@@ -24,7 +24,20 @@ use files::search::matcher::{self, SearchOutcome};
 use files::util::cancel::CancelToken;
 use proptest::prelude::*;
 
+/// The oracle's own copy of the display cap.
+///
+/// Deliberately a separate constant, because the oracle is a frozen
+/// transcription and should not quietly follow the implementation it is
+/// checking. The assertion below is what keeps that honest: if the real cap
+/// moves and this does not, the oracle truncates at a different point from
+/// the matcher and every parity assertion here silently becomes a tautology.
+/// Failing to compile is the only safe way to notice.
 const MAX_RESULTS: usize = 15;
+const _: () = assert!(
+    MAX_RESULTS == files::config::MAX_RESULTS,
+    "the parity oracle's cap has drifted from config::MAX_RESULTS"
+);
+
 const PREFIX: &str = "V:\\";
 
 /// The original implementation, transcribed verbatim.

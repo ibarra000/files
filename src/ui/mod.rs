@@ -83,7 +83,7 @@ pub fn layout(area: Rect) -> Chunks {
 }
 
 /// Draws one frame.
-pub fn draw(frame: &mut Frame, state: &AppState, viewer_missing: bool) {
+pub fn draw(frame: &mut Frame, state: &AppState, avwin_missing: bool) {
     let now = Instant::now();
     let wall = SystemTime::now();
     let chunks = layout(frame.size());
@@ -145,7 +145,7 @@ pub fn draw(frame: &mut Frame, state: &AppState, viewer_missing: bool) {
     let help = if state.focus == Focus::History {
         history::help_line().to_string()
     } else {
-        status::help_line(viewer_missing)
+        status::help_line(state.viewer, avwin_missing)
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(help, theme::help()))),
@@ -387,22 +387,49 @@ mod tests {
         assert!(text.contains("avwin.exe not found"), "{text}");
     }
 
-    #[test]
-    fn a_missing_viewer_is_warned_about_in_the_help_line() {
-        let backend = TestBackend::new(120, 20);
+    /// Drawn wide enough that the help line is not clipped, and always with
+    /// `avwin_missing` set, so these assertions are about the viewer rather
+    /// than about the probe.
+    fn render_wide(s: &AppState) -> String {
+        let backend = TestBackend::new(130, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let s = state();
-        terminal.draw(|f| draw(f, &s, true)).unwrap();
+        terminal.draw(|f| draw(f, s, true)).unwrap();
         let buffer = terminal.backend().buffer().clone();
-        let text: String = (0..buffer.area.height)
+        (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
                     .map(|x| buffer.get(x, y).symbol())
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    #[test]
+    fn a_missing_viewer_is_warned_about_in_the_help_line() {
+        let mut s = state();
+        s.viewer = crate::config::ViewerKind::Avwin;
+        let text = render_wide(&s);
         assert!(text.contains("avwin.exe not found"), "{text}");
+    }
+
+    /// Most people never switch to avwin, and warning them about a program
+    /// they have not chosen is noise about something that cannot affect them.
+    #[test]
+    fn the_missing_avwin_warning_is_absent_while_the_pdf_viewer_is_active() {
+        let s = state();
+        assert_eq!(s.viewer, crate::config::ViewerKind::Pdf);
+        let text = render_wide(&s);
+        assert!(!text.contains("WARNING"), "{text}");
+    }
+
+    /// F2 changes what Enter does, so which mode it is in has to be visible.
+    #[test]
+    fn the_active_viewer_is_visible_on_screen() {
+        let mut s = state();
+        assert!(render_wide(&s).contains("F2 pdf"));
+        s.viewer = crate::config::ViewerKind::Avwin;
+        assert!(render_wide(&s).contains("F2 avwin"));
     }
 
     #[test]
@@ -451,5 +478,106 @@ mod tests {
         );
         let text = render_to_text(&s);
         assert!(text.contains("cole") || text.contains("É"), "{text}");
+    }
+
+    /// Collects the characters on the search line that carry `style`.
+    ///
+    /// `render_to_text` reads symbols and throws the styles away, which means
+    /// it cannot see a highlight at all - a selection that silently stopped
+    /// being drawn would pass every other test in this file.
+    fn styled_run(state: &AppState, style: ratatui::style::Style) -> String {
+        let backend = TestBackend::new(100, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, state, false)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let chunks = layout(buffer.area);
+        let y = chunks.input_text_y();
+        (chunks.input_text_x()..chunks.input.x + chunks.input.width)
+            .filter(|&x| buffer.get(x, y).style().bg == style.bg)
+            .map(|x| buffer.get(x, y).symbol())
+            .collect()
+    }
+
+    #[test]
+    fn selected_text_in_the_search_box_is_actually_highlighted() {
+        let mut s = state();
+        let now = Instant::now();
+        type_code(&mut s);
+        for _ in 0..2 {
+            s.update(
+                AppEvent::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)),
+                now,
+            );
+        }
+        assert_eq!(styled_run(&s, theme::text_selection()), "04");
+    }
+
+    #[test]
+    fn nothing_is_highlighted_when_nothing_is_selected() {
+        let mut s = state();
+        type_code(&mut s);
+        assert_eq!(styled_run(&s, theme::text_selection()), "");
+    }
+
+    #[test]
+    fn recall_replaces_the_results_pane_and_the_help_line() {
+        let mut s = state();
+        let now = Instant::now();
+        s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+        type_code(&mut s);
+        results(&mut s, vec![hit("11d_alpha.pdf", 0)], 1, 1);
+
+        s.update(
+            AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            now,
+        );
+
+        let text = render_to_text(&s);
+        assert!(text.contains("History (1 of 2)"), "{text}");
+        assert!(text.contains("P12345-001"), "{text}");
+        assert!(
+            !text.contains("11d_alpha.pdf"),
+            "the results belong to the code being replaced: {text}"
+        );
+        assert!(text.contains("Esc keep what you were typing"), "{text}");
+    }
+
+    #[test]
+    fn recall_with_nothing_remembered_still_renders() {
+        let mut s = state();
+        let now = Instant::now();
+        s.update(
+            AppEvent::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            now,
+        );
+        let text = render_to_text(&s);
+        assert!(text.contains("previous codes"), "{text}");
+    }
+
+    /// A code longer than the box used to run through the border and put the
+    /// terminal caret outside the widget entirely.
+    #[test]
+    fn a_code_wider_than_the_box_stays_inside_its_border() {
+        let mut s = state();
+        let now = Instant::now();
+        for c in "A".repeat(300).chars() {
+            s.update(
+                AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                now,
+            );
+        }
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &s, false)).unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let chunks = layout(buffer.area);
+        let right = chunks.input.x + chunks.input.width - 1;
+        assert_eq!(
+            buffer.get(right, chunks.input_text_y()).symbol(),
+            "│",
+            "the text ran through the right border"
+        );
     }
 }

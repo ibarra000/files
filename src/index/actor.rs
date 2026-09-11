@@ -45,7 +45,7 @@ use super::enumerate::{DirSource, ListOpts};
 use super::errors::EnumError;
 use super::log::{IndexLog, Record};
 use super::persist;
-use super::schedule::{Cadence, Decision, Input, ScanReason, Scheduler, Step};
+use super::schedule::{Cadence, Decision, Input, Scheduler, Step, is_probe_refusal};
 use super::store::{Activity, DegradeReason, IndexStore, Origin};
 use super::{DirStamp, Snapshot};
 use crate::app::event::{AppEvent, IndexMsg};
@@ -78,7 +78,9 @@ const MAX_STEPS_PER_WAKE: usize = 6;
 #[derive(Debug, Clone)]
 pub enum IndexCmd {
     /// Re-examine the share. `force` skips the stamp check.
-    Refresh { force: bool },
+    Refresh {
+        force: bool,
+    },
     Shutdown,
 }
 
@@ -341,33 +343,23 @@ fn next_wake(rx: &Receiver<IndexCmd>, deadline: Instant) -> Wake {
 
 /// Reflects a failure in the shared status.
 ///
-/// A probe that the share *refused* is reported as degraded, not unreachable:
-/// the drive is fine, it just will not answer the cheap freshness question, and
-/// telling the user their drive is unreachable would be a lie they would act
-/// on.
+/// A probe the share *refused* is reported as degraded, not unreachable: the
+/// drive is fine, it just will not answer the cheap freshness question.
+/// Telling the user their drive is unreachable would be a lie they would act
+/// on, and the only thing they could do about it is the one thing that cannot
+/// help.
 fn apply_failure(
     ctx: &IndexContext,
     failure: PendingFailure,
     failures: &mut u32,
     retry_at: Instant,
 ) {
-    if failure.from_probe && super::schedule::StampHealth::is_blind(ctx.stamp_health_hint()) {
+    if failure.from_probe && is_probe_refusal(failure.err) {
         ctx.store.set_degraded(DegradeReason::StampUnreliable);
         return;
     }
     *failures = failures.saturating_add(1);
     ctx.store.record_failure(failure.err, *failures, retry_at);
-}
-
-impl IndexContext {
-    /// The stamp verdict as last published to the store.
-    ///
-    /// Read back from the store rather than threaded through, because
-    /// `note_schedule` has already put it there and one source of truth is
-    /// worth more here than one fewer load.
-    fn stamp_health_hint(&self) -> super::schedule::StampHealth {
-        self.store.status().stamp_health
-    }
 }
 
 /// What [`load_from_disk`] recovered.
@@ -483,11 +475,22 @@ fn scan_and_publish(
         *detail = format!("accepted an empty listing after {empty_streak} consistent answers");
     } else {
         *empty_streak = 0;
-        *detail = format!("{entries} entries in {}", crate::util::humanize::elapsed(elapsed));
+        *detail = format!(
+            "{entries} entries in {}",
+            crate::util::humanize::elapsed(elapsed)
+        );
     }
 
     let stamp = snapshot.stamp();
     ctx.store.publish_flat(Arc::new(snapshot), Origin::Network);
+    if stamp.is_none() {
+        // Set *after* the publish, which clears the health because a fresh
+        // listing normally resolves whatever was wrong. Change detection is
+        // unavailable here, so the scheduler drops to the rescan floor rather
+        // than re-enumerating on the probe cadence - the whole of the bug this
+        // module was rewritten for - and the user is told why.
+        ctx.store.set_degraded(DegradeReason::StampUnreliable);
+    }
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
 
     if forced {
@@ -587,13 +590,6 @@ fn full_scan(
         }
     }
 
-    if stamp.is_none() {
-        // Change detection is unavailable here. The scheduler drops to the
-        // rescan floor rather than re-enumerating on the probe cadence, which
-        // is the whole of the bug this module was rewritten for.
-        ctx.store.set_degraded(DegradeReason::StampUnreliable);
-    }
-
     let serial = volume_serial_for(ctx, serial, &dir).unwrap_or(0);
     let snapshot = builder.finish(SystemTime::now(), serial, stamp);
     ctx.store.set_activity(Activity::Idle);
@@ -616,10 +612,11 @@ fn log_decision(
     if !ctx.log.is_enabled() {
         return;
     }
-    let wait = decision
-        .step
-        .is_terminal()
-        .then(|| decision.next_action.saturating_duration_since(Instant::now()));
+    let wait = decision.step.is_terminal().then(|| {
+        decision
+            .next_action
+            .saturating_duration_since(Instant::now())
+    });
     ctx.log.record(&Record {
         event,
         detail,
@@ -722,7 +719,7 @@ mod tests {
     use crate::config::CUSTPRO_PATH;
     use crate::index::DirStamp;
     use crate::index::fake_source::{Call, FakeDirSource};
-    use crate::index::schedule::StampHealth;
+    use crate::index::schedule::{ScanReason, StampHealth};
     use crossbeam_channel::bounded;
 
     /// The fast cadence puts an "hour" at 400ms, so the timer-driven paths
@@ -759,6 +756,21 @@ mod tests {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if pred(store) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// Waits for a line to reach the decision log.
+    ///
+    /// The log is appended from the actor thread, so "has it happened yet" is
+    /// a question about another thread's progress, not about elapsed time.
+    fn wait_for_log(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if std::fs::read_to_string(path).is_ok_and(|t| t.contains(needle)) {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -975,7 +987,8 @@ mod tests {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp_supported(false);
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1004,7 +1017,8 @@ mod tests {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1034,7 +1048,8 @@ mod tests {
         src.set_error(Some(EnumError::Transient(53)));
         let store = Arc::new(IndexStore::default());
         let cadence = Cadence::fast();
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         let window = Duration::from_millis(300);
         std::thread::sleep(window);
@@ -1055,7 +1070,8 @@ mod tests {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(7, 7)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1082,7 +1098,8 @@ mod tests {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1116,7 +1133,8 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1141,7 +1159,8 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1167,7 +1186,8 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
-        let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
+        let mut actor =
+            spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
@@ -1203,9 +1223,23 @@ mod tests {
             |s| s.flat().is_some(),
             Duration::from_secs(3)
         ));
-        std::thread::sleep(Duration::from_millis(80));
+        // Polled rather than slept on. Fixed sleeps were long enough on an
+        // idle machine and not on a loaded one, so this failed only when the
+        // rest of the suite happened to be running beside it.
+        assert!(wait_for_log(
+            &path,
+            "reason=first-run",
+            Duration::from_secs(3)
+        ));
         actor.refresh(true);
-        std::thread::sleep(Duration::from_millis(80));
+        assert!(wait_for_log(&path, "reason=f5", Duration::from_secs(3)));
+        // The quiet path is the probe that follows the forced scan, so it is
+        // waited for rather than assumed to have happened by now.
+        assert!(wait_for_log(
+            &path,
+            "step=confirm-fresh",
+            Duration::from_secs(3)
+        ));
         actor.shutdown(Duration::from_millis(500));
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1237,9 +1271,10 @@ mod tests {
                 cache_dir: Some(cache.path().to_path_buf()),
                 ..Default::default()
             };
-            let context = IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
-                .with_cadence(Cadence::fast())
-                .with_seed(SEED);
+            let context =
+                IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
+                    .with_cadence(Cadence::fast())
+                    .with_seed(SEED);
             let mut actor = spawn(context, draining_events()).unwrap();
             assert!(wait_for(
                 &store,
@@ -1258,9 +1293,10 @@ mod tests {
             cache_dir: Some(cache.path().to_path_buf()),
             ..Default::default()
         };
-        let context = IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
-            .with_cadence(Cadence::fast())
-            .with_seed(SEED);
+        let context =
+            IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
+                .with_cadence(Cadence::fast())
+                .with_seed(SEED);
         let mut actor = spawn(context, draining_events()).unwrap();
 
         assert!(wait_for(
@@ -1294,10 +1330,14 @@ mod tests {
 
         {
             let store = Arc::new(IndexStore::default());
-            let context =
-                IndexContext::new(settings(), Arc::clone(&store), Arc::new(src.clone()), Some(1))
-                    .with_cadence(Cadence::fast())
-                    .with_seed(SEED);
+            let context = IndexContext::new(
+                settings(),
+                Arc::clone(&store),
+                Arc::new(src.clone()),
+                Some(1),
+            )
+            .with_cadence(Cadence::fast())
+            .with_seed(SEED);
             let mut actor = spawn(context, draining_events()).unwrap();
             assert!(wait_for(
                 &store,
@@ -1314,10 +1354,14 @@ mod tests {
         src.clear_calls();
 
         let store = Arc::new(IndexStore::default());
-        let context =
-            IndexContext::new(settings(), Arc::clone(&store), Arc::new(src.clone()), Some(1))
-                .with_cadence(Cadence::fast())
-                .with_seed(SEED);
+        let context = IndexContext::new(
+            settings(),
+            Arc::clone(&store),
+            Arc::new(src.clone()),
+            Some(1),
+        )
+        .with_cadence(Cadence::fast())
+        .with_seed(SEED);
         let mut actor = spawn(context, draining_events()).unwrap();
 
         assert!(
@@ -1328,7 +1372,10 @@ mod tests {
             ),
             "a change made while the app was closed must still be picked up"
         );
-        assert_eq!(store.status().last_scan_reason, Some(ScanReason::StampMoved));
+        assert_eq!(
+            store.status().last_scan_reason,
+            Some(ScanReason::StampMoved)
+        );
         actor.shutdown(Duration::from_millis(500));
     }
 

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use crate::config::file::ConfigError;
-use crate::config::{ConfigChoice, EnumStrategy, MatcherKind, Settings};
+use crate::config::{ConfigChoice, EnumStrategy, MatcherKind, Settings, ViewerKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -36,6 +36,9 @@ pub struct Overrides {
     pub matcher: Option<MatcherKind>,
     pub server_filter: Option<bool>,
     pub persist: Option<bool>,
+    pub index_log: Option<PathBuf>,
+    pub viewer: Option<ViewerKind>,
+    pub pdf_viewer: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +67,18 @@ impl Args {
         }
         if let Some(v) = self.overrides.persist {
             s.persist = v;
+        }
+        if let Some(v) = &self.overrides.index_log {
+            s.index_log = Some(v.clone());
+        }
+        if let Some(v) = self.overrides.viewer {
+            s.viewer = v;
+            // The flag outranks the file for this run, so writing the file
+            // would report a save that the next start ignores.
+            s.viewer_persistable = false;
+        }
+        if let Some(v) = &self.overrides.pdf_viewer {
+            s.pdf_viewer = Some(v.clone());
         }
         Ok(s)
     }
@@ -109,7 +124,18 @@ OPTIONS:
     --server-filter <on|off>
                         push the search pattern to the file server
                         (default: off until --bench confirms it is safe)
+    --viewer <KIND>     pdf | avwin                      (default: pdf)
+                        pdf gathers every page of the code into one document
+                        and opens it with the system's PDF handler; avwin
+                        opens the single selected file. F2 switches while
+                        running, but this flag pins it for the run
+    --pdf-viewer <PATH> open merged PDFs with this program instead of
+                        whatever is registered for .pdf
     --no-persist        do not read or write the on-disk index
+    --index-log <PATH>  append one line per index scheduling decision: what
+                        woke it, what the directory stamp said, whether it
+                        rebuilt and why, and when it will look again
+                        (off by default; it answers why did it reindex)
     --demo              run against synthetic data, with no drives at all
     -h, --help          show this
     -V, --version       show the version
@@ -124,7 +150,18 @@ ENVIRONMENT:
     FILES_BASE_PATH, FILES_CUSTPRO_PATH   repoint the 'jobs' / 'custompro'
                                           mappings
     FILES_FS_STRATEGY, FILES_MATCHER, FILES_SERVER_FILTER, FILES_PERSIST,
-    FILES_CACHE_DIR
+    FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER
+
+    Setting FILES_VIEWER also makes F2 a session-only switch: the environment
+    outranks the file, so saving the choice would change nothing.
+
+    FILES_PROBE_INTERVAL, FILES_RESCAN_FLOOR   how often the index checks
+                                          whether the share changed, and how
+                                          long it may go without a full
+                                          rescan, in whole seconds. Lowering
+                                          both is how a freshness problem is
+                                          reproduced in minutes rather than
+                                          hours.
 
     Every strategy is switchable without a rebuild, so a fast path that
     misbehaves on the real network can be turned off in the field.
@@ -176,6 +213,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
             "--allow-write" => allow_write = true,
             "--demo" => demo = true,
             "--no-persist" => overrides.persist = Some(false),
+            "--viewer" => {
+                let v = value("--viewer")?;
+                overrides.viewer = Some(
+                    ViewerKind::parse(&v)
+                        .ok_or_else(|| ArgError(format!("unknown --viewer value: {v}")))?,
+                );
+            }
+            "--pdf-viewer" => {
+                overrides.pdf_viewer = Some(PathBuf::from(value("--pdf-viewer")?));
+            }
+            "--index-log" => {
+                overrides.index_log = Some(PathBuf::from(value("--index-log")?));
+            }
             "--query" => query = Some(value("--query")?),
             "--enum" => {
                 let v = value("--enum")?;
@@ -230,6 +280,7 @@ pub fn parse_env() -> Result<Args, ArgError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn args(list: &[&str]) -> Result<Args, ArgError> {
         parse(list.iter().map(|s| s.to_string()))
@@ -390,6 +441,20 @@ mod tests {
     }
 
     #[test]
+    fn the_index_log_path_is_an_override_like_any_other() {
+        let args = parse(["--index-log".into(), r"C:\temp\idx.log".into()]).unwrap();
+        assert_eq!(
+            args.overrides.index_log.as_deref(),
+            Some(Path::new(r"C:\temp\idx.log"))
+        );
+    }
+
+    #[test]
+    fn the_index_log_needs_a_path() {
+        assert!(parse(["--index-log".into()]).is_err());
+    }
+
+    #[test]
     fn the_help_text_documents_every_flag_the_parser_accepts() {
         for flag in [
             "--doctor",
@@ -404,8 +469,66 @@ mod tests {
             "--server-filter",
             "--no-persist",
             "--demo",
+            "--index-log",
+            "--viewer",
+            "--pdf-viewer",
         ] {
             assert!(HELP.contains(flag), "{flag} is undocumented");
         }
+    }
+
+    /// The ENVIRONMENT block is the only record of these names, and nothing
+    /// else fails when one is added to the loader and forgotten here.
+    #[test]
+    fn the_help_text_documents_every_environment_variable_the_loader_reads() {
+        for var in [
+            "FILES_BASE_PATH",
+            "FILES_CUSTPRO_PATH",
+            "FILES_FS_STRATEGY",
+            "FILES_MATCHER",
+            "FILES_SERVER_FILTER",
+            "FILES_PERSIST",
+            "FILES_CACHE_DIR",
+            "FILES_INDEX_LOG",
+            "FILES_VIEWER",
+            "FILES_PDF_VIEWER",
+        ] {
+            assert!(HELP.contains(var), "{var} is undocumented");
+        }
+    }
+
+    #[test]
+    fn selects_a_viewer() {
+        assert_eq!(
+            args(&["--viewer", "avwin"]).unwrap().overrides.viewer,
+            Some(ViewerKind::Avwin)
+        );
+        assert_eq!(
+            args(&["--viewer", "pdf"]).unwrap().overrides.viewer,
+            Some(ViewerKind::Pdf)
+        );
+        assert_eq!(args(&[]).unwrap().overrides.viewer, None);
+    }
+
+    #[test]
+    fn an_unknown_viewer_is_rejected_with_its_name() {
+        let err = args(&["--viewer", "notepad"]).unwrap_err();
+        assert!(err.0.contains("notepad"), "{}", err.0);
+        assert!(args(&["--viewer"]).unwrap_err().0.contains("--viewer"));
+    }
+
+    #[test]
+    fn names_an_explicit_pdf_viewer() {
+        let a = args(&["--pdf-viewer", r"C:	ools\sumatra.exe"]).unwrap();
+        assert_eq!(
+            a.overrides.pdf_viewer.as_deref(),
+            Some(Path::new(r"C:	ools\sumatra.exe"))
+        );
+        assert!(
+            args(&["--pdf-viewer"])
+                .unwrap_err()
+                .0
+                .contains("--pdf-viewer")
+        );
     }
 }

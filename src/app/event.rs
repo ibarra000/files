@@ -13,8 +13,10 @@ use std::time::Duration;
 use crossterm::event::{KeyEvent, MouseEvent};
 use smallvec::SmallVec;
 
+use crate::config::ViewerKind;
 use crate::index::errors::EnumError;
 use crate::index::store::FlatStatus;
+use crate::open::OpenRequest;
 use crate::search::matcher::{QueryReject, SearchOutcome};
 use crate::search::verify::VerifyOutcome;
 
@@ -93,8 +95,36 @@ pub enum ClipboardMsg {
 
 #[derive(Debug, Clone)]
 pub enum OpenMsg {
-    Launched { path: Arc<str> },
-    Failed { path: Arc<str>, detail: String },
+    Launched {
+        /// What the viewer was actually handed, which for a merged document
+        /// is not any of the files the user can see.
+        path: Arc<str>,
+        /// Pages handed over. One for avwin, so that path needs no special
+        /// case downstream.
+        pages: usize,
+        /// Pages that could not be used, already described. Non-empty means
+        /// the document opened but is not complete, which the user has to be
+        /// told - silently short pages are the worst outcome available here.
+        skipped: Vec<String>,
+        /// The code has more pages than the ceiling allows, so the document
+        /// stops short of the end.
+        truncated: bool,
+    },
+    Failed {
+        path: Arc<str>,
+        detail: String,
+    },
+    /// The viewer choice reached the configuration file.
+    ///
+    /// Separate from a launch rather than folded into it: conflating the two
+    /// would leave "the document opened but the setting did not stick"
+    /// impossible to report.
+    ViewerSaved {
+        viewer: ViewerKind,
+    },
+    ViewerSaveFailed {
+        detail: String,
+    },
 }
 
 /// Whether the frame needs redrawing.
@@ -126,11 +156,26 @@ impl Redraw {
 /// transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
-    Search { query: String, epoch: u64 },
-    Verify { query: String, epoch: u64 },
-    Prefetch { dir: PathBuf, epoch: u64 },
-    RefreshIndex { force: bool },
-    Open(Arc<str>),
+    Search {
+        query: String,
+        epoch: u64,
+    },
+    Verify {
+        query: String,
+        epoch: u64,
+    },
+    Prefetch {
+        dir: PathBuf,
+        epoch: u64,
+    },
+    RefreshIndex {
+        force: bool,
+    },
+    Open(OpenRequest),
+    /// Write the chosen viewer back to the configuration file, preserving
+    /// every comment in it. Emitted only when the state machine already knows
+    /// the value can stick - see `Settings::viewer_persistable`.
+    SaveViewer(ViewerKind),
     /// Put text on the system clipboard.
     Copy(String),
     /// Fetch the clipboard, to be inserted at the caret.

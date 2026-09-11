@@ -18,9 +18,11 @@
 //! added latency, since a keystroke wakes the thread immediately.
 
 mod keys;
+mod model;
 mod mouse;
 
-use std::path::PathBuf;
+pub use model::{EmptyReason, Focus, QueryPhase, Severity, TOAST_LIFETIME, Toast};
+
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -30,6 +32,7 @@ use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, PrefetchMsg, 
 use super::input::{self, Input};
 use crate::config::{
     ANIMATION_TICK, MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
+    ViewerKind,
 };
 use crate::history::History;
 use crate::index::errors::EnumError;
@@ -37,76 +40,6 @@ use crate::index::store::FlatStatus;
 use crate::paths::MappingKind;
 use crate::search::matcher::{Hit, QueryReject};
 use crate::search::verify::{AuditVerdict, SkipReason, VerifyOutcome};
-
-/// How far the current query has got.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryPhase {
-    /// Nothing typed.
-    Idle,
-    TooShort {
-        need: usize,
-    },
-    /// Typed, but it matches no known job-code pattern.
-    Unresolvable,
-    /// Dispatched to the matcher. Sub-millisecond, so rarely rendered.
-    LocalPending,
-    /// Showing results from the in-memory index.
-    Local,
-    /// Local results shown while the server is being consulted.
-    Verifying {
-        since: Instant,
-    },
-    /// Confirmed against the server, or proven current by an unchanged
-    /// directory stamp.
-    Verified {
-        took: Duration,
-        by_stamp: bool,
-    },
-    /// Verification failed; local results remain on screen.
-    VerifyFailed {
-        detail: String,
-    },
-}
-
-impl QueryPhase {
-    pub fn is_verifying(&self) -> bool {
-        matches!(self, Self::Verifying { .. })
-    }
-}
-
-/// Why the result list is empty.
-///
-/// The results widget takes this rather than an empty slice, so a blank list
-/// always carries a reason. The previous implementation could show nothing at
-/// all when the drive was unreachable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EmptyReason {
-    NoQuery,
-    QueryTooShort { need: usize },
-    NoPathPattern,
-    NoMatches { searched: u32 },
-    IndexUnavailable { detail: String },
-    PathNotFound { dir: PathBuf },
-    AccessDenied { dir: PathBuf },
-    NotSearchedYet,
-}
-
-/// What the arrow keys act on.
-///
-/// Up used to mean one thing because there was only one thing it could mean.
-/// Now it has to choose between recalling a code and walking the results, and
-/// an explicit focus is how that choice stays predictable instead of being
-/// inferred from whichever flags happen to be set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Focus {
-    /// Typing. Up opens recall, Down steps into the results.
-    #[default]
-    Input,
-    /// Walking the result list. Up on the top row goes back to the input.
-    Results,
-    /// Walking previously used codes.
-    History,
-}
 
 /// The last mouse press, for working out double- and triple-clicks.
 ///
@@ -119,23 +52,6 @@ struct Click {
     row: u16,
     count: u8,
 }
-
-/// A transient message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Toast {
-    pub text: String,
-    pub severity: Severity,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-    Info,
-    Warn,
-    Error,
-}
-
-/// How long a transient message stays on screen.
-pub const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 
 /// Everything rendered, and everything that decides what to do next.
 pub struct AppState {
@@ -169,6 +85,15 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
+    /// Which viewer Enter uses, right now.
+    ///
+    /// Separate from `settings.viewer`, which is the value resolved at
+    /// startup and stays immutable. `Settings` is cloned into the backend and
+    /// every worker, so making it mutable would be one truth with several
+    /// stale copies of it; this is the only copy that moves, and the choice
+    /// travels to the worker on the command rather than being read from
+    /// anywhere shared.
+    pub viewer: ViewerKind,
 
     query_epoch: u64,
     verify_due_at: Option<Instant>,
@@ -185,6 +110,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(settings: Settings, now: Instant) -> Self {
+        let viewer = settings.viewer;
         Self {
             settings,
             input: Input::new(),
@@ -204,6 +130,7 @@ impl AppState {
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
+            viewer,
             query_epoch: 0,
             verify_due_at: None,
             prefetch_due_at: None,
@@ -342,7 +269,11 @@ impl AppState {
             ClipboardMsg::Copied { chars } => {
                 // Said out loud: a copy that silently succeeded is
                 // indistinguishable from a copy that silently failed.
-                let unit = if chars == 1 { "character" } else { "characters" };
+                let unit = if chars == 1 {
+                    "character"
+                } else {
+                    "characters"
+                };
                 self.set_toast(format!("copied {chars} {unit}"), Severity::Info, now);
                 Response::redraw()
             }
@@ -471,7 +402,26 @@ impl AppState {
         // someone who opens a result before the server answers must not lose
         // the code.
         let code = self.input.text().to_string();
-        let mut response = Response::none().with(Cmd::Open(path));
+        let request = crate::open::OpenRequest {
+            path,
+            // The typed code, not the selected row: the page set is rebuilt
+            // from it because `hits` is capped at MAX_RESULTS and ranked by
+            // match position, so a long document would arrive truncated and
+            // out of order.
+            query: code.clone(),
+            viewer: self.viewer,
+        };
+        let mut response = Response::none().with(Cmd::Open(request));
+
+        // Assembling a document means reading every page off the share, which
+        // is not instant. Enter used to return silently because handing one
+        // path to one program was; saying nothing for a second or more now
+        // would read as the keypress having been ignored.
+        if self.viewer == ViewerKind::Pdf {
+            self.set_toast("opening...".into(), Severity::Info, now);
+            response.redraw = Redraw::Yes;
+        }
+
         if let Some(cmd) = self.remember(&code) {
             response = response.with(cmd);
         }
@@ -582,11 +532,10 @@ impl AppState {
             }
         }
 
-        self.selected_path = if self.selection_pinned {
-            self.hits.first().map(|h| Arc::clone(&h.path))
-        } else {
-            self.hits.first().map(|h| Arc::clone(&h.path))
-        };
+        // Both the pinned and unpinned cases land here only once the pinned
+        // path above has already failed to find anywhere better, so there is
+        // one answer: the top of the new list.
+        self.selected_path = self.hits.first().map(|h| Arc::clone(&h.path));
     }
 
     // --- verification -----------------------------------------------------
@@ -758,12 +707,59 @@ impl AppState {
 
     fn on_open(&mut self, msg: OpenMsg, now: Instant) -> Response {
         match msg {
-            OpenMsg::Launched { .. } => Response::none(),
+            // A document that opened whole says nothing. One that lost pages
+            // has to say so: a drawing set silently missing page seven is the
+            // worst outcome available here, because nothing on screen would
+            // ever reveal it.
+            OpenMsg::Launched {
+                pages,
+                skipped,
+                truncated,
+                ..
+            } => {
+                if skipped.is_empty() && !truncated {
+                    // Clears the "opening..." notice rather than leaving it up
+                    // for its full lifetime after the viewer has appeared.
+                    self.toast = None;
+                    self.toast_expires_at = None;
+                    return Response::redraw();
+                }
+                // Two different kinds of incomplete, and both have to be said
+                // out loud: a document quietly missing pages is the worst
+                // outcome this path can produce, because nothing on screen
+                // would ever reveal it.
+                let mut text = if truncated {
+                    format!("opened the first {pages} pages; the set is longer")
+                } else {
+                    let total = pages + skipped.len();
+                    format!("opened {pages} of {total} pages")
+                };
+                if !skipped.is_empty() {
+                    text.push_str("; skipped ");
+                    text.push_str(&skipped.join(", "));
+                }
+                self.set_toast(text, Severity::Warn, now);
+                Response::redraw()
+            }
             OpenMsg::Failed { path, detail } => {
                 let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
                 self.set_toast(
                     format!("could not open {name}: {detail}"),
                     Severity::Error,
+                    now,
+                );
+                Response::redraw()
+            }
+            OpenMsg::ViewerSaved { viewer } => {
+                self.set_toast(format!("viewer: {}", viewer.name()), Severity::Info, now);
+                Response::redraw()
+            }
+            // Not fatal, and not silent: the toggle still applies to this
+            // session, so the message says what did and did not happen.
+            OpenMsg::ViewerSaveFailed { detail } => {
+                self.set_toast(
+                    format!("viewer changed for this session only: {detail}"),
+                    Severity::Warn,
                     now,
                 );
                 Response::redraw()

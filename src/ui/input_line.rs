@@ -130,11 +130,12 @@ mod tests {
         // terminal caret outside the widget.
         let long = "A".repeat(50);
         let view = view(&input(&long), 10);
-        assert_eq!(rendered(&view).chars().count(), 10);
-        assert!(
-            view.caret_column < 10,
-            "the caret must land inside the box, got {}",
-            view.caret_column
+        // Nine characters plus the caret's own cell: with the caret at the end
+        // of the text it has to be given somewhere to sit inside the box.
+        assert_eq!(rendered(&view).chars().count(), 9);
+        assert_eq!(
+            view.caret_column, 9,
+            "the caret must land inside the box, on the last column"
         );
     }
 
@@ -178,7 +179,9 @@ mod tests {
         let mut line = input(&"A".repeat(50));
         line.select_all();
         let view = view(&line, 10);
-        assert_eq!(rendered(&view).chars().count(), 10);
+        // Only the tail of the selection is on screen; the rest is scrolled
+        // off to the left and must be clipped, not sliced blindly.
+        assert_eq!(rendered(&view).chars().count(), 9);
         assert!(
             view.line
                 .spans

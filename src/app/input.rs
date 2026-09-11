@@ -193,9 +193,7 @@ impl Input {
         // Collapsing to the near edge rather than stepping off it is what
         // every other text field does: after selecting a run, Left puts you
         // at its start, not one character before wherever the drag ended.
-        if !extend
-            && let Some((lo, _)) = self.selection()
-        {
+        if !extend && let Some((lo, _)) = self.selection() {
             self.caret = lo;
             self.anchor = None;
             return;
@@ -209,9 +207,7 @@ impl Input {
     }
 
     pub fn move_right(&mut self, by_field: bool, extend: bool) {
-        if !extend
-            && let Some((_, hi)) = self.selection()
-        {
+        if !extend && let Some((_, hi)) = self.selection() {
             self.caret = hi;
             self.anchor = None;
             return;

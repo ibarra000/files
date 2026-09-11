@@ -148,6 +148,8 @@ const SETTINGS_KEYS: &[&str] = &[
     "persist",
     "cache_dir",
     "history",
+    "viewer",
+    "pdf_viewer",
 ];
 const ROOT_KEYS: &[&str] = &["version", "mapping", "settings"];
 
@@ -160,6 +162,8 @@ pub struct FileSettings {
     pub persist: Option<bool>,
     pub cache_dir: Option<PathBuf>,
     pub history: Option<bool>,
+    pub viewer: Option<String>,
+    pub pdf_viewer: Option<PathBuf>,
 }
 
 /// A parsed configuration.
@@ -529,7 +533,21 @@ fn parse_rules(
 
 fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
     let mut out = FileSettings::default();
-    let Some(table) = doc.get("settings").and_then(Item::as_table) else {
+    let Some(item) = doc.get("settings") else {
+        return out;
+    };
+    // `settings = 3`, or `[[settings]]` for `[settings]`, used to fall through
+    // here and default *every* setting with nothing said. That is the failure
+    // this file refuses everywhere else: the user writes a configuration, it is
+    // silently ignored, and there is no symptom to notice.
+    let Some(table) = item.as_table() else {
+        ctx.err(
+            item.span(),
+            None,
+            None,
+            "`settings` must be a table written as [settings]",
+            None,
+        );
         return out;
     };
     for (key, item) in table.iter() {
@@ -553,6 +571,25 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "persist" => out.persist = value.and_then(Value::as_bool),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = value.and_then(Value::as_bool),
+            "viewer" => {
+                let raw = value.and_then(Value::as_str);
+                // Rejected here rather than ignored later. A misspelt viewer
+                // that silently fell back would leave someone pressing Enter
+                // and getting the wrong program with nothing to explain it.
+                if let Some(v) = raw
+                    && crate::config::ViewerKind::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("unknown viewer {v:?} (expected \"pdf\" or \"avwin\")"),
+                        None,
+                    );
+                }
+                out.viewer = raw.map(str::to_string);
+            }
+            "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
             _ => {}
         }
     }
@@ -852,6 +889,62 @@ kind = "job-folder"
         );
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("unknown key \"enable\""));
+    }
+
+    #[test]
+    fn reads_the_viewer_and_its_override_from_the_settings_table() {
+        let text = format!(
+            "{MINIMAL}\n[settings]\nviewer = \"avwin\"\npdf_viewer = 'C:\\tools\\sumatra.exe'\n"
+        );
+        let c = parse_ok(&text);
+        assert_eq!(c.settings.viewer.as_deref(), Some("avwin"));
+        assert_eq!(
+            c.settings.pdf_viewer.as_deref(),
+            Some(Path::new(r"C:\tools\sumatra.exe"))
+        );
+    }
+
+    /// A misspelt viewer that fell back silently would leave someone pressing
+    /// Enter and getting the wrong program, with nothing on screen to say so.
+    #[test]
+    fn an_unknown_viewer_value_is_rejected_with_its_text() {
+        let text = format!("{MINIMAL}\n[settings]\nviewer = \"notepad\"\n");
+        let errs = parse_err(&text);
+        let msg = messages(&errs);
+        assert!(msg.contains("notepad"), "{msg}");
+        assert!(
+            msg.contains("avwin"),
+            "the message must say what is allowed: {msg}"
+        );
+    }
+
+    /// The viewer key ships uncommented because F2 rewrites it in place.
+    #[test]
+    fn the_shipped_default_sets_a_viewer_the_writer_can_replace() {
+        let c = builtin();
+        assert_eq!(c.settings.viewer.as_deref(), Some("pdf"));
+    }
+
+    /// Silently defaulting every setting is the failure this file refuses
+    /// everywhere else - and it also fed a panic in the config writer.
+    #[test]
+    fn a_settings_that_is_not_a_table_is_rejected() {
+        for bad in ["settings = 3", "settings = \"pdf\"", "settings = []"] {
+            // Root keys must precede the first table header, so this goes
+            // beside `version` rather than after the mapping.
+            let errs = parse_err(&MINIMAL.replace(
+                "version = 1",
+                &format!(
+                    "version = 1
+{bad}"
+                ),
+            ));
+            assert!(
+                messages(&errs).contains("must be a table"),
+                "{bad}: {}",
+                messages(&errs)
+            );
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::Duration;
 use crate::util::rng::Rng;
 
 /// Backoff schedule for a repeatedly failing operation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Backoff {
     pub base: Duration,
     pub cap: Duration,

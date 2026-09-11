@@ -39,7 +39,7 @@ pub fn run<B: RatatuiBackend>(
     source: Arc<dyn DirSource>,
     volume_serial: Option<u32>,
 ) -> io::Result<()> {
-    let viewer_missing = !crate::open::viewer_available();
+    let avwin_missing = !crate::open::avwin_available();
     let (mut actors, rx) = Actors::start(settings.clone(), source, volume_serial)?;
 
     // Loaded before the first frame so the Up arrow works immediately, and
@@ -55,7 +55,7 @@ pub fn run<B: RatatuiBackend>(
     // before the first click, not merely after the first resize.
     state.set_area(terminal.size()?);
 
-    let result = event_loop(terminal, &mut state, &actors, &rx, viewer_missing);
+    let result = event_loop(terminal, &mut state, &actors, &rx, avwin_missing);
 
     // Workers are stopped after the caller has already restored the terminal,
     // so a wedged network thread can never keep the user out of their shell.
@@ -68,13 +68,13 @@ fn event_loop<B: RatatuiBackend>(
     state: &mut AppState,
     actors: &Actors,
     rx: &Receiver<AppEvent>,
-    viewer_missing: bool,
+    avwin_missing: bool,
 ) -> io::Result<()> {
     let mut dirty = true;
 
     loop {
         if dirty {
-            terminal.draw(|frame| ui::draw(frame, state, viewer_missing))?;
+            terminal.draw(|frame| ui::draw(frame, state, avwin_missing))?;
             state.note_frame(Instant::now());
             dirty = false;
         }
@@ -180,11 +180,10 @@ mod tests {
     fn quitting_is_requested_exactly_once() {
         let mut s = state();
         let now = Instant::now();
-        // Ctrl+C, not Esc: Esc clears and never leaves.
-        let response = s.update(
-            AppEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            now,
-        );
+        // Driven by `Shutdown`, because no key quits any more: Ctrl+C copies
+        // and Esc clears. The window's close button ends the program, so the
+        // shutdown and channel-disconnect paths are the only ways in.
+        let response = s.update(AppEvent::Shutdown, now);
         assert!(s.should_quit);
         assert_eq!(
             response

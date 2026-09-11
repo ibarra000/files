@@ -93,6 +93,18 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     }
 
     let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "VIEWER  {}{}",
+        settings.viewer.name(),
+        if settings.viewer_persistable {
+            ""
+        } else {
+            "  (F2 applies for the session only)"
+        }
+    );
+
+    let _ = writeln!(out);
     let _ = writeln!(out, "OK");
 }
 
@@ -109,6 +121,7 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
 
     report_index_cache(settings, out);
     let _ = writeln!(out);
+    report_viewer(settings, out);
     report_recommendations(settings, out);
 }
 
@@ -265,7 +278,22 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out, "  indexed directory   {}", indexed.display());
     let _ = writeln!(out, "  cache key           {}", key.hex());
 
-    match persist::load(dir, key, persist::Expect::new(indexed, None)) {
+    // Validated against the *real* volume serial, exactly as the running
+    // application does. Passing `None` here skipped the one check the app
+    // applies and nothing else does, so `--doctor` could report a perfectly
+    // healthy cache that every launch then threw away - which is the opposite
+    // of what a diagnostic is for.
+    let serial = volume_serial_of(indexed);
+    let _ = writeln!(
+        out,
+        "  volume serial       {}",
+        match serial {
+            Some(v) => format!("{v:08X}"),
+            None => "unknown (the identity check will be skipped)".into(),
+        }
+    );
+
+    match persist::load(dir, key, persist::Expect::new(indexed, serial)) {
         Ok(snapshot) => {
             let _ = writeln!(
                 out,
@@ -286,6 +314,103 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
             let _ = writeln!(out, "  cached index        {err}");
         }
     }
+
+    let _ = writeln!(
+        out,
+        "  decision log        {}",
+        match &settings.index_log {
+            Some(p) => p.display().to_string(),
+            None => "off (pass --index-log <PATH> to record why it reindexes)".into(),
+        }
+    );
+}
+
+/// The flat root's volume serial, or `None` off Windows and when it cannot be
+/// resolved.
+fn volume_serial_of(dir: &std::path::Path) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        crate::index::volume::volume_serial(dir)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// What happens when a result is opened.
+///
+/// Worth its own section: this is the only part of the program that hands work
+/// to software nobody here controls, and "Enter does nothing" is answered by
+/// exactly these four lines.
+fn report_viewer(settings: &Settings, out: &mut dyn Write) {
+    let _ = writeln!(out, "VIEWER");
+    let _ = writeln!(out, "  viewer              {}", settings.viewer.name());
+
+    let _ = writeln!(
+        out,
+        "  avwin.exe           {}",
+        if crate::open::avwin_available() {
+            "found on PATH"
+        } else if settings.viewer == crate::config::ViewerKind::Avwin {
+            "NOT FOUND on PATH - Enter will fail"
+        } else {
+            "not found on PATH (not in use)"
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "  pdf target          {}",
+        match &settings.pdf_viewer {
+            Some(p) => p.display().to_string(),
+            None => "the system's .pdf association".into(),
+        }
+    );
+
+    // Merged documents live here, and they are the one thing this program
+    // writes that a viewer keeps open afterwards.
+    let _ = writeln!(
+        out,
+        "  merged documents    {}",
+        match &settings.cache_dir {
+            Some(dir) => {
+                let pdf_dir = dir.join("pdf");
+                let (count, bytes) = directory_size(&pdf_dir);
+                format!(
+                    "{} ({} file{}, {})",
+                    pdf_dir.display(),
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    humanize::bytes(bytes)
+                )
+            }
+            None => "nowhere - documents will not be merged".into(),
+        }
+    );
+
+    // Says why F2 will not stick, which is otherwise invisible.
+    if !settings.viewer_persistable {
+        let _ = writeln!(
+            out,
+            "  F2                  session only - the environment, the command line \
+             or --no-config outranks the file"
+        );
+    }
+    let _ = writeln!(out);
+}
+
+/// Counts a directory's files and their total size. Best effort.
+fn directory_size(dir: &Path) -> (usize, u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .fold((0, 0), |(n, bytes), m| (n + 1, bytes + m.len()))
 }
 
 fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
@@ -301,6 +426,7 @@ fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
         "  FILES_PERSIST={}",
         if settings.persist { "on" } else { "off" }
     );
+    let _ = writeln!(out, "  FILES_VIEWER={}", settings.viewer.name());
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -643,12 +769,27 @@ fn bench_stamp(source: &dyn DirSource, dir: &Path, allow_write: bool, out: &mut 
     let Ok(before) = before else {
         let _ = writeln!(
             out,
-            "  unavailable - freshness will rely on periodic full rescans"
+            "  unavailable - freshness will rely on the periodic full rescan"
         );
+        let _ = writeln!(
+            out,
+            "  (that is {} between rescans; raise FILES_RESCAN_FLOOR to trade",
+            humanize::elapsed(crate::config::FULL_RESCAN_FLOOR)
+        );
+        let _ = writeln!(out, "   staleness for load, or lower it for the reverse)");
         return;
     };
     let _ = writeln!(out, "  probe cost          {}", humanize::elapsed(elapsed));
     let _ = writeln!(out, "  value               {before:?}");
+    let _ = writeln!(
+        out,
+        "  precision           {}",
+        match before.kind {
+            crate::index::StampKind::Full => "write + change time (handle query)",
+            crate::index::StampKind::WriteOnly =>
+                "write time only (attribute fallback - the handle query was refused)",
+        }
+    );
 
     if !allow_write {
         let _ = writeln!(
@@ -853,6 +994,48 @@ mod tests {
     fn bench_reports_a_non_literal_query_as_inapplicable() {
         let report = text(|out| bench(&settings(), source(), Some("p1*45"), false, out));
         assert!(report.contains("not applicable"), "{report}");
+    }
+
+    /// A diagnostic that validates the cache differently from the application
+    /// is worse than none: it reports a healthy index the app then discards.
+    #[test]
+    fn the_cache_report_states_the_volume_identity_it_checked_against() {
+        let mut s = settings();
+        s.persist = true;
+        let report = text(|out| report_index_cache(&s, out));
+        assert!(report.contains("volume serial"), "{report}");
+        assert!(report.contains("cache key"), "{report}");
+    }
+
+    #[test]
+    fn the_cache_report_points_at_the_decision_log_when_it_is_off() {
+        let mut s = settings();
+        s.persist = true;
+        s.index_log = None;
+        let report = text(|out| report_index_cache(&s, out));
+        assert!(
+            report.contains("--index-log"),
+            "the user needs to be told the switch exists: {report}"
+        );
+    }
+
+    #[test]
+    fn the_cache_report_names_the_decision_log_when_it_is_on() {
+        let mut s = settings();
+        s.persist = true;
+        s.index_log = Some(std::path::PathBuf::from(r"C:\temp\idx.log"));
+        let report = text(|out| report_index_cache(&s, out));
+        assert!(report.contains("idx.log"), "{report}");
+    }
+
+    #[test]
+    fn the_stamp_report_says_how_precise_the_probe_was() {
+        let src = source();
+        let report = text(|out| bench_stamp(src.as_ref(), Path::new(CUSTPRO_PATH), false, out));
+        assert!(
+            report.contains("precision"),
+            "a write-only stamp detects less than a full one, and the user              should be able to see which they have: {report}"
+        );
     }
 
     #[test]

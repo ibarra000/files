@@ -118,7 +118,7 @@ pub fn search(
     if matched == 0 && !cancelled && fold::needs_unicode_fallback(query) {
         let (top, matched) = unicode_fallback(snap, query, cancel);
         return Ok(SearchOutcome {
-            hits: materialise(snap, &top),
+            hits: materialise(snap, &top.into_sorted()),
             matched,
             total,
             cancelled: cancel.is_cancelled(),
@@ -127,7 +127,7 @@ pub fn search(
     }
 
     Ok(SearchOutcome {
-        hits: materialise(snap, &top),
+        hits: materialise(snap, &top.into_sorted()),
         matched,
         total,
         cancelled,
@@ -167,7 +167,7 @@ fn sweep(snap: &Snapshot, needle: &[u8], cancel: &CancelToken) -> (TopK, u32, bo
         .reduce(
             || (TopK::new(), 0u32, false),
             |(mut a, ca, xa), (b, cb, xb)| {
-                a.merge(&b);
+                a.merge(b);
                 (a, ca + cb, xa || xb)
             },
         );
@@ -278,9 +278,12 @@ fn unicode_fallback(snap: &Snapshot, query: &str, cancel: &CancelToken) -> (TopK
 }
 
 /// Turns retained keys into displayable hits.
-fn materialise(snap: &Snapshot, top: &TopK) -> Vec<Hit> {
-    top.keys()
-        .iter()
+///
+/// Takes the already-sorted keys rather than the selection itself: the heap's
+/// internal order is not display order, so the sort has to happen somewhere,
+/// and doing it once at the boundary keeps `TopK` free of a second copy.
+fn materialise(snap: &Snapshot, keys: &[Key]) -> Vec<Hit> {
+    keys.iter()
         .map(|&k: &Key| {
             let index = topk::key_index(k);
             Hit {

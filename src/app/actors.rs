@@ -9,6 +9,7 @@
 //! All of them report into one channel, which the main loop is the only
 //! receiver of.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -41,6 +42,10 @@ pub struct Actors {
     verify: WorkerHandle<SearchRequest>,
     index: IndexActor,
     prefetch: Prefetcher,
+    /// Opens what Enter chose. One thread for the life of the process, like
+    /// the rest: assembling a document reads every page off the share, which
+    /// is far too much work to spawn a thread for per keypress.
+    opener: open::worker::Opener,
     /// Absent when history is switched off, or when there is nowhere to put
     /// it. Recall still works within the session either way.
     history: Option<history::Writer>,
@@ -65,9 +70,17 @@ impl Actors {
         if settings.persist
             && let Some(cache_dir) = &settings.cache_dir
         {
-            let live = [crate::index::persist::MappingKey::of(
-                &settings.custpro_path,
-            )];
+            // Every *configured* mapping, not only the one indexed right now.
+            // `gc_orphans` deletes anything that looks like one of ours, so a
+            // narrower list meant that launching with a different effective
+            // configuration - an env override, an alternate `--config` - wiped
+            // the other one's cache and guaranteed it a cold start.
+            let live: Vec<_> = settings
+                .routes
+                .enabled()
+                .filter(|m| !m.path.as_os_str().is_empty())
+                .map(|m| crate::index::persist::MappingKey::of(&m.path))
+                .collect();
             crate::index::persist::gc_orphans(cache_dir, &live);
         }
 
@@ -86,15 +99,26 @@ impl Actors {
         let search = worker::spawn_search(Arc::clone(&backend), tx.clone())?;
         let verify = worker::spawn_verify(Arc::clone(&backend), Arc::clone(&verifier), tx.clone())?;
         let index = actor::spawn(
-            IndexContext {
-                settings: settings.clone(),
-                store: Arc::clone(&store),
-                source: Arc::clone(&source),
+            IndexContext::new(
+                settings.clone(),
+                Arc::clone(&store),
+                Arc::clone(&source),
                 volume_serial,
-            },
+            )
+            .with_log(Arc::new(crate::index::log::IndexLog::from_option(
+                settings.index_log.as_deref(),
+            ))),
             tx.clone(),
         )?;
         let prefetch = prefetch::spawn(Arc::clone(&backend), tx.clone())?;
+        // Merged documents cannot be deleted once a viewer has them open, so
+        // last session's are collected at the start of this one - the same
+        // arrangement the index cache uses just above. Swept *before* the
+        // opener exists, so the sweep cannot race a merge it just wrote.
+        if let Some(cache_dir) = &settings.cache_dir {
+            open::pdf::gc(cache_dir, open::worker::CACHE_LIFETIME);
+        }
+        let opener = open::worker::spawn(Arc::clone(&backend), tx.clone())?;
         let input = spawn_input(tx.clone())?;
 
         // Best effort: failing to start the writer costs recall next session,
@@ -114,6 +138,7 @@ impl Actors {
                 verify,
                 index,
                 prefetch,
+                opener,
                 history,
                 _input: input,
             },
@@ -140,7 +165,17 @@ impl Actors {
                 }
                 Cmd::Prefetch { dir, .. } => self.prefetch.request(dir),
                 Cmd::RefreshIndex { force } => self.index.refresh(force),
-                Cmd::Open(path) => open::open_async(path, self.events.clone()),
+                Cmd::Open(request) => self.opener.request(request, &self.events),
+                Cmd::SaveViewer(viewer) => crate::config::write::save_viewer_async(
+                    self.backend
+                        .settings
+                        .routes
+                        .source()
+                        .path()
+                        .map(Path::to_path_buf),
+                    viewer,
+                    self.events.clone(),
+                ),
                 Cmd::Copy(text) => clipboard::copy_async(text, self.events.clone()),
                 Cmd::ReadClipboard => clipboard::read_async(self.events.clone()),
                 Cmd::SaveHistory(entries) => {
@@ -167,6 +202,7 @@ impl Actors {
         clean &= self.verify.shutdown(budget);
         clean &= self.index.shutdown(budget);
         clean &= self.prefetch.shutdown(budget);
+        clean &= self.opener.shutdown(budget);
         if let Some(writer) = &mut self.history {
             writer.shutdown();
         }
@@ -234,10 +270,24 @@ pub fn default_source(settings: &Settings) -> Arc<dyn DirSource> {
 
 /// An in-memory source, for exercising the whole stack without any drives.
 pub fn fake_source_for_demo() -> Arc<dyn DirSource> {
+    // Shaped like a real job so the interesting cases can be reached by hand
+    // on a machine with no drives mapped:
+    //
+    //   * twenty pages, which is more than MAX_RESULTS - so the rows on screen
+    //     stop at fifteen while the document opens whole;
+    //   * a `.tif` page, which is not a member and must pass in silence;
+    //   * files that merely start with the code, which belong to no document.
+    let mut names: Vec<String> = vec!["11-D-0704.pdf".into()];
+    names.extend((1..=20).map(|i| format!("11-D-0704_Page{i}.pdf")));
+    names.push("11-D-0704_Page21.tif".into());
+    names.push("11-D-0704 revision notes.pdf".into());
+    names.push("11-D-0704 notes.txt".into());
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+
     Arc::new(
         FakeDirSource::new()
             .with_synthetic("V:\\", 2_000)
-            .with_dir("R:\\11d", &["11-D-0704 drawing.pdf", "11-D-0704 notes.txt"]),
+            .with_dir("R:\\11d", &names),
     )
 }
 

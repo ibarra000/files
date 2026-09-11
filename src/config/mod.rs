@@ -11,6 +11,7 @@
 //! I/O in this crate can be exercised on the machine it is written on.
 
 pub mod file;
+pub mod write;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -215,6 +216,54 @@ impl MatcherKind {
     }
 }
 
+/// Which application a chosen result is handed to.
+///
+/// The two differ in more than which executable is spawned. `Avwin` opens the
+/// one file the cursor is on, which is all it can do: the pages of a drawing
+/// set are separate files on the share, and a viewer given one of them shows
+/// one page. `Pdf` treats the code as naming a *document*, gathers every page
+/// of it and hands over a single assembled PDF - which is what someone asking
+/// for `11-D-0704` almost always meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewerKind {
+    /// Every page of the code, merged into one PDF, opened with the system's
+    /// `.pdf` handler.
+    #[default]
+    Pdf,
+    /// The single selected file, handed to `avwin.exe`. The behaviour this
+    /// program had before there was a choice.
+    Avwin,
+}
+
+impl ViewerKind {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "pdf" | "merge" | "merged" => Some(Self::Pdf),
+            "avwin" | "av" | "avwin.exe" => Some(Self::Avwin),
+            _ => None,
+        }
+    }
+
+    /// The spelling written to the config file, so it must be one `parse`
+    /// accepts. `every_key_the_writer_can_emit_is_an_accepted_setting` pins
+    /// that, because an unknown value is a hard startup error.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pdf => "pdf",
+            Self::Avwin => "avwin",
+        }
+    }
+
+    /// What F2 does. A cycle rather than a boolean so a third viewer is one
+    /// match arm rather than a rethink.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Pdf => Self::Avwin,
+            Self::Avwin => Self::Pdf,
+        }
+    }
+}
+
 /// The routing table the shipped defaults describe.
 ///
 /// Parsed from `assets/default_config.toml` through the ordinary loader, so
@@ -263,11 +312,44 @@ pub struct Settings {
     pub server_filter: bool,
     pub persist: bool,
     pub cache_dir: Option<PathBuf>,
+    /// Where to append the index decision log, if anywhere.
+    ///
+    /// Off by default. It exists so that "the index reloads at random" can be
+    /// answered from the machine that has the problem, without a debugger and
+    /// without a rebuild - see [`crate::index::log`].
+    pub index_log: Option<PathBuf>,
     /// Remember codes between runs, for recall with the Up arrow.
     pub history: bool,
     /// Where they are remembered. `None` disables storage without disabling
     /// recall within the session.
     pub history_path: Option<PathBuf>,
+    /// The viewer at startup.
+    ///
+    /// Deliberately the *initial* value and nothing more. F2 changes which
+    /// viewer is in use, and that lives on `AppState`, not here: `Settings` is
+    /// cloned into the backend and every worker, so a mutable field would be
+    /// one truth with several stale copies of it. See `AppState::viewer`.
+    pub viewer: ViewerKind,
+    /// Overrides the system's `.pdf` association when set.
+    ///
+    /// Not validated at load, unlike every other path in the configuration. A
+    /// mistyped *share* path is silent - the search simply finds nothing and
+    /// the user concludes the job has no files - which is why `file` refuses
+    /// to start on one. A missing viewer executable is the opposite: it fails
+    /// loudly the first time it is used, and this same file roams to laptops
+    /// where that executable legitimately is not installed. Refusing to start
+    /// there would be a regression, so this is reported by `--doctor` and
+    /// surfaced as a toast instead.
+    pub pdf_viewer: Option<PathBuf>,
+    /// Whether an F2 toggle can be written back to the configuration file.
+    ///
+    /// False when the environment or the command line set the viewer, because
+    /// `apply_file_settings` lets those win and the saved value would be
+    /// ignored at the next start; and false when there is no file to write to
+    /// at all. Decided here rather than in the actor that does the writing, so
+    /// the state machine can say "this session only" instead of reporting a
+    /// save that changes nothing.
+    pub viewer_persistable: bool,
 }
 
 impl Default for Settings {
@@ -299,8 +381,16 @@ impl Settings {
             server_filter: false,
             persist: true,
             cache_dir: default_cache_dir(),
+            index_log: None,
             history: true,
             history_path: crate::history::default_path(),
+            viewer: ViewerKind::default(),
+            pdf_viewer: None,
+            // Assume not, and let `load` say otherwise once it knows there is
+            // a file and that nothing outranks it. Defaulting the other way
+            // would make every test fixture and every `--no-config` session
+            // claim it could save.
+            viewer_persistable: false,
         })
     }
 
@@ -317,15 +407,22 @@ impl Settings {
     /// returned as errors rather than swallowed - see [`file`] for why
     /// falling back would be worse.
     pub fn load(choice: &ConfigChoice) -> Result<Self, Vec<file::ConfigError>> {
+        // Whether a file was actually read decides whether F2 has anywhere to
+        // save to, so it is tracked here rather than rediscovered later.
+        let mut have_file = false;
         let parsed = match choice {
             ConfigChoice::None => file::builtin(),
-            ConfigChoice::Explicit(path) => file::load_file(path, true)?,
+            ConfigChoice::Explicit(path) => {
+                have_file = true;
+                file::load_file(path, true)?
+            }
             ConfigChoice::Default => match file::default_config_path() {
                 Some(path) => {
                     // Best effort: a read-only profile means no file, and the
                     // built-in defaults are the same bytes anyway.
                     let _ = file::write_default_if_absent(&path);
                     if path.exists() {
+                        have_file = true;
                         file::load_file(&path, false)?
                     } else {
                         file::builtin()
@@ -337,6 +434,9 @@ impl Settings {
 
         let mut s = Self::from_env_with(parsed.routes);
         s.apply_file_settings(&parsed.settings);
+        // The environment outranks the file, so saving into the file while
+        // `FILES_VIEWER` is set would report success and change nothing.
+        s.viewer_persistable = have_file && env_str("FILES_VIEWER").is_none();
         Ok(s)
     }
 
@@ -373,6 +473,16 @@ impl Settings {
         {
             self.history = v;
         }
+        if env_str("FILES_VIEWER").is_none()
+            && let Some(v) = f.viewer.as_deref().and_then(ViewerKind::parse)
+        {
+            self.viewer = v;
+        }
+        if env_str("FILES_PDF_VIEWER").is_none()
+            && let Some(v) = &f.pdf_viewer
+        {
+            self.pdf_viewer = Some(v.clone());
+        }
     }
 
     /// As [`Settings::from_env`], but over a supplied routing table.
@@ -407,8 +517,17 @@ impl Settings {
         if let Some(v) = env_str("FILES_CACHE_DIR") {
             s.cache_dir = Some(PathBuf::from(v));
         }
+        if let Some(v) = env_str("FILES_INDEX_LOG") {
+            s.index_log = Some(PathBuf::from(v));
+        }
         if let Some(v) = env_bool("FILES_HISTORY") {
             s.history = v;
+        }
+        if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
+            s.viewer = v;
+        }
+        if let Some(v) = env_str("FILES_PDF_VIEWER") {
+            s.pdf_viewer = Some(PathBuf::from(v));
         }
         s
     }
@@ -492,6 +611,47 @@ mod tests {
         assert_eq!(MatcherKind::parse("simd"), Some(MatcherKind::Simd));
         assert_eq!(MatcherKind::parse("NAIVE"), Some(MatcherKind::Naive));
         assert_eq!(MatcherKind::parse(""), None);
+    }
+
+    #[test]
+    fn parses_every_viewer_spelling() {
+        assert_eq!(ViewerKind::parse("pdf"), Some(ViewerKind::Pdf));
+        assert_eq!(ViewerKind::parse("  MERGE "), Some(ViewerKind::Pdf));
+        assert_eq!(ViewerKind::parse("avwin"), Some(ViewerKind::Avwin));
+        assert_eq!(ViewerKind::parse("AVWIN.EXE"), Some(ViewerKind::Avwin));
+        assert_eq!(ViewerKind::parse("notepad"), None);
+    }
+
+    /// Assembling the whole document is what someone typing a code almost
+    /// always meant; opening one page of it is the special case.
+    #[test]
+    fn the_pdf_viewer_is_the_default() {
+        assert_eq!(Settings::default().viewer, ViewerKind::Pdf);
+    }
+
+    #[test]
+    fn toggling_the_viewer_returns_to_where_it_started() {
+        for v in [ViewerKind::Pdf, ViewerKind::Avwin] {
+            assert_eq!(v.next().next(), v);
+            assert_ne!(v.next(), v);
+        }
+    }
+
+    /// Every spelling the writer can emit has to be one the parser accepts,
+    /// or F2 would write a value that stops the program at the next start.
+    #[test]
+    fn every_name_the_writer_emits_parses_back() {
+        for v in [ViewerKind::Pdf, ViewerKind::Avwin] {
+            assert_eq!(ViewerKind::parse(v.name()), Some(v));
+        }
+    }
+
+    /// Nothing to save to, so F2 must say "this session only" rather than
+    /// report a save that goes nowhere.
+    #[test]
+    fn the_built_in_defaults_have_nowhere_to_persist_a_viewer() {
+        let s = Settings::load(&ConfigChoice::None).expect("built-ins must load");
+        assert!(!s.viewer_persistable);
     }
 
     #[test]

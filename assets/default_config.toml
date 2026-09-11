@@ -113,6 +113,25 @@ case    = "lower"          # lower | upper | preserve
 # what is set here.
 # ---------------------------------------------------------------------------
 [settings]
+
+# Which program a chosen result is handed to.
+#
+#   pdf    gather every page of the code - `11-D-0704`, `11-D-0704_Page1`,
+#          `11-D-0704Page12` - into one document and open it with whatever
+#          this machine has registered for .pdf
+#   avwin  open the single selected file with avwin.exe
+#
+# Written uncommented because F2 switches viewers while the program is
+# running and saves the choice back here. Setting FILES_VIEWER or passing
+# --viewer makes F2 a session-only switch, since both outrank this file.
+viewer = "pdf"
+
+# Open merged PDFs with a specific program instead of the registered handler.
+# Not checked at startup: this file roams between machines, and refusing to
+# start on one where the program is not installed would be worse than the
+# error you get when you actually press Enter.
+# pdf_viewer    = 'C:\Program Files\SumatraPDF\SumatraPDF.exe'
+
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes

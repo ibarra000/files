@@ -130,8 +130,25 @@ impl Cadence {
         if let Some(v) = env_secs("FILES_RESCAN_FLOOR") {
             self.rescan_floor = v;
         }
+        self.normalised()
+    }
+
+    /// Reconciles the four intervals with each other.
+    ///
+    /// Separate from [`Cadence::from_env`] so it can be tested without the
+    /// process environment, which `cargo test` shares across threads.
+    pub fn normalised(mut self) -> Self {
         // Probing less often than rescanning would make the probe pointless.
         self.probe_interval = self.probe_interval.min(self.rescan_floor);
+        // The spacing backstop has to scale with the rest, or compressing the
+        // cadence to reproduce a problem in minutes silently suppresses the
+        // very rescan being reproduced. At the shipped values this changes
+        // nothing: thirty seconds is already below both half an hour and a
+        // minute.
+        self.min_scan_spacing = self
+            .min_scan_spacing
+            .min(self.rescan_floor / 2)
+            .min(self.probe_interval);
         self
     }
 }
@@ -419,7 +436,7 @@ impl Scheduler {
             Err(err) => {
                 self.counters.probe_failures = self.counters.probe_failures.saturating_add(1);
 
-                if unanswerable(err) {
+                if is_probe_refusal(err) {
                     self.unanswerable_streak = self.unanswerable_streak.saturating_add(1);
                     if self.unanswerable_streak >= self.cadence.stamp_failures_before_blind {
                         self.stamp_health = StampHealth::Blind {
@@ -447,7 +464,11 @@ impl Scheduler {
         }
     }
 
-    fn on_scanned(&mut self, now: Instant, result: Result<Option<DirStamp>, EnumError>) -> Decision {
+    fn on_scanned(
+        &mut self,
+        now: Instant,
+        result: Result<Option<DirStamp>, EnumError>,
+    ) -> Decision {
         match result {
             Ok(stamp) => {
                 self.counters.full_scans = self.counters.full_scans.saturating_add(1);
@@ -564,13 +585,18 @@ fn not_before(now: Instant, at: Instant) -> Instant {
 /// True when the error says *this share cannot answer the probe*, as opposed
 /// to *the share is unreachable right now*.
 ///
-/// The distinction decides whether change detection gets disabled or merely
-/// retried, so it is deliberately a whitelist of definite answers about the
-/// capability - the same shape as the job-cache miss whitelist in
+/// The distinction decides two things: whether change detection gets disabled
+/// or merely retried, and whether the user is told their drive is unreachable
+/// or that freshness checking is unavailable. Only one of those is true at a
+/// time, and telling them the wrong one sends them to check a network that is
+/// working.
+///
+/// Deliberately a whitelist of definite answers about the capability - the
+/// same shape as the job-cache miss whitelist in
 /// [`crate::index::store::IndexStore::publish_job_miss`], and for the same
 /// reason. A network blip must never disable the mechanism that exists to
 /// avoid a million-entry enumeration.
-fn unanswerable(err: EnumError) -> bool {
+pub fn is_probe_refusal(err: EnumError) -> bool {
     matches!(
         err,
         EnumError::Unsupported(_)
@@ -989,6 +1015,33 @@ mod tests {
         );
     }
 
+    /// Compressing the cadence is how a freshness problem gets reproduced in
+    /// minutes instead of hours. A fixed thirty-second spacing backstop would
+    /// suppress exactly the rescan being reproduced.
+    #[test]
+    fn compressing_the_cadence_scales_the_spacing_backstop_with_it() {
+        let c = Cadence {
+            probe_interval: Duration::from_secs(1),
+            rescan_floor: Duration::from_secs(6),
+            ..Cadence::shipped()
+        }
+        .normalised();
+        assert!(
+            c.min_scan_spacing <= c.probe_interval,
+            "the backstop must not outrank the cadence it is protecting: {:?}",
+            c.min_scan_spacing
+        );
+    }
+
+    #[test]
+    fn the_shipped_spacing_backstop_is_unaffected_by_the_clamp() {
+        let c = Cadence::shipped().normalised();
+        assert_eq!(
+            c.min_scan_spacing, MIN_FULL_SCAN_SPACING,
+            "the clamp is for compressed cadences, not for production"
+        );
+    }
+
     #[test]
     fn a_probe_interval_longer_than_the_floor_is_clamped() {
         let c = Cadence {
@@ -996,7 +1049,7 @@ mod tests {
             rescan_floor: Duration::from_secs(60),
             ..Cadence::shipped()
         }
-        .from_env();
+        .normalised();
         assert_eq!(
             c.probe_interval,
             Duration::from_secs(60),
@@ -1005,14 +1058,17 @@ mod tests {
     }
 
     #[test]
-    fn unanswerable_is_a_whitelist_of_definite_answers() {
+    fn a_probe_refusal_is_a_whitelist_of_definite_answers() {
         for definite in [
             EnumError::Unsupported(50),
             EnumError::AccessDenied(5),
             EnumError::NotADirectory(267),
             EnumError::Corrupt(13),
         ] {
-            assert!(unanswerable(definite), "{definite:?} is a definite answer");
+            assert!(
+                is_probe_refusal(definite),
+                "{definite:?} is a definite answer"
+            );
         }
         for indefinite in [
             EnumError::Transient(53),
@@ -1023,7 +1079,7 @@ mod tests {
             EnumError::Empty,
         ] {
             assert!(
-                !unanswerable(indefinite),
+                !is_probe_refusal(indefinite),
                 "{indefinite:?} says nothing about the share's capabilities"
             );
         }

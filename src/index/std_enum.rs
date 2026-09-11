@@ -36,10 +36,11 @@ impl DirSource for StdDirSource {
                 .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
                 .unwrap_or(0)
         };
-        // std exposes no separate change time, so both fields carry mtime.
-        // Comparisons remain valid; only the resolution is coarser.
-        let m = secs(meta.modified());
-        Ok(DirStamp::new(m, m))
+        // std exposes no separate change time, so the stamp carries mtime
+        // alone and says so. Comparisons remain valid; only the resolution is
+        // coarser - and marking the kind is what stops a stamp from here ever
+        // being compared against a two-field one from the Windows path.
+        Ok(DirStamp::write_only(secs(meta.modified())))
     }
 
     fn list(

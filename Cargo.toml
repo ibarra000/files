@@ -32,10 +32,20 @@ bytemuck = { version = "1", default-features = false }
 smallvec = "1"
 lru = "0.12"
 
-# Parse-only, and deliberately not `toml` + serde derive: every value carries a
-# byte span, so a bad config reports `config.toml:34:15` rather than a shrug.
-# It also keeps `syn` out of the build.
-toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
+# Deliberately not `toml` + serde derive: every value carries a byte span, so a
+# bad config reports `config.toml:34:15` rather than a shrug, and it keeps `syn`
+# out of the build. `display` is on because F2 writes the chosen viewer back,
+# and a format-preserving rewrite is the only kind that may touch a file the
+# user is invited to hand-edit. It pulls in `toml_write` and nothing else.
+toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
+
+# The only heavyweight dependency here, and taken deliberately. A drawing set is
+# stored one PDF per page, so opening a job means merging N documents into one -
+# which is parsing and rewriting the xref table, object graph and page tree.
+# Hand-rolling that is a PDF parser, and a subtly wrong one renders blank pages
+# rather than failing. `chrono-clock` is dropped because the only thing it does
+# here is stamp `/CreationDate`; `rayon` is already a direct dependency.
+lopdf = { version = "0.45", default-features = false, features = ["rayon"] }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
@@ -49,6 +59,11 @@ features = [
     "Win32_System_WindowsProgramming",
     "Win32_NetworkManagement_WNet",
     "Win32_Security",
+    # ShellExecuteW, so a merged PDF opens in whatever the user has registered
+    # for .pdf rather than a program this app picked for them.
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
 ]
 
 [dev-dependencies]

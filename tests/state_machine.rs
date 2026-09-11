@@ -16,8 +16,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use files::app::event::{
     AppEvent, Cmd, IndexMsg, OpenMsg, PrefetchMsg, Redraw, Response, SearchMsg, VerifyMsg,
 };
-use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
-use files::config::{MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG};
+use files::app::state::{AppState, EmptyReason, Focus, QueryPhase, Severity, TOAST_LIFETIME};
+use files::config::{
+    MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
+};
 use files::index::errors::EnumError;
 use files::index::store::{Activity, FlatStatus, Health};
 use files::search::matcher::{Hit, SearchOutcome};
@@ -34,6 +36,14 @@ fn key(c: char) -> AppEvent {
 
 fn press(code: KeyCode) -> AppEvent {
     AppEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+fn ctrl(code: KeyCode) -> AppEvent {
+    AppEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+}
+
+fn shift(code: KeyCode) -> AppEvent {
+    AppEvent::Key(KeyEvent::new(code, KeyModifiers::SHIFT))
 }
 
 fn type_in(s: &mut AppState, text: &str, now: Instant) -> Response {
@@ -144,7 +154,7 @@ fn a_cancelled_result_changes_nothing() {
     type_in(&mut s, "11-D-0704", now);
     let ev = AppEvent::Search(SearchMsg {
         epoch: s.query_epoch(),
-        query: s.input.clone(),
+        query: s.input.text().to_string(),
         elapsed: Duration::ZERO,
         result: Ok(SearchOutcome {
             hits: vec![],
@@ -184,15 +194,91 @@ fn escape_clears_the_input_and_never_quits() {
     assert!(!s.should_quit);
 }
 
+/// Ctrl+C copies the selection rather than ending the session.
 #[test]
-fn ctrl_c_always_quits() {
+fn ctrl_c_copies_the_selected_text() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
-    s.update(
-        AppEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        now,
+    s.update(shift(KeyCode::Left), now);
+    s.update(shift(KeyCode::Left), now);
+
+    let r = s.update(ctrl(KeyCode::Char('c')), now);
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Copy(text) if text == "04")),
+        "{:?}",
+        r.cmds
     );
-    assert!(s.should_quit);
+    assert!(!s.should_quit);
+}
+
+/// With nothing selected it says so. Silence would read as the program
+/// ignoring the key, to anyone who remembers when it quit.
+#[test]
+fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    s.update(ctrl(KeyCode::Char('c')), now);
+    assert!(!s.should_quit);
+    assert!(
+        s.toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("nothing selected")),
+        "{:?}",
+        s.toast
+    );
+    assert_eq!(s.input, "11-D-0704", "the code must survive");
+}
+
+/// The load-bearing consequence of removing the quit keys: nothing on the
+/// keyboard may end the session. The window's close button does that now.
+#[test]
+fn no_key_sequence_quits_the_application() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let codes = [
+        KeyCode::Esc,
+        KeyCode::Enter,
+        KeyCode::Backspace,
+        KeyCode::Delete,
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::Left,
+        KeyCode::Right,
+        KeyCode::Home,
+        KeyCode::End,
+        KeyCode::Tab,
+        KeyCode::F(5),
+        KeyCode::Char('q'),
+        KeyCode::Char('c'),
+        KeyCode::Char('d'),
+        KeyCode::Char('z'),
+    ];
+    for code in codes {
+        for event in [press(code), ctrl(code), shift(code)] {
+            let r = s.update(event, now);
+            assert!(!s.should_quit, "{code:?} ended the session");
+            assert!(
+                !r.cmds.iter().any(|c| matches!(c, Cmd::Quit)),
+                "{code:?} asked to quit"
+            );
+        }
+    }
+}
+
+/// Ctrl and Alt combinations this program has no binding for used to fall
+/// through to the "it is a character, type it" arm: Ctrl+W typed a `w`.
+#[test]
+fn an_unbound_control_combination_does_not_type_a_letter() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D", now);
+    for c in ['q', 'x', 'z', 'n', 'p'] {
+        s.update(ctrl(KeyCode::Char(c)), now);
+    }
+    assert_eq!(s.input, "11-D");
 }
 
 #[test]
@@ -205,8 +291,27 @@ fn enter_opens_the_selection() {
     );
 
     let r = s.update(press(KeyCode::Enter), now);
-    assert_eq!(r.cmds.len(), 1);
-    assert!(matches!(&r.cmds[0], Cmd::Open(p) if &**p == "V:\\a.pdf"));
+    // The request carries the typed code as well as the row, because the page
+    // set is rebuilt from the code rather than from the fifteen rows on screen.
+    assert!(matches!(
+        &r.cmds[0],
+        Cmd::Open(req)
+            if &*req.path == "V:\\a.pdf"
+                && req.query == "11-D-0704"
+                && req.viewer == ViewerKind::Pdf
+    ));
+    assert_eq!(
+        r.cmds.iter().filter(|c| matches!(c, Cmd::Open(_))).count(),
+        1,
+        "exactly one file is opened"
+    );
+    // Opening is also the strongest signal that this was the code meant, so
+    // it is remembered at the same time.
+    assert!(
+        r.cmds.iter().any(|c| matches!(c, Cmd::SaveHistory(_))),
+        "{:?}",
+        r.cmds
+    );
 }
 
 #[test]
@@ -244,8 +349,12 @@ fn the_first_result_is_selected_by_default() {
     assert_eq!(s.selected_row(), Some(0));
 }
 
+/// Down still wraps at the bottom, but Up no longer wraps at the top: it
+/// hands focus back to the search box, which is what makes a further Up reach
+/// the recalled codes. Wrapping would also throw the eye from the row someone
+/// was reading to the far end of the list.
 #[test]
-fn arrow_keys_wrap_around() {
+fn down_wraps_at_the_bottom_but_up_leaves_the_list_at_the_top() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(
@@ -255,13 +364,18 @@ fn arrow_keys_wrap_around() {
 
     s.update(press(KeyCode::Down), now);
     assert_eq!(s.selected_row(), Some(1));
-    s.update(press(KeyCode::Up), now);
+    s.update(press(KeyCode::Down), now);
+    assert_eq!(s.selected_row(), Some(2));
+    s.update(press(KeyCode::Down), now);
+    assert_eq!(s.selected_row(), Some(0), "down from the bottom wraps");
+
     s.update(press(KeyCode::Up), now);
     assert_eq!(
-        s.selected_row(),
-        Some(2),
-        "up from the top wraps to the bottom"
+        s.focus,
+        Focus::Input,
+        "up from the top returns to the search box"
     );
+    assert!(!s.should_quit);
 }
 
 /// The specific annoyance this design exists to avoid.
@@ -412,7 +526,7 @@ fn animation_stops_when_the_work_finishes() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.clone(),
+            query: s.input.text().to_string(),
             elapsed: Duration::from_millis(40),
             outcome: VerifyOutcome::IndexAuthoritative { stamp: None },
         }),
@@ -435,7 +549,7 @@ fn an_unchanged_directory_verifies_without_touching_the_results() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.clone(),
+            query: s.input.text().to_string(),
             elapsed: Duration::from_millis(2),
             outcome: VerifyOutcome::IndexAuthoritative { stamp: None },
         }),
@@ -457,7 +571,7 @@ fn a_failed_verification_keeps_the_local_results_on_screen() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.clone(),
+            query: s.input.text().to_string(),
             elapsed: Duration::from_millis(20),
             outcome: VerifyOutcome::Failed(EnumError::Transient(53)),
         }),
@@ -483,7 +597,7 @@ fn a_server_answer_replaces_rather_than_unions() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.clone(),
+            query: s.input.text().to_string(),
             elapsed: Duration::from_millis(30),
             outcome: VerifyOutcome::Server {
                 hits: vec![hit("kept.pdf")],
@@ -505,7 +619,7 @@ fn an_audit_failure_warns_the_user() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.clone(),
+            query: s.input.text().to_string(),
             elapsed: Duration::from_millis(30),
             outcome: VerifyOutcome::Server {
                 hits: vec![],
@@ -624,6 +738,203 @@ fn a_failed_open_is_reported_rather_than_swallowed() {
     assert!(t.text.contains("a.pdf"));
 }
 
+// --- the viewer -------------------------------------------------------
+
+#[test]
+fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
+    let (mut s, now) = state();
+    s.settings.viewer_persistable = true;
+    assert_eq!(s.viewer, ViewerKind::Pdf);
+
+    let r = s.update(press(KeyCode::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Avwin);
+    assert_eq!(r.redraw, Redraw::Yes, "the help line changes");
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::SaveViewer(ViewerKind::Avwin))),
+        "{:?}",
+        r.cmds
+    );
+
+    s.update(press(KeyCode::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Pdf, "it cycles back");
+}
+
+/// A doubled character is visible; a doubled toggle is a silent no-op that
+/// looks exactly like the key being broken.
+#[test]
+fn f2_on_key_release_does_not_toggle_twice() {
+    let (mut s, now) = state();
+    let mut ev = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);
+    ev.kind = KeyEventKind::Release;
+    s.update(AppEvent::Key(ev), now);
+    assert_eq!(s.viewer, ViewerKind::Pdf, "a release must change nothing");
+}
+
+/// With FILES_VIEWER or --viewer in play the file value is ignored at the next
+/// start, so writing it would report a save that does nothing.
+#[test]
+fn f2_says_so_when_the_choice_cannot_be_persisted() {
+    let (mut s, now) = state();
+    s.settings.viewer_persistable = false;
+
+    let r = s.update(press(KeyCode::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Avwin, "it still applies");
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::SaveViewer(_))),
+        "nothing should be written"
+    );
+    let t = s.toast.as_ref().unwrap();
+    assert!(t.text.contains("session only"), "{}", t.text);
+}
+
+/// Recall owns the arrows, Enter and Esc; every *other* key means "back to
+/// editing" and commits the highlighted entry. F2 is not editing - it changes
+/// which program opens a file - so it must not drag a code into the search box
+/// and run a query for it.
+#[test]
+fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
+    let (mut s, now) = state();
+    s.seed_history(vec!["11-D-0704".into(), "AB12-0704".into()]);
+    type_in(&mut s, "99-", now);
+
+    s.update(press(KeyCode::Up), now);
+    assert_eq!(s.focus, Focus::History);
+    let recalled = s.input.text().to_string();
+    let epoch = s.query_epoch();
+
+    let r = s.update(press(KeyCode::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Avwin, "the viewer still toggles");
+    assert_eq!(s.focus, Focus::History, "recall stays open");
+    assert_eq!(s.input.text(), recalled, "the entry is not committed");
+    assert_eq!(s.query_epoch(), epoch, "and nothing is searched for");
+    assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
+}
+
+/// Choosing a different program to open a file with is not a reason to run
+/// the search again.
+#[test]
+fn f2_does_not_disturb_the_query_or_the_results() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(
+        search_result(&view(&s), vec![hit("a.pdf"), hit("b.pdf")], 2, 9),
+        now,
+    );
+    let epoch = s.query_epoch();
+    let selected = s.selected_path.clone();
+
+    let r = s.update(press(KeyCode::F(2)), now);
+    assert_eq!(s.query_epoch(), epoch);
+    assert_eq!(s.hits.len(), 2);
+    assert_eq!(s.selected_path, selected);
+    assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
+}
+
+#[test]
+fn enter_carries_the_viewer_that_is_active_now_not_the_one_configured_at_startup() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(search_result(&view(&s), vec![hit("a.pdf")], 1, 9), now);
+    s.update(press(KeyCode::F(2)), now);
+
+    let r = s.update(press(KeyCode::Enter), now);
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Open(req) if req.viewer == ViewerKind::Avwin)),
+        "{:?}",
+        r.cmds
+    );
+}
+
+/// A drawing set silently missing page seven is the worst outcome here,
+/// because nothing on screen would ever reveal it.
+#[test]
+fn a_partial_assembly_warns_and_names_what_was_skipped() {
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Open(OpenMsg::Launched {
+            path: Arc::from(r"C:\cache\pdf\abc.pdf"),
+            pages: 12,
+            skipped: vec!["11-D-0704_Page7.pdf (could not be read)".into()],
+            truncated: false,
+        }),
+        now,
+    );
+    let t = s.toast.as_ref().unwrap();
+    assert_eq!(t.severity, Severity::Warn);
+    assert!(t.text.contains("12 of 13"), "{}", t.text);
+    assert!(t.text.contains("Page7"), "{}", t.text);
+}
+
+#[test]
+fn a_complete_assembly_says_nothing() {
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Open(OpenMsg::Launched {
+            path: Arc::from(r"C:\cache\pdf\abc.pdf"),
+            pages: 13,
+            skipped: Vec::new(),
+            truncated: false,
+        }),
+        now,
+    );
+    assert!(s.toast.is_none(), "{:?}", s.toast);
+}
+
+/// A drawing set longer than the ceiling opens without its tail. Saying
+/// nothing would leave the user believing they had seen the whole thing.
+#[test]
+fn a_truncated_document_says_the_set_is_longer() {
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Open(OpenMsg::Launched {
+            path: Arc::from(r"C:\cache\pdf\merged.pdf"),
+            pages: 512,
+            skipped: Vec::new(),
+            truncated: true,
+        }),
+        now,
+    );
+    let t = s.toast.as_ref().unwrap();
+    assert_eq!(t.severity, Severity::Warn);
+    assert!(t.text.contains("512"), "{}", t.text);
+    assert!(t.text.contains("longer"), "{}", t.text);
+}
+
+#[test]
+fn a_saved_viewer_is_confirmed_on_screen() {
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Open(OpenMsg::ViewerSaved {
+            viewer: ViewerKind::Avwin,
+        }),
+        now,
+    );
+    let t = s.toast.as_ref().unwrap();
+    assert_eq!(t.severity, Severity::Info);
+    assert!(t.text.contains("avwin"), "{}", t.text);
+}
+
+/// The toggle still applies, so this is a warning about persistence rather
+/// than a failure of the keypress.
+#[test]
+fn a_failed_viewer_save_warns_rather_than_ending_the_session() {
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Open(OpenMsg::ViewerSaveFailed {
+            detail: "access is denied".into(),
+        }),
+        now,
+    );
+    let t = s.toast.as_ref().unwrap();
+    assert_eq!(t.severity, Severity::Warn);
+    assert!(t.text.contains("session only"), "{}", t.text);
+    assert!(t.text.contains("access is denied"), "{}", t.text);
+}
+
 #[test]
 fn a_dead_worker_clears_the_spinner_and_says_so() {
     let (mut s, now) = state();
@@ -673,7 +984,7 @@ fn a_busy_index_keeps_the_frame_animating() {
 fn view(s: &AppState) -> AppStateView {
     AppStateView {
         query_epoch: s.query_epoch(),
-        input: s.input.clone(),
+        input: s.input.text().to_string(),
     }
 }
 

@@ -167,7 +167,7 @@ pub fn spawn_search(
                 if let Err(payload) = result {
                     let _ = tx.send(AppEvent::ActorDied {
                         actor: "search",
-                        detail: panic_detail(&payload),
+                        detail: crate::util::once::panic_detail(&payload),
                     });
                 }
             })?
@@ -252,7 +252,7 @@ pub fn spawn_verify(
                 if let Err(payload) = result {
                     let _ = tx.send(AppEvent::ActorDied {
                         actor: "verify",
-                        detail: panic_detail(&payload),
+                        detail: crate::util::once::panic_detail(&payload),
                     });
                 }
             })?
@@ -311,16 +311,6 @@ fn run_verify(
             elapsed: started.elapsed(),
             outcome,
         }));
-    }
-}
-
-fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
     }
 }
 

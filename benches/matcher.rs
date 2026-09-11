@@ -21,7 +21,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use files::config::MatcherKind;
 use files::index::builder::SnapshotBuilder;
 use files::index::snapshot::Snapshot;
-use files::search::matcher;
+use files::search::{matcher, pages};
 use files::util::cancel::{CancelToken, Epoch};
 
 /// A listing shaped like the real one: job codes with a suffix.
@@ -123,6 +123,26 @@ fn cancellation_latency(c: &mut Criterion) {
 ///
 /// Expected to be a rounding error next to the network I/O it accompanies -
 /// this exists to confirm that assumption rather than assume it.
+/// Gathering a code's pages, which runs once per Enter against the flat index.
+///
+/// Worth measuring because the sweep is uncapped and visits every entry: the
+/// claim it rests on is that the O(1) name-length pre-filter rejects almost
+/// everything before the arena is touched, so this should stay close to a
+/// linear pass over the offsets array rather than over the names.
+fn page_collection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("page_collection");
+    for n in [100_000usize, 1_000_000] {
+        let snap = synthetic(n);
+        group.throughput(Throughput::Elements(n as u64));
+        group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
+            // The common shape: a code with no page set in this listing, so
+            // every entry has to be rejected.
+            b.iter(|| pages::collect(&snap, "11-D-0704", &CancelToken::never()));
+        });
+    }
+    group.finish();
+}
+
 fn snapshot_build(c: &mut Criterion) {
     let names: Vec<String> = (0..200_000)
         .map(|i| format!("job_{i:07}_{}_report.pdf", i % 997))
@@ -149,6 +169,7 @@ criterion_group!(
     scaling,
     query_shape,
     cancellation_latency,
-    snapshot_build
+    snapshot_build,
+    page_collection
 );
 criterion_main!(benches);

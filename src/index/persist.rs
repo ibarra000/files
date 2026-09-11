@@ -42,8 +42,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use memmap2::Mmap;
 
-use super::DirStamp;
 use super::snapshot::{Arenas, Snapshot};
+use super::{DirStamp, StampKind};
 use crate::config::MAX_INDEX_AGE;
 
 const _: () = assert!(
@@ -53,13 +53,19 @@ const _: () = assert!(
 
 pub const MAGIC: [u8; 8] = *b"FILESIDX";
 
-/// Bumped to 2 when cache files became per-directory.
+/// Bumped to 2 when cache files became per-directory; to 3 when the directory
+/// stamp came under the checksum and gained a kind.
 ///
 /// A v1 index was named only by volume serial, so two directories on the same
-/// volume produced colliding names and a single shared `latest` pointer. The
-/// bump discards every pre-existing index once, cleanly, rather than relying
-/// on the new validation to reject them one at a time.
-pub const FORMAT_VERSION: u16 = 2;
+/// volume produced colliding names and a single shared `latest` pointer. A v2
+/// index left the stamp outside the hash, so a single flipped bit there was
+/// undetectable and presented as "the directory changed" - a full
+/// re-enumeration of a million-entry share, on every load, with no symptom.
+///
+/// Each bump discards every pre-existing index once, cleanly, rather than
+/// relying on the new validation to reject them one at a time. That costs one
+/// cold start.
+pub const FORMAT_VERSION: u16 = 3;
 pub const HEADER_SIZE: usize = 96;
 const ALIGN: usize = 64;
 
@@ -67,6 +73,11 @@ const ALIGN: usize = 64;
 const FLAG_NUL_SEPARATED: u32 = 1 << 0;
 const FLAG_TRUNCATED: u32 = 1 << 1;
 const FLAG_HAS_STAMP: u32 = 1 << 2;
+/// Bit 3: the stamp came from the attribute fallback, so `change_time` is a
+/// copy of `last_write` rather than an independent value. Recorded because
+/// comparing stamps of different kinds is meaningless - see
+/// [`crate::index::StampKind`].
+const FLAG_STAMP_WRITE_ONLY: u32 = 1 << 3;
 
 /// Stable cache identity for one indexed directory.
 ///
@@ -176,6 +187,20 @@ fn align_up(v: usize) -> usize {
     v.div_ceil(ALIGN) * ALIGN
 }
 
+/// The bytes the checksum covers: the whole header except the checksum field
+/// itself, followed by the offsets table.
+///
+/// One function, used by both the writer and the reader, so the two cannot
+/// disagree about the coverage - which is how the stamp came to sit outside
+/// it.
+fn hashable(header: &[u8], offsets_bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_SIZE + offsets_bytes.len());
+    out.extend_from_slice(&header[0..48]);
+    out.extend_from_slice(&header[56..HEADER_SIZE]);
+    out.extend_from_slice(offsets_bytes);
+    out
+}
+
 /// FNV-1a. Used for corruption detection only, never for security.
 fn hash64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -239,8 +264,11 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
     if snapshot.truncated() {
         flags |= FLAG_TRUNCATED;
     }
-    if snapshot.stamp().is_some() {
+    if let Some(stamp) = snapshot.stamp() {
         flags |= FLAG_HAS_STAMP;
+        if stamp.kind == StampKind::WriteOnly {
+            flags |= FLAG_STAMP_WRITE_ONLY;
+        }
     }
     let stamp = snapshot.stamp().unwrap_or(DirStamp::new(0, 0));
     let avg_name_len = arena_len
@@ -270,15 +298,16 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
     header[56..64].copy_from_slice(&stamp.last_write.to_le_bytes());
     header[64..72].copy_from_slice(&stamp.change_time.to_le_bytes());
 
-    // The hash deliberately covers only the header and the offsets table.
-    // Hashing 60 MB of arenas would force every page resident and defeat the
-    // lazy mapping this format exists for; a corrupt *arena* can only produce
-    // wrong text, never an out-of-bounds read, because all indexing goes
-    // through the validated offsets.
-    let mut to_hash = Vec::with_capacity(48 + offsets_bytes.len());
-    to_hash.extend_from_slice(&header[0..48]);
-    to_hash.extend_from_slice(&offsets_bytes);
-    header[48..56].copy_from_slice(&hash64(&to_hash).to_le_bytes());
+    // The hash deliberately covers the whole header and the offsets table,
+    // but not the arenas. Hashing 60 MB of arenas would force every page
+    // resident and defeat the lazy mapping this format exists for; a corrupt
+    // *arena* can only produce wrong text, never an out-of-bounds read,
+    // because all indexing goes through the validated offsets.
+    //
+    // v2 stopped at byte 48 and so left the stamp unprotected, which is the
+    // one field whose corruption is both silent and expensive.
+    let checksum = hash64(&hashable(&header, &offsets_bytes));
+    header[48..56].copy_from_slice(&checksum.to_le_bytes());
 
     // A unique temp name in the same directory, so the rename is atomic and
     // never lands on an existing (possibly mapped) file.
@@ -288,9 +317,9 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
     // unscoped sweep would delete a sibling mapping's temp file mid-write.
     let key_hex = key.hex();
     let tmp = dir.join(format!(
-        "{key_hex}-{:x}-{:x}.tmp",
-        std::process::id(),
-        now_nanos()
+        "{}{:x}.tmp",
+        temp_prefix(key),
+        crate::util::once::now_nanos()
     ));
     let final_name = format!(
         "{key_hex}-{:08x}-{:016x}.idx",
@@ -355,7 +384,11 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
 /// The file is deliberately tiny and never mapped, so renaming over it can
 /// never hit a sharing violation.
 fn write_pointer(dir: &Path, key: MappingKey, name: &str) -> Result<(), LoadError> {
-    let tmp = dir.join(format!("ptr-{}-{:x}.tmp", key.hex(), now_nanos()));
+    let tmp = dir.join(format!(
+        "ptr-{}-{:x}.tmp",
+        key.hex(),
+        crate::util::once::now_nanos()
+    ));
     {
         let mut f = File::create(&tmp).map_err(|e| LoadError::Io(e.to_string()))?;
         f.write_all(name.as_bytes())
@@ -380,23 +413,34 @@ fn pointer_path(dir: &Path, key: MappingKey) -> PathBuf {
 ///
 /// A file another process still has mapped cannot be deleted; that is
 /// expected, not an error, and the next run will collect it.
+///
+/// Temporaries belonging to *other processes* are left alone. Two instances of
+/// the app index the same directory under the same key, so an unqualified
+/// sweep would delete the other one's file between its rename and its pointer
+/// write - leaving a pointer aimed at nothing, and a guaranteed cold start.
 fn gc(dir: &Path, key: MappingKey, keep: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     let prefix = key.hex();
+    let ours = temp_prefix(key);
     for entry in rd.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if !name.starts_with(&prefix) {
             continue;
         }
-        let stale_tmp = name.ends_with(".tmp");
+        let stale_tmp = name.ends_with(".tmp") && name.starts_with(&ours);
         let superseded = name.ends_with(".idx") && name != keep;
         if stale_tmp || superseded {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// The `<key>-<pid>-` prefix every temporary this process writes shares.
+fn temp_prefix(key: MappingKey) -> String {
+    format!("{}-{:x}-", key.hex(), std::process::id())
 }
 
 /// Removes cache files belonging to directories that are no longer
@@ -406,6 +450,13 @@ fn gc(dir: &Path, key: MappingKey, keep: &str) {
 /// ever sweeps keys that are still in use. Best effort, called once at
 /// startup.
 pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
+    // An empty live set would mean "collect every cache file there is", which
+    // is never what a caller means. It means the configuration could not be
+    // resolved - no enabled mapping, an unreadable config - and doing nothing
+    // is the only safe reading of that.
+    if live.is_empty() {
+        return;
+    }
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
@@ -430,13 +481,6 @@ pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-}
-
-fn now_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
 }
 
 // --- reading ---------------------------------------------------------------
@@ -537,8 +581,18 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
 
     let flags = u32at(12);
     let volume_serial = u32at(16);
+    // Zero means "unknown", and it has to mean that symmetrically.
+    //
+    // The writer records `0` when the serial could not be resolved - which
+    // happens when the startup query races the SMB session warm-up - and the
+    // reader used to reject exactly that as a volume mismatch. The result was
+    // a cache written by one run and thrown away by the next, at random,
+    // depending on how quickly the redirector woke up. The directory check
+    // below still runs either way, which is what makes an unknown serial
+    // survivable rather than a hole.
     if let Some(expected) = expect.volume_serial
         && expected != 0
+        && volume_serial != 0
         && volume_serial != expected
     {
         return Err(LoadError::VolumeMismatch {
@@ -559,10 +613,12 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
         return Err(LoadError::TooOld);
     }
 
-    let stamp = if flags & FLAG_HAS_STAMP != 0 {
-        Some(DirStamp::new(i64at(56), i64at(64)))
-    } else {
+    let stamp = if flags & FLAG_HAS_STAMP == 0 {
         None
+    } else if flags & FLAG_STAMP_WRITE_ONLY != 0 {
+        Some(DirStamp::write_only(i64at(56)))
+    } else {
+        Some(DirStamp::new(i64at(56), i64at(64)))
     };
 
     Ok(Header {
@@ -597,10 +653,7 @@ fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError>
         .ok_or(LoadError::Truncated)?;
 
     // Verify before trusting a single offset.
-    let mut to_hash = Vec::with_capacity(48 + offsets_bytes.len());
-    to_hash.extend_from_slice(&bytes[0..48]);
-    to_hash.extend_from_slice(offsets_bytes);
-    if hash64(&to_hash) != h.hash {
+    if hash64(&hashable(&bytes[0..HEADER_SIZE], offsets_bytes)) != h.hash {
         return Err(LoadError::ChecksumMismatch);
     }
 
@@ -744,6 +797,124 @@ mod tests {
         save(dir.path(), key(), &original).unwrap();
         let loaded = load(dir.path(), key(), expect(Some(0xABCD_1234))).unwrap();
         (dir, loaded)
+    }
+
+    /// A serial of zero means "unknown", and it has to mean that on both
+    /// sides. The writer records zero when the startup query lost its race
+    /// with the SMB session warm-up; the reader used to call that a volume
+    /// mismatch and throw the cache away, at random, on the next launch.
+    #[test]
+    fn a_snapshot_written_with_an_unknown_serial_is_still_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), key(), &snap(&["a.pdf"], 0)).unwrap();
+
+        let loaded = load(dir.path(), key(), expect(Some(0xABCD_1234)))
+            .expect("an unknown serial is unknown, not wrong");
+        assert_eq!(loaded.len(), 1);
+    }
+
+    /// The other direction still has to be rejected, or a drive letter
+    /// remapped to a different share serves the previous one's file list.
+    #[test]
+    fn two_known_but_different_serials_are_still_a_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), key(), &snap(&["a.pdf"], 0xAAAA)).unwrap();
+        assert!(matches!(
+            err(load(dir.path(), key(), expect(Some(0xBBBB)))),
+            LoadError::VolumeMismatch { .. }
+        ));
+    }
+
+    /// v2 hashed only bytes 0..48, leaving the stamp at 56..72 unprotected.
+    /// A flipped bit there is silent and expensive: it reads as "the
+    /// directory changed", which costs a full enumeration of a million-entry
+    /// share on load, every load.
+    #[test]
+    fn a_corrupted_stamp_is_caught_by_the_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = save(dir.path(), key(), &snap(&["a.pdf"], 7)).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[57] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(
+            err(load(dir.path(), key(), expect(Some(7)))),
+            LoadError::ChecksumMismatch
+        );
+    }
+
+    #[test]
+    fn the_stamp_kind_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = SnapshotBuilder::new(DIR);
+        b.push_str("a.pdf");
+        let original = b.finish(SystemTime::now(), 7, Some(DirStamp::write_only(999)));
+        save(dir.path(), key(), &original).unwrap();
+
+        let loaded = load(dir.path(), key(), expect(Some(7))).unwrap();
+        assert_eq!(
+            loaded.stamp(),
+            Some(DirStamp::write_only(999)),
+            "a write-only stamp must not come back looking like a full one"
+        );
+    }
+
+    /// Two instances index the same directory under the same key, so an
+    /// unqualified sweep of `*.tmp` deletes the other one's file between its
+    /// rename and its pointer write.
+    #[test]
+    fn gc_leaves_another_process_temp_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), key(), &snap(&["a.pdf"], 7)).unwrap();
+
+        let theirs = dir.path().join(format!("{}-deadbeef-1.tmp", key().hex()));
+        std::fs::write(&theirs, b"in flight").unwrap();
+        let ours = dir.path().join(format!("{}0.tmp", temp_prefix(key())));
+        std::fs::write(&ours, b"ours").unwrap();
+
+        gc(dir.path(), key(), "nothing-matches-this");
+
+        assert!(theirs.exists(), "another process was still writing that");
+        assert!(!ours.exists(), "our own leftovers are ours to collect");
+    }
+
+    /// An empty live set means the configuration could not be resolved, not
+    /// "delete everything".
+    #[test]
+    fn orphan_collection_does_nothing_when_nothing_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), key(), &snap(&["a.pdf"], 7)).unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+
+        gc_orphans(dir.path(), &[]);
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            before,
+            "an empty live set must not be read as a licence to wipe the cache"
+        );
+    }
+
+    #[test]
+    fn orphan_collection_keeps_every_configured_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = MappingKey::of(Path::new(r"S:rchive"));
+        save(dir.path(), key(), &snap(&["a.pdf"], 7)).unwrap();
+        save(dir.path(), other, &snap_at(r"S:rchive", &["b.pdf"], 7)).unwrap();
+
+        gc_orphans(dir.path(), &[key(), other]);
+
+        assert!(load(dir.path(), key(), expect(Some(7))).is_ok());
+        assert!(
+            load(
+                dir.path(),
+                other,
+                Expect::new(Path::new(r"S:rchive"), Some(7))
+            )
+            .is_ok(),
+            "a second configured mapping is not an orphan"
+        );
     }
 
     #[test]

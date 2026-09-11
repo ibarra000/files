@@ -31,7 +31,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::util::latest_slot::LatestSlot;
 
@@ -117,11 +116,11 @@ impl History {
             return false;
         }
 
-        let already_newest = self
-            .entries
-            .first()
-            .is_some_and(|e| e.eq_ignore_ascii_case(entry));
-        if already_newest {
+        // Exact match, not case-insensitive: a code re-entered in different
+        // case is the same job but a different spelling, and the one just
+        // confirmed to work is the one worth keeping. Comparing loosely here
+        // would leave the old spelling in place forever.
+        if self.entries.first().is_some_and(|e| e == entry) {
             return false;
         }
 
@@ -282,7 +281,7 @@ pub fn save(path: &Path, entries: &[String]) -> Result<(), HistoryError> {
     let tmp = parent.join(format!(
         "history-{:x}-{:x}.tmp",
         std::process::id(),
-        now_nanos()
+        crate::util::once::now_nanos()
     ));
 
     {
@@ -312,9 +311,9 @@ pub fn save(path: &Path, entries: &[String]) -> Result<(), HistoryError> {
 ///
 /// Fed through a [`LatestSlot`] for the same reason the search worker is: two
 /// commits in quick succession should produce one write of the newer list, not
-/// two writes racing to rename over each other. Whole snapshots make that safe
-/// - the loser is simply a list that is one entry out of date, and it never
-/// lands after the winner because there is only one writer.
+/// two writes racing to rename over each other. Whole snapshots make that
+/// safe: the loser is simply a list one entry out of date, and it can never
+/// land after the winner because there is only one writer.
 pub struct Writer {
     slot: Arc<LatestSlot<Arc<Vec<String>>>>,
     handle: Option<JoinHandle<()>>,
@@ -363,13 +362,6 @@ pub fn spawn_writer(path: PathBuf) -> std::io::Result<Writer> {
         slot,
         handle: Some(handle),
     })
-}
-
-fn now_nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::app::state::{AppState, QueryPhase};
-use crate::config::MIN_QUERY_LEN;
+use crate::config::{MIN_QUERY_LEN, ViewerKind};
 use crate::index::store::{Activity, Health};
 use crate::util::humanize;
 
@@ -53,9 +53,16 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     }
 
     if let Activity::Scanning { seen } = state.index.activity {
+        // Named, not bare. A rebuild the user can attribute is one they can
+        // live with; an unexplained one appearing mid-search is what got
+        // reported as "random indexing reloads".
+        let why = match state.index.last_scan_reason {
+            Some(reason) => format!(" ({})", reason.label()),
+            None => String::new(),
+        };
         return StatusLine {
             text: format!(
-                "{} building index... {} files so far",
+                "{} building index{why}... {} files so far",
                 humanize::spinner(now.elapsed()),
                 humanize::count(seen)
             ),
@@ -65,6 +72,14 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     if state.index.activity == Activity::LoadingDisk {
         return StatusLine {
             text: "loading cached index...".into(),
+            tone: Tone::Busy,
+        };
+    }
+    if state.index.activity == Activity::Persisting {
+        // Busy, and previously unlabelled: it drives the animation tick, so
+        // the screen spun with nothing on it to explain why.
+        return StatusLine {
+            text: "saving index...".into(),
             tone: Tone::Busy,
         };
     }
@@ -157,6 +172,15 @@ fn index_summary(state: &AppState, wall: SystemTime) -> String {
     if status.truncated {
         s.push_str(" (truncated)");
     }
+    // How long ago the listing was last *proven* current, which is a
+    // different and usually much smaller number than its age. Shown only when
+    // it differs, so the quiet case stays short.
+    if let (Some(age), Some(confirmed)) = (status.age(wall), status.confirmed_age(wall))
+        && confirmed + Duration::from_secs(30) < age
+    {
+        s.push_str(" · checked ");
+        s.push_str(&humanize::age(confirmed));
+    }
     if let Health::Degraded { reason, .. } = &status.health {
         s.push_str(" · ");
         s.push_str(reason.label());
@@ -184,16 +208,28 @@ fn matches_summary(state: &AppState) -> String {
 }
 
 /// The key hints along the bottom.
-pub fn help_line(viewer_missing: bool) -> String {
+///
+/// Names the active viewer, because F2 changes what Enter does and nothing
+/// else on screen would say which mode it is in.
+pub fn help_line(viewer: ViewerKind, avwin_missing: bool) -> String {
     // No "quit" hint, because there is no key that quits: the window's close
     // button ends the program, as it does for every other application.
-    let mut s = String::from(
-        "Enter open · Up history · Down results · Shift+arrows select · Ctrl+C copy · F5 refresh · Esc clear",
+    let hints = format!(
+        "Enter open · F2 {} · Up recall · Down results · Shift+arrows select · \
+         Ctrl+C copy · F5 refresh · Esc clear",
+        viewer.name()
     );
-    if viewer_missing {
-        s.push_str("  ·  WARNING: avwin.exe not found on PATH");
+
+    // Only worth saying when avwin is the viewer actually in use. Warning
+    // about a program the user has deliberately switched away from would nag
+    // every default installation about something that does not matter to it.
+    if avwin_missing && viewer == ViewerKind::Avwin {
+        // The warning leads. The line is too long for a narrow terminal and
+        // gets truncated on the right, so putting it last meant the one thing
+        // someone needed to read was the one thing cut off.
+        return format!("WARNING: avwin.exe not found on PATH  ·  {hints}");
     }
-    s
+    hints
 }
 
 /// Describes the minimum query length, for the empty state.
@@ -213,6 +249,7 @@ mod tests {
     use crate::app::state::AppState;
     use crate::config::Settings;
     use crate::index::errors::EnumError;
+    use crate::index::schedule::ScanReason;
     use crate::index::store::{DegradeReason, FlatStatus, Origin};
     use crate::search::matcher::Hit;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -261,7 +298,7 @@ mod tests {
         s.update(
             AppEvent::Search(crate::app::event::SearchMsg {
                 epoch: s.query_epoch(),
-                query: s.input.clone(),
+                query: s.input.text().to_string(),
                 elapsed: Duration::from_micros(300),
                 result: Ok(crate::search::matcher::SearchOutcome {
                     hits,
@@ -396,6 +433,87 @@ mod tests {
         assert_eq!(line.tone, Tone::Busy);
     }
 
+    /// The reported bug was not that the index rebuilds - it has to - but that
+    /// a rebuild appeared mid-search with no explanation.
+    #[test]
+    fn a_running_scan_says_why_it_is_happening() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, |st| {
+            st.activity = Activity::Scanning { seen: 1000 };
+            st.last_scan_reason = Some(ScanReason::StampMoved);
+        });
+        let line = render(&s, now, EPOCH);
+        assert!(
+            line.text.contains("building index (directory changed)"),
+            "{}",
+            line.text
+        );
+    }
+
+    #[test]
+    fn a_scan_with_no_recorded_reason_still_reads_cleanly() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, |st| {
+            st.activity = Activity::Scanning { seen: 1000 };
+            st.last_scan_reason = None;
+        });
+        let line = render(&s, now, EPOCH);
+        assert!(line.text.contains("building index..."), "{}", line.text);
+        assert!(
+            !line.text.contains("()"),
+            "no empty parentheses: {}",
+            line.text
+        );
+    }
+
+    /// `Persisting` counts as busy, so it drives the 100ms animation tick.
+    /// Without a branch here the screen span with nothing to explain it.
+    #[test]
+    fn saving_the_index_is_visible() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, |st| st.activity = Activity::Persisting);
+        assert_eq!(render(&s, now, EPOCH).text, "saving index...");
+    }
+
+    /// The index age is the first thing a user checks before trusting a
+    /// result. It must describe the data, not the last time we asked about it.
+    #[test]
+    fn a_confirmed_index_reports_the_data_age_and_the_check_separately() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, |st| {
+            st.origin = Some(Origin::Network);
+            st.entries = 10;
+            st.built_at = Some(EPOCH);
+            st.confirmed_at = Some(EPOCH + Duration::from_secs(3600));
+        });
+        let line = render(&s, now, EPOCH + Duration::from_secs(3660));
+        assert!(
+            line.text.contains("1h"),
+            "the data really is an hour old: {}",
+            line.text
+        );
+        assert!(
+            line.text.contains("checked"),
+            "and it was proven current a minute ago: {}",
+            line.text
+        );
+    }
+
+    #[test]
+    fn a_freshly_built_index_does_not_mention_the_check() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, healthy_status(10, Duration::ZERO));
+        assert!(
+            !render(&s, now, EPOCH).text.contains("checked"),
+            "the quiet case stays short"
+        );
+    }
+
     #[test]
     fn loading_the_disk_cache_is_visible() {
         let now = Instant::now();
@@ -429,7 +547,7 @@ mod tests {
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
                 epoch: s.query_epoch(),
-                query: s.input.clone(),
+                query: s.input.text().to_string(),
                 elapsed: Duration::from_millis(2),
                 outcome: crate::search::verify::VerifyOutcome::IndexAuthoritative { stamp: None },
             }),
@@ -450,7 +568,7 @@ mod tests {
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
                 epoch: s.query_epoch(),
-                query: s.input.clone(),
+                query: s.input.text().to_string(),
                 elapsed: Duration::from_millis(42),
                 outcome: crate::search::verify::VerifyOutcome::Server {
                     hits: vec![hit("a.pdf")],
@@ -514,18 +632,33 @@ mod tests {
 
     #[test]
     fn the_help_line_warns_about_a_missing_viewer() {
-        assert!(!help_line(false).contains("WARNING"));
-        assert!(help_line(true).contains("avwin.exe"));
+        assert!(!help_line(ViewerKind::Avwin, false).contains("WARNING"));
+        assert!(help_line(ViewerKind::Avwin, true).contains("avwin.exe"));
+    }
+
+    /// The probe runs at startup regardless, but most people never use avwin.
+    /// Warning them about a program they have not chosen is noise about
+    /// something that cannot affect them.
+    #[test]
+    fn the_missing_avwin_warning_only_appears_when_avwin_is_the_active_viewer() {
+        assert!(!help_line(ViewerKind::Pdf, true).contains("WARNING"));
+        assert!(help_line(ViewerKind::Avwin, true).contains("WARNING"));
+    }
+
+    #[test]
+    fn the_help_line_names_the_active_viewer() {
+        assert!(help_line(ViewerKind::Pdf, false).contains("F2 pdf"));
+        assert!(help_line(ViewerKind::Avwin, false).contains("F2 avwin"));
     }
 
     #[test]
     fn the_help_line_never_offers_a_key_that_quits() {
         // There is no such key any more. Advertising one would send someone
         // pressing Ctrl+C expecting to exit, which now copies instead.
-        let line = help_line(false);
+        let line = help_line(ViewerKind::Pdf, false);
         assert!(!line.contains("quit"), "{line}");
         assert!(line.contains("Esc clear"), "{line}");
         assert!(line.contains("Ctrl+C copy"), "{line}");
-        assert!(line.contains("Up history"), "{line}");
+        assert!(line.contains("Up recall"), "{line}");
     }
 }

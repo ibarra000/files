@@ -44,6 +44,12 @@ impl AppState {
                 KeyCode::Down => return self.history_newer(),
                 KeyCode::Enter => return self.accept_history(now),
                 KeyCode::Esc => return self.cancel_history(now),
+                // Which program opens a file has nothing to do with which code
+                // is being recalled, so this must not count as "back to
+                // editing" - that would accept whichever entry happened to be
+                // highlighted and run a search for it, from a keypress that
+                // asked for neither.
+                KeyCode::F(2) => return self.toggle_viewer(now),
                 _ => {
                     self.leave_history();
                     leaving = self.on_input_changed(now);
@@ -125,6 +131,13 @@ impl AppState {
             KeyCode::Enter => self.on_enter(now),
             KeyCode::Esc => self.on_escape(now),
 
+            // No modifier guard, matching the F5 arm below: some terminals
+            // report a function key with SHIFT set, and requiring NONE would
+            // make this intermittently dead. An unmodified letter is not
+            // available for a toggle - every `Char` falls through into the
+            // search box.
+            KeyCode::F(2) => self.toggle_viewer(now),
+
             KeyCode::F(5) => {
                 self.set_toast("refreshing index...".into(), Severity::Info, now);
                 let mut r = Response::redraw().with(Cmd::RefreshIndex { force: true });
@@ -145,6 +158,39 @@ impl AppState {
         let mut out = leaving;
         out.merge(response);
         out
+    }
+
+    // --- viewer -----------------------------------------------------------
+
+    /// Switches between opening whole documents and opening one file.
+    ///
+    /// Redraws *and* toasts, and both are needed. The help line changes, but
+    /// nothing else on screen moves, so without the message the only evidence
+    /// that a mode changed is a word in the footer - and someone who pressed
+    /// the key by accident would have no idea what they had done.
+    ///
+    /// Deliberately touches neither the query epoch nor the results: choosing
+    /// a different program to open a file with is not a reason to search
+    /// again.
+    fn toggle_viewer(&mut self, now: Instant) -> Response {
+        self.viewer = self.viewer.next();
+        let name = self.viewer.name();
+
+        if self.settings.viewer_persistable {
+            // The toast is raised by the save reporting back, so that what the
+            // user reads is what actually reached the disk.
+            Response::redraw().with(Cmd::SaveViewer(self.viewer))
+        } else {
+            // The environment or the command line outranks the file, so
+            // writing it would report a save the next start ignores. Saying so
+            // is better than saving into the void.
+            self.set_toast(
+                format!("viewer: {name} (this session only)"),
+                Severity::Info,
+                now,
+            );
+            Response::redraw()
+        }
     }
 
     // --- arrows -----------------------------------------------------------
@@ -176,8 +222,11 @@ impl AppState {
                 if self.hits.is_empty() {
                     return Response::none();
                 }
+                // Moves rather than landing on row 0: the top row is already
+                // highlighted before the first Down is pressed, so stepping
+                // onto it would look like the key did nothing.
                 self.focus = Focus::Results;
-                self.jump_selection(0)
+                self.move_selection(1)
             }
         }
     }

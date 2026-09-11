@@ -1,11 +1,26 @@
 //! Bounded top-K selection.
 //!
-//! Only 15 rows are ever displayed, so sorting every match - as the previous
-//! implementation did - is wasted work that scales with the match count rather
-//! than the result count. A fixed sorted array beats a `BinaryHeap` decisively
-//! at this size: the reject path is one comparison against a value already in
-//! L1, and the accept path is a single fully-predicted `copy_within` of at
-//! most 112 bytes. A heap only starts winning around K >= 64.
+//! Only the retained rows are ever displayed, so sorting every match - as the
+//! original implementation did - is wasted work that scales with the match
+//! count rather than the result count.
+//!
+//! # Why a heap
+//!
+//! This was a fixed sorted `[Key; K]` array, which is the right structure at
+//! K=15: the accept path is one fully-predicted `copy_within` of at most 112
+//! bytes. That argument inverts as K grows, and the module said so - "a heap
+//! only starts winning around K >= 64".
+//!
+//! The decisive cost is not the accept path but the *empty* one. A sweep of a
+//! large index builds one selection per rayon chunk - hundreds of them - and
+//! the overwhelming majority of chunks match nothing at all. An array pays to
+//! fill K slots with `Key::MAX` for every one of those, then moves the whole
+//! struct by value through the reduce tree. A `BinaryHeap` allocates nothing
+//! until something is actually retained, so an empty chunk costs a pointer.
+//!
+//! The reject path - which is still where essentially every candidate goes -
+//! is unchanged: one comparison against the heap root, which is the worst key
+//! retained and therefore exactly the admission threshold.
 //!
 //! # The packed key
 //!
@@ -24,6 +39,8 @@
 //! total order, which means the unstable parallel merge below produces output
 //! identical to the serial version instead of merely equivalent - no
 //! run-to-run reshuffling of tied results.
+
+use std::collections::BinaryHeap;
 
 /// Number of results retained.
 pub const K: usize = crate::config::MAX_RESULTS;
@@ -53,42 +70,42 @@ pub fn key_name_len(k: Key) -> u32 {
     ((k >> 32) & 0xFFFF) as u32
 }
 
-/// The best `K` keys seen, kept sorted ascending.
+/// The best `K` keys seen.
 ///
-/// Because it is always sorted, the final result needs no sort at all.
-#[derive(Clone, Copy, Debug)]
+/// A bounded max-heap, so the root is the *worst* key retained - which is
+/// precisely the admission threshold a candidate must beat.
+#[derive(Clone, Debug, Default)]
 pub struct TopK {
-    buf: [Key; K],
-    len: usize,
+    heap: BinaryHeap<Key>,
 }
 
-impl Default for TopK {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// `push` indexes the root of a full heap, so a zero-sized selection would
+/// have no threshold to compare against.
+const _: () = assert!(K > 0);
 
 impl TopK {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        // Deliberately does not reserve: most chunks of a large sweep retain
+        // nothing, and the whole point of the heap is that those cost no
+        // allocation at all.
         Self {
-            buf: [Key::MAX; K],
-            len: 0,
+            heap: BinaryHeap::new(),
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.len
+        self.heap.len()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.heap.is_empty()
     }
 
     #[inline]
     pub fn is_full(&self) -> bool {
-        self.len == K
+        self.heap.len() == K
     }
 
     /// The worst key currently retained, or `Key::MAX` when not yet full.
@@ -97,8 +114,8 @@ impl TopK {
     /// skip work for candidates that cannot possibly place.
     #[inline]
     pub fn threshold(&self) -> Key {
-        if self.len == K {
-            self.buf[K - 1]
+        if self.heap.len() == K {
+            *self.heap.peek().expect("a full heap has a root")
         } else {
             Key::MAX
         }
@@ -107,35 +124,48 @@ impl TopK {
     /// Offers a candidate.
     #[inline]
     pub fn push(&mut self, k: Key) {
-        // Rejects the overwhelming majority in one comparison.
-        if self.len == K && k >= self.buf[K - 1] {
+        if self.heap.len() < K {
+            self.heap.push(k);
             return;
         }
-        let at = self.buf[..self.len].partition_point(|&x| x < k);
-        let end = (self.len + 1).min(K);
-        if at < end - 1 {
-            self.buf.copy_within(at..end - 1, at + 1);
+        // Rejects the overwhelming majority in one comparison. Overwriting the
+        // root sifts down once; `pop` followed by `push` would sift down and
+        // then back up to reach the same place.
+        let mut worst = self.heap.peek_mut().expect("K > 0 and the heap is full");
+        if k < *worst {
+            *worst = k;
         }
-        self.buf[at] = k;
-        self.len = end;
     }
 
-    /// Merges another selection into this one.
-    pub fn merge(&mut self, other: &TopK) {
-        for &k in &other.buf[..other.len] {
+    /// Folds another selection into this one, consuming it.
+    ///
+    /// By value because rayon's `reduce` already owns the right-hand side, and
+    /// pushing the smaller side into the larger halves the work. That
+    /// reordering is safe: the K smallest keys of a union do not depend on
+    /// which side they arrived from, which is exactly the associativity the
+    /// parallel sweep relies on.
+    pub fn merge(&mut self, other: TopK) {
+        let mut other = other;
+        if other.heap.len() > self.heap.len() {
+            std::mem::swap(self, &mut other);
+        }
+        for k in other.heap.into_vec() {
             self.push(k);
         }
     }
 
     /// The retained keys, best first.
-    #[inline]
-    pub fn keys(&self) -> &[Key] {
-        &self.buf[..self.len]
+    ///
+    /// Consuming, because a heap's internal order is not display order and
+    /// handing back a sorted slice would mean carrying a second copy of it for
+    /// the whole sweep to serve the one caller that renders.
+    pub fn into_sorted(self) -> Vec<Key> {
+        self.heap.into_sorted_vec()
     }
 
     /// The retained entry indices, best first.
-    pub fn indices(&self) -> impl Iterator<Item = u32> + '_ {
-        self.keys().iter().copied().map(key_index)
+    pub fn into_indices(self) -> impl Iterator<Item = u32> {
+        self.into_sorted().into_iter().map(key_index)
     }
 }
 
@@ -184,14 +214,12 @@ mod tests {
 
     #[test]
     fn keeps_the_best_k_in_sorted_order() {
-        let keys: Vec<Key> = (0..100).rev().map(|i| key(i, 0, i)).collect();
+        let keys: Vec<Key> = (0..K as u32 * 4).rev().map(|i| key(i, 0, i)).collect();
         let t = collect(&keys);
         assert_eq!(t.len(), K);
-        assert_eq!(t.keys(), reference(&keys).as_slice());
-        assert!(
-            t.keys().windows(2).all(|w| w[0] < w[1]),
-            "output must be sorted"
-        );
+        let got = t.into_sorted();
+        assert_eq!(got, reference(&keys));
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "output must be sorted");
     }
 
     #[test]
@@ -199,7 +227,7 @@ mod tests {
         let keys: Vec<Key> = (0..3).map(|i| key(i, 0, i)).collect();
         let t = collect(&keys);
         assert_eq!(t.len(), 3);
-        assert_eq!(t.keys().len(), 3);
+        assert_eq!(t.into_sorted().len(), 3);
     }
 
     #[test]
@@ -207,7 +235,7 @@ mod tests {
         let t = TopK::new();
         assert!(t.is_empty());
         assert_eq!(t.threshold(), Key::MAX);
-        assert!(t.keys().is_empty());
+        assert!(t.into_sorted().is_empty());
     }
 
     #[test]
@@ -215,20 +243,21 @@ mod tests {
         let keys: Vec<Key> = (0..K as u32 * 2).map(|i| key(i, 0, i)).collect();
         let t = collect(&keys);
         assert!(t.is_full());
-        assert_eq!(t.threshold(), *t.keys().last().unwrap());
+        let threshold = t.threshold();
+        assert_eq!(threshold, *t.into_sorted().last().unwrap());
     }
 
     #[test]
     fn insertion_order_does_not_affect_the_result() {
-        let ascending: Vec<Key> = (0..60).map(|i| key(i, 0, i)).collect();
+        let ascending: Vec<Key> = (0..K as u32 * 4).map(|i| key(i, 0, i)).collect();
         let descending: Vec<Key> = ascending.iter().rev().copied().collect();
         let mut shuffled = ascending.clone();
         shuffled.rotate_left(17);
-        shuffled.swap(0, 40);
+        shuffled.swap(0, ascending.len() - 3);
 
         let want = reference(&ascending);
         for order in [&ascending, &descending, &shuffled] {
-            assert_eq!(collect(order).keys(), want.as_slice());
+            assert_eq!(collect(order).into_sorted(), want);
         }
     }
 
@@ -242,11 +271,11 @@ mod tests {
             let chunk = all.len().div_ceil(parts);
             let mut merged = TopK::new();
             for c in all.chunks(chunk) {
-                merged.merge(&collect(c));
+                merged.merge(collect(c));
             }
             assert_eq!(
-                merged.keys(),
-                reference(&all).as_slice(),
+                merged.into_sorted(),
+                reference(&all),
                 "partition into {parts} chunks diverged"
             );
         }
@@ -257,19 +286,36 @@ mod tests {
         let a = collect(&(0..40u32).map(|i| key(i, 0, i)).collect::<Vec<_>>());
         let b = collect(&(20..60u32).map(|i| key(i, 0, i)).collect::<Vec<_>>());
 
-        let mut ab = a;
-        ab.merge(&b);
+        let mut ab = a.clone();
+        ab.merge(b.clone());
         let mut ba = b;
-        ba.merge(&a);
-        assert_eq!(ab.keys(), ba.keys());
+        ba.merge(a);
+        assert_eq!(ab.into_sorted(), ba.into_sorted());
+    }
+
+    /// Merging the larger side into the smaller must give the same answer,
+    /// since `merge` swaps them to do less work.
+    #[test]
+    fn merging_a_large_selection_into_a_small_one_is_symmetric() {
+        let big = collect(&(0..K as u32 * 4).map(|i| key(i, 0, i)).collect::<Vec<_>>());
+        let small = collect(&[key(0, 0, 9_999), key(1, 0, 9_998)]);
+
+        let mut a = big.clone();
+        a.merge(small.clone());
+        let mut b = small;
+        b.merge(big);
+        assert_eq!(a.into_sorted(), b.into_sorted());
     }
 
     #[test]
     fn duplicate_keys_do_not_displace_distinct_better_ones() {
-        let keys: Vec<Key> = std::iter::repeat_n(key(5, 5, 5), 50)
+        let keys: Vec<Key> = std::iter::repeat_n(key(5, 5, 5), K * 4)
             .chain((0..3).map(|i| key(0, 0, i)))
             .collect();
         let t = collect(&keys);
-        assert_eq!(&t.keys()[..3], &[key(0, 0, 0), key(0, 0, 1), key(0, 0, 2)]);
+        assert_eq!(
+            &t.into_sorted()[..3],
+            &[key(0, 0, 0), key(0, 0, 1), key(0, 0, 2)]
+        );
     }
 }

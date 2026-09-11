@@ -47,13 +47,15 @@ use std::mem::{offset_of, size_of};
 use std::path::Path;
 use std::time::Instant;
 
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Foundation::{FILETIME, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FULL_DIR_INFO,
-    FILE_LIST_DIRECTORY, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FIND_FIRST_EX_LARGE_FETCH, FileBasicInfo, FileFullDirectoryInfo, FileFullDirectoryRestartInfo,
-    FindExInfoBasic, FindExInfoStandard, FindExSearchNameMatch, FindFirstFileExW, FindNextFileW,
-    GetFileAttributesW, GetFileInformationByHandleEx, OPEN_EXISTING, WIN32_FIND_DATAW,
+    CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FULL_DIR_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FIND_FIRST_EX_LARGE_FETCH, FileBasicInfo,
+    FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FindExInfoBasic, FindExInfoStandard,
+    FindExSearchNameMatch, FindFirstFileExW, FindNextFileW, GetFileAttributesExW,
+    GetFileAttributesW, GetFileExInfoStandard, GetFileInformationByHandleEx, OPEN_EXISTING,
+    WIN32_FILE_ATTRIBUTE_DATA, WIN32_FIND_DATAW,
 };
 
 use super::DirStamp;
@@ -85,15 +87,24 @@ fn open_dir_handle(dir: &Path) -> Result<OwnedHandle, EnumError> {
     // it CreateFileW fails with ERROR_ACCESS_DENIED, which reads as a
     // permissions problem and is not one.
     //
-    // FILE_LIST_DIRECTORY alone is requested rather than GENERIC_READ: some
-    // SMB shares grant the former where they deny the latter.
+    // FILE_LIST_DIRECTORY is requested rather than GENERIC_READ: some SMB
+    // shares grant the former where they deny the latter.
+    //
+    // FILE_READ_ATTRIBUTES is requested *as well*, and it is load-bearing.
+    // `GetFileInformationByHandleEx(FileBasicInfo)` is an attribute query, and
+    // a server that enforces the granted access mask strictly - which local
+    // NTFS does not, but several SMB implementations do - fails it with
+    // ERROR_ACCESS_DENIED when only FILE_LIST_DIRECTORY was asked for. That
+    // made the freshness probe fail on the real share and never on a
+    // development machine, and a probe that always fails used to mean a full
+    // re-enumeration every sixty seconds.
     //
     // FILE_FLAG_OVERLAPPED is deliberately absent, which keeps the handle
     // synchronous - GetFileInformationByHandleEx has no asynchronous form.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            FILE_LIST_DIRECTORY,
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -408,7 +419,35 @@ fn list_find_first(
 
 // --- stamp probe -----------------------------------------------------------
 
+/// Reads the directory's timestamps.
+///
+/// Two paths, in order of preference:
+///
+/// 1. `GetFileInformationByHandleEx(FileBasicInfo)`, which returns both
+///    `LastWriteTime` and `ChangeTime`;
+/// 2. `GetFileAttributesExW`, which needs no handle at all and returns the
+///    write time only.
+///
+/// The fallback exists because the alternative to a coarse stamp is *no*
+/// stamp, and no stamp means falling back to the hourly floor - change
+/// detection at one-hour granularity instead of one minute. A write-only
+/// stamp still detects entry churn on NTFS; it is only blind to metadata-only
+/// changes, which do not alter a listing.
+///
+/// The two kinds are tagged and never compared against each other - see
+/// [`super::StampKind`] - because `change_time` means different things in each.
 fn probe_stamp_win(dir: &Path) -> Result<DirStamp, EnumError> {
+    match probe_stamp_by_handle(dir) {
+        Ok(stamp) => Ok(stamp),
+        Err(handle_err) => probe_stamp_by_attributes(dir).map_err(|_| handle_err),
+    }
+}
+
+fn probe_stamp_by_handle(dir: &Path) -> Result<DirStamp, EnumError> {
+    #[cfg(test)]
+    if FORCE_STAMP_FALLBACK.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(EnumError::AccessDenied(code::ACCESS_DENIED));
+    }
     let handle = open_dir_handle(dir)?;
     // SAFETY: FILE_BASIC_INFO is plain-old-data; zeroing it is a valid
     // initial state and the API overwrites it on success.
@@ -429,6 +468,42 @@ fn probe_stamp_win(dir: &Path) -> Result<DirStamp, EnumError> {
     }
     Ok(DirStamp::new(info.LastWriteTime, info.ChangeTime))
 }
+
+/// Handle-free fallback: the write time from `GetFileAttributesExW`.
+fn probe_stamp_by_attributes(dir: &Path) -> Result<DirStamp, EnumError> {
+    let is_root = {
+        let s = dir.as_os_str().to_string_lossy();
+        s.len() <= 3 && s.contains(':')
+    };
+    let wide = wide_path(dir, is_root);
+
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `data` is a
+    // correctly sized, correctly aligned local of exactly the type
+    // GetFileExInfoStandard writes, and is only read after a success return.
+    let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetFileAttributesExW(wide.as_ptr(), GetFileExInfoStandard, (&raw mut data).cast())
+    };
+    if ok == 0 {
+        return Err(EnumError::from_win_open(last_error()));
+    }
+    if data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(EnumError::NotADirectory(code::DIRECTORY));
+    }
+    Ok(DirStamp::write_only(filetime_to_i64(data.ftLastWriteTime)))
+}
+
+/// A `FILETIME` as the same 100ns-since-1601 integer `FILE_BASIC_INFO` uses,
+/// so the two paths at least share units.
+fn filetime_to_i64(ft: FILETIME) -> i64 {
+    ((u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)) as i64
+}
+
+/// Forces the attribute fallback, so the path a hostile share would take can
+/// be exercised on a machine where the handle query works fine.
+#[cfg(test)]
+static FORCE_STAMP_FALLBACK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // --- the source ------------------------------------------------------------
 
@@ -780,6 +855,85 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, EnumError::Empty, "zero matches is an answer");
+    }
+
+    /// Restores the fallback switch even if the test panics, so one failure
+    /// cannot silently reroute every other probe in the process.
+    struct ForcedFallback;
+
+    impl ForcedFallback {
+        fn on() -> Self {
+            FORCE_STAMP_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for ForcedFallback {
+        fn drop(&mut self) {
+            FORCE_STAMP_FALLBACK.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// The share that prompted all of this refuses the handle query. Without
+    /// the fallback that means no stamp at all, and no stamp means change
+    /// detection drops from one minute to one hour.
+    #[test]
+    fn probe_stamp_falls_back_to_file_attributes_when_the_handle_query_fails() {
+        let dir = temp_with(&["a.txt"]);
+        let _forced = ForcedFallback::on();
+
+        let stamp = probe_stamp_win(dir.path()).expect("the fallback must carry the probe");
+        assert_eq!(
+            stamp.kind,
+            crate::index::StampKind::WriteOnly,
+            "and it must admit which fields it actually filled in"
+        );
+        assert!(stamp.last_write > 0);
+    }
+
+    #[test]
+    fn both_stamp_paths_read_the_same_write_time() {
+        let dir = temp_with(&["a.txt"]);
+        let by_handle = probe_stamp_by_handle(dir.path()).unwrap();
+        let by_attrs = probe_stamp_by_attributes(dir.path()).unwrap();
+        assert_eq!(
+            by_handle.last_write, by_attrs.last_write,
+            "the two paths must at least agree on units and epoch"
+        );
+    }
+
+    #[test]
+    fn the_fallback_stamp_still_moves_when_the_directory_changes() {
+        let dir = temp_with(&["a.txt"]);
+        let before = probe_stamp_by_attributes(dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.path().join("b.txt"), b"x").unwrap();
+        let after = probe_stamp_by_attributes(dir.path()).unwrap();
+        assert_ne!(
+            before, after,
+            "a coarse stamp is only worth having if it detects entry churn"
+        );
+    }
+
+    #[test]
+    fn the_attribute_probe_rejects_a_file() {
+        let dir = temp_with(&["a.txt"]);
+        assert!(matches!(
+            probe_stamp_by_attributes(&dir.path().join("a.txt")),
+            Err(EnumError::NotADirectory(_))
+        ));
+    }
+
+    /// The handle query is an attribute read, so the handle has to have been
+    /// opened for one. Requesting only `FILE_LIST_DIRECTORY` is what made the
+    /// probe fail on a strict SMB server and never on local NTFS.
+    #[test]
+    fn the_directory_handle_is_opened_for_attribute_reads() {
+        let dir = temp_with(&["a.txt"]);
+        assert!(
+            probe_stamp_by_handle(dir.path()).is_ok(),
+            "FILE_READ_ATTRIBUTES must be in the access mask"
+        );
     }
 
     #[test]
