@@ -9,6 +9,17 @@ use std::path::PathBuf;
 use crate::config::file::ConfigError;
 use crate::config::{ConfigChoice, EnumStrategy, MatcherKind, Settings, ViewerKind};
 
+/// How a `--bench --walk` run is bounded.
+///
+/// Kept separate from `walk::WalkOpts` so the CLI can express "unset" and let
+/// the defaults come from one place rather than being restated here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalkArgs {
+    pub concurrency: Option<usize>,
+    pub max_depth: Option<u16>,
+}
+
+/// What the program was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
     /// Run the interactive search.
@@ -19,6 +30,10 @@ pub enum Mode {
     Bench {
         query: Option<String>,
         allow_write: bool,
+        /// Walk the tree recursively and report its shape instead of timing a
+        /// single directory. The measurement that decides whether indexing a
+        /// whole share is affordable.
+        walk: Option<WalkArgs>,
     },
     /// Validate the configuration and print the routing table, without
     /// touching the network.
@@ -101,6 +116,7 @@ USAGE:
     files --doctor
     files --check-config [--query <CODE>]
     files --bench [--query <CODE>] [--allow-write]
+    files --bench --walk [--concurrency <N>] [--max-depth <N>]
 
 MODES:
     (none)              interactive search
@@ -109,6 +125,12 @@ MODES:
     --bench             time every enumeration strategy against the real
                         drives and cross-check that they agree
                         (slow: enumerates the share several times)
+    --bench --walk      walk every configured share recursively and report
+                        how many directories and files it holds, how deep it
+                        goes, and how long reading all of it took
+                        (read-only, but it reads the entire tree: minutes on
+                        a large share. This is the measurement that says
+                        whether indexing whole shares is affordable)
 
 OPTIONS:
     --config <PATH>     read this configuration file instead of the default
@@ -119,6 +141,11 @@ OPTIONS:
     --query <CODE>      job code to use for --bench or --check-config
     --allow-write       let --bench create one temp file, to confirm the
                         directory timestamp actually moves on this server
+    --concurrency <N>   directories --bench --walk reads at once (default 8,
+                        max 64). Higher finishes sooner and leans harder on
+                        the file server; SMB2 credits stop rewarding it well
+                        before 64
+    --max-depth <N>     how deep --bench --walk descends (default 32)
     --enum <STRATEGY>   handle | findfirst | std        (default: handle)
     --matcher <KIND>    simd | naive                    (default: simd)
     --server-filter <on|off>
@@ -174,6 +201,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     let mut overrides = Overrides::default();
     let mut query = None;
     let mut allow_write = false;
+    let mut walk: Option<WalkArgs> = None;
     let mut demo = false;
     let mut check_config = false;
 
@@ -205,7 +233,23 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                 mode = Mode::Bench {
                     query: None,
                     allow_write: false,
+                    walk: None,
                 }
+            }
+            "--walk" => walk = Some(WalkArgs::default()),
+            "--concurrency" => {
+                let n = value("--concurrency")?;
+                let n: usize = n
+                    .parse()
+                    .map_err(|_| ArgError(format!("--concurrency expects a number, got {n:?}")))?;
+                walk.get_or_insert_with(WalkArgs::default).concurrency = Some(n.clamp(1, 64));
+            }
+            "--max-depth" => {
+                let d = value("--max-depth")?;
+                let d: u16 = d
+                    .parse()
+                    .map_err(|_| ArgError(format!("--max-depth expects a number, got {d:?}")))?;
+                walk.get_or_insert_with(WalkArgs::default).max_depth = Some(d.max(1));
             }
             "--check-config" => check_config = true,
             "--config" => config = ConfigChoice::Explicit(PathBuf::from(value("--config")?)),
@@ -262,7 +306,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     if check_config {
         mode = Mode::CheckConfig { query };
     } else if let Mode::Bench { .. } = mode {
-        mode = Mode::Bench { query, allow_write };
+        mode = Mode::Bench {
+            query,
+            allow_write,
+            walk,
+        };
     }
     Ok(Args {
         mode,
@@ -301,7 +349,8 @@ mod tests {
             args(&["--bench"]).unwrap().mode,
             Mode::Bench {
                 query: None,
-                allow_write: false
+                allow_write: false,
+                walk: None
             }
         );
     }
@@ -313,7 +362,8 @@ mod tests {
             a.mode,
             Mode::Bench {
                 query: Some("p12345".into()),
-                allow_write: true
+                allow_write: true,
+                walk: None
             }
         );
     }

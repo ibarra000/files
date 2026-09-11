@@ -282,12 +282,34 @@ pub fn fake_source_for_demo() -> Arc<dyn DirSource> {
     names.push("11-D-0704_Page21.tif".into());
     names.push("11-D-0704 revision notes.pdf".into());
     names.push("11-D-0704 notes.txt".into());
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    // Registered at the configured roots, and as a *tree* rather than a pair
+    // of flat directories, so `--demo` exercises the recursive walk rather
+    // than reporting an empty share. The nested codes are the ones no routing
+    // rule would have guessed - which is the case worth being able to try by
+    // hand.
+    let nested: Vec<String> = [
+        "archive\\2019\\odd name\\11-3-0704 survey.pdf",
+        "archive\\2019\\odd name\\11-3-0704 notes.txt",
+        "archive\\2020\\ab12-0704 spec.pdf",
+        "ab12\\drawing.pdf",
+        "ab12\\rev b\\drawing.pdf",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // The job folder goes in as tree paths too, so it is reachable both by the
+    // routing rules (which resolve the code straight to `R:\11d`) and by a
+    // recursive walk from the root. Registering it as a bare listing would
+    // leave it with no entry in its parent - a directory a walk could never
+    // find, which is a shape a real share cannot have.
+    let mut paths: Vec<String> = nested;
+    paths.extend(names.iter().map(|n| format!("11d\\{n}")));
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 
     Arc::new(
         FakeDirSource::new()
-            .with_synthetic("V:\\", 2_000)
-            .with_dir("R:\\11d", &names),
+            .with_synthetic(crate::config::CUSTPRO_PATH, 2_000)
+            .with_tree("R:\\", &paths),
     )
 }
 
@@ -418,14 +440,49 @@ mod tests {
     #[test]
     fn the_demo_source_exercises_both_roots() {
         let src = fake_source_for_demo();
-        let mut sink = crate::index::enumerate::CountingSink::default();
-        src.list(
-            std::path::Path::new("V:\\"),
-            &mut sink,
-            &crate::index::enumerate::ListOpts::default(),
-            &crate::util::cancel::CancelToken::never(),
-        )
-        .unwrap();
-        assert_eq!(sink.count, 2_000);
+        let count = |dir: &str, files_only: bool| {
+            let mut sink = crate::index::enumerate::CountingSink::default();
+            let opts = crate::index::enumerate::ListOpts {
+                files_only,
+                ..Default::default()
+            };
+            src.list(
+                std::path::Path::new(dir),
+                &mut sink,
+                &opts,
+                &crate::util::cancel::CancelToken::never(),
+            )
+            .map(|_| sink.count)
+        };
+
+        // At the *configured* path, not `V:\`. Registering the flat share
+        // anywhere else left the demo searching a directory the settings never
+        // name, so it found nothing and looked like a broken index.
+        assert_eq!(count(crate::config::CUSTPRO_PATH, true).unwrap(), 2_000);
+
+        // The job root holds only folders, so it lists nothing under the usual
+        // files-only options and its subdirectories only when a walk asks for
+        // them. That difference is the whole reason the walk exists.
+        assert_eq!(
+            count("R:\\", true).unwrap(),
+            0,
+            "no loose files at the root"
+        );
+        assert!(
+            count("R:\\", false).unwrap() >= 3,
+            "but its subdirectories are there to descend into"
+        );
+
+        // Reachable *from that root*, rather than being a listing with no
+        // entry in its parent - a shape no real share can have, and one a
+        // recursive walk could never find.
+        assert!(
+            count("R:\\11d", true).unwrap() > 20,
+            "the job folder is reachable"
+        );
+        assert!(
+            count("R:\\archive\\2019\\odd name", true).unwrap() > 0,
+            "and so is the folder no routing rule would have guessed"
+        );
     }
 }

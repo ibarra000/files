@@ -25,6 +25,7 @@ use crate::index::actor::scan_once;
 use crate::index::enumerate::{CountingSink, DirSource, ListOpts, VecSink};
 use crate::index::errors::EnumError;
 use crate::index::persist;
+use crate::index::walk::{WalkCounts, WalkOpts, WalkReport, walk_tree};
 use crate::search::pattern;
 use crate::util::cancel::CancelToken;
 use crate::util::humanize;
@@ -507,6 +508,147 @@ pub fn bench_strategies(source: &dyn DirSource, dir: &Path, reps: usize) -> Vec<
 }
 
 /// Full benchmark report.
+/// Walks every enabled mapping and reports the shape of each tree.
+///
+/// Read-only, and the single measurement that decides whether indexing whole
+/// shares is affordable: the cost of a recursive walk is dominated by the
+/// *directory* count, which nothing but a walk can tell you.
+pub fn bench_walk(
+    settings: &Settings,
+    source: Arc<dyn DirSource>,
+    args: crate::cli::WalkArgs,
+    out: &mut dyn Write,
+) {
+    let mut opts = WalkOpts::default();
+    if let Some(n) = args.concurrency {
+        opts = opts.with_concurrency(n);
+    }
+    if let Some(d) = args.max_depth {
+        opts = opts.with_max_depth(d);
+    }
+
+    let _ = writeln!(out, "files {} - tree walk", env!("CARGO_PKG_VERSION"));
+    let _ = writeln!(
+        out,
+        "reading {} directories at a time, to a depth of {}",
+        opts.concurrency, opts.max_depth
+    );
+    let _ = writeln!(out, "read-only: nothing is written to the share.");
+
+    for mapping in settings.routes.enabled() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{} - {}", mapping.name, mapping.path.display());
+
+        let sink = WalkCounts::default();
+        let report = walk_tree(
+            source.as_ref(),
+            &mapping.path,
+            &opts,
+            &sink,
+            &CancelToken::never(),
+        );
+        report_walk(&report, &sink, out);
+    }
+}
+
+fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
+    use std::sync::atomic::Ordering;
+
+    let dirs = report.dirs_visited.max(1);
+    let files = report.files;
+    let secs = report.elapsed.as_secs_f64().max(0.000_001);
+
+    let _ = writeln!(
+        out,
+        "  directories         {:>12}",
+        humanize::count(report.dirs_visited)
+    );
+    let _ = writeln!(out, "  files               {:>12}", humanize::count(files));
+    let _ = writeln!(
+        out,
+        "  files per directory {:>12.1}",
+        files as f64 / dirs as f64
+    );
+    let _ = writeln!(out, "  deepest             {:>12}", report.max_depth_seen);
+    let _ = writeln!(
+        out,
+        "  round trips         {:>12}",
+        humanize::count(report.round_trips as usize)
+    );
+    let _ = writeln!(
+        out,
+        "  elapsed             {:>12}",
+        humanize::elapsed(report.elapsed)
+    );
+    let _ = writeln!(
+        out,
+        "  directories/second  {:>12.0}",
+        report.dirs_visited as f64 / secs
+    );
+
+    // What an index built from this walk would cost to hold. Directory paths
+    // are interned once rather than repeated per file, which is the whole
+    // reason the directory count is worth reporting separately.
+    let name_bytes = sink.name_bytes.load(Ordering::Relaxed);
+    let dir_bytes = sink.max_rel_len.load(Ordering::Relaxed) * report.dirs_visited as u64 / 2;
+    let projected =
+        name_bytes * 2 + dir_bytes * 2 + (files as u64 + report.dirs_visited as u64) * 8;
+    let _ = writeln!(
+        out,
+        "  projected index     {:>12}",
+        humanize::bytes(projected)
+    );
+
+    if report.skipped_reparse > 0 {
+        let _ = writeln!(
+            out,
+            "  [NOTE] {} junction(s) not followed; anything only reachable through \
+             one is not indexed",
+            report.skipped_reparse
+        );
+    }
+    if report.depth_clipped > 0 {
+        let _ = writeln!(
+            out,
+            "  [WARN] {} subtree(s) cut off by --max-depth",
+            report.depth_clipped
+        );
+    }
+    let errors = &report.errors;
+    if errors.total() > 0 {
+        let _ = writeln!(
+            out,
+            "  [WARN] {} unreadable: {} denied, {} missing, {} transient, {} other",
+            errors.total(),
+            errors.denied,
+            errors.missing,
+            errors.transient,
+            errors.other
+        );
+        for (rel, err) in errors.recorded.iter().take(5) {
+            let shown = if rel.is_empty() { "<root>" } else { rel };
+            let _ = writeln!(out, "         {shown}: {}", err.describe(shown));
+        }
+    }
+    if let Some(err) = &report.aborted {
+        let _ = writeln!(
+            out,
+            "  [FAIL] gave up: the share stopped answering ({})",
+            err.describe("the share")
+        );
+    }
+
+    let _ = writeln!(
+        out,
+        "  {}",
+        if report.complete() {
+            "[PASS] the whole tree was read"
+        } else {
+            "[WARN] this is a partial view of the tree"
+        }
+    );
+}
+
 pub fn bench(
     settings: &Settings,
     source: Arc<dyn DirSource>,

@@ -173,9 +173,12 @@ pub trait TreeSink: Send + Sync {
     fn progress(&self, _dirs_done: usize, _queued: usize, _files: usize) {}
 }
 
-/// Counts without keeping anything, for `--bench --walk`.
+/// Counts a walk without keeping any of it, for `--bench --walk`.
+///
+/// Distinct from `enumerate::CountingSink`, which counts one directory; this
+/// accumulates across a whole tree and from several threads at once.
 #[derive(Debug, Default)]
-pub struct CountingSink {
+pub struct WalkCounts {
     pub dirs: AtomicU64,
     pub files: AtomicU64,
     pub name_bytes: AtomicU64,
@@ -184,7 +187,7 @@ pub struct CountingSink {
     pub max_rel_len: AtomicU64,
 }
 
-impl TreeSink for CountingSink {
+impl TreeSink for WalkCounts {
     fn push_dir(&self, rel: &str, files: &[String]) -> bool {
         self.dirs.fetch_add(1, Ordering::Relaxed);
         self.files.fetch_add(files.len() as u64, Ordering::Relaxed);

@@ -69,10 +69,18 @@ fn main() -> io::Result<()> {
         Mode::Bench {
             ref query,
             allow_write,
+            walk,
         } => {
             let source = source_for(&args, &settings);
             let mut out = io::stdout().lock();
-            doctor::bench(&settings, source, query.as_deref(), allow_write, &mut out);
+            match walk {
+                // A tree walk answers a different question from the strategy
+                // shootout - how big the share is, not how fast one directory
+                // reads - and takes long enough that running both would bury
+                // it.
+                Some(w) => doctor::bench_walk(&settings, source, w, &mut out),
+                None => doctor::bench(&settings, source, query.as_deref(), allow_write, &mut out),
+            }
             out.flush()
         }
         Mode::Tui => run_tui(args, settings),
