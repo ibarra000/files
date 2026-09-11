@@ -37,8 +37,12 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use parking_lot::Mutex;
+
 use super::Snapshot;
 use super::builder::SnapshotBuilder;
+use super::walk::TreeSink;
+use crate::config::{SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES};
 
 /// Where one directory's files begin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +416,104 @@ pub fn parent_rel(rel: &str) -> &str {
     rel.rsplit_once('\\').map_or("", |(parent, _)| parent)
 }
 
+/// Builds a [`TreeIndex`] from a walk, sealing segments as it goes.
+///
+/// # Why everything mutable is behind one lock
+///
+/// `TreeSink::push_dir` takes `&self` and is called from every walk worker at
+/// once. The store's rule is that the index actor thread is the only writer,
+/// and a walk appears to break it - so it is worth being exact about why it
+/// does not.
+///
+/// `walk_tree` is built on `std::thread::scope`: it does not return until
+/// every worker has joined. For the whole of a walk the actor thread is
+/// therefore *inside* one step, mutating nothing, and the workers are a scoped
+/// sub-computation of it. One mutex serialises them against each other, so
+/// there is still exactly one writer at any instant and it is still causally
+/// the actor. That is also why the walk runs on the actor's own thread rather
+/// than being supervised from it: under a supervising actor the argument
+/// evaporates, and two writers would race a load-modify-store.
+///
+/// Contention is not a concern, and the arithmetic says why: appending
+/// seventeen names to a vector is well under a microsecond, while the
+/// directory read that produced them cost a millisecond or so of SMB. Eight
+/// workers contend for about a thousandth of their time.
+pub struct SegmentSink {
+    staging: Mutex<Staging>,
+    root: Box<str>,
+}
+
+struct Staging {
+    builder: SegmentBuilder,
+    sealed: Vec<Arc<TreeSegment>>,
+    /// Arena bytes that seal the segment being built. Doubles each time, so
+    /// the first results arrive quickly and the segment count stays bounded.
+    target: usize,
+    full: bool,
+}
+
+impl SegmentSink {
+    pub fn new(root: &str) -> Self {
+        Self {
+            staging: Mutex::new(Staging {
+                builder: SegmentBuilder::new(),
+                sealed: Vec::new(),
+                target: SEGMENT_MIN_BYTES,
+                full: false,
+            }),
+            root: root.into(),
+        }
+    }
+
+    /// The index built so far, including whatever is still unsealed.
+    ///
+    /// Callable mid-walk, which is what lets a partially walked share be
+    /// searched: a snapshot of progress rather than a promise of completeness.
+    pub fn index(&self) -> TreeIndex {
+        let mut s = self.staging.lock();
+        // Sealing the remainder rather than reading round it: a segment is the
+        // only searchable form, and leaving the tail in the builder would make
+        // the most recently walked folders - the ones someone watching the
+        // progress line is waiting for - the ones that never appear.
+        let tail = (!s.builder.is_empty()).then(|| Arc::new(s.builder.seal()));
+        if let Some(tail) = tail {
+            s.sealed.push(tail);
+        }
+        s.sealed
+            .iter()
+            .fold(TreeIndex::empty(&self.root), |ix, seg| {
+                ix.appended(Arc::clone(seg))
+            })
+    }
+
+    /// Segments sealed so far. Test and diagnostic use.
+    pub fn segment_count(&self) -> usize {
+        self.staging.lock().sealed.len()
+    }
+}
+
+impl TreeSink for SegmentSink {
+    fn push_dir(&self, rel: &str, files: &[String]) -> bool {
+        let mut s = self.staging.lock();
+        if s.full {
+            return false;
+        }
+        if !s.builder.push_dir(rel, files) {
+            // An arena ceiling. Reported back so the walk stops here rather
+            // than spending another two minutes reading directories that
+            // cannot be stored.
+            s.full = true;
+            return false;
+        }
+        if s.builder.arena_bytes() >= s.target {
+            let segment = Arc::new(s.builder.seal());
+            debug_assert!(segment.check_invariants().is_ok(), "sealed a bad segment");
+            s.sealed.push(segment);
+            s.target = (s.target * 2).min(SEGMENT_MAX_BYTES);
+        }
+        true
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

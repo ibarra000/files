@@ -49,6 +49,22 @@ pub const MIN_QUERY_LEN: usize = 3;
 /// reachable by arrow key.
 pub const MAX_RESULTS: usize = 300;
 
+/// Arena bytes in the first segment a walk publishes.
+///
+/// Small on purpose. A walk of a large share runs for minutes, and the
+/// difference between useful and useless is whether anything is searchable
+/// after the first second - so the first segment is sealed early and the
+/// ladder doubles from there, rather than every segment being the size that
+/// suits the last one.
+pub const SEGMENT_MIN_BYTES: usize = 512 << 10;
+
+/// Ceiling on a segment's arenas.
+///
+/// Above this, sealing costs a visible copy and the marginal gain in search
+/// efficiency is nil: at around twenty segments the per-segment overhead is
+/// already lost in the sweep itself.
+pub const SEGMENT_MAX_BYTES: usize = 16 << 20;
+
 /// Most files one matching folder may contribute to a result set.
 ///
 /// A job code names a folder as often as it names a file, and someone typing

@@ -371,3 +371,172 @@ fn a_large_tree_is_walked_exactly_once_through() {
     assert_eq!(sink.dirs().len(), report.dirs_visited, "nor any directory");
     assert!(report.complete());
 }
+
+// --- from a walk to a searchable index --------------------------------
+
+use files::index::tree::SegmentSink;
+use files::search::matcher;
+
+fn indexed(src: &FakeDirSource, opts: &WalkOpts) -> (files::index::tree::TreeIndex, WalkReport) {
+    let sink = SegmentSink::new("R:\\");
+    let report = walk_tree(src, Path::new("R:\\"), opts, &sink, &CancelToken::never());
+    (sink.index(), report)
+}
+
+fn found(index: &files::index::tree::TreeIndex, query: &str) -> Vec<String> {
+    matcher::search_tree(index, query, &CancelToken::never())
+        .unwrap()
+        .hits
+        .iter()
+        .map(|h| h.path.to_string())
+        .collect()
+}
+
+/// The whole project, in one assertion: a file whose folder no routing rule
+/// would have guessed is walked, indexed, and found by its code.
+#[test]
+fn a_walked_tree_can_be_searched_for_a_code_no_rule_would_have_routed() {
+    let src = FakeDirSource::new().with_tree(
+        "R:\\",
+        &[
+            "archive\\2019\\odd name\\11-3-0704 survey.pdf",
+            "11d\\0704\\quote.pdf",
+            "ab12\\unrelated.pdf",
+        ],
+    );
+    let (index, report) = indexed(&src, &WalkOpts::default());
+
+    assert!(report.complete());
+    assert_eq!(index.len(), 3);
+    assert_eq!(
+        found(&index, "11-3-0704"),
+        vec!["R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf"]
+    );
+}
+
+/// And the folder case, which is how a job code usually appears.
+#[test]
+fn a_code_that_names_a_folder_finds_what_is_in_it() {
+    let src = FakeDirSource::new().with_tree(
+        "R:\\",
+        &[
+            "11d\\0704\\quote.pdf",
+            "11d\\0704\\drawing.pdf",
+            "11d\\0705\\other.pdf",
+        ],
+    );
+    let (index, _) = indexed(&src, &WalkOpts::default());
+
+    let mut got = found(&index, "0704");
+    got.sort();
+    assert_eq!(
+        got,
+        vec!["R:\\11d\\0704\\drawing.pdf", "R:\\11d\\0704\\quote.pdf"]
+    );
+}
+
+/// The index is searchable while the walk is still running, which is what
+/// makes a three-minute walk of a real share usable rather than a blank
+/// screen.
+#[test]
+fn a_partially_walked_tree_is_already_searchable() {
+    let paths: Vec<String> = (0..400)
+        .map(|i| format!("d{i:03}\\0704 file.pdf"))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let src = FakeDirSource::new().with_tree("R:\\", &refs);
+
+    let sink = SegmentSink::new("R:\\");
+    // Stopped early on purpose, exactly as reading the index mid-walk would
+    // see it.
+    let mut opts = WalkOpts::default().with_concurrency(1);
+    opts.max_dirs = 20;
+    let report = walk_tree(&src, Path::new("R:\\"), &opts, &sink, &CancelToken::never());
+
+    assert!(report.truncated, "the walk was stopped short");
+    let index = sink.index();
+    assert!(!index.is_empty(), "yet something is already searchable");
+    assert!(!found(&index, "0704").is_empty());
+}
+
+/// Segments are an implementation detail; the answers must not depend on
+/// where the boundaries fell.
+#[test]
+fn segmenting_does_not_change_what_is_found() {
+    let paths: Vec<String> = (0..300)
+        .map(|i| format!("d{i:03}\\0704 file{i:03}.pdf"))
+        .collect();
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let src = FakeDirSource::new().with_tree("R:\\", &refs);
+
+    let (index, report) = indexed(&src, &WalkOpts::default().with_concurrency(1));
+    assert!(report.complete());
+    assert_eq!(index.len(), 300);
+
+    let hits = matcher::search_tree(&index, "file123", &CancelToken::never()).unwrap();
+    assert_eq!(
+        hits.hits
+            .iter()
+            .map(|h| h.path.to_string())
+            .collect::<Vec<_>>(),
+        vec!["R:\\d123\\0704 file123.pdf"]
+    );
+}
+
+/// Every file the walk reported is in the index, and no more.
+#[test]
+fn the_index_holds_exactly_what_the_walk_found() {
+    let src = FakeDirSource::new().with_tree(
+        "R:\\",
+        &[
+            "a\\one.pdf",
+            "a\\two.pdf",
+            "a\\b\\three.pdf",
+            "c\\four.pdf",
+            "loose.pdf",
+        ],
+    );
+    let (index, report) = indexed(&src, &WalkOpts::default());
+
+    assert_eq!(index.len(), report.files);
+    let mut all: Vec<String> = (0..index.len() as u32)
+        .map(|i| index.full_path(i).unwrap())
+        .collect();
+    all.sort();
+    assert_eq!(
+        all,
+        vec![
+            "R:\\a\\b\\three.pdf",
+            "R:\\a\\one.pdf",
+            "R:\\a\\two.pdf",
+            "R:\\c\\four.pdf",
+            "R:\\loose.pdf",
+        ]
+    );
+}
+
+/// A large tree crosses several segment boundaries, and every one of its
+/// files must still resolve to the right path.
+#[test]
+fn a_tree_spanning_many_segments_resolves_every_path() {
+    let mut paths = Vec::new();
+    for a in 0..40 {
+        for b in 0..40 {
+            paths.push(format!("a{a:02}\\b{b:02}\\report.pdf"));
+        }
+    }
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let src = FakeDirSource::new().with_tree("R:\\", &refs);
+
+    let (index, report) = indexed(&src, &WalkOpts::default());
+    assert!(report.complete());
+    assert_eq!(index.len(), 1_600);
+
+    // Every path is distinct and well formed, which is what the run table has
+    // to get right across a boundary.
+    let all: std::collections::HashSet<String> = (0..index.len() as u32)
+        .map(|i| index.full_path(i).unwrap())
+        .collect();
+    assert_eq!(all.len(), 1_600, "a path was duplicated or lost");
+    assert!(all.contains("R:\\a17\\b23\\report.pdf"));
+}
