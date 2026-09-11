@@ -1,0 +1,120 @@
+# files - job code routing
+#
+# Written automatically on first run. Edit freely, then check it with
+#
+#     files --check-config
+#
+# which validates everything below without touching the network, and prints
+# where a given code would be searched.
+#
+# Use literal strings ('...') for paths and patterns. TOML *basic* strings
+# ("...") process backslash escapes, so "R:\Documents" is a parse error and
+# "\d" silently becomes "d".
+
+version = 1
+
+
+# ---------------------------------------------------------------------------
+# CustomPro. One large directory holding every job's files directly, so a
+# listing here is the whole share. That is why it is indexed and cached.
+#
+# THIS MAPPING MUST COME FIRST. CustomPro codes contain dashes too
+# ("P12345-001", "PP987-A"), so if the job rules below were tried first they
+# would claim such a code, build a folder name from it, and probe a
+# nonexistent path under R:\ on every keystroke. `stop` is what prevents
+# that: when a rule here matches, no later mapping is consulted.
+#
+# Set stop = false to search the job shares for these codes as well; results
+# from every matching mapping are merged into one ranked list.
+# ---------------------------------------------------------------------------
+[[mapping]]
+name    = "custompro"
+path    = 'V:\Documents\custpro'
+kind    = "flat"
+enabled = true
+stop    = true
+
+  [[mapping.rules]]
+  pattern = '^PP'
+
+  [[mapping.rules]]
+  pattern = '^P[0-9]+'
+
+
+# ---------------------------------------------------------------------------
+# Per-job folders. Each code resolves to one small subdirectory of the root,
+# fetched on demand and cached briefly.
+#
+# Rules are ordered and the FIRST match within a mapping wins, so the more
+# specific patterns must come before the more general ones.
+#
+# `folder` builds the subdirectory name from the pattern's capture groups. It
+# is a regex replacement template: use ${1}, ${2}. Prefer the braces - a bare
+# $1x means "the group named 1x", which does not exist and would expand to
+# nothing.
+# ---------------------------------------------------------------------------
+[[mapping]]
+name    = "jobs"
+path    = 'R:\'
+kind    = "job-folder"
+enabled = true
+case    = "lower"          # lower | upper | preserve
+
+  # Four fields, single-LETTER second field:  11-D-0704-A2 -> 11d
+  #
+  # The second field is [A-Z] - letters only, not [A-Z0-9]. Widening it
+  # reroutes codes such as 11-3-0704. Please do not "tidy" it.
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)-([A-Z0-9]+)$'
+  folder  = '${1}${2}'
+
+  # Three fields, single-LETTER second field:  11-D-0704 -> 11d
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'
+  folder  = '${1}${2}'
+
+  # Three fields, second field two or more characters:  11-DX-0704 -> 11
+  #
+  # Note the gap this leaves against the rule above: a single-DIGIT middle
+  # field (11-3-0704) satisfies neither and resolves to nothing. That is
+  # existing behaviour, pinned by a test. If such codes are real, add a rule
+  # here rather than widening the character class above.
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z0-9]{2,})-([A-Z0-9]+)$'
+  folder  = '${1}'
+
+  # Two fields:  AB12-0704 -> ab12
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
+  folder  = '${1}'
+
+
+# ---------------------------------------------------------------------------
+# A third share. Uncomment, adjust, and check it with `files --check-config`.
+#
+# NOTE: this build indexes ONE flat mapping. A second enabled `kind = "flat"`
+# is refused at startup, by name, rather than silently searched against the
+# first one's index. Any number of `job-folder` mappings is fine.
+# ---------------------------------------------------------------------------
+# [[mapping]]
+# name    = "archive"
+# path    = 'S:\archive'
+# kind    = "job-folder"
+# enabled = true
+#
+#   # AR1234-56 -> S:\archive\ar1234
+#   [[mapping.rules]]
+#   pattern = '^(AR[0-9]+)-([0-9]+)$'
+#   folder  = '${1}'
+
+
+# ---------------------------------------------------------------------------
+# Global options. The command line overrides the environment, which overrides
+# what is set here.
+# ---------------------------------------------------------------------------
+[settings]
+# enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
+# matcher       = "simd"             # simd | naive
+# server_filter = false              # turn on only after `files --bench` passes
+# persist       = true               # keep the on-disk index between runs
+# history       = true               # remember codes for recall with the Up arrow

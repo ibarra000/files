@@ -1,0 +1,77 @@
+[package]
+name = "files"
+version = "0.2.0"
+edition = "2024"
+
+[lib]
+name = "files"
+path = "src/lib.rs"
+
+[[bin]]
+name = "files"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+# Fuzzy matching is not currently wired up, but is deliberately kept available:
+# the ranking pipeline in `search::topk` is shaped so a fuzzy scorer can drop in.
+nucleo = "0.5"
+regex = "1.10"
+
+# Load-bearing as of 0.2: previously only present transitively via `nucleo`.
+memchr = "2.8"
+rayon = "1.10"
+parking_lot = "0.12"
+
+arc-swap = "1.7"
+crossbeam-channel = "0.5"
+thiserror = "2"
+memmap2 = "0.9"
+bytemuck = { version = "1", default-features = false }
+smallvec = "1"
+lru = "0.12"
+
+# Parse-only, and deliberately not `toml` + serde derive: every value carries a
+# byte span, so a bad config reports `config.toml:34:15` rather than a shrug.
+# It also keeps `syn` out of the build.
+toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
+
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_NetworkManagement_WNet",
+    "Win32_Security",
+]
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3"
+
+[[bench]]
+name = "matcher"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+# `strip = "debuginfo"` keeps symbol NAMES so a RUST_BACKTRACE report from a
+# machine we cannot debug on is still actionable.
+strip = "debuginfo"
+# `panic` is deliberately left at the default "unwind": handle cleanup relies on
+# Drop running, and an abort inside raw mode + the alternate screen wrecks the
+# user's terminal.
+
+[profile.release-dbg]
+inherits = "release"
+debug = 1
+strip = "none"
