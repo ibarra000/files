@@ -232,10 +232,11 @@ fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
     assert_eq!(s.input, "11-D-0704", "the code must survive");
 }
 
-/// The load-bearing consequence of removing the quit keys: nothing on the
-/// keyboard may end the session. The window's close button does that now.
+/// Ctrl+Q is the *only* way out, and the bindings most likely to be hit by
+/// accident are the ones this checks hardest. Esc in particular: two taps of
+/// it used to end the session, which is what put a deliberate quit key here.
 #[test]
-fn no_key_sequence_quits_the_application() {
+fn nothing_except_ctrl_q_quits_the_application() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
 
@@ -252,7 +253,6 @@ fn no_key_sequence_quits_the_application() {
         KeyCode::End,
         KeyCode::Tab,
         KeyCode::F(5),
-        KeyCode::Char('q'),
         KeyCode::Char('c'),
         KeyCode::Char('d'),
         KeyCode::Char('z'),
@@ -267,6 +267,38 @@ fn no_key_sequence_quits_the_application() {
             );
         }
     }
+
+    // A bare `q` is text, not a command. Only the modified form leaves.
+    s.update(press(KeyCode::Char('q')), now);
+    assert!(!s.should_quit, "typing q must not end the session");
+    s.update(shift(KeyCode::Char('q')), now);
+    assert!(!s.should_quit, "Shift+Q must not end the session");
+}
+
+#[test]
+fn ctrl_q_quits_and_asks_exactly_once() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let r = s.update(ctrl(KeyCode::Char('q')), now);
+    assert!(s.should_quit);
+    assert_eq!(
+        r.cmds.iter().filter(|c| matches!(c, Cmd::Quit)).count(),
+        1,
+        "one Quit command, not several"
+    );
+}
+
+/// Ctrl+C copies; it must not also be a way out. This is the binding someone
+/// reaching for a quit key is most likely to try first.
+#[test]
+fn ctrl_c_copies_rather_than_quitting() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let r = s.update(ctrl(KeyCode::Char('c')), now);
+    assert!(!s.should_quit);
+    assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Quit)));
 }
 
 /// Ctrl and Alt combinations this program has no binding for used to fall

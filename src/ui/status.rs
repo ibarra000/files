@@ -212,11 +212,11 @@ fn matches_summary(state: &AppState) -> String {
 /// Names the active viewer, because F2 changes what Enter does and nothing
 /// else on screen would say which mode it is in.
 pub fn help_line(viewer: ViewerKind, avwin_missing: bool) -> String {
-    // No "quit" hint, because there is no key that quits: the window's close
-    // button ends the program, as it does for every other application.
+    // Quit is advertised because it is not guessable: Ctrl+C is taken by copy,
+    // and Esc deliberately does not leave.
     let hints = format!(
         "Enter open · F2 {} · Up recall · Down results · Shift+arrows select · \
-         Ctrl+C copy · F5 refresh · Esc clear",
+         Ctrl+C copy · F5 refresh · Esc clear · Ctrl+Q quit",
         viewer.name()
     );
 
@@ -652,11 +652,14 @@ mod tests {
     }
 
     #[test]
-    fn the_help_line_never_offers_a_key_that_quits() {
-        // There is no such key any more. Advertising one would send someone
-        // pressing Ctrl+C expecting to exit, which now copies instead.
+    fn the_help_line_names_the_quit_key_and_does_not_imply_another() {
+        // Ctrl+Q is not guessable - Ctrl+C copies and Esc deliberately stays -
+        // so it has to be advertised. Equally, neither of those two may be
+        // presented as a way out.
         let line = help_line(ViewerKind::Pdf, false);
-        assert!(!line.contains("quit"), "{line}");
+        assert!(line.contains("Ctrl+Q quit"), "{line}");
+        assert!(!line.contains("Ctrl+C quit"), "{line}");
+        assert!(!line.contains("Esc quit"), "{line}");
         assert!(line.contains("Esc clear"), "{line}");
         assert!(line.contains("Ctrl+C copy"), "{line}");
         assert!(line.contains("Up recall"), "{line}");

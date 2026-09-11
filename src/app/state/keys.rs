@@ -58,6 +58,16 @@ impl AppState {
         }
 
         let response = match key.code {
+            // The one key that leaves. Ctrl+Q rather than Ctrl+C because Ctrl+C
+            // copies a selection here, and rather than Esc because Esc is
+            // reached for constantly while searching - two taps of it used to
+            // end the session by accident, which is what this binding exists
+            // to replace. Raw mode means Ctrl+C never raises SIGINT either, so
+            // without this there is no way out except closing the window.
+            KeyCode::Char('q') if ctrl => {
+                self.should_quit = true;
+                Response::none().with(Cmd::Quit)
+            }
             KeyCode::Char('c') if ctrl => self.copy_selection(now),
             KeyCode::Char('v') if ctrl => Response::none().with(Cmd::ReadClipboard),
             KeyCode::Char('a') if ctrl => {
