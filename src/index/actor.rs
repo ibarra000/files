@@ -35,6 +35,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -87,6 +88,15 @@ pub enum IndexCmd {
 /// Handle to the running actor.
 pub struct IndexActor {
     tx: Sender<IndexCmd>,
+    /// Set from the caller's thread, checked from inside a running scan.
+    ///
+    /// The command channel cannot deliver a shutdown while a scan is in
+    /// progress, because the actor is the channel's only reader and the actor
+    /// is the thing scanning. That has never mattered: a flat enumeration is
+    /// milliseconds. A recursive walk of a large share is minutes, and for all
+    /// of them `shutdown` would time out and leak the thread. A flag is the
+    /// only thing that crosses that gap.
+    stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -105,6 +115,10 @@ impl IndexActor {
     }
 
     pub fn shutdown(&mut self, budget: Duration) -> bool {
+        // The flag first, so a scan that is between directories when the
+        // message lands has already been told to stop. Sending first and
+        // setting second would leave exactly the window this exists to close.
+        self.stop.store(true, Ordering::Relaxed);
         let _ = self.tx.send(IndexCmd::Shutdown);
         let Some(handle) = self.handle.take() else {
             return true;
@@ -174,11 +188,13 @@ impl IndexContext {
 /// Starts the actor.
 pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<IndexActor> {
     let (tx, rx) = crossbeam_channel::bounded(16);
+    let stop = Arc::new(AtomicBool::new(false));
+    let cancel = CancelToken::from_flag(Arc::clone(&stop));
     let handle = std::thread::Builder::new()
         .name("files-index".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run(ctx, rx, &events);
+                run(ctx, rx, &events, &cancel);
             }));
             if let Err(_payload) = result {
                 let _ = events.send(AppEvent::ActorDied {
@@ -189,6 +205,7 @@ pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<Ind
         })?;
     Ok(IndexActor {
         tx,
+        stop,
         handle: Some(handle),
     })
 }
@@ -210,7 +227,7 @@ struct PendingFailure {
     from_probe: bool,
 }
 
-fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>) {
+fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, cancel: &CancelToken) {
     let mut sched = Scheduler::new(ctx.cadence, ctx.rng_seed);
     let dir = ctx.settings.custpro_path.clone();
     let mut serial = ctx.volume_serial;
@@ -281,6 +298,7 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>) {
                         &mut empty_streak,
                         forced,
                         &mut detail,
+                        cancel,
                     );
                     if let Err(err) = outcome {
                         pending = Some(PendingFailure {
@@ -443,9 +461,10 @@ fn scan_and_publish(
     empty_streak: &mut u32,
     forced: bool,
     detail: &mut String,
+    cancel: &CancelToken,
 ) -> Result<Option<DirStamp>, EnumError> {
     let previous_entries = ctx.store.status().entries;
-    let (snapshot, elapsed) = match full_scan(ctx, events, serial) {
+    let (snapshot, elapsed) = match full_scan(ctx, events, serial, cancel) {
         Ok(v) => v,
         Err(err) => {
             *detail = format!("scan failed: {err}");
@@ -539,6 +558,7 @@ fn full_scan(
     ctx: &IndexContext,
     events: &Sender<AppEvent>,
     serial: &mut Option<u32>,
+    cancel: &CancelToken,
 ) -> Result<(Snapshot, Duration), EnumError> {
     let started = Instant::now();
     let dir = ctx.settings.custpro_path.clone();
@@ -576,12 +596,9 @@ fn full_scan(
     ctx.store.set_activity(Activity::Scanning { seen: 0 });
     publish_status(ctx, events);
 
-    let result = ctx.source.list(
-        &dir,
-        &mut progress,
-        &ListOpts::default(),
-        &CancelToken::never(),
-    );
+    let result = ctx
+        .source
+        .list(&dir, &mut progress, &ListOpts::default(), cancel);
     match result {
         Ok(_) | Err(EnumError::Empty) => {}
         Err(err) => {
@@ -971,6 +988,45 @@ mod tests {
 
         let started = Instant::now();
         assert!(actor.shutdown(Duration::from_millis(500)));
+        assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    /// Shutdown has to reach a scan that is already running.
+    ///
+    /// The command channel cannot: the actor is its only reader and the actor
+    /// is the thing scanning. That never mattered while a scan was one
+    /// millisecond-scale listing, but a recursive walk of a large share runs
+    /// for minutes, and without the flag every exit during one would time out
+    /// and leak the thread along with its outstanding queries.
+    #[test]
+    fn shutdown_reaches_a_scan_that_is_already_running() {
+        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        // The probe answers at once and the *listing* is what blocks, which is
+        // where a walk spends its minutes. `probe_stamp` takes no cancellation
+        // token at all, so hanging that instead would exercise a path nothing
+        // can interrupt and prove nothing about this one.
+        src.set_stamp_error(Some(EnumError::Unsupported(50)));
+        src.set_hang(true);
+        let store = Arc::new(IndexStore::default());
+        let (tx, _rx) = bounded(256);
+        let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
+
+        // Let the scan get properly under way, or this proves only that an
+        // idle actor exits.
+        assert!(
+            wait_for(
+                &store,
+                |s| s.status().activity.is_busy(),
+                Duration::from_secs(2)
+            ),
+            "the scan should be in flight"
+        );
+
+        let started = Instant::now();
+        assert!(
+            actor.shutdown(Duration::from_millis(500)),
+            "shutdown timed out against a running scan"
+        );
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 

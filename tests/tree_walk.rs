@@ -265,8 +265,45 @@ fn a_missing_root_is_reported_rather_than_hung_on() {
         &sink,
         &CancelToken::never(),
     );
-    assert_eq!(report.errors.missing, 1);
+    assert_eq!(report.errors.vanished, 1);
     assert_eq!(report.dirs_visited, 0);
+    assert!(
+        report.aborted.is_some(),
+        "a missing root is the share being absent, not a folder having moved"
+    );
+    assert!(!report.complete());
+}
+
+/// A folder deleted while the walk is running is ordinary churn on a share
+/// people are working on. Counting it as a coverage hole would leave a
+/// perfectly healthy share permanently degraded, and the warnings that do
+/// matter would be ignored along with it.
+#[test]
+fn a_folder_that_vanishes_mid_walk_is_not_a_coverage_hole() {
+    let src = tree();
+    src.fail_dir("R:\\11d\\0704", EnumError::PathNotFound(3));
+
+    let (report, sink) = walk(&src, &WalkOpts::default().with_concurrency(1));
+
+    assert_eq!(report.errors.vanished, 1);
+    assert_eq!(report.errors.holes(), 0, "nothing is unreachable");
+    assert!(
+        report.complete(),
+        "the walk read everything that was still there: {report:?}"
+    );
+    assert!(sink.paths().contains("ab12\\spec.pdf"));
+}
+
+/// Where an unreadable one is exactly that, and must be reported.
+#[test]
+fn an_unreadable_folder_is_a_coverage_hole() {
+    let src = tree();
+    src.fail_dir("R:\\11d\\0704", EnumError::AccessDenied(5));
+
+    let (report, _) = walk(&src, &WalkOpts::default().with_concurrency(1));
+
+    assert_eq!(report.errors.holes(), 1);
+    assert_eq!(report.errors.vanished, 0);
     assert!(!report.complete());
 }
 

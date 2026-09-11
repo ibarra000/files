@@ -615,13 +615,12 @@ fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
         );
     }
     let errors = &report.errors;
-    if errors.total() > 0 {
+    if errors.holes() > 0 {
         let _ = writeln!(
             out,
-            "  [WARN] {} unreadable: {} denied, {} missing, {} transient, {} other",
-            errors.total(),
+            "  [WARN] {} unreadable: {} denied, {} transient, {} other",
+            errors.holes(),
             errors.denied,
-            errors.missing,
             errors.transient,
             errors.other
         );
@@ -629,6 +628,16 @@ fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
             let shown = if rel.is_empty() { "<root>" } else { rel };
             let _ = writeln!(out, "         {shown}: {}", err.describe(shown));
         }
+    }
+    // Reported without alarm: folders are created and deleted while a walk is
+    // running, and calling that a fault would train the reader to skip the
+    // warnings that matter.
+    if errors.vanished > 0 {
+        let _ = writeln!(
+            out,
+            "  [NOTE] {} folder(s) were deleted while the walk was running",
+            errors.vanished
+        );
     }
     if let Some(err) = &report.aborted {
         let _ = writeln!(

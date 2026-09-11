@@ -101,25 +101,46 @@ impl WalkOpts {
 #[derive(Debug, Clone, Default)]
 pub struct WalkErrors {
     pub recorded: Vec<(String, EnumError)>,
+    /// Folders that could not be read. These are coverage holes: the files
+    /// are on the share and absent from the index.
     pub denied: u32,
-    pub missing: u32,
+    /// Folders that were gone by the time the walk reached them.
+    ///
+    /// Counted apart from the rest, and deliberately **not** a coverage hole.
+    /// A walk queues a directory and reads it a moment later, and on a share
+    /// people are working on, folders are deleted in between all day. Folding
+    /// this in with the genuine failures would leave a perfectly healthy busy
+    /// share permanently labelled degraded - which is a status line nobody
+    /// reads after the first week, and the warnings that matter go with it.
+    pub vanished: u32,
     pub transient: u32,
     pub other: u32,
 }
 
 impl WalkErrors {
+    /// Failures that leave part of the share unsearchable.
+    ///
+    /// [`Self::vanished`] is excluded on purpose; see the field.
+    pub fn holes(&self) -> u32 {
+        self.denied + self.transient + self.other
+    }
+
+    /// Every per-directory failure, including the harmless ones.
     pub fn total(&self) -> u32 {
-        self.denied + self.missing + self.transient + self.other
+        self.holes() + self.vanished
     }
 
     fn record(&mut self, rel: &str, err: EnumError) {
         match err {
             EnumError::AccessDenied(_) => self.denied += 1,
-            EnumError::PathNotFound(_) | EnumError::NotADirectory(_) => self.missing += 1,
+            EnumError::PathNotFound(_) | EnumError::NotADirectory(_) => self.vanished += 1,
             EnumError::Transient(_) | EnumError::TimedOut => self.transient += 1,
             _ => self.other += 1,
         }
-        if self.recorded.len() < MAX_RECORDED_ERRORS {
+        // A vanished folder is not worth an example slot: there is nothing to
+        // go and look at, and sixty-four of them would crowd out the ones
+        // somebody can actually act on.
+        if self.recorded.len() < MAX_RECORDED_ERRORS && !matches!(err, EnumError::PathNotFound(_)) {
             self.recorded.push((rel.to_string(), err));
         }
     }
@@ -146,13 +167,15 @@ pub struct WalkReport {
 }
 
 impl WalkReport {
-    /// True when the walk reached the end of the tree and read every folder.
+    /// True when the walk reached the end of the tree and read every folder
+    /// that was still there to read.
     ///
     /// Anything else is a partial index, and the difference has to reach the
     /// user: results missing because a subtree was unreadable look exactly
-    /// like results that do not exist.
+    /// like results that do not exist. Folders that vanished mid-walk do not
+    /// count against this - see [`WalkErrors::vanished`].
     pub fn complete(&self) -> bool {
-        !self.cancelled && !self.truncated && self.aborted.is_none() && self.errors.total() == 0
+        !self.cancelled && !self.truncated && self.aborted.is_none() && self.errors.holes() == 0
     }
 }
 
@@ -470,6 +493,15 @@ fn worker(
                 {
                     let mut s = shared.stats.lock();
                     s.errors.record(&pending.rel, err);
+                    // The root failing is categorically different from a
+                    // subfolder failing. A subfolder that has gone is churn on
+                    // a share people are working on; the *root* going means
+                    // there is no share, and a walk that read nothing at all
+                    // must never be reported as having read everything.
+                    if pending.rel.is_empty() {
+                        s.aborted = Some(err);
+                        shared.stop.store(true, Ordering::Relaxed);
+                    }
                 }
                 if transient {
                     let n = shared.consecutive_transient.fetch_add(1, Ordering::Relaxed) + 1;
