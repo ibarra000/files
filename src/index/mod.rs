@@ -13,6 +13,7 @@ pub mod schedule;
 pub mod snapshot;
 pub mod std_enum;
 pub mod store;
+pub mod tree;
 pub mod walk;
 
 #[cfg(windows)]
