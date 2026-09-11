@@ -108,6 +108,13 @@ impl AppState {
                 self.on_input_changed(now)
             }
 
+            // Sideways in the grid when the results have focus, and the caret
+            // otherwise - the same split Home and End already make. Results
+            // flow down each column, so Left and Right are the only way to
+            // reach the next one without walking every row in between.
+            KeyCode::Left if self.focus == Focus::Results && !shift => self.move_columns(-1),
+            KeyCode::Right if self.focus == Focus::Results && !shift => self.move_columns(1),
+
             KeyCode::Left => {
                 self.focus = Focus::Input;
                 self.input.move_left(ctrl, shift);
@@ -133,6 +140,19 @@ impl AppState {
                     self.input.move_end(shift);
                     Response::redraw()
                 }
+            }
+
+            // A whole screen of the grid at a time. Steps into the results
+            // from the input, because wanting to page implies wanting to be in
+            // the list, and there is nothing else a page could mean while
+            // typing.
+            KeyCode::PageDown => {
+                self.focus = Focus::Results;
+                self.move_pages(1)
+            }
+            KeyCode::PageUp => {
+                self.focus = Focus::Results;
+                self.move_pages(-1)
             }
 
             KeyCode::Up => self.on_up(now),

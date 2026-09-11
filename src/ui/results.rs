@@ -6,6 +6,8 @@
 //! what the previous implementation showed whenever a drive was
 //! unreachable.
 
+use std::ops::Range;
+
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
@@ -116,6 +118,28 @@ pub fn title(hits: &[Hit], matched: u32) -> String {
     } else {
         format!(" Results ({}) ", hits.len())
     }
+}
+
+/// Which ranks are on screen, for the foot of the results block.
+///
+/// Only says anything when there is more than one screen of them. On a single
+/// page the range is the whole list and the block title already gives the
+/// count, so printing it twice would be noise on the one border that is also
+/// the narrowest place to put it.
+/// Counts what is actually held rather than what matched: the pages are of
+/// the retained results, and totalling matches nobody can scroll to would make
+/// the last page look truncated. The block title already reports the match
+/// count.
+pub fn footer(visible: &Range<usize>, retained: usize) -> String {
+    if visible.start == 0 && visible.end >= retained {
+        return String::new();
+    }
+    format!(
+        " showing {}-{} of {} ",
+        visible.start + 1,
+        visible.end,
+        humanize::count(retained)
+    )
 }
 
 #[cfg(test)]

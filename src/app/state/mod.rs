@@ -21,8 +21,9 @@ mod keys;
 mod model;
 mod mouse;
 
-pub use model::{EmptyReason, Focus, QueryPhase, Severity, TOAST_LIFETIME, Toast};
+pub use model::{EmptyReason, Focus, Grid, QueryPhase, Severity, TOAST_LIFETIME, Toast};
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -443,6 +444,59 @@ impl AppState {
         self.selection_lost = false;
         self.selected_path = Some(Arc::clone(&self.hits[next as usize].path));
         Response::redraw()
+    }
+
+    /// The results grid, as it will next be drawn.
+    ///
+    /// Goes through [`Self::chunks`], the same function the renderer uses, so
+    /// navigation and rendering cannot disagree about how tall a column is.
+    pub fn grid(&self) -> Grid {
+        Grid::for_pane(self.chunks().results)
+    }
+
+    /// Half-open range of ranks currently on screen.
+    ///
+    /// Derived from the selection rather than stored. A stored page index
+    /// would be a second source of truth that every result update would have
+    /// to keep in step with a selection tracked by *path*, and the failure
+    /// mode is a cursor on a page nobody can see.
+    pub fn visible_range(&self) -> Range<usize> {
+        self.grid()
+            .page(self.selected_row().unwrap_or(0), self.hits.len())
+    }
+
+    /// Moves the selection by whole screens.
+    ///
+    /// A page is every column at once, so this is column movement scaled up
+    /// and clamps for the same reason.
+    fn move_pages(&mut self, pages: isize) -> Response {
+        let columns = self.grid().columns() as isize;
+        self.move_columns(pages * columns)
+    }
+
+    /// Moves the selection sideways by whole columns.
+    ///
+    /// Clamps where [`Self::move_selection`] wraps. The result count is not a
+    /// multiple of the column height, so wrapping horizontally would land on
+    /// an arbitrary rank rather than anywhere near where someone was looking.
+    fn move_columns(&mut self, columns: isize) -> Response {
+        if self.hits.is_empty() {
+            return Response::none();
+        }
+        let rows = self.grid().rows() as isize;
+        let len = self.hits.len() as isize;
+        let Some(current) = self.selected_row().map(|i| i as isize) else {
+            // Same rule as `move_selection`: enter the list from the near end.
+            let row = if columns > 0 { 0 } else { self.hits.len() - 1 };
+            return self.jump_selection(row);
+        };
+        let target = (current + columns * rows).clamp(0, len - 1);
+        if target == current {
+            // Already against the edge. Redrawing an identical frame is the
+            // thing this loop is built to avoid.
+            return Response::none();
+        }
+        self.jump_selection(target as usize)
     }
 
     fn jump_selection(&mut self, row: usize) -> Response {

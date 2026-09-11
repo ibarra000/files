@@ -32,7 +32,7 @@ use proptest::prelude::*;
 /// moves and this does not, the oracle truncates at a different point from
 /// the matcher and every parity assertion here silently becomes a tautology.
 /// Failing to compile is the only safe way to notice.
-const MAX_RESULTS: usize = 15;
+const MAX_RESULTS: usize = 300;
 const _: () = assert!(
     MAX_RESULTS == files::config::MAX_RESULTS,
     "the parity oracle's cap has drifted from config::MAX_RESULTS"

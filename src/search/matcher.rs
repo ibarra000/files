@@ -368,13 +368,14 @@ mod tests {
 
     #[test]
     fn caps_results_but_not_the_match_count() {
-        let names_v: Vec<String> = (0..100).map(|i| format!("abc{i:03}")).collect();
+        let n = topk::K * 2;
+        let names_v: Vec<String> = (0..n).map(|i| format!("abc{i:05}")).collect();
         let refs: Vec<&str> = names_v.iter().map(|s| s.as_str()).collect();
         let s = snap(&refs);
         let o = run(&s, "abc");
-        assert_eq!(o.hits.len(), topk::K);
-        assert_eq!(o.matched, 100);
-        assert_eq!(o.total, 100);
+        assert_eq!(o.hits.len(), topk::K, "retained is capped");
+        assert_eq!(o.matched as usize, n, "but the match count is the truth");
+        assert_eq!(o.total as usize, n);
     }
 
     #[test]

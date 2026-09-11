@@ -24,6 +24,7 @@ use files::index::errors::EnumError;
 use files::index::store::{Activity, FlatStatus, Health};
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::verify::{AuditVerdict, VerifyOutcome};
+use ratatui::layout::Rect;
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
@@ -1038,4 +1039,159 @@ fn search_result(view: &AppStateView, hits: Vec<Hit>, matched: u32, total: u32) 
             unicode_fallback: false,
         }),
     })
+}
+
+// --- the results grid -------------------------------------------------
+
+/// A terminal wide enough for all three columns, with a known column height.
+///
+/// The geometry is asserted rather than assumed: the whole point of deriving
+/// the grid from `ui::layout` is that navigation and rendering agree, so a
+/// test that guessed the column height would be testing its own arithmetic.
+fn grid_state(rows: u16) -> (AppState, Instant, usize) {
+    let (mut s, now) = state();
+    // 2 margin + 3 input + 1 status + 1 toast + 1 help + 2 result borders.
+    s.set_area(Rect::new(0, 0, 120, rows + 10));
+    let g = s.grid();
+    assert_eq!(g.columns(), 3, "120 columns is wide enough for three");
+    assert_eq!(g.rows(), rows as usize);
+    (s, now, g.rows())
+}
+
+fn many_hits(n: usize) -> Vec<Hit> {
+    (0..n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect()
+}
+
+fn with_results(s: &mut AppState, now: Instant, n: usize) {
+    type_in(s, "11-D-0704", now);
+    let v = view(s);
+    s.update(search_result(&v, many_hits(n), n as u32, 9_000), now);
+}
+
+#[test]
+fn right_moves_the_selection_a_whole_column() {
+    let (mut s, now, rows) = grid_state(10);
+    with_results(&mut s, now, 200);
+
+    s.update(press(KeyCode::Down), now); // into the results
+    let before = s.selected_row().unwrap();
+    s.update(press(KeyCode::Right), now);
+    assert_eq!(s.selected_row(), Some(before + rows));
+
+    s.update(press(KeyCode::Left), now);
+    assert_eq!(s.selected_row(), Some(before), "and back again");
+}
+
+/// Horizontal movement clamps where vertical movement wraps. Wrapping
+/// sideways would land on an arbitrary rank, since the result count is not a
+/// multiple of the column height.
+#[test]
+fn right_at_the_last_column_clamps_rather_than_wrapping() {
+    let (mut s, now, _) = grid_state(10);
+    with_results(&mut s, now, 200);
+
+    s.update(press(KeyCode::Down), now);
+    s.update(press(KeyCode::End), now);
+    let last = s.selected_row().unwrap();
+    assert_eq!(last, 199);
+
+    let r = s.update(press(KeyCode::Right), now);
+    assert_eq!(s.selected_row(), Some(last), "stays put");
+    assert_eq!(
+        r.redraw,
+        Redraw::No,
+        "and does not redraw an identical frame"
+    );
+}
+
+#[test]
+fn left_from_the_first_column_clamps_to_the_top() {
+    let (mut s, now, _) = grid_state(10);
+    with_results(&mut s, now, 200);
+
+    s.update(press(KeyCode::Down), now);
+    s.update(press(KeyCode::Left), now);
+    assert_eq!(s.selected_row(), Some(0));
+}
+
+/// While typing, the arrows still belong to the caret.
+#[test]
+fn left_and_right_move_the_caret_when_the_input_has_focus() {
+    let (mut s, now, _) = grid_state(10);
+    with_results(&mut s, now, 200);
+    assert_eq!(s.focus, Focus::Input);
+
+    s.update(press(KeyCode::Left), now);
+    assert_eq!(s.focus, Focus::Input, "must not step into the results");
+    s.update(key('X'), now);
+    assert_eq!(s.input.text(), "11-D-070X4", "the caret moved, not the row");
+}
+
+/// Down walks rank by rank and wraps from the foot of one column to the head
+/// of the next, which is what makes the newspaper flow readable.
+#[test]
+fn down_crosses_from_one_column_to_the_next() {
+    let (mut s, now, rows) = grid_state(6);
+    with_results(&mut s, now, 100);
+
+    s.update(press(KeyCode::Down), now);
+    for _ in 1..rows {
+        s.update(press(KeyCode::Down), now);
+    }
+    assert_eq!(
+        s.selected_row(),
+        Some(rows),
+        "one past the foot of column one is the head of column two"
+    );
+}
+
+#[test]
+fn the_visible_page_follows_the_selection() {
+    let (mut s, now, rows) = grid_state(10);
+    with_results(&mut s, now, 200);
+    let page = rows * 3;
+
+    assert_eq!(s.visible_range(), 0..page, "starts on the first page");
+
+    s.update(press(KeyCode::Down), now);
+    s.update(press(KeyCode::End), now);
+    let last = s.visible_range();
+    assert!(last.contains(&199), "the last page holds the last result");
+    assert_eq!(last.end, 200, "and is clipped to what exists");
+}
+
+#[test]
+fn page_down_advances_a_whole_screen_and_page_up_returns() {
+    let (mut s, now, rows) = grid_state(10);
+    with_results(&mut s, now, 200);
+    let page = rows * 3;
+
+    s.update(press(KeyCode::PageDown), now);
+    assert_eq!(s.focus, Focus::Results, "paging steps into the results");
+    assert_eq!(s.selected_row(), Some(page));
+    assert_eq!(s.visible_range(), page..page * 2);
+
+    s.update(press(KeyCode::PageUp), now);
+    assert_eq!(s.selected_row(), Some(0));
+    assert_eq!(s.visible_range(), 0..page);
+}
+
+/// The cap is what makes the grid worth having; 15 was one column.
+#[test]
+fn far_more_than_one_screen_of_results_is_reachable() {
+    let (mut s, now, rows) = grid_state(10);
+    with_results(&mut s, now, files::config::MAX_RESULTS);
+
+    s.update(press(KeyCode::Down), now);
+    s.update(press(KeyCode::End), now);
+    assert_eq!(
+        s.selected_row(),
+        Some(files::config::MAX_RESULTS - 1),
+        "the last of {} results is reachable",
+        files::config::MAX_RESULTS
+    );
+    assert!(
+        files::config::MAX_RESULTS > rows * 3,
+        "the cap has to exceed one screen or none of this matters"
+    );
 }

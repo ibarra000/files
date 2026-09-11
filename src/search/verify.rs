@@ -549,7 +549,8 @@ mod tests {
 
     #[test]
     fn server_hits_are_capped_at_the_display_limit() {
-        let names: Vec<String> = (0..100).map(|i| format!("alpha{i:03}.txt")).collect();
+        let n = crate::config::MAX_RESULTS * 2;
+        let names: Vec<String> = (0..n).map(|i| format!("alpha{i:05}.txt")).collect();
         let hits = rank_server_names(Path::new("V:\\"), names, "alpha");
         assert_eq!(hits.len(), crate::config::MAX_RESULTS);
     }

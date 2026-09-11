@@ -38,14 +38,34 @@ pub const CUSTPRO_PATH: &str = r"V:\Documents\custpro";
 // --- Query -----------------------------------------------------------------
 
 pub const MIN_QUERY_LEN: usize = 3;
-pub const MAX_RESULTS: usize = 15;
+
+/// Results retained and reachable by scrolling.
+///
+/// Fifteen was a single column's worth. A broad code legitimately matches far
+/// more than that, and the cap was silently deciding which ones were worth
+/// seeing - the drawing you wanted could be the sixteenth. Three hundred is
+/// five screens of the grid below: enough that a broad query is useful,
+/// bounded enough that ranking still means something and the tail stays
+/// reachable by arrow key.
+pub const MAX_RESULTS: usize = 300;
+
+/// Columns in the results grid, when the terminal is wide enough for them.
+pub const GRID_COLUMNS: usize = 3;
+
+/// Below this many cells a column is more marker and ellipsis than filename,
+/// so the grid drops to fewer columns rather than rendering slivers.
+pub const MIN_COLUMN_WIDTH: u16 = 24;
+
+/// Results flow down each column before moving right, so a page divides
+/// evenly and the last page is the only ragged one.
+const _: () = assert!(MAX_RESULTS.is_multiple_of(GRID_COLUMNS));
 
 /// Upper bound on a query we are willing to hand to the server as a wildcard.
 pub const MAX_SERVER_QUERY_LEN: usize = 64;
 
 /// Stop a server-side wildcard enumeration past this many hits and report the
-/// count as a lower bound. Only 15 rows are ever displayed; this exists purely
-/// to bound the pathological case.
+/// count as a lower bound. Far more than [`MAX_RESULTS`] can ever display;
+/// this exists purely to bound the pathological case.
 pub const MAX_SERVER_HITS: usize = 5_000;
 
 /// Consecutive audit failures before the server-side filter is disabled for

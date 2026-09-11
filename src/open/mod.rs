@@ -412,10 +412,6 @@ mod tests {
 
         let group = collect_group(&picked, &cx).expect("the code has a document");
         assert_eq!(group.len(), 19, "the bare file plus pages 1..18");
-        assert!(
-            group.len() > crate::config::MAX_RESULTS,
-            "the point of rebuilding from the code rather than the visible rows"
-        );
 
         let order: Vec<Option<u32>> = group.pages.iter().map(|p| p.page).collect();
         let mut expected = vec![None];
@@ -426,6 +422,43 @@ mod tests {
         assert_eq!(doc.pages, 19);
         assert!(doc.merged && doc.skipped.is_empty());
         assert!(std::path::Path::new(doc.path.as_ref()).is_file());
+    }
+
+    /// A document is rebuilt from the code, not from the rows on screen.
+    ///
+    /// This used to be a clause on the assembly test above, which compared a
+    /// nineteen-page document against a fifteen-row display cap. The cap is
+    /// three hundred now, so nineteen pages no longer tell the two
+    /// implementations apart - every page would be on screen either way and a
+    /// version that reused the visible rows would pass. Hence a document
+    /// deliberately larger than the cap, and no files on disk, since
+    /// `collect_group` reads the snapshot and never the filesystem.
+    #[test]
+    fn a_document_larger_than_the_result_cap_is_still_assembled_whole() {
+        let pages = crate::config::MAX_RESULTS + 100;
+        let mut names = vec!["11-d-0704.pdf".to_string()];
+        names.extend((1..=pages).map(|i| format!("11-d-0704_Page{i}.pdf")));
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let snap = snapshot("R:\\11d", &refs);
+
+        let cx = OpenContext {
+            snapshot: Some(&snap),
+            cache_dir: None,
+            pdf_viewer: None,
+        };
+        let picked = request("R:\\11d\\11-d-0704.pdf", "11-d-0704", ViewerKind::Pdf);
+
+        let group = collect_group(&picked, &cx).expect("the code has a document");
+        assert_eq!(group.len(), pages + 1, "the bare file plus every page");
+        assert!(
+            group.len() > crate::config::MAX_RESULTS,
+            "the fixture has to outgrow the cap or it proves nothing"
+        );
+
+        // The tail is what a capped implementation would have lost.
+        let order: Vec<Option<u32>> = group.pages.iter().map(|p| p.page).collect();
+        assert_eq!(order.first(), Some(&None), "the bare file leads");
+        assert_eq!(order.last(), Some(&Some(pages as u32)), "the last page");
     }
 
     /// A one-page PDF, as terse as a valid one gets.

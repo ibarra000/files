@@ -19,11 +19,16 @@ pub mod theme;
 use std::time::{Instant, SystemTime};
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListState, Paragraph};
+use ratatui::widgets::block::{Position, Title};
+use ratatui::widgets::{Block, Borders, HighlightSpacing, List, ListState, Paragraph};
 
-use crate::app::state::{AppState, Focus};
+use crate::app::state::{AppState, Focus, Grid};
+
+/// Marks the selected row. Reserved in every column, not just the one holding
+/// the selection, or the grid shears by three cells between them.
+const MARKER: &str = ">> ";
 
 /// The rows of the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,19 +184,56 @@ fn draw_results(frame: &mut Frame, state: &AppState, area: Rect) {
         return;
     }
 
+    // The range indicator sits on the bottom border, so it costs no row and
+    // the grid keeps the full interior height.
+    let visible = state.visible_range();
+    let block = block.title(
+        Title::from(Span::styled(
+            results::footer(&visible, state.hits.len()),
+            theme::help(),
+        ))
+        .position(Position::Bottom)
+        .alignment(Alignment::Right),
+    );
+
+    let grid = Grid::for_pane(area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     let query_len = state.input.chars().count();
-    let items: Vec<_> = state
-        .hits
-        .iter()
-        .map(|h| results::row_with_query(h, query_len))
-        .collect();
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(theme::selection())
-        .highlight_symbol(">> ");
-    let mut list_state = ListState::default();
-    list_state.select(state.selected_row());
-    frame.render_stateful_widget(list, area, &mut list_state);
+    let selected = state.selected_row();
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![
+            Constraint::Ratio(1, grid.columns() as u32);
+            grid.columns()
+        ])
+        .split(inner);
+
+    for (c, column) in columns.iter().enumerate() {
+        let lo = visible.start + c * grid.rows();
+        let hi = (lo + grid.rows()).min(visible.end);
+        if lo >= hi {
+            continue;
+        }
+        let items: Vec<_> = state.hits[lo..hi]
+            .iter()
+            .map(|h| results::row_with_query(h, query_len))
+            .collect();
+        let list = List::new(items)
+            .highlight_style(theme::selection())
+            .highlight_symbol(MARKER)
+            // Without this, a column holding no selection starts its text
+            // three cells further left than the one that does, and the whole
+            // grid visibly shears.
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut list_state = ListState::default();
+        list_state.select(selected.filter(|r| (lo..hi).contains(r)).map(|r| r - lo));
+        frame.render_stateful_widget(list, *column, &mut list_state);
+    }
 }
 
 fn draw_history(frame: &mut Frame, state: &AppState, area: Rect) {
@@ -579,5 +621,71 @@ mod tests {
             "│",
             "the text ran through the right border"
         );
+    }
+
+    fn many(n: usize) -> Vec<Hit> {
+        (0..n).map(|i| hit(&format!("11d_{i:04}.pdf"), 0)).collect()
+    }
+
+    /// Results fill a column downwards before starting the next, so rank 1
+    /// and the rank one past the foot of column one share a screen row.
+    #[test]
+    fn results_flow_down_the_first_column_before_the_second() {
+        let mut s = state();
+        s.set_area(Rect::new(0, 0, 100, 20));
+        type_code(&mut s);
+        results(&mut s, many(60), 60, 9000);
+
+        let grid = s.grid();
+        assert_eq!(grid.columns(), 3, "100 cells is wide enough for three");
+
+        let text = render_to_text(&s);
+        let row = text
+            .lines()
+            .find(|l| l.contains("11d_0000.pdf"))
+            .expect("the first result is on screen");
+        // Rank 0 heads column one; the rank a column further on heads column
+        // two, and the two therefore sit on the same line.
+        let second = format!("11d_{:04}.pdf", grid.rows());
+        assert!(
+            row.contains(&second),
+            "expected {second} beside 11d_0000.pdf, got {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_of_results_reports_its_range_underneath() {
+        let mut s = state();
+        s.set_area(Rect::new(0, 0, 100, 20));
+        type_code(&mut s);
+        results(&mut s, many(300), 300, 9000);
+
+        let visible = s.visible_range();
+        let text = render_to_text(&s);
+        let want = format!("showing 1-{} of 300", visible.end);
+        assert!(
+            text.contains(&want),
+            "expected {want:?} in:
+{text}"
+        );
+    }
+
+    /// One screenful needs no range indicator; the title already counts them.
+    #[test]
+    fn a_single_page_of_results_says_nothing_about_ranges() {
+        let mut s = state();
+        s.set_area(Rect::new(0, 0, 100, 20));
+        type_code(&mut s);
+        results(&mut s, many(3), 3, 9000);
+        assert!(!render_to_text(&s).contains("showing"));
+    }
+
+    #[test]
+    fn a_narrow_terminal_collapses_the_grid_to_fewer_columns() {
+        let mut s = state();
+        s.set_area(Rect::new(0, 0, 40, 20));
+        assert_eq!(s.grid().columns(), 1, "40 cells fits one column");
+        s.set_area(Rect::new(0, 0, 60, 20));
+        assert_eq!(s.grid().columns(), 2);
     }
 }
