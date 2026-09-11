@@ -50,6 +50,14 @@ pub enum MappingKind {
     /// One large directory holding every job's files directly. The only shape
     /// big enough to justify a persisted index and a background refresh.
     Flat,
+    /// The whole tree beneath the path, walked and indexed.
+    ///
+    /// The answer to a share whose folder names no rule can predict: instead
+    /// of deducing which directory a code lives in, every directory is read
+    /// and the question becomes a search rather than a guess. Costs a
+    /// background walk and a few hundred megabytes; buys never silently
+    /// missing a file.
+    Tree,
     /// The code resolves to a subfolder underneath the mapping's path.
     JobFolder,
 }
@@ -58,6 +66,7 @@ impl MappingKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "flat" => Some(Self::Flat),
+            "tree" | "recursive" => Some(Self::Tree),
             "job-folder" | "job_folder" | "jobfolder" => Some(Self::JobFolder),
             _ => None,
         }
@@ -66,8 +75,15 @@ impl MappingKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Flat => "flat",
+            Self::Tree => "tree",
             Self::JobFolder => "job-folder",
         }
+    }
+
+    /// True when this mapping is indexed in the background rather than listed
+    /// on demand.
+    pub fn is_indexed(self) -> bool {
+        matches!(self, Self::Flat | Self::Tree)
     }
 }
 
@@ -286,17 +302,37 @@ pub struct Mapping {
 }
 
 impl Mapping {
-    /// The directory `code` resolves to under this mapping, if any rule
-    /// matches.
+    /// The directory `code` resolves to under this mapping, if any.
     ///
-    /// Returns the matching rule too, so the caller can honour `stop`.
-    fn resolve(&self, code: &str) -> Option<(Target, &Rule)> {
+    /// Returns whether evaluation should stop here, so the caller can honour
+    /// a rule's `stop` without needing the rule itself.
+    fn resolve(&self, code: &str) -> Option<(Target, bool)> {
+        // A mapping with no rules matches everything. That is the whole point
+        // of an indexed share: there is nothing to deduce, because every file
+        // under it is already known, so a code that matches nothing simply
+        // returns no results rather than being declared unroutable. A
+        // job-folder mapping with no rules could never resolve a directory
+        // and is rejected at load time instead.
+        if self.rules.is_empty() {
+            return self.kind.is_indexed().then(|| {
+                (
+                    Target {
+                        mapping: self.id,
+                        kind: self.kind,
+                        dir: self.path.clone(),
+                    },
+                    false,
+                )
+            });
+        }
         for rule in self.rules.iter() {
             let Some(caps) = rule.re.captures(code) else {
                 continue;
             };
             let dir = match self.kind {
-                MappingKind::Flat => self.path.clone(),
+                // Both are searched whole, so the code selects the mapping
+                // rather than a directory within it.
+                MappingKind::Flat | MappingKind::Tree => self.path.clone(),
                 MappingKind::JobFolder => {
                     let template = rule.folder.as_deref()?;
                     let mut expanded = String::new();
@@ -317,7 +353,7 @@ impl Mapping {
                     kind: self.kind,
                     dir,
                 },
-                rule,
+                rule.stop,
             ));
         }
         None
@@ -461,10 +497,9 @@ impl Routes {
     pub fn classify(&self, code: &str) -> TargetList {
         let mut targets = TargetList::new();
         for mapping in self.enabled() {
-            let Some((target, rule)) = mapping.resolve(code) else {
+            let Some((target, stop)) = mapping.resolve(code) else {
                 continue;
             };
-            let stop = rule.stop;
             targets.push(target);
             if stop {
                 break;

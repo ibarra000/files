@@ -43,7 +43,7 @@ use super::errors::EnumError;
 use crate::config::{
     BACKOFF_BASE, BACKOFF_CAP, FULL_RESCAN_FLOOR, MIN_FULL_SCAN_SPACING, PROBE_JITTER_PERCENT,
     SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP, STAMP_FAILURES_BEFORE_BLIND, STAMP_PROBE_INTERVAL,
-    env_secs,
+    TREE_MIN_SCAN_SPACING, TREE_RESCAN_FLOOR, env_secs,
 };
 use crate::util::backoff::{Backoff, jitter};
 use crate::util::rng::Rng;
@@ -94,6 +94,32 @@ impl Cadence {
             probe_interval: STAMP_PROBE_INTERVAL,
             rescan_floor: FULL_RESCAN_FLOOR,
             min_scan_spacing: MIN_FULL_SCAN_SPACING,
+            jitter_percent: PROBE_JITTER_PERCENT,
+            probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
+            scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),
+            stamp_failures_before_blind: STAMP_FAILURES_BEFORE_BLIND,
+        }
+    }
+
+    /// The schedule for a walked tree.
+    ///
+    /// A tree never probes - no directory timestamp can stand for three
+    /// hundred thousand directories - so it lives permanently on the floor,
+    /// and the floor is correspondingly shorter and the spacing between passes
+    /// correspondingly longer, because a pass costs minutes rather than
+    /// seconds.
+    ///
+    /// `probe_interval` carries the spacing rather than a probe interval,
+    /// which is not a trick: [`Self::normalised`] clamps `min_scan_spacing`
+    /// to at most `probe_interval`, so leaving the probe interval at a minute
+    /// would quietly clamp a five-minute spacing back down to one. The field
+    /// is unused by a tree, so it is free to hold the value that keeps the
+    /// clamp honest.
+    pub const fn tree() -> Self {
+        Self {
+            probe_interval: TREE_MIN_SCAN_SPACING,
+            rescan_floor: TREE_RESCAN_FLOOR,
+            min_scan_spacing: TREE_MIN_SCAN_SPACING,
             jitter_percent: PROBE_JITTER_PERCENT,
             probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
             scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),

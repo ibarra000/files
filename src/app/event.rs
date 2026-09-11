@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 
 use crate::config::ViewerKind;
 use crate::index::errors::EnumError;
-use crate::index::store::FlatStatus;
+use crate::index::store::IndexStatus;
 use crate::open::OpenRequest;
 use crate::search::matcher::{QueryReject, SearchOutcome};
 use crate::search::verify::VerifyOutcome;
@@ -69,7 +69,7 @@ pub struct VerifyMsg {
 #[derive(Debug, Clone)]
 pub enum IndexMsg {
     /// A fresh view of the index status, published after every change.
-    Status(Arc<FlatStatus>),
+    Status(Arc<IndexStatus>),
     /// A new snapshot is installed; any displayed result should be recomputed.
     SnapshotChanged,
     /// Reported by an explicit refresh, so the user learns what happened.

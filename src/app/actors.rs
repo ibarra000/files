@@ -41,6 +41,8 @@ pub struct Actors {
     search: WorkerHandle<SearchRequest>,
     verify: WorkerHandle<SearchRequest>,
     index: IndexActor,
+    /// Absent when no tree mapping is configured.
+    tree_index: Option<IndexActor>,
     prefetch: Prefetcher,
     /// Opens what Enter chose. One thread for the life of the process, like
     /// the rest: assembling a document reads every page off the share, which
@@ -110,6 +112,27 @@ impl Actors {
             ))),
             tx.clone(),
         )?;
+        // A second actor, only when a tree mapping is configured. One thread
+        // each rather than one for both: a walk runs for minutes, and sharing
+        // would mean the flat share's freshness queued behind it - or a
+        // five-minute backoff on an unreachable tree delaying a healthy one.
+        let tree_index = (!settings.tree_path.as_os_str().is_empty())
+            .then(|| {
+                actor::spawn(
+                    IndexContext::new(
+                        settings.clone(),
+                        Arc::clone(&store),
+                        Arc::clone(&source),
+                        None,
+                    )
+                    .for_tree()
+                    .with_log(Arc::new(
+                        crate::index::log::IndexLog::from_option(settings.index_log.as_deref()),
+                    )),
+                    tx.clone(),
+                )
+            })
+            .transpose()?;
         let prefetch = prefetch::spawn(Arc::clone(&backend), tx.clone())?;
         // Merged documents cannot be deleted once a viewer has them open, so
         // last session's are collected at the start of this one - the same
@@ -137,6 +160,7 @@ impl Actors {
                 search,
                 verify,
                 index,
+                tree_index,
                 prefetch,
                 opener,
                 history,
@@ -164,7 +188,13 @@ impl Actors {
                         .submit_generation(epoch, SearchRequest { query, epoch });
                 }
                 Cmd::Prefetch { dir, .. } => self.prefetch.request(dir),
-                Cmd::RefreshIndex { force } => self.index.refresh(force),
+                Cmd::RefreshIndex { force } => {
+                    self.index.refresh(force);
+                    // F5 means "re-examine the share", and there are two.
+                    if let Some(tree) = &self.tree_index {
+                        tree.refresh(force);
+                    }
+                }
                 Cmd::Open(request) => self.opener.request(request, &self.events),
                 Cmd::SaveViewer(viewer) => crate::config::write::save_viewer_async(
                     self.backend
@@ -201,6 +231,9 @@ impl Actors {
         clean &= self.search.shutdown(budget);
         clean &= self.verify.shutdown(budget);
         clean &= self.index.shutdown(budget);
+        if let Some(tree) = &mut self.tree_index {
+            clean &= tree.shutdown(budget);
+        }
         clean &= self.prefetch.shutdown(budget);
         clean &= self.opener.shutdown(budget);
         if let Some(writer) = &mut self.history {

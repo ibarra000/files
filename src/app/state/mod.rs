@@ -37,7 +37,7 @@ use crate::config::{
 };
 use crate::history::History;
 use crate::index::errors::EnumError;
-use crate::index::store::FlatStatus;
+use crate::index::store::IndexStatus;
 use crate::paths::MappingKind;
 use crate::search::matcher::{Hit, QueryReject};
 use crate::search::verify::{AuditVerdict, SkipReason, VerifyOutcome};
@@ -74,7 +74,7 @@ pub struct AppState {
     pub total: u32,
     pub phase: QueryPhase,
     pub empty_reason: Option<EmptyReason>,
-    pub index: Arc<FlatStatus>,
+    pub index: Arc<IndexStatus>,
     pub toast: Option<Toast>,
     pub should_quit: bool,
     /// Set once the user moves the selection, and cleared when they type.
@@ -125,7 +125,7 @@ impl AppState {
             total: 0,
             phase: QueryPhase::Idle,
             empty_reason: Some(EmptyReason::NoQuery),
-            index: Arc::new(FlatStatus::default()),
+            index: Arc::new(IndexStatus::default()),
             toast: None,
             should_quit: false,
             selection_pinned: false,

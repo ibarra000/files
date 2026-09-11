@@ -35,7 +35,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -47,10 +47,12 @@ use super::errors::EnumError;
 use super::log::{IndexLog, Record};
 use super::persist;
 use super::schedule::{Cadence, Decision, Input, Scheduler, Step, is_probe_refusal};
-use super::store::{Activity, DegradeReason, IndexStore, Origin};
+use super::store::{Activity, DegradeReason, IndexStore, Origin, TreeCoverage};
 use super::{DirStamp, Snapshot};
+use super::{tree, walk};
 use crate::app::event::{AppEvent, IndexMsg};
 use crate::config::Settings;
+use crate::paths::MappingKind;
 use crate::util::cancel::CancelToken;
 
 /// Progress is rate limited at the source, so the UI channel is never close
@@ -140,6 +142,14 @@ impl IndexActor {
 /// Everything the actor needs.
 pub struct IndexContext {
     pub settings: Settings,
+    /// Which index this actor owns.
+    ///
+    /// One actor per index, not one actor for both: a tree walk runs for
+    /// minutes, and sharing a thread would mean the flat share's freshness
+    /// waited behind it - or worse, that a five-minute backoff on an
+    /// unreachable tree delayed the healthy one. Each still has exactly one
+    /// writer, which is what the store's single-writer rule requires.
+    pub kind: MappingKind,
     pub store: Arc<IndexStore>,
     pub source: Arc<dyn DirSource>,
     /// Volume serial resolved at startup, if it was available then.
@@ -160,12 +170,85 @@ impl IndexContext {
     ) -> Self {
         Self {
             settings,
+            kind: MappingKind::Flat,
             store,
             source,
             volume_serial,
             cadence: Cadence::shipped().from_env(),
             rng_seed: None,
             log: Arc::new(IndexLog::disabled()),
+        }
+    }
+
+    /// Makes this actor own the walked tree instead of the flat index.
+    pub fn for_tree(mut self) -> Self {
+        self.kind = MappingKind::Tree;
+        self.cadence = Cadence::tree().from_env();
+        self
+    }
+
+    // --- which index this actor is talking about ---------------------------
+    //
+    // Routed in one place rather than at each of the twenty call sites, for
+    // the same reason `indexed_dir` exists: an actor that read the *flat*
+    // index's state while owning the tree would be told it had no snapshot on
+    // every wake, make every scan a `FirstRun`, and leave `min_scan_spacing`
+    // as the only thing between the share and a continuous re-walk.
+
+    fn is_tree(&self) -> bool {
+        self.kind == MappingKind::Tree
+    }
+
+    /// Whether this actor's index holds anything yet.
+    fn have_index(&self) -> bool {
+        if self.is_tree() {
+            self.store.tree().is_some()
+        } else {
+            self.store.flat().is_some()
+        }
+    }
+
+    fn status(&self) -> Arc<super::store::IndexStatus> {
+        if self.is_tree() {
+            self.store.tree_status()
+        } else {
+            self.store.status()
+        }
+    }
+
+    fn set_activity(&self, activity: Activity) {
+        if self.is_tree() {
+            self.store.set_tree_activity(activity);
+        } else {
+            self.store.set_activity(activity);
+        }
+    }
+
+    fn note_scan_started(&self, reason: super::schedule::ScanReason) {
+        if self.is_tree() {
+            self.store.note_tree_scan_started(reason);
+        } else {
+            self.store.note_scan_started(reason);
+        }
+    }
+
+    fn note_schedule(
+        &self,
+        counters: super::schedule::Counters,
+        health: super::schedule::StampHealth,
+    ) {
+        if self.is_tree() {
+            self.store.note_tree_schedule(counters, health);
+        } else {
+            self.store.note_schedule(counters, health);
+        }
+    }
+
+    fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
+        if self.is_tree() {
+            self.store.record_tree_failure(err, attempt, next_retry_at);
+        } else {
+            self.store.record_failure(err, attempt, next_retry_at);
         }
     }
 
@@ -248,7 +331,7 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
             stamp: loaded.and_then(|l| l.stamp),
             captured_age: loaded.and_then(|l| l.age),
         },
-        ctx.store.flat().is_some(),
+        ctx.have_index(),
     );
     log_decision(&ctx, &sched, "start", &describe_load(loaded), &decision);
 
@@ -265,9 +348,8 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
 
         for step in 0..MAX_STEPS_PER_WAKE {
             let now = Instant::now();
-            decision = sched.on(now, input, ctx.store.flat().is_some());
-            ctx.store
-                .note_schedule(sched.counters(), sched.stamp_health());
+            decision = sched.on(now, input, ctx.have_index());
+            ctx.note_schedule(sched.counters(), sched.stamp_health());
 
             // Told to the store only now: the retry instant is part of the
             // decision, and the status line promises the user a countdown.
@@ -290,7 +372,7 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                     event = "probe";
                 }
                 Step::FullScan(reason) => {
-                    ctx.store.note_scan_started(reason);
+                    ctx.note_scan_started(reason);
                     let outcome = scan_and_publish(
                         &ctx,
                         events,
@@ -377,7 +459,7 @@ fn apply_failure(
         return;
     }
     *failures = failures.saturating_add(1);
-    ctx.store.record_failure(failure.err, *failures, retry_at);
+    ctx.record_failure(failure.err, *failures, retry_at);
 }
 
 /// What [`load_from_disk`] recovered.
@@ -392,9 +474,15 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
     if !ctx.settings.persist {
         return None;
     }
+    // The tree has no on-disk form yet, so it always starts cold. Returning
+    // early rather than attempting a flat load is what stops a tree actor
+    // decoding the *flat* share's cache and publishing it as its own.
+    if ctx.is_tree() {
+        return None;
+    }
     let cache_dir = ctx.settings.cache_dir.clone()?;
 
-    ctx.store.set_activity(Activity::LoadingDisk);
+    ctx.set_activity(Activity::LoadingDisk);
     publish_status(ctx, events);
 
     let dir = indexed_dir(ctx);
@@ -426,7 +514,7 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
         }
     };
 
-    ctx.store.set_activity(Activity::Idle);
+    ctx.set_activity(Activity::Idle);
     publish_status(ctx, events);
     loaded
 }
@@ -435,18 +523,21 @@ fn persist_current(ctx: &IndexContext, events: &Sender<AppEvent>) {
     if !ctx.settings.persist {
         return;
     }
+    if ctx.is_tree() {
+        return;
+    }
     let (Some(cache_dir), Some(snapshot)) = (ctx.settings.cache_dir.clone(), ctx.store.flat())
     else {
         return;
     };
 
-    ctx.store.set_activity(Activity::Persisting);
+    ctx.set_activity(Activity::Persisting);
     publish_status(ctx, events);
     // Best effort throughout: failing to write the cache costs a slow cold
     // start next time and nothing else.
     let key = persist::MappingKey::of(indexed_dir(ctx));
     let _ = persist::save(&cache_dir, key, &snapshot);
-    ctx.store.set_activity(Activity::Idle);
+    ctx.set_activity(Activity::Idle);
     publish_status(ctx, events);
 }
 
@@ -463,6 +554,9 @@ fn scan_and_publish(
     detail: &mut String,
     cancel: &CancelToken,
 ) -> Result<Option<DirStamp>, EnumError> {
+    if ctx.kind == MappingKind::Tree {
+        return walk_and_publish(ctx, events, forced, detail, cancel);
+    }
     let previous_entries = ctx.store.status().entries;
     let (snapshot, elapsed) = match full_scan(ctx, events, serial, cancel) {
         Ok(v) => v,
@@ -529,7 +623,10 @@ fn scan_and_publish(
 /// One accessor rather than repeated field reads, so making the actor
 /// per-mapping is a change in one place.
 fn indexed_dir(ctx: &IndexContext) -> &Path {
-    &ctx.settings.custpro_path
+    match ctx.kind {
+        MappingKind::Tree => &ctx.settings.tree_path,
+        _ => &ctx.settings.custpro_path,
+    }
 }
 
 /// The volume serial for the persisted index's identity check.
@@ -593,7 +690,7 @@ fn full_scan(
         last_count: 0,
     };
 
-    ctx.store.set_activity(Activity::Scanning { seen: 0 });
+    ctx.set_activity(Activity::Scanning { seen: 0 });
     publish_status(ctx, events);
 
     let result = ctx
@@ -602,21 +699,21 @@ fn full_scan(
     match result {
         Ok(_) | Err(EnumError::Empty) => {}
         Err(err) => {
-            ctx.store.set_activity(Activity::Idle);
+            ctx.set_activity(Activity::Idle);
             return Err(err);
         }
     }
 
     let serial = volume_serial_for(ctx, serial, &dir).unwrap_or(0);
     let snapshot = builder.finish(SystemTime::now(), serial, stamp);
-    ctx.store.set_activity(Activity::Idle);
+    ctx.set_activity(Activity::Idle);
     Ok((snapshot, started.elapsed()))
 }
 
 fn publish_status(ctx: &IndexContext, events: &Sender<AppEvent>) {
     // Droppable by nature: the next status supersedes this one, so a full
     // channel is not worth blocking the scan for.
-    let _ = events.try_send(AppEvent::Index(IndexMsg::Status(ctx.store.status())));
+    let _ = events.try_send(AppEvent::Index(IndexMsg::Status(ctx.status())));
 }
 
 fn log_decision(
@@ -730,6 +827,214 @@ pub fn scan_once(
     Ok((builder.finish(SystemTime::now(), 0, stamp), stats))
 }
 
+/// Walks the tree and publishes it, segment by segment as it goes.
+///
+/// Always reports `Ok(None)` - no stamp - and that is the honest answer, not a
+/// convenience. A directory's timestamp moves when *its own* children change,
+/// so the root of a three-hundred-thousand-directory tree says nothing about a
+/// file added three levels down. If a walk recorded one, the scheduler would
+/// go healthy, probe, see an unchanged root and report the index as *proven
+/// current* while a thousand files had been added underneath - a worse version
+/// of the bug this index exists to remove. Reporting no stamp settles the
+/// scheduler into `Blind`, where the rescan floor is the whole guarantee,
+/// which is exactly a tree's situation.
+fn walk_and_publish(
+    ctx: &IndexContext,
+    events: &Sender<AppEvent>,
+    forced: bool,
+    detail: &mut String,
+    cancel: &CancelToken,
+) -> Result<Option<DirStamp>, EnumError> {
+    let root = indexed_dir(ctx).to_path_buf();
+    let sink = WalkSink::new(
+        &root.to_string_lossy(),
+        Arc::clone(&ctx.store),
+        events.clone(),
+    );
+
+    ctx.store.set_tree_activity(Activity::Walking {
+        dirs: 0,
+        queued: 0,
+        files: 0,
+    });
+    publish_status(ctx, events);
+
+    let opts = walk::WalkOpts::default();
+    let report = walk::walk_tree(ctx.source.as_ref(), &root, &opts, &sink, cancel);
+    ctx.store.set_tree_activity(Activity::Idle);
+
+    if report.cancelled {
+        *detail = "walk cancelled".into();
+        return Err(EnumError::Cancelled);
+    }
+    if let Some(err) = report.aborted {
+        // The share stopped answering. Whatever was published mid-walk stays:
+        // a partial tree with an honest label beats an empty screen.
+        *detail = format!("walk aborted: {err}");
+        if forced {
+            let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+                entries: 0,
+                elapsed: report.elapsed,
+                error: Some(err),
+            }));
+        }
+        return Err(err);
+    }
+
+    let coverage = Arc::new(TreeCoverage {
+        dirs: report.dirs_visited,
+        files: report.files,
+        holes: report.errors.holes(),
+        vanished: report.errors.vanished,
+        examples: report
+            .errors
+            .recorded
+            .iter()
+            .map(|(rel, _)| {
+                if rel.is_empty() {
+                    "<root>".into()
+                } else {
+                    rel.clone()
+                }
+            })
+            .collect(),
+        skipped_junctions: report.skipped_reparse,
+        elapsed: report.elapsed,
+    });
+
+    let index = Arc::new(sink.finish(report.complete()));
+    let entries = index.len();
+    *detail = format!(
+        "{} files in {} folders, {}",
+        entries,
+        report.dirs_visited,
+        crate::util::humanize::elapsed(report.elapsed)
+    );
+    ctx.store
+        .publish_tree(index, Origin::Network, Some(coverage));
+    let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
+
+    if forced {
+        let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+            entries,
+            elapsed: report.elapsed,
+            error: None,
+        }));
+    }
+    // Deliberately no stamp; see this function's own doc comment.
+    Ok(None)
+}
+
+/// Publishes a tree index as the walk seals each segment.
+///
+/// Wraps [`tree::SegmentSink`] with the two things the actor needs on top of
+/// it: publication into the store, and progress the UI can render without
+/// being flooded.
+struct WalkSink {
+    inner: tree::SegmentSink,
+    store: Arc<IndexStore>,
+    events: Sender<AppEvent>,
+    gate: ProgressGate,
+}
+
+impl WalkSink {
+    fn new(root: &str, store: Arc<IndexStore>, events: Sender<AppEvent>) -> Self {
+        Self {
+            inner: tree::SegmentSink::new(root),
+            store,
+            events,
+            gate: ProgressGate::new(),
+        }
+    }
+
+    fn finish(&self, complete: bool) -> tree::TreeIndex {
+        self.inner
+            .index()
+            .with_metadata(SystemTime::now(), 0)
+            .with_complete(complete)
+    }
+}
+
+impl walk::TreeSink for WalkSink {
+    fn push_dir(&self, rel: &str, files: &[String]) -> bool {
+        self.inner.push_dir(rel, files)
+    }
+
+    fn progress(&self, dirs_done: usize, queued: usize, files: usize) {
+        if !self.gate.claim(Instant::now(), files) {
+            return;
+        }
+        // Published as it goes, so the share is searchable about a second in
+        // rather than after the whole walk. The index is rebuilt from the
+        // sealed segments each time, which is a vector of refcounts rather
+        // than a byte of the hundreds of megabytes behind them.
+        self.store.publish_tree(
+            Arc::new(self.inner.index()),
+            Origin::Network,
+            // No verdict yet: judging a half-finished walk would flag every
+            // one of them as incomplete for the minutes it is running.
+            None,
+        );
+        self.store.set_tree_activity(Activity::Walking {
+            dirs: dirs_done,
+            queued,
+            files,
+        });
+        let _ = self
+            .events
+            .try_send(AppEvent::Index(IndexMsg::Status(self.store.tree_status())));
+    }
+}
+
+/// The same rate limit `ProgressSink` applies, for a sink called from every
+/// walk worker at once.
+///
+/// `ProgressSink` can keep an `Instant` and a count in plain fields because
+/// the enumerator calls it from one thread. A walk calls `progress` once per
+/// directory from eight, which over three hundred thousand directories is some
+/// seventeen hundred calls a second into a 256-slot channel - so the limit has
+/// to hold without taking a lock, or the limiter costs more than the sends it
+/// suppresses.
+struct ProgressGate {
+    started: Instant,
+    last_report_nanos: AtomicU64,
+    last_count: AtomicU64,
+}
+
+impl ProgressGate {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            last_report_nanos: AtomicU64::new(0),
+            last_count: AtomicU64::new(0),
+        }
+    }
+
+    /// True for exactly one caller per interval.
+    fn claim(&self, now: Instant, count: usize) -> bool {
+        let t = now.saturating_duration_since(self.started).as_nanos() as u64;
+        let previous = self.last_report_nanos.load(Ordering::Relaxed);
+        let by_time = t.saturating_sub(previous) >= PROGRESS_INTERVAL.as_nanos() as u64;
+        let by_count = (count as u64).saturating_sub(self.last_count.load(Ordering::Relaxed))
+            >= PROGRESS_ENTRIES as u64;
+        if !by_time && !by_count {
+            return false;
+        }
+        // Compare-exchange rather than `fetch_max`: with `fetch_max` two
+        // workers arriving in the same microsecond both move the value and
+        // both believe they won, which turns a rate limit into a rate
+        // multiplier under exactly the load it exists for.
+        if self
+            .last_report_nanos
+            .compare_exchange(previous, t, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        self.last_count.store(count as u64, Ordering::Relaxed);
+        true
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

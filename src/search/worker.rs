@@ -18,13 +18,14 @@ use std::time::Instant;
 use crossbeam_channel::Sender;
 
 use super::matcher::{self, SearchOutcome};
-use super::verify::{Verifier, VerifyOutcome};
+use super::verify::{SkipReason, Verifier, VerifyOutcome};
 use crate::app::event::{AppEvent, SearchMsg, VerifyMsg};
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 use crate::index::errors::EnumError;
 use crate::index::snapshot::Snapshot;
 use crate::index::store::IndexStore;
+use crate::index::tree::TreeIndex;
 use crate::index::{jobs, snapshot};
 use crate::paths::{MappingKind, TargetList};
 use crate::util::cancel::{CancelToken, Epoch};
@@ -55,11 +56,8 @@ impl Backend {
         query: &str,
         cancel: &CancelToken,
     ) -> Result<Arc<Snapshot>, EnumError> {
-        // One flat index exists so far, so the first target is taken. Merging
-        // several is the next stage; the routing table already returns them
-        // all.
         let targets = self.targets_for(query);
-        let Some(target) = targets.first() else {
+        let Some(target) = targets.iter().find(|t| t.kind != MappingKind::Tree) else {
             return Ok(Arc::new(Snapshot::empty("")));
         };
         match target.kind {
@@ -67,6 +65,9 @@ impl Backend {
                 .store
                 .flat()
                 .unwrap_or_else(|| Arc::new(Snapshot::empty(&target.dir.to_string_lossy())))),
+            // Searched through `trees_for`, not here: a tree is not a listing
+            // and cannot be represented as one.
+            MappingKind::Tree => unreachable!("filtered out above"),
             MappingKind::JobFolder => jobs::fetch(
                 self.source.as_ref(),
                 &self.store,
@@ -76,6 +77,21 @@ impl Backend {
             )
             .map(|(s, _)| s),
         }
+    }
+
+    /// The walked tree, when the query reaches one.
+    ///
+    /// Separate from [`Self::snapshot_for`] because a tree is a different
+    /// shape, not a different listing: it spans many directories and carries
+    /// the folder names alongside the filenames. Forcing it through
+    /// `Arc<Snapshot>` would mean flattening away exactly the structure that
+    /// makes a folder-name match possible.
+    pub fn tree_for(&self, query: &str) -> Option<Arc<TreeIndex>> {
+        self.targets_for(query)
+            .iter()
+            .any(|t| t.kind == MappingKind::Tree)
+            .then(|| self.store.tree())
+            .flatten()
     }
 
     /// Every target a query resolves to, in configuration order.
@@ -220,7 +236,16 @@ fn run_search(
             }
         };
 
-        let result = matcher::search(&snapshot, &request.query, backend.settings.matcher, &cancel);
+        let flat = matcher::search(&snapshot, &request.query, backend.settings.matcher, &cancel);
+        let result = match backend.tree_for(&request.query) {
+            // One merged, ranked list: which share a file came from is shown
+            // on the row, but it must not decide where in the list it sits.
+            Some(tree) => flat.and_then(|flat| {
+                matcher::search_tree(&tree, &request.query, &cancel)
+                    .map(|tree| matcher::merge(flat, tree))
+            }),
+            None => flat,
+        };
 
         let _ = tx.send(AppEvent::Search(SearchMsg {
             epoch: request.epoch,
@@ -291,6 +316,14 @@ fn run_verify(
                 let snapshot = backend.store.flat();
                 verifier.verify(&request.query, snapshot.as_deref(), &cancel)
             }
+            // A tree has no single directory to ask the server about.
+            // `FindFirstFileExW` matches within one folder, so verifying a
+            // tree would mean one round trip per folder the hits came from -
+            // turning the one cheap round trip this exists for into hundreds.
+            // Freshness for a tree comes from the change watcher and the
+            // re-walk floor instead, and saying so is better than implying a
+            // check that did not happen.
+            MappingKind::Tree => VerifyOutcome::Skipped(SkipReason::NotApplicable),
             MappingKind::JobFolder => {
                 match jobs::fetch(
                     backend.source.as_ref(),

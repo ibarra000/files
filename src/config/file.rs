@@ -407,15 +407,23 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
 
         let before = ctx.errors.len();
         let rules = parse_rules(table, kind, mapping_stop, &label, ctx);
-        // Only complain about an empty rule list when it is genuinely empty,
-        // not when every rule was individually rejected - that would report
-        // the same mistake twice and bury the message that matters.
-        if rules.is_empty() && ctx.errors.len() == before {
+        // An indexed mapping needs no rules: every file under it is already
+        // known, so there is nothing to deduce and a code that matches nothing
+        // simply returns nothing. A job-folder mapping is the opposite - its
+        // rules are the only thing that can turn a code into a directory, so
+        // without them it could never match anything at all.
+        //
+        // Only complain when the list is genuinely empty, not when every rule
+        // was individually rejected: that would report the same mistake twice
+        // and bury the message that matters.
+        if rules.is_empty() && !kind.is_indexed() && ctx.errors.len() == before {
             ctx.err(
                 span.clone(),
                 Some(&label),
                 None,
-                "no `[[mapping.rules]]`; this mapping could never match anything",
+                "no `[[mapping.rules]]`; a job-folder mapping cannot resolve a \
+                 code without them. An indexed mapping (kind = \"flat\" or \
+                 kind = \"tree\") needs none.",
                 None,
             );
         }
@@ -872,11 +880,41 @@ kind = "job-folder"
         assert!(messages(&errs).contains("empty `path`"));
     }
 
+    /// A job-folder mapping's rules are the only thing that can turn a code
+    /// into a directory, so without them it can never match anything.
     #[test]
-    fn a_mapping_with_no_rules_is_rejected() {
-        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"flat\"\n";
+    fn a_job_folder_mapping_with_no_rules_is_rejected() {
+        let text =
+            "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"job-folder\"\n";
         let errs = parse_err(text);
         assert!(messages(&errs).contains("no `[[mapping.rules]]`"));
+    }
+
+    /// An indexed mapping is the opposite: every file under it is already
+    /// known, so there is nothing for a rule to deduce.
+    #[test]
+    fn an_indexed_mapping_needs_no_rules() {
+        for kind in ["flat", "tree"] {
+            let text = format!(
+                "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
+            );
+            let parsed = parse(&text, p(), ConfigSource::BuiltIn)
+                .unwrap_or_else(|e| panic!("{kind} was rejected: {:?}", messages(&e)));
+            assert_eq!(parsed.routes.enabled().count(), 1);
+        }
+    }
+
+    /// And it matches every query, rather than being declared unroutable.
+    #[test]
+    fn a_rule_less_indexed_mapping_matches_anything() {
+        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"tree\"\n";
+        let parsed = parse(text, p(), ConfigSource::BuiltIn).expect("valid");
+        for code in ["11-D-0704", "anything at all", "zzz"] {
+            let targets = parsed.routes.classify(code);
+            assert_eq!(targets.len(), 1, "{code:?} reached nothing");
+            assert_eq!(targets[0].kind, MappingKind::Tree);
+            assert_eq!(targets[0].dir, std::path::Path::new("R:\\"));
+        }
     }
 
     #[test]

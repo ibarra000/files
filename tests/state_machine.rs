@@ -21,7 +21,7 @@ use files::config::{
     MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
 };
 use files::index::errors::EnumError;
-use files::index::store::{Activity, FlatStatus, Health};
+use files::index::store::{Activity, Health, IndexStatus};
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::verify::{AuditVerdict, VerifyOutcome};
 use ratatui::layout::Rect;
@@ -675,7 +675,7 @@ fn an_audit_failure_warns_the_user() {
 #[test]
 fn an_unreachable_drive_explains_itself_instead_of_showing_nothing() {
     let (mut s, now) = state();
-    let status = FlatStatus {
+    let status = IndexStatus {
         health: Health::Unreachable {
             err: EnumError::Transient(53),
             since: now,
@@ -1004,7 +1004,7 @@ fn toasts_expire() {
 #[test]
 fn a_busy_index_keeps_the_frame_animating() {
     let (mut s, now) = state();
-    let status = FlatStatus {
+    let status = IndexStatus {
         activity: Activity::Scanning { seen: 1000 },
         ..Default::default()
     };

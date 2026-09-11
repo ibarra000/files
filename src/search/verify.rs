@@ -49,6 +49,15 @@ pub enum SkipReason {
     AuditFailed { misses: u32 },
     /// The source cannot push filters down at all.
     Unsupported,
+    /// There is no single directory to ask about.
+    ///
+    /// A walked tree spans hundreds of thousands of folders and the server's
+    /// pattern matching works within one, so the question this check asks
+    /// cannot be put to it. Freshness comes from the change watcher and the
+    /// re-walk instead - which is worth saying rather than leaving the line
+    /// blank, because "not checked" and "checked and fine" must not look
+    /// identical.
+    NotApplicable,
 }
 
 impl SkipReason {
@@ -60,6 +69,7 @@ impl SkipReason {
                 format!("server filter disabled after {misses} disagreements")
             }
             Self::Unsupported => "server-side filtering unavailable".into(),
+            Self::NotApplicable => "kept live by the watcher".into(),
         }
     }
 }

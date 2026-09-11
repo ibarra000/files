@@ -9,7 +9,7 @@
 //!
 //! Modelling "healthy" and "has data" as one value is what made an
 //! unreachable drive render as `0 files`: an error replaced the listing.
-//! Here [`FlatStatus::health`] and the snapshot are orthogonal, so
+//! Here [`IndexStatus::health`] and the snapshot are orthogonal, so
 //! **losing the last-known-good listing by entering an error state is not
 //! representable**. A failed refresh changes the health and leaves the data
 //! alone.
@@ -32,6 +32,7 @@ use super::DirStamp;
 use super::errors::EnumError;
 use super::schedule::{Counters, ScanReason, StampHealth};
 use super::snapshot::Snapshot;
+use super::tree::TreeIndex;
 use crate::config::JOB_CACHE_CAPACITY;
 
 /// Where the current listing came from.
@@ -61,7 +62,20 @@ impl Origin {
 pub enum Activity {
     Idle,
     LoadingDisk,
-    Scanning { seen: usize },
+    Scanning {
+        seen: usize,
+    },
+    /// A recursive walk.
+    ///
+    /// Reports folders rather than only files, because "8,402 folders, 1,204
+    /// queued" says both that it is moving and roughly how much is left,
+    /// which a climbing file count does not. On a three-minute walk that is
+    /// the difference between progress and an unexplained wait.
+    Walking {
+        dirs: usize,
+        queued: usize,
+        files: usize,
+    },
     Persisting,
 }
 
@@ -82,6 +96,26 @@ pub enum DegradeReason {
     ServerFilterDisabled,
     /// The listing hit the arena ceiling.
     Truncated,
+    /// Part of the tree could not be read, so a file that exists may not be
+    /// findable.
+    ///
+    /// This is the same failure the routing rules produced - a silently
+    /// absent file - and it is surfaced for the same reason. Someone told
+    /// "3 folders unreadable" goes and looks at them; someone told nothing
+    /// concludes the file is not there, and is wrong, and has no way to find
+    /// that out.
+    PartiallyUnreadable,
+    /// The walk stopped before the end of the tree: a limit, a cancellation,
+    /// or the share going away part way through.
+    IncompleteWalk,
+    /// The share will not report changes, so freshness rests entirely on the
+    /// periodic re-walk.
+    ///
+    /// Distinct from [`Self::StampUnreliable`], which says the cheap *probe*
+    /// is unavailable. A tree never had one, so reporting a healthy tree as
+    /// "change detection unavailable" would be true in a way that sends
+    /// someone to check the wrong thing.
+    LiveUpdatesUnavailable,
 }
 
 impl DegradeReason {
@@ -90,8 +124,38 @@ impl DegradeReason {
             Self::StampUnreliable => "change detection unavailable",
             Self::ServerFilterDisabled => "server filter disabled",
             Self::Truncated => "index truncated",
+            Self::PartiallyUnreadable => "part of the tree was unreadable",
+            Self::IncompleteWalk => "tree only partly walked",
+            Self::LiveUpdatesUnavailable => "no live updates",
         }
     }
+}
+
+/// What the last walk reached, and what it could not.
+///
+/// Separate from [`Health`] because that is a single label and this is a list
+/// someone is expected to act on. Behind an `Arc` because [`IndexStatus`] is
+/// cloned on every status update, and a progress tick every hundred
+/// milliseconds must not deep-copy sixty-four paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TreeCoverage {
+    pub dirs: usize,
+    pub files: usize,
+    /// Folders that could not be read, so their files are absent from the
+    /// index without being absent from the share. This is the number that
+    /// matters.
+    pub holes: u32,
+    /// Folders that were gone by the time the walk reached them.
+    ///
+    /// Counted apart from `holes` and deliberately not a reason to degrade:
+    /// on a share people are working on, folders are deleted between being
+    /// queued and being read all day, and calling that a fault would train
+    /// the reader to ignore the warnings that matter.
+    pub vanished: u32,
+    /// A few unreadable folders verbatim, so they can be gone and looked at.
+    pub examples: Vec<String>,
+    pub skipped_junctions: u32,
+    pub elapsed: Duration,
 }
 
 /// Index health, independent of whether a snapshot is present.
@@ -122,7 +186,7 @@ impl Health {
 
 /// Everything the UI needs to describe the flat index honestly.
 #[derive(Debug, Clone)]
-pub struct FlatStatus {
+pub struct IndexStatus {
     pub origin: Option<Origin>,
     /// When the listing being served was actually captured.
     pub built_at: Option<SystemTime>,
@@ -145,13 +209,16 @@ pub struct FlatStatus {
     /// Session totals, so "it keeps rebuilding" has a number.
     pub counters: Counters,
     /// Why the persisted index was not usable at startup, if it was not.
+    /// What the last walk reached. `None` for a flat index, which has no
+    /// notion of partial coverage: a single listing either worked or did not.
+    pub coverage: Option<Arc<TreeCoverage>>,
     pub cache_rejected: Option<String>,
     /// Set when the last refresh failed, even though the previous snapshot is
     /// still being served.
     pub last_error: Option<EnumError>,
 }
 
-impl Default for FlatStatus {
+impl Default for IndexStatus {
     fn default() -> Self {
         Self {
             origin: None,
@@ -165,13 +232,14 @@ impl Default for FlatStatus {
             last_scan_reason: None,
             stamp_health: StampHealth::Unknown,
             counters: Counters::default(),
+            coverage: None,
             cache_rejected: None,
             last_error: None,
         }
     }
 }
 
-impl FlatStatus {
+impl IndexStatus {
     /// Wall-clock age of the current listing, clamped at zero.
     ///
     /// Clamped because `built_at` is a `SystemTime`: an NTP correction or a
@@ -221,7 +289,20 @@ pub enum Cached {
 /// The index, shared by every thread.
 pub struct IndexStore {
     flat: ArcSwapOption<Snapshot>,
-    status: ArcSwap<FlatStatus>,
+    status: ArcSwap<IndexStatus>,
+    /// The walked tree, when a tree mapping is configured.
+    ///
+    /// A second slot rather than a map keyed by mapping: the shipped
+    /// configuration is exactly one flat share and one tree, and the two are
+    /// genuinely different things - one is a single directory with a cheap
+    /// freshness probe, the other is three hundred thousand directories with
+    /// none. A keyed map would hide that difference behind a uniformity the
+    /// rest of the program does not have.
+    ///
+    /// Each slot still has exactly one writer thread, which is what the
+    /// single-writer rule above actually requires.
+    tree: ArcSwapOption<TreeIndex>,
+    tree_status: ArcSwap<IndexStatus>,
     jobs: Mutex<LruCache<PathBuf, JobSlot>>,
 }
 
@@ -236,9 +317,111 @@ impl IndexStore {
         let cap = NonZeroUsize::new(job_capacity.max(1)).expect("capacity is at least one");
         Self {
             flat: ArcSwapOption::empty(),
-            status: ArcSwap::from_pointee(FlatStatus::default()),
+            status: ArcSwap::from_pointee(IndexStatus::default()),
+            tree: ArcSwapOption::empty(),
+            tree_status: ArcSwap::from_pointee(IndexStatus::default()),
             jobs: Mutex::new(LruCache::new(cap)),
         }
+    }
+
+    // --- the walked tree ---------------------------------------------------
+
+    /// The current tree index, if a tree mapping is configured and has been
+    /// walked at all. Lock-free, like [`Self::flat`].
+    pub fn tree(&self) -> Option<Arc<TreeIndex>> {
+        self.tree.load_full()
+    }
+
+    pub fn tree_status(&self) -> Arc<IndexStatus> {
+        self.tree_status.load_full()
+    }
+
+    /// Installs a tree index.
+    ///
+    /// Called repeatedly during a walk, each time with one more segment, so
+    /// the share becomes searchable about a second in rather than after
+    /// minutes. `coverage` says what the walk could not reach; `None` while
+    /// one is still running, since a partial view is not yet a verdict.
+    pub fn publish_tree(
+        &self,
+        index: Arc<TreeIndex>,
+        origin: Origin,
+        coverage: Option<Arc<TreeCoverage>>,
+    ) {
+        let entries = index.len() as u32;
+        let built_at = index.captured_at();
+        let complete = index.complete();
+        self.tree.store(Some(index));
+        self.update_tree_status(|s| {
+            s.origin = Some(origin);
+            s.built_at = Some(built_at);
+            s.confirmed_at = Some(built_at);
+            s.entries = entries;
+            s.last_error = None;
+            if let Some(coverage) = &coverage {
+                s.coverage = Some(Arc::clone(coverage));
+            }
+            // Health is only settled once the walk has finished. Judging a
+            // half-finished walk would flag every one of them as incomplete
+            // for the minutes it is running.
+            s.health = match coverage.as_deref() {
+                None => s.health.clone(),
+                Some(c) if c.holes > 0 => Health::Degraded {
+                    reason: DegradeReason::PartiallyUnreadable,
+                    since: Instant::now(),
+                },
+                Some(_) if !complete => Health::Degraded {
+                    reason: DegradeReason::IncompleteWalk,
+                    since: Instant::now(),
+                },
+                Some(_) => Health::Ok,
+            };
+        });
+    }
+
+    /// Records a failed walk, leaving whatever index is already published in
+    /// place - a stale tree beats no tree.
+    pub fn record_tree_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
+        self.update_tree_status(|s| {
+            s.last_error = Some(err);
+            s.activity = Activity::Idle;
+            s.health = Health::Unreachable {
+                err,
+                since: Instant::now(),
+                attempt,
+                next_retry_at,
+            };
+        });
+    }
+
+    pub fn set_tree_activity(&self, activity: Activity) {
+        self.update_tree_status(|s| s.activity = activity);
+    }
+
+    pub fn set_tree_degraded(&self, reason: DegradeReason) {
+        self.update_tree_status(|s| {
+            s.health = Health::Degraded {
+                reason,
+                since: Instant::now(),
+            };
+        });
+    }
+
+    pub fn note_tree_scan_started(&self, reason: ScanReason) {
+        self.update_tree_status(|s| s.last_scan_reason = Some(reason));
+    }
+
+    pub fn note_tree_schedule(&self, counters: Counters, stamp_health: StampHealth) {
+        self.update_tree_status(|s| {
+            s.counters = counters;
+            s.stamp_health = stamp_health;
+        });
+    }
+
+    fn update_tree_status(&self, f: impl FnOnce(&mut IndexStatus)) {
+        let mut next = (**self.tree_status.load()).clone();
+        f(&mut next);
+        self.tree_status.store(Arc::new(next));
     }
 
     // --- flat root ---------------------------------------------------------
@@ -249,7 +432,7 @@ impl IndexStore {
         self.flat.load_full()
     }
 
-    pub fn status(&self) -> Arc<FlatStatus> {
+    pub fn status(&self) -> Arc<IndexStatus> {
         self.status.load_full()
     }
 
@@ -358,7 +541,7 @@ impl IndexStore {
         });
     }
 
-    fn update_status(&self, f: impl FnOnce(&mut FlatStatus)) {
+    fn update_status(&self, f: impl FnOnce(&mut IndexStatus)) {
         let mut next = (*self.status.load_full()).clone();
         f(&mut next);
         self.status.store(Arc::new(next));

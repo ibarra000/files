@@ -47,8 +47,19 @@ pub struct Hit {
     pub path: Arc<str>,
     pub name: Arc<str>,
     /// Byte offset of the match within the name, for highlighting.
+    ///
+    /// `u32::MAX` when the file was pulled in because its *folder* matched:
+    /// there is nothing in its own name to underline, and inventing an offset
+    /// would underline the wrong characters.
     pub match_pos: u32,
     pub index: u32,
+}
+
+impl Hit {
+    /// True when this row is here because its folder matched, not its name.
+    pub fn is_inherited(&self) -> bool {
+        self.match_pos == u32::MAX
+    }
 }
 
 /// Result of a completed match.
@@ -195,6 +206,39 @@ pub fn search_tree(
         cancelled,
         unicode_fallback: false,
     })
+}
+
+/// Folds two searches into one ranked list.
+///
+/// Both shares are searched and the results interleave by rank rather than
+/// being grouped: which share a file came from is shown on its row, but a
+/// worse match on the flat share must not outrank a better one on the tree
+/// merely because it was searched first.
+///
+/// Both inputs are already capped at `topk::K`, so this sorts at most `2K`
+/// and truncates - a few hundred comparisons once per keystroke.
+pub fn merge(flat: SearchOutcome, tree: SearchOutcome) -> SearchOutcome {
+    let mut hits = flat.hits;
+    hits.extend(tree.hits);
+    // Ranked by the same key the two searches used, restated over the
+    // materialised rows because the packed ordinals are not comparable across
+    // indexes - they are positions within different arenas.
+    hits.sort_by(|a, b| {
+        a.is_inherited()
+            .cmp(&b.is_inherited())
+            .then(a.match_pos.cmp(&b.match_pos))
+            .then(a.name.len().cmp(&b.name.len()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    hits.truncate(crate::config::MAX_RESULTS);
+
+    SearchOutcome {
+        hits,
+        matched: flat.matched.saturating_add(tree.matched),
+        total: flat.total.saturating_add(tree.total),
+        cancelled: flat.cancelled || tree.cancelled,
+        unicode_fallback: flat.unicode_fallback || tree.unicode_fallback,
+    }
 }
 
 /// Matches folder names and pulls in the files inside them.

@@ -69,6 +69,27 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
             tone: Tone::Busy,
         };
     }
+    if let Activity::Walking {
+        dirs,
+        queued,
+        files,
+    } = state.index.activity
+    {
+        // Folders, not only files. A climbing file count says it is moving; a
+        // folder count with a queue beside it also says roughly how much is
+        // left, which over a walk lasting minutes is the difference between
+        // progress and an unexplained wait.
+        return StatusLine {
+            text: format!(
+                "{} walking the tree... {} folders, {} queued, {} files",
+                humanize::spinner(now.elapsed()),
+                humanize::count(dirs),
+                humanize::count(queued),
+                humanize::count(files)
+            ),
+            tone: Tone::Busy,
+        };
+    }
     if state.index.activity == Activity::LoadingDisk {
         return StatusLine {
             text: "loading cached index...".into(),
@@ -250,7 +271,7 @@ mod tests {
     use crate::config::Settings;
     use crate::index::errors::EnumError;
     use crate::index::schedule::ScanReason;
-    use crate::index::store::{DegradeReason, FlatStatus, Origin};
+    use crate::index::store::{DegradeReason, IndexStatus, Origin};
     use crate::search::matcher::Hit;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::sync::Arc;
@@ -261,14 +282,14 @@ mod tests {
         AppState::new(Settings::default(), now)
     }
 
-    fn with_index(s: &mut AppState, now: Instant, f: impl FnOnce(&mut FlatStatus)) {
-        let mut status = FlatStatus::default();
+    fn with_index(s: &mut AppState, now: Instant, f: impl FnOnce(&mut IndexStatus)) {
+        let mut status = IndexStatus::default();
         f(&mut status);
         s.update(AppEvent::Index(IndexMsg::Status(Arc::new(status))), now);
     }
 
-    fn healthy_status(entries: u32, age: Duration) -> impl FnOnce(&mut FlatStatus) {
-        move |st: &mut FlatStatus| {
+    fn healthy_status(entries: u32, age: Duration) -> impl FnOnce(&mut IndexStatus) {
+        move |st: &mut IndexStatus| {
             st.origin = Some(Origin::Network);
             st.entries = entries;
             st.built_at = Some(EPOCH);

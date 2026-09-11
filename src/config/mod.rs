@@ -138,6 +138,23 @@ pub const STAMP_PROBE_INTERVAL: Duration = Duration::from_secs(60);
 /// `--bench --allow-write` verifies whether it does.
 pub const FULL_RESCAN_FLOOR: Duration = Duration::from_secs(60 * 60);
 
+/// Longest a walked tree may go without a complete re-walk.
+///
+/// Half an hour is roughly a 3-7% duty cycle against the share, for a pass
+/// that costs one to three minutes. With live updates working this is a
+/// backstop against a watcher that accepted the request and then silently
+/// stopped firing - a failure with no symptom, which is exactly why the
+/// backstop is not optional. With them unavailable it is the entire freshness
+/// guarantee, and half an hour is the longest a new job folder should stay
+/// invisible.
+pub const TREE_RESCAN_FLOOR: Duration = Duration::from_secs(30 * 60);
+
+/// Two re-walks are never started closer together than this.
+///
+/// Ten times [`MIN_FULL_SCAN_SPACING`], in proportion to what a walk costs
+/// against a flat enumeration.
+pub const TREE_MIN_SCAN_SPACING: Duration = Duration::from_secs(5 * 60);
+
 /// Refuse a persisted index older than this.
 pub const MAX_INDEX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -371,6 +388,13 @@ pub struct Settings {
     pub base_path: PathBuf,
     /// First enabled flat mapping. Derived from `routes`, as above.
     pub custpro_path: PathBuf,
+    /// First enabled tree mapping, or empty when none is configured.
+    ///
+    /// Derived from `routes` like the two above, and for the same transitional
+    /// reason: it lets the index and the search be written against a root
+    /// rather than against the routing table, which is what makes the routing
+    /// table removable later without re-plumbing them.
+    pub tree_path: PathBuf,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
     /// Server-side wildcard filtering. Ships **off** so it can be enabled only
@@ -438,10 +462,19 @@ impl Settings {
             .find(|m| m.kind == MappingKind::Flat)
             .map(|m| m.path.clone())
             .unwrap_or_default();
+        // Empty when no tree mapping is configured, which is how the rest of
+        // the program asks "is there a tree" without consulting the routing
+        // table.
+        let tree_path = routes
+            .enabled()
+            .find(|m| m.kind == MappingKind::Tree)
+            .map(|m| m.path.clone())
+            .unwrap_or_default();
         tweak(Self {
             routes,
             base_path,
             custpro_path,
+            tree_path,
             enum_strategy: EnumStrategy::default(),
             matcher: MatcherKind::default(),
             server_filter: false,

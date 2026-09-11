@@ -269,7 +269,7 @@ mod tests {
     use crate::app::event::{AppEvent, IndexMsg, SearchMsg};
     use crate::config::Settings;
     use crate::index::errors::EnumError;
-    use crate::index::store::{FlatStatus, Health};
+    use crate::index::store::{Health, IndexStatus};
     use crate::search::matcher::{Hit, SearchOutcome};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -365,7 +365,7 @@ mod tests {
     fn an_unreachable_drive_is_explained_on_screen() {
         let mut s = state();
         let now = Instant::now();
-        let status = FlatStatus {
+        let status = IndexStatus {
             health: Health::Unreachable {
                 err: EnumError::Transient(53),
                 since: now,
