@@ -110,12 +110,76 @@ impl Default for Behaviour {
     }
 }
 
+/// Decrements the in-flight count however the call leaves, including the early
+/// returns for cancellation and scripted failures.
+struct InFlight<'a>(&'a Mutex<(usize, usize)>);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.lock().0 -= 1;
+    }
+}
+
+/// One entry in a fake directory.
+///
+/// Carries the attribute word because that is exactly what a tree walk reads:
+/// whether to list an entry as a file, and whether to descend into it. The
+/// fake could previously only produce files, which made a walker untestable on
+/// a machine with no network drives - that is, untestable at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FakeEntry {
+    pub name: String,
+    pub attributes: u32,
+}
+
+impl FakeEntry {
+    pub const FILE: u32 = 0x0000_0080;
+    pub const DIRECTORY: u32 = 0x0000_0010;
+    pub const REPARSE_POINT: u32 = 0x0000_0400;
+
+    pub fn file(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: Self::FILE,
+        }
+    }
+
+    pub fn dir(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: Self::DIRECTORY,
+        }
+    }
+
+    /// A junction or directory symlink. Listed as neither a file nor something
+    /// to descend into, which is the behaviour a walker has to be held to.
+    pub fn junction(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: Self::DIRECTORY | Self::REPARSE_POINT,
+        }
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.attributes & Self::DIRECTORY != 0
+    }
+}
+
 /// A scriptable directory source.
 #[derive(Debug, Clone, Default)]
 pub struct FakeDirSource {
-    dirs: Arc<Mutex<HashMap<PathBuf, Vec<String>>>>,
+    dirs: Arc<Mutex<HashMap<PathBuf, Vec<FakeEntry>>>>,
     behaviour: Arc<Mutex<Behaviour>>,
     calls: Arc<Mutex<Vec<Call>>>,
+    /// Per-directory failures, for the access-denied-subtree case that cannot
+    /// be reproduced any other way here.
+    dir_errors: Arc<Mutex<HashMap<PathBuf, EnumError>>>,
+    /// Junction path rewrites: link -> target, applied as a prefix.
+    junctions: Arc<Mutex<HashMap<PathBuf, PathBuf>>>,
+    /// Concurrent `list` calls, now and at their peak. A walker's concurrency
+    /// limit is otherwise only observable by timing, which is no way to write
+    /// a test.
+    in_flight: Arc<Mutex<(usize, usize)>>,
 }
 
 impl FakeDirSource {
@@ -125,23 +189,147 @@ impl FakeDirSource {
 
     /// Registers a directory and its files.
     pub fn with_dir(self, dir: impl Into<PathBuf>, names: &[&str]) -> Self {
-        self.dirs
-            .lock()
-            .insert(dir.into(), names.iter().map(|s| s.to_string()).collect());
+        self.dirs.lock().insert(
+            dir.into(),
+            names.iter().map(|s| FakeEntry::file(*s)).collect(),
+        );
         self
     }
 
     /// Registers a directory holding `n` generated files.
     pub fn with_synthetic(self, dir: impl Into<PathBuf>, n: usize) -> Self {
-        let names = (0..n).map(|i| format!("job_{i:07}_report.pdf")).collect();
+        let names = (0..n)
+            .map(|i| FakeEntry::file(format!("job_{i:07}_report.pdf")))
+            .collect();
         self.dirs.lock().insert(dir.into(), names);
         self
     }
 
-    pub fn set_dir(&self, dir: impl Into<PathBuf>, names: &[&str]) {
-        self.dirs
+    /// Declares a file at `path`, creating every ancestor directory and the
+    /// directory entry each one needs inside its parent.
+    ///
+    /// The only tree-building primitive, deliberately: declaring a directory's
+    /// entry in its parent and its own listing as two separate steps is how a
+    /// fake ends up internally inconsistent, and a walker proved correct
+    /// against a tree that could not exist has been proved nothing.
+    pub fn with_file(self, path: impl AsRef<Path>) -> Self {
+        self.add_path(path.as_ref());
+        self
+    }
+
+    /// Declares many files at once, each relative to `root`.
+    pub fn with_tree(self, root: impl AsRef<Path>, rel_paths: &[&str]) -> Self {
+        let root = root.as_ref();
+        // The root exists even if it holds nothing, or a walk of an empty
+        // share would report "no such directory".
+        self.dirs.lock().entry(root.to_path_buf()).or_default();
+        for rel in rel_paths {
+            self.add_path(&root.join(rel));
+        }
+        self
+    }
+
+    /// Inserts `entry` into `dir`, replacing any entry of the same name.
+    fn put(&self, dir: &Path, entry: FakeEntry) {
+        let mut dirs = self.dirs.lock();
+        let listing = dirs.entry(dir.to_path_buf()).or_default();
+        if let Some(slot) = listing.iter_mut().find(|e| e.name == entry.name) {
+            *slot = entry;
+        } else {
+            listing.push(entry);
+        }
+    }
+
+    /// Registers a file and every directory above it.
+    fn add_path(&self, path: &Path) {
+        let Some(parent) = path.parent() else { return };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        self.add_dirs(parent);
+        self.put(parent, FakeEntry::file(name));
+    }
+
+    /// Makes `dir` exist, along with every directory above it.
+    fn add_dirs(&self, dir: &Path) {
+        self.dirs.lock().entry(dir.to_path_buf()).or_default();
+        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name().and_then(|n| n.to_str()))
+        else {
+            return;
+        };
+        // A volume root's parent is itself in spirit; stop rather than
+        // inventing an entry for `V:\` inside `V:\`.
+        if parent.as_os_str().is_empty() || parent == dir {
+            return;
+        }
+        self.add_dirs(parent);
+        self.put(parent, FakeEntry::dir(name));
+    }
+
+    /// Declares `name` inside `dir` as a junction pointing at `target`, and
+    /// registers the target too - so a walker that wrongly descends actually
+    /// loops and the test notices, instead of the fake quietly making the bug
+    /// unreachable.
+    pub fn with_junction(
+        self,
+        dir: impl AsRef<Path>,
+        name: &str,
+        target: impl AsRef<Path>,
+    ) -> Self {
+        self.add_dirs(dir.as_ref());
+        self.put(dir.as_ref(), FakeEntry::junction(name));
+        // Recorded as a path rewrite rather than a copy of the target's
+        // listing. A copy aliases one level only, so a junction pointing at an
+        // ancestor would dead-end instead of looping - and a cycle that cannot
+        // happen is a cycle the walker cannot be held to surviving.
+        self.junctions
             .lock()
-            .insert(dir.into(), names.iter().map(|s| s.to_string()).collect());
+            .insert(dir.as_ref().join(name), target.as_ref().to_path_buf());
+        self
+    }
+
+    /// Rewrites any junction prefix of `dir`, as the server would.
+    ///
+    /// Bounded rather than looped to a fixed point: a junction chain that
+    /// never settles is a real thing to model, and hanging the fake is not the
+    /// way to model it.
+    fn resolve(&self, dir: &Path) -> PathBuf {
+        let junctions = self.junctions.lock();
+        if junctions.is_empty() {
+            return dir.to_path_buf();
+        }
+        let mut cur = dir.to_path_buf();
+        for _ in 0..64 {
+            let mut rewritten = false;
+            for (link, target) in junctions.iter() {
+                if let Ok(rest) = cur.strip_prefix(link) {
+                    cur = target.join(rest);
+                    rewritten = true;
+                    break;
+                }
+            }
+            if !rewritten {
+                break;
+            }
+        }
+        cur
+    }
+
+    /// Fails one directory, leaving the rest of the tree readable.
+    pub fn fail_dir(&self, dir: impl Into<PathBuf>, err: EnumError) {
+        self.dir_errors.lock().insert(dir.into(), err);
+    }
+
+    /// The most `list` calls that were ever in flight at once.
+    pub fn peak_in_flight(&self) -> usize {
+        self.in_flight.lock().1
+    }
+
+    pub fn set_dir(&self, dir: impl Into<PathBuf>, names: &[&str]) {
+        self.dirs.lock().insert(
+            dir.into(),
+            names.iter().map(|s| FakeEntry::file(*s)).collect(),
+        );
     }
 
     pub fn add_file(&self, dir: impl Into<PathBuf>, name: &str) {
@@ -149,12 +337,12 @@ impl FakeDirSource {
             .lock()
             .entry(dir.into())
             .or_default()
-            .push(name.to_string());
+            .push(FakeEntry::file(name));
     }
 
     pub fn remove_file(&self, dir: impl AsRef<Path>, name: &str) {
         if let Some(v) = self.dirs.lock().get_mut(dir.as_ref()) {
-            v.retain(|n| n != name);
+            v.retain(|e| e.name != name);
         }
     }
 
@@ -244,6 +432,14 @@ impl FakeDirSource {
         self.calls.lock().push(call);
     }
 
+    /// Counts one call in, and out again when the guard drops.
+    fn enter(&self) -> InFlight<'_> {
+        let mut c = self.in_flight.lock();
+        c.0 += 1;
+        c.1 = c.1.max(c.0);
+        InFlight(&self.in_flight)
+    }
+
     /// Applies scripted latency, hanging, and failure.
     fn gate(&self, opts: &ListOpts, cancel: &CancelToken) -> Result<(), EnumError> {
         let (latency, fail, hang) = {
@@ -313,24 +509,43 @@ impl DirSource for FakeDirSource {
     ) -> Result<ListStats, EnumError> {
         self.record(Call::List(dir.to_path_buf()));
         let started = Instant::now();
+
+        // Counted around everything below, so a walker's concurrency limit is
+        // observable directly rather than inferred from timing.
+        let _guard = self.enter();
+
+        // Before the global gate: a scripted per-directory failure is about
+        // this directory, not about the share.
+        if let Some(err) = self.dir_errors.lock().get(dir).cloned() {
+            return Err(err);
+        }
         self.gate(opts, cancel)?;
 
-        let names = self.dirs.lock().get(dir).cloned();
+        let names = self.dirs.lock().get(&self.resolve(dir)).cloned();
         let Some(names) = names else {
             return Err(EnumError::PathNotFound(3));
         };
 
         let mut entries = 0usize;
         let mut complete = true;
-        for name in &names {
+        for entry in &names {
             if cancel.is_cancelled() {
                 return Err(EnumError::Cancelled);
+            }
+            // The real enumerators filter on attributes before the sink sees
+            // anything; a fake that skipped this would let a walker pass here
+            // and miss every subdirectory against a real share.
+            if opts.files_only && !super::enumerate::is_listable_file(entry.attributes) {
+                continue;
             }
             if entries >= opts.max_entries {
                 complete = false;
                 break;
             }
-            if !sink.push_str(name, EntryMeta { attributes: 0x0080 }) {
+            let meta = EntryMeta {
+                attributes: entry.attributes,
+            };
+            if !sink.push_str(&entry.name, meta) {
                 complete = false;
                 break;
             }
@@ -371,8 +586,14 @@ impl DirSource for FakeDirSource {
         let mut entries = 0usize;
         let mut complete = true;
         let mut seen = 0usize;
-        for name in &names {
-            if !wildcard_matches(wildcard, name) {
+        for entry in &names {
+            // A server-side wildcard returns directories too; the caller
+            // filters. Matching the real thing keeps `--bench`'s completeness
+            // oracle honest about what it is comparing against.
+            if opts.files_only && !super::enumerate::is_listable_file(entry.attributes) {
+                continue;
+            }
+            if !wildcard_matches(wildcard, &entry.name) {
                 continue;
             }
             if drops.contains(&seen) {
@@ -384,7 +605,10 @@ impl DirSource for FakeDirSource {
                 complete = false;
                 break;
             }
-            if !sink.push_str(name, EntryMeta { attributes: 0x0080 }) {
+            let meta = EntryMeta {
+                attributes: entry.attributes,
+            };
+            if !sink.push_str(&entry.name, meta) {
                 complete = false;
                 break;
             }

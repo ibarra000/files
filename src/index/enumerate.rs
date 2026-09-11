@@ -199,6 +199,23 @@ pub trait DirSource: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// True when a tree walk should descend into an entry with these attributes.
+///
+/// Deliberately the mirror of [`is_listable_file`] rather than its negation:
+/// for an ordinary entry exactly one of the two holds, and for a junction
+/// *neither* does. A directory reparse point is resolved server-side on a
+/// mapped share, so it can point at another share entirely or back into this
+/// tree, and the only sound cycle guard - a visited set keyed on file id -
+/// needs an id many SMB servers report as zero. Refusing to descend is the
+/// honest position; the walk counts them so a skipped subtree is visible
+/// rather than silent.
+#[inline]
+pub fn is_walkable_dir(attributes: u32) -> bool {
+    const DIRECTORY: u32 = 0x0000_0010;
+    const REPARSE: u32 = 0x0000_0400;
+    attributes & DIRECTORY != 0 && attributes & REPARSE == 0
+}
+
 /// True when a directory entry with these attributes should be listed.
 ///
 /// Mirrors the previous `DirEntry::file_type().is_file()` behaviour: skip

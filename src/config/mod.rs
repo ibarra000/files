@@ -165,6 +165,26 @@ pub const SHUTDOWN_JOIN_BUDGET: Duration = Duration::from_millis(250);
 pub const DIR_BUFFER_BYTES: usize = 1 << 20;
 pub const DIR_BUFFER_MIN: usize = 64 << 10;
 
+/// Directories read at once during a recursive walk.
+///
+/// A tree walk is bound by round trips per *directory*, so walking several at
+/// once converts almost directly into wall clock. Eight rather than more
+/// because SMB2 flow control is credit-based: a 1 MiB directory query spends
+/// around sixteen credits of a session's few hundred, so past roughly this
+/// many large requests the client starts waiting for credits rather than
+/// gaining throughput - and because a share is someone else's production file
+/// server. It is the same default `robocopy /MT` picked.
+pub const WALK_CONCURRENCY: usize = 8;
+
+/// Per-directory buffer during a tree walk.
+///
+/// An eighth of [`DIR_BUFFER_BYTES`], which is sized for a single flat
+/// directory of a million entries. In a job tree the median directory holds
+/// well under a hundred, so this still reads almost all of them in one round
+/// trip while costing sixteen times fewer SMB2 credits - which is what lets
+/// eight walkers actually be in flight at once instead of starving each other.
+pub const WALK_DIR_BUFFER_BYTES: usize = 128 << 10;
+
 /// Entries per rayon chunk in the matcher. Sized so a cancelled search stops
 /// within a few hundred microseconds without putting a branch in the inner
 /// vectorized scan.
