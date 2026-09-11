@@ -49,6 +49,16 @@ pub const MIN_QUERY_LEN: usize = 3;
 /// reachable by arrow key.
 pub const MAX_RESULTS: usize = 300;
 
+/// Most files one matching folder may contribute to a result set.
+///
+/// A job code names a folder as often as it names a file, and someone typing
+/// one wants that folder's contents - at about seventeen files per folder, a
+/// dozen matching folders still fit. The bound exists for the folder that
+/// holds five thousand: without it, one such folder fills every slot and hides
+/// every other folder that matched, which is the "files are missing" bug this
+/// index was built to remove, wearing a new hat.
+pub const MAX_FILES_PER_FOLDER: usize = 64;
+
 /// Columns in the results grid, when the terminal is wide enough for them.
 pub const GRID_COLUMNS: usize = 3;
 

@@ -28,10 +28,18 @@
 //! integer compare:
 //!
 //! ```text
-//! bits 63..48  match position within the name  (earlier wins)
+//! bit  63      0 = the name matched, 1 = its folder did  (a name wins)
+//! bits 62..48  match position within the name  (earlier wins)
 //! bits 47..32  name length                     (shorter wins)
 //! bits 31..0   entry index                     (directory order wins)
 //! ```
+//!
+//! The top bit is what keeps a tree's results explicable. A code can match a
+//! file's own name or the name of the folder it sits in, and "the file is
+//! called `11-D-0704`" should always beat "the file is inside a folder called
+//! `11-D-0704`" - otherwise one matching folder's entire contents outranks an
+//! exactly-named file somewhere else, which is not what anyone scanning the
+//! list expects. Putting it in the highest bit makes that ordering free.
 //!
 //! Including the entry index matters beyond tie-breaking. The original code
 //! used `sort_by`, which is *stable*, so equal `(pos, len)` pairs kept
@@ -48,11 +56,36 @@ pub const K: usize = crate::config::MAX_RESULTS;
 /// Packed ranking key. Lower compares better.
 pub type Key = u64;
 
-/// Builds a ranking key. Position and length saturate; both are bounded well
-/// below the saturation point by the snapshot builder.
+/// Largest match position the key can hold. Positions above this saturate,
+/// which degrades ranking between two very deep matches and never
+/// correctness - a name long enough to reach it is already unreadable.
+pub const MAX_POS: u32 = 0x7FFF;
+
+/// Set on a key whose *folder* matched rather than its own name.
+const INHERITED: Key = 1 << 63;
+
+/// Builds a ranking key for a name that matched in its own right.
+///
+/// Position and length saturate; both are bounded well below the saturation
+/// point by the snapshot builder.
 #[inline]
 pub fn key(match_pos: u32, name_len: u32, index: u32) -> Key {
-    ((match_pos.min(0xFFFF) as u64) << 48) | ((name_len.min(0xFFFF) as u64) << 32) | (index as u64)
+    ((match_pos.min(MAX_POS) as u64) << 48) | ((name_len.min(0xFFFF) as u64) << 32) | (index as u64)
+}
+
+/// Builds a ranking key for a file pulled in because its folder matched.
+///
+/// `match_pos` is the position within the *folder* name, so folders whose name
+/// begins with the code still beat folders that merely contain it.
+#[inline]
+pub fn key_inherited(match_pos: u32, name_len: u32, index: u32) -> Key {
+    key(match_pos, name_len, index) | INHERITED
+}
+
+/// True when this key was pulled in by its folder rather than its own name.
+#[inline]
+pub fn key_is_inherited(k: Key) -> bool {
+    k & INHERITED != 0
 }
 
 #[inline]
@@ -62,7 +95,7 @@ pub fn key_index(k: Key) -> u32 {
 
 #[inline]
 pub fn key_pos(k: Key) -> u32 {
-    (k >> 48) as u32
+    ((k >> 48) & MAX_POS as u64) as u32
 }
 
 #[inline]
@@ -207,9 +240,43 @@ mod tests {
     #[test]
     fn saturates_rather_than_overflowing_into_another_field() {
         let k = key(u32::MAX, u32::MAX, 42);
-        assert_eq!(key_pos(k), 0xFFFF);
+        assert_eq!(key_pos(k), MAX_POS);
         assert_eq!(key_name_len(k), 0xFFFF);
         assert_eq!(key_index(k), 42);
+        assert!(
+            !key_is_inherited(k),
+            "saturating the position must not spill into the source bit"
+        );
+    }
+
+    /// A file that matched by name beats every file pulled in by its folder,
+    /// however good the folder's match was.
+    #[test]
+    fn a_name_of_its_own_outranks_an_inherited_folder_match() {
+        let by_name = key(0xFFFF, 0xFFFF, u32::MAX);
+        let by_folder = key_inherited(0, 0, 0);
+        assert!(
+            by_name < by_folder,
+            "the worst possible name match should still win"
+        );
+        assert!(key_is_inherited(by_folder));
+        assert!(!key_is_inherited(by_name));
+    }
+
+    /// The other fields still decide the order within each source.
+    #[test]
+    fn inherited_keys_are_ordered_among_themselves() {
+        assert!(key_inherited(0, 10, 5) < key_inherited(1, 0, 0), "position");
+        assert!(key_inherited(3, 10, 9) < key_inherited(3, 11, 0), "length");
+        assert!(key_inherited(3, 10, 5) < key_inherited(3, 10, 6), "order");
+    }
+
+    #[test]
+    fn the_source_bit_does_not_disturb_the_other_fields() {
+        let k = key_inherited(7, 300, 123_456);
+        assert_eq!(key_pos(k), 7);
+        assert_eq!(key_name_len(k), 300);
+        assert_eq!(key_index(k), 123_456);
     }
 
     #[test]

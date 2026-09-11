@@ -30,8 +30,9 @@ use std::sync::Arc;
 use memchr::memmem;
 use rayon::prelude::*;
 
-use crate::config::{MATCH_CHUNK_ENTRIES, MIN_QUERY_LEN, MatcherKind};
+use crate::config::{MATCH_CHUNK_ENTRIES, MAX_FILES_PER_FOLDER, MIN_QUERY_LEN, MatcherKind};
 use crate::index::snapshot::Snapshot;
+use crate::index::tree::{TreeIndex, TreeSegment};
 use crate::search::topk::{self, Key, TopK};
 use crate::util::cancel::CancelToken;
 use crate::util::fold;
@@ -107,7 +108,7 @@ pub fn search(
     }
 
     let (top, matched, cancelled) = match kind {
-        MatcherKind::Simd => sweep(snap, &needle, cancel),
+        MatcherKind::Simd => sweep(snap, &needle, 0, cancel),
         MatcherKind::Naive => naive(snap, &needle, cancel),
     };
 
@@ -135,8 +136,160 @@ pub fn search(
     })
 }
 
+/// Runs a query against a walked tree.
+///
+/// Two passes per segment, because a job code names a folder at least as often
+/// as it names a file:
+///
+/// 1. the filenames, exactly as a flat listing is swept;
+/// 2. the folder names - a far smaller arena - whose matches pull in the files
+///    inside them.
+///
+/// A file that matched by its own name always outranks one pulled in by its
+/// folder; see [`topk`]'s key layout.
+pub fn search_tree(
+    index: &TreeIndex,
+    query: &str,
+    cancel: &CancelToken,
+) -> Result<SearchOutcome, QueryReject> {
+    if query.chars().count() < MIN_QUERY_LEN {
+        return Err(QueryReject::TooShort {
+            need: MIN_QUERY_LEN,
+        });
+    }
+    let needle = fold::fold_query(query);
+    if needle.contains(&0) {
+        return Err(QueryReject::ContainsNul);
+    }
+
+    let total = index.len() as u32;
+    if total == 0 {
+        return Ok(SearchOutcome::default());
+    }
+
+    let mut top = TopK::new();
+    let mut matched = 0u32;
+    let mut cancelled = false;
+
+    for (s, segment) in index.segments().iter().enumerate() {
+        if cancel.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        let base = index.base(s);
+
+        let (names, n, stopped) = sweep(segment.files(), &needle, base, cancel);
+        top.merge(names);
+        matched = matched.saturating_add(n);
+        cancelled |= stopped;
+
+        let (folders, f) = sweep_folders(segment, &needle, base);
+        top.merge(folders);
+        matched = matched.saturating_add(f);
+    }
+
+    Ok(SearchOutcome {
+        hits: materialise_tree(index, &top.into_sorted()),
+        matched,
+        total,
+        cancelled,
+        unicode_fallback: false,
+    })
+}
+
+/// Matches folder names and pulls in the files inside them.
+///
+/// Not chunked across rayon: the folder arena is around a fiftieth the size of
+/// the filename arena, so the fan-out would cost more than the scan.
+fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32) -> (TopK, u32) {
+    let mut top = TopK::new();
+    let mut matched = 0u32;
+
+    let dirs = segment.dirs();
+    let offsets = dirs.offsets();
+    let arena = dirs.lower();
+    if dirs.is_empty() || needle.len() as u32 > dirs.max_name_len() {
+        return (top, matched);
+    }
+
+    let finder = memmem::Finder::new(needle);
+    let mut cursor = 0usize;
+    let mut dir = 0usize;
+
+    while let Some(rel) = finder.find(&arena[cursor..]) {
+        let abs = (cursor + rel) as u32;
+        dir = advance_to(offsets, dir, abs);
+
+        let start = offsets[dir];
+        let end = offsets[dir + 1];
+        let pos = abs - start;
+        let name_len = end - start - 1;
+
+        // Every file in the folder, which is what someone typing a job code is
+        // asking for - but bounded, because one enormous folder filling all
+        // three hundred slots would hide every other folder that matched, and
+        // that is the original "files are missing" bug wearing a new hat.
+        let files = segment.files_of(dir as u32);
+        let shown = (files.len() as u32).min(MAX_FILES_PER_FOLDER as u32);
+        for i in files.start..files.start + shown {
+            top.push(topk::key_inherited(pos, name_len, base + i));
+        }
+        matched = matched.saturating_add(files.len() as u32);
+
+        cursor = end as usize;
+        dir += 1;
+        if cursor >= arena.len() || dir >= dirs.len() {
+            break;
+        }
+    }
+
+    (top, matched)
+}
+
+/// Turns retained keys into hits, for a tree.
+///
+/// Re-sorted by path rather than trusting the packed ordinal, because a
+/// parallel walk assigns ordinals in arrival order: the same share walked
+/// twice would otherwise rank tied results differently between runs, quietly
+/// destroying the strict total order `topk` documents. Three hundred short
+/// comparisons, once per search.
+fn materialise_tree(index: &TreeIndex, keys: &[Key]) -> Vec<Hit> {
+    let mut hits: Vec<(Key, Hit)> = keys
+        .iter()
+        .filter_map(|&k| {
+            let ordinal = topk::key_index(k);
+            let (s, local) = index.locate(ordinal)?;
+            let segment = &index.segments()[s];
+            Some((
+                k,
+                Hit {
+                    path: Arc::from(index.full_path(ordinal)?.as_str()),
+                    name: Arc::from(segment.files().display_name(local).as_ref()),
+                    // An inherited hit matched in the folder name, not here, so
+                    // there is nothing in this row to underline.
+                    match_pos: if topk::key_is_inherited(k) {
+                        u32::MAX
+                    } else {
+                        topk::key_pos(k)
+                    },
+                    index: ordinal,
+                },
+            ))
+        })
+        .collect();
+
+    hits.sort_by(|(ka, a), (kb, b)| {
+        topk::key_is_inherited(*ka)
+            .cmp(&topk::key_is_inherited(*kb))
+            .then(topk::key_pos(*ka).cmp(&topk::key_pos(*kb)))
+            .then(a.name.len().cmp(&b.name.len()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    hits.into_iter().map(|(_, h)| h).collect::<Vec<Hit>>()
+}
+
 /// Parallel SIMD sweep.
-fn sweep(snap: &Snapshot, needle: &[u8], cancel: &CancelToken) -> (TopK, u32, bool) {
+fn sweep(snap: &Snapshot, needle: &[u8], base: u32, cancel: &CancelToken) -> (TopK, u32, bool) {
     let offsets = snap.offsets();
     let arena = snap.lower();
     let n = snap.len();
@@ -145,7 +298,7 @@ fn sweep(snap: &Snapshot, needle: &[u8], cancel: &CancelToken) -> (TopK, u32, bo
     // Below a chunk's worth of entries the rayon fan-out costs more than the
     // scan it parallelises.
     if chunks <= 1 {
-        let (top, matched) = scan_chunk(arena, offsets, needle, 0, n);
+        let (top, matched) = scan_chunk(arena, offsets, needle, 0, n, base);
         return (top, matched, cancel.is_cancelled());
     }
 
@@ -161,7 +314,7 @@ fn sweep(snap: &Snapshot, needle: &[u8], cancel: &CancelToken) -> (TopK, u32, bo
             }
             let lo = c * MATCH_CHUNK_ENTRIES;
             let hi = ((c + 1) * MATCH_CHUNK_ENTRIES).min(n);
-            let (top, matched) = scan_chunk(arena, offsets, &finder_needle, lo, hi);
+            let (top, matched) = scan_chunk(arena, offsets, &finder_needle, lo, hi, base);
             (top, matched, false)
         })
         .reduce(
@@ -176,7 +329,18 @@ fn sweep(snap: &Snapshot, needle: &[u8], cancel: &CancelToken) -> (TopK, u32, bo
 }
 
 /// Sweeps entries `lo..hi`, whose names occupy one contiguous arena range.
-fn scan_chunk(arena: &[u8], offsets: &[u32], needle: &[u8], lo: usize, hi: usize) -> (TopK, u32) {
+///
+/// `base` is added to every entry index, so one segment of a tree contributes
+/// global ordinals while a flat listing passes zero and behaves exactly as it
+/// always has.
+fn scan_chunk(
+    arena: &[u8],
+    offsets: &[u32],
+    needle: &[u8],
+    lo: usize,
+    hi: usize,
+    base: u32,
+) -> (TopK, u32) {
     let mut top = TopK::new();
     let mut matched = 0u32;
     if lo >= hi {
@@ -203,7 +367,7 @@ fn scan_chunk(arena: &[u8], offsets: &[u32], needle: &[u8], lo: usize, hi: usize
         let pos = abs - start;
         let name_len = end - start - 1;
 
-        top.push(topk::key(pos, name_len, entry as u32));
+        top.push(topk::key(pos, name_len, base + entry as u32));
         matched += 1;
 
         // Jump past this entry entirely. This is what makes `matched` count
@@ -529,5 +693,177 @@ mod tests {
             entry = advance_to(offsets, entry, byte);
             assert_eq!(entry, i);
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::index::tree::{SegmentBuilder, TreeIndex, TreeSegment};
+    use std::sync::Arc;
+
+    fn segment(dirs: &[(&str, &[&str])]) -> Arc<TreeSegment> {
+        let mut b = SegmentBuilder::new();
+        for (rel, files) in dirs {
+            let owned: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+            assert!(b.push_dir(rel, &owned));
+        }
+        let s = b.seal();
+        s.check_invariants().unwrap();
+        Arc::new(s)
+    }
+
+    fn index(dirs: &[(&str, &[&str])]) -> TreeIndex {
+        TreeIndex::empty("R:\\").appended(segment(dirs))
+    }
+
+    fn run(index: &TreeIndex, q: &str) -> SearchOutcome {
+        search_tree(index, q, &CancelToken::never()).unwrap()
+    }
+
+    fn paths(o: &SearchOutcome) -> Vec<String> {
+        o.hits.iter().map(|h| h.path.to_string()).collect()
+    }
+
+    /// The whole point of the rewrite. No routing rule would guess this
+    /// folder, so before the tree index the file was not merely unranked, it
+    /// was unreachable.
+    #[test]
+    fn finds_a_file_in_a_folder_no_rule_would_have_guessed() {
+        let ix = index(&[(
+            "archive\\2019\\odd name",
+            &["11-3-0704 survey.pdf", "unrelated.txt"],
+        )]);
+        assert_eq!(
+            paths(&run(&ix, "11-3-0704")),
+            vec!["R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf"]
+        );
+    }
+
+    /// A code names a folder far more often than it names a file, so matching
+    /// the folder has to bring its contents with it.
+    #[test]
+    fn a_folder_match_brings_in_the_files_inside_it() {
+        let ix = index(&[
+            ("11d\\0704", &["quote.pdf", "drawing.pdf"]),
+            ("ab12", &["unrelated.pdf"]),
+        ]);
+        let got = paths(&run(&ix, "0704"));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.contains(&"R:\\11d\\0704\\quote.pdf".to_string()));
+        assert!(got.contains(&"R:\\11d\\0704\\drawing.pdf".to_string()));
+    }
+
+    /// "The file is called 11-D-0704" beats "the file is in a folder called
+    /// 11-D-0704", which is what anyone scanning the list expects.
+    #[test]
+    fn a_file_named_for_the_code_outranks_the_folder_named_for_it() {
+        let ix = index(&[
+            ("11d\\0704", &["aaa.pdf", "bbb.pdf"]),
+            ("elsewhere", &["0704 summary.pdf"]),
+        ]);
+        assert_eq!(
+            paths(&run(&ix, "0704"))[0],
+            "R:\\elsewhere\\0704 summary.pdf"
+        );
+    }
+
+    /// One enormous folder must not fill every slot and hide the others - that
+    /// is the original bug in a new form.
+    #[test]
+    fn one_huge_folder_cannot_crowd_out_every_other_match() {
+        let many: Vec<String> = (0..500).map(|i| format!("f{i:04}.pdf")).collect();
+        let many: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let ix = index(&[("0704 big", &many), ("0704 small", &["only.pdf"])]);
+
+        let got = paths(&run(&ix, "0704"));
+        assert!(
+            got.iter().any(|p| p.ends_with("0704 small\\only.pdf")),
+            "the small folder was crowded out of {} hits",
+            got.len()
+        );
+        assert!(
+            got.len() <= crate::config::MAX_FILES_PER_FOLDER + 1,
+            "the big folder contributed {} rows",
+            got.len()
+        );
+    }
+
+    /// `matched` is the truth about how many files the code reaches, even when
+    /// only some of them are retained.
+    #[test]
+    fn the_match_count_is_not_capped_by_what_is_shown() {
+        let many: Vec<String> = (0..500).map(|i| format!("f{i:04}.pdf")).collect();
+        let many: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
+        let ix = index(&[("0704 big", &many)]);
+        assert_eq!(run(&ix, "0704").matched, 500);
+    }
+
+    #[test]
+    fn results_span_segments() {
+        let ix = TreeIndex::empty("R:\\")
+            .appended(segment(&[("a", &["0704 one.pdf"])]))
+            .appended(segment(&[("b", &["0704 two.pdf"])]));
+
+        let got = paths(&run(&ix, "0704"));
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.contains(&"R:\\a\\0704 one.pdf".to_string()));
+        assert!(got.contains(&"R:\\b\\0704 two.pdf".to_string()));
+    }
+
+    /// The same files split across segments differently must rank identically.
+    /// A walk assigns ordinals in arrival order, so without the re-sort in
+    /// `materialise_tree` the same share walked twice would order tied results
+    /// differently between runs.
+    #[test]
+    fn ranking_does_not_depend_on_how_the_walk_was_segmented() {
+        let whole = index(&[
+            ("a", &["0704 one.pdf", "0704 two.pdf"]),
+            ("b", &["0704 three.pdf"]),
+        ]);
+        let split = TreeIndex::empty("R:\\")
+            .appended(segment(&[("a", &["0704 one.pdf", "0704 two.pdf"])]))
+            .appended(segment(&[("b", &["0704 three.pdf"])]));
+
+        assert_eq!(paths(&run(&whole, "0704")), paths(&run(&split, "0704")));
+    }
+
+    #[test]
+    fn an_empty_folder_that_matches_contributes_nothing() {
+        let ix = index(&[("0704 empty", &[]), ("other", &["keep.pdf"])]);
+        assert!(paths(&run(&ix, "0704")).is_empty());
+    }
+
+    #[test]
+    fn an_empty_index_matches_nothing_without_panicking() {
+        let ix = TreeIndex::empty("R:\\");
+        let o = run(&ix, "0704");
+        assert!(o.hits.is_empty());
+        assert_eq!(o.total, 0);
+    }
+
+    #[test]
+    fn a_short_query_is_rejected_rather_than_run() {
+        let ix = index(&[("a", &["one.pdf"])]);
+        assert!(matches!(
+            search_tree(&ix, "ab", &CancelToken::never()),
+            Err(QueryReject::TooShort { .. })
+        ));
+    }
+
+    #[test]
+    fn matching_is_case_insensitive_over_both_names_and_folders() {
+        let ix = index(&[("11D\\0704", &["QUOTE.pdf"])]);
+        assert_eq!(run(&ix, "11d").hits.len(), 1, "the folder");
+        assert_eq!(run(&ix, "quote").hits.len(), 1, "the file");
+    }
+
+    /// A file pulled in by its folder has nothing in its own name to
+    /// underline, and must not be handed a position that would highlight the
+    /// wrong characters.
+    #[test]
+    fn an_inherited_hit_carries_no_highlight() {
+        let ix = index(&[("0704", &["quote.pdf"])]);
+        assert_eq!(run(&ix, "0704").hits[0].match_pos, u32::MAX);
     }
 }
