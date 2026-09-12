@@ -17,10 +17,14 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
+use std::sync::Arc;
+
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use files::config::MatcherKind;
+use files::config::SEGMENT_MAX_BYTES;
 use files::index::builder::SnapshotBuilder;
 use files::index::snapshot::Snapshot;
+use files::index::tree::{SegmentBuilder, TreeIndex};
 use files::search::{matcher, pages};
 use files::util::cancel::{CancelToken, Epoch};
 
@@ -163,10 +167,86 @@ fn snapshot_build(c: &mut Criterion) {
     group.finish();
 }
 
+/// A walked tree shaped like the real share: `dirs` folders, `per_dir` files
+/// in each.
+///
+/// Segments are sealed on the same arena budget the sink uses, so the segment
+/// count a query actually sweeps is the one the application would have.
+fn synthetic_tree(dirs: usize, per_dir: usize) -> TreeIndex {
+    let mut index = TreeIndex::empty("R:\\");
+    let mut b = SegmentBuilder::new();
+    let mut files: Vec<String> = Vec::with_capacity(per_dir);
+
+    for d in 0..dirs {
+        let rel = format!("{:02}\\{:02}\\job_{d:06}", d % 64, (d / 64) % 64);
+        files.clear();
+        for f in 0..per_dir {
+            files.push(format!("{d:06}-{f:02} drawing rev a.pdf"));
+        }
+        b.push_dir(&rel, &files);
+        if b.arena_bytes() >= SEGMENT_MAX_BYTES {
+            index = index.appended(Arc::new(b.seal()));
+        }
+    }
+    if !b.is_empty() {
+        index = index.appended(Arc::new(b.seal()));
+    }
+    index
+}
+
+/// The gate the whole design was sized against: a query against the real
+/// share, which is about 300,000 folders and 5,000,000 files.
+///
+/// The matcher's own documentation claims 1-3 ms for a 30 MB arena, which
+/// extrapolates to 5-16 ms here - fine on a worker thread that never blocks
+/// the UI, but close enough to the edge to measure rather than assume. Past
+/// roughly 15 ms a per-segment n-gram prefilter goes in.
+///
+/// Two sweeps per query, not one: the small directory arena for folders whose
+/// name matches, then the large filename arena. The folder sweep is what makes
+/// a job code that names a folder return that folder's files, which is the
+/// behaviour the rewrite exists to provide, so it belongs inside the number.
+fn tree_scaling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tree_scaling");
+    group.sample_size(10);
+
+    // 17 files per folder, which is what the real share measured.
+    for (dirs, per_dir) in [(30_000usize, 17usize), (300_000, 17)] {
+        let index = synthetic_tree(dirs, per_dir);
+        let bytes: u64 = index
+            .segments()
+            .iter()
+            .map(|s| (s.files().lower().len() + s.dirs().lower().len()) as u64)
+            .sum();
+        group.throughput(Throughput::Bytes(bytes));
+        group.bench_with_input(
+            BenchmarkId::new("files", index.len()),
+            &index,
+            |b, index| {
+                b.iter(|| matcher::search_tree(index, "123456-07", &CancelToken::never()).unwrap());
+            },
+        );
+        // A query that names a *folder*, so the hits come through the
+        // directory table and its per-folder expansion rather than from the
+        // filename sweep.
+        group.bench_with_input(
+            BenchmarkId::new("folder", index.len()),
+            &index,
+            |b, index| {
+                b.iter(|| {
+                    matcher::search_tree(index, "job_012345", &CancelToken::never()).unwrap()
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     simd_versus_naive,
     scaling,
+    tree_scaling,
     query_shape,
     cancellation_latency,
     snapshot_build,
