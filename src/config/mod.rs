@@ -401,19 +401,15 @@ pub enum ConfigChoice {
 pub struct Settings {
     /// The routing table. Immutable once loaded, shared by every thread.
     pub routes: Arc<Routes>,
-    /// First enabled job-folder mapping.
+    /// First enabled flat mapping, or empty when none is configured.
     ///
-    /// Derived from `routes`, kept while the rest of the crate is migrated to
-    /// addressing mappings by id. Never set independently.
-    pub base_path: PathBuf,
-    /// First enabled flat mapping. Derived from `routes`, as above.
+    /// Derived from `routes`, never set independently.
     pub custpro_path: PathBuf,
     /// First enabled tree mapping, or empty when none is configured.
     ///
-    /// Derived from `routes` like the two above, and for the same transitional
-    /// reason: it lets the index and the search be written against a root
-    /// rather than against the routing table, which is what makes the routing
-    /// table removable later without re-plumbing them.
+    /// Derived from `routes` like the one above, and for the same reason: it
+    /// lets the index and the search be written against a root rather than
+    /// against the mapping list.
     pub tree_path: PathBuf,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
@@ -482,11 +478,6 @@ impl Settings {
     /// Builds settings around a routing table, deriving the transitional
     /// convenience paths from it so the two can never disagree.
     pub fn with_routes(routes: Arc<Routes>, tweak: impl FnOnce(Self) -> Self) -> Self {
-        let base_path = routes
-            .enabled()
-            .find(|m| m.kind == MappingKind::JobFolder)
-            .map(|m| m.path.clone())
-            .unwrap_or_default();
         let custpro_path = routes
             .enabled()
             .find(|m| m.kind == MappingKind::Flat)
@@ -502,7 +493,6 @@ impl Settings {
             .unwrap_or_default();
         tweak(Self {
             routes,
-            base_path,
             custpro_path,
             tree_path,
             enum_strategy: EnumStrategy::default(),

@@ -262,8 +262,8 @@ mod tests {
     /// What an older config looks like: the table is there, the key is not.
     #[test]
     fn rewriting_the_viewer_when_the_key_is_absent_adds_it_to_the_existing_table() {
-        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
-                    kind = \"flat\"\n  [[mapping.rules]]\n  pattern = '^P'\n\n\
+        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+                    kind = \"flat\"\n\n\
                     [settings]\n# matcher = \"simd\"\npersist = true\n";
         let after = with_viewer(text, ViewerKind::Avwin).unwrap();
 
@@ -276,8 +276,8 @@ mod tests {
     /// into its own decor unless it is given a prefix of its own.
     #[test]
     fn rewriting_the_viewer_with_no_settings_table_does_not_swallow_the_trailing_comments() {
-        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
-                    kind = \"flat\"\n  [[mapping.rules]]\n  pattern = '^P'\n\n\
+        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+                    kind = \"flat\"\n\n\
                     # a parting note the user wrote\n# and a second line of it\n";
         let after = with_viewer(text, ViewerKind::Pdf).unwrap();
 

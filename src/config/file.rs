@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{ImDocument, Item, Value};
 
-use crate::paths::{CaseFold, ConfigSource, Mapping, MappingId, MappingKind, Routes, Rule};
+use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, Routes};
 use crate::util::winpath;
 
 /// The file written on first run, and the compiled-in fallback.
@@ -33,8 +33,27 @@ use crate::util::winpath;
 /// the ordinary loader, so what ships and what is written cannot drift.
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../assets/default_config.toml");
 
+/// What to tell someone whose configuration predates the deletion of routing.
+///
+/// Its own constant because it is the one error message in this file that has
+/// to be reachable from a test by name rather than by fragment: getting it
+/// wrong means someone reads it, edits the file as instructed, and is refused
+/// again.
+const V1_MIGRATION: &str = concat!(
+    "this is a version 1 configuration, written when a job code was matched against ",
+    "patterns to work out which folder to look in. Both shares are indexed now, so there ",
+    "is nothing left to match: delete every `[[mapping.rules]]` block and any `case` or ",
+    "`stop` key, give each mapping `kind = \"flat\"` or `kind = \"tree\"`, and set ",
+    "`version = 2`. Deleting the file also works - a fresh one is written on the next run.",
+);
+
 /// The only format version this build understands.
-pub const CONFIG_VERSION: i64 = 1;
+///
+/// Bumped to 2 when routing was removed. A version 1 file is not merely
+/// missing a key or two - every `[[mapping.rules]]` in it describes work the
+/// program no longer does - so it gets one clear instruction rather than a
+/// wall of "unknown key".
+pub const CONFIG_VERSION: i64 = 2;
 
 /// What went wrong, and exactly where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,8 +158,7 @@ impl Ctx<'_> {
 /// Keys accepted at each level. Anything else is an error: a typo like
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
-const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "stop", "case", "rules"];
-const RULE_KEYS: &[&str] = &["pattern", "folder", "stop"];
+const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled"];
 const SETTINGS_KEYS: &[&str] = &[
     "enum_strategy",
     "matcher",
@@ -230,6 +248,21 @@ pub fn parse(
         }
     }
 
+    // A version 1 file is reported and nothing else is. Every `rules` block
+    // and every `kind = "job-folder"` in it would otherwise produce its own
+    // "unknown key" beneath the one message that matters, and a wall of errors
+    // reads as a broken file rather than as an out-of-date one.
+    if doc.get("version").and_then(Item::as_integer) == Some(1) {
+        ctx.err(
+            doc.get("version").and_then(Item::span),
+            None,
+            None,
+            V1_MIGRATION,
+            None,
+        );
+        return Err(ctx.errors);
+    }
+
     match doc.get("version").and_then(Item::as_integer) {
         Some(CONFIG_VERSION) => {}
         Some(other) => ctx.err(
@@ -277,7 +310,7 @@ pub fn parse(
             None,
             format!(
                 "{} enabled flat mappings ({}), but only one can be indexed in this build; \
-                 disable all but one, or make the others kind = \"job-folder\"",
+                 disable all but one, or make the others kind = \"tree\"",
                 flat.len(),
                 flat.join(", ")
             ),
@@ -372,10 +405,10 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                         table.get("kind").and_then(Item::span),
                         Some(&label),
                         None,
-                        format!("unknown kind {k:?} (expected \"flat\" or \"job-folder\")"),
+                        format!("unknown kind {k:?} (expected \"flat\" or \"tree\")"),
                         None,
                     );
-                    MappingKind::JobFolder
+                    MappingKind::Tree
                 }
             },
             None => {
@@ -383,162 +416,24 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                     span.clone(),
                     Some(&label),
                     None,
-                    "missing `kind` (expected \"flat\" or \"job-folder\")",
+                    "missing `kind` (expected \"flat\" or \"tree\")",
                     None,
                 );
-                MappingKind::JobFolder
+                MappingKind::Tree
             }
         };
 
-        let case = match table.get("case").and_then(Item::as_str) {
-            Some(c) => CaseFold::parse(c).unwrap_or_else(|| {
-                ctx.err(
-                    table.get("case").and_then(Item::span),
-                    Some(&label),
-                    None,
-                    format!("unknown case {c:?} (expected \"lower\", \"upper\" or \"preserve\")"),
-                    None,
-                );
-                CaseFold::Lower
-            }),
-            None => CaseFold::Lower,
-        };
-
         let enabled = table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
-        let mapping_stop = table.get("stop").and_then(Item::as_bool).unwrap_or(false);
-
-        let before = ctx.errors.len();
-        let rules = parse_rules(table, kind, mapping_stop, &label, ctx);
-        // An indexed mapping needs no rules: every file under it is already
-        // known, so there is nothing to deduce and a code that matches nothing
-        // simply returns nothing. A job-folder mapping is the opposite - its
-        // rules are the only thing that can turn a code into a directory, so
-        // without them it could never match anything at all.
-        //
-        // Only complain when the list is genuinely empty, not when every rule
-        // was individually rejected: that would report the same mistake twice
-        // and bury the message that matters.
-        if rules.is_empty() && !kind.is_indexed() && ctx.errors.len() == before {
-            ctx.err(
-                span.clone(),
-                Some(&label),
-                None,
-                "no `[[mapping.rules]]`; a job-folder mapping cannot resolve a \
-                 code without them. An indexed mapping (kind = \"flat\" or \
-                 kind = \"tree\") needs none.",
-                None,
-            );
-        }
-
         mappings.push(Mapping {
             id: MappingId(index as u16),
             name: label.into(),
             path: winpath::normalise_root(Path::new(raw_path)),
             kind,
             enabled,
-            case,
-            rules: rules.into_boxed_slice(),
         });
     }
 
     mappings
-}
-
-fn parse_rules(
-    table: &toml_edit::Table,
-    kind: MappingKind,
-    mapping_stop: bool,
-    label: &str,
-    ctx: &mut Ctx<'_>,
-) -> Vec<Rule> {
-    let Some(entries) = table.get("rules").and_then(Item::as_array_of_tables) else {
-        return Vec::new();
-    };
-
-    let mut rules = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        for (key, item) in entry.iter() {
-            if !RULE_KEYS.contains(&key) {
-                ctx.err(
-                    item.span(),
-                    Some(label),
-                    Some(index),
-                    format!("unknown key {key:?}"),
-                    None,
-                );
-            }
-        }
-
-        let Some(pattern) = entry.get("pattern").and_then(Item::as_str) else {
-            ctx.err(
-                entry.span(),
-                Some(label),
-                Some(index),
-                "missing `pattern`",
-                None,
-            );
-            continue;
-        };
-
-        let folder = entry.get("folder").and_then(Item::as_str);
-        match (kind, folder) {
-            (MappingKind::Flat, Some(_)) => {
-                ctx.err(
-                    entry.get("folder").and_then(Item::span),
-                    Some(label),
-                    Some(index),
-                    "`folder` is only meaningful on a job-folder mapping (is `kind` wrong?)",
-                    None,
-                );
-            }
-            (MappingKind::JobFolder, None) => {
-                ctx.err(
-                    entry.span(),
-                    Some(label),
-                    Some(index),
-                    "missing `folder`; without it the code would resolve to the share root",
-                    None,
-                );
-                continue;
-            }
-            _ => {}
-        }
-
-        let stop = entry
-            .get("stop")
-            .and_then(Item::as_bool)
-            .unwrap_or(mapping_stop);
-
-        match Rule::new(pattern, folder, stop, index as u16) {
-            Ok(rule) => {
-                // An unsatisfiable reference expands to nothing, the folder
-                // comes out empty, and the search would fall back to the
-                // entire share. Silent at runtime, so it is caught here.
-                let missing = rule.unsatisfiable_refs();
-                if !missing.is_empty() {
-                    ctx.err(
-                        entry.get("folder").and_then(Item::span),
-                        Some(label),
-                        Some(index),
-                        format!(
-                            "`folder` references {} which the pattern does not capture",
-                            missing.join(", ")
-                        ),
-                        folder.map(str::to_string),
-                    );
-                }
-                rules.push(rule);
-            }
-            Err(e) => ctx.err(
-                entry.get("pattern").and_then(Item::span),
-                Some(label),
-                Some(index),
-                format!("pattern does not compile: {e}"),
-                Some(pattern.to_string()),
-            ),
-        }
-    }
-    rules
 }
 
 fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
@@ -710,16 +605,12 @@ mod tests {
     }
 
     const MINIMAL: &str = r#"
-version = 1
+version = 2
 
 [[mapping]]
 name = "jobs"
 path = 'R:\'
-kind = "job-folder"
-
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
-  folder  = '${1}'
+kind = "tree"
 "#;
 
     // --- the shipped default ------------------------------------------------
@@ -751,20 +642,14 @@ kind = "job-folder"
     /// appears from both.
     fn the_shipped_default_searches_every_share() {
         let c = builtin();
-        assert_eq!(c.routes.classify("P12345-001").len(), 2);
-        assert_eq!(c.routes.classify("anything at all").len(), 2);
+        assert_eq!(c.routes.targets().len(), 2);
     }
 
-    /// And neither share carries a pattern any more, which is the point.
+    /// And every share is indexed, which is what makes the patterns
+    /// unnecessary rather than merely absent.
     #[test]
-    fn the_shipped_default_has_no_rules_at_all() {
+    fn every_shipped_mapping_is_indexed() {
         for mapping in builtin().routes.all() {
-            assert!(
-                mapping.rules.is_empty(),
-                "mapping {:?} still carries {} rule(s)",
-                mapping.name,
-                mapping.rules.len()
-            );
             assert!(
                 mapping.kind.is_indexed(),
                 "{:?} is not indexed",
@@ -800,9 +685,9 @@ kind = "job-folder"
     fn parses_a_minimal_configuration() {
         let c = parse_ok(MINIMAL);
         assert_eq!(c.routes.enabled().count(), 1);
-        let t = c.routes.classify("AB12-0704");
+        let t = c.routes.targets();
         assert_eq!(t.len(), 1);
-        assert_eq!(t[0].dir, Path::new(r"R:\ab12"));
+        assert_eq!(t[0].dir, Path::new(r"R:\"));
     }
 
     #[test]
@@ -810,10 +695,7 @@ kind = "job-folder"
         let c = parse_ok(MINIMAL);
         assert!(c.routes.all()[0].enabled);
 
-        let text = MINIMAL.replace(
-            "kind = \"job-folder\"",
-            "kind = \"job-folder\"\nenabled = false",
-        );
+        let text = MINIMAL.replace("kind = \"tree\"", "kind = \"tree\"\nenabled = false");
         match parse(&text, p(), ConfigSource::BuiltIn) {
             Ok(_) => panic!("a config with nothing enabled should be rejected"),
             Err(e) => assert!(
@@ -844,66 +726,19 @@ kind = "job-folder"
 
     #[test]
     fn a_syntax_error_reports_a_line_and_column() {
-        let errs = parse_err("version = 1\n[[mapping]\nname = 'x'\n");
+        let errs = parse_err("version = 2\n[[mapping]\nname = 'x'\n");
         let msg = messages(&errs);
         assert!(msg.contains(r"C:\cfg.toml:"), "{msg}");
     }
-
-    #[test]
-    fn an_uncompilable_pattern_names_the_mapping_the_rule_and_the_reason() {
-        let text = MINIMAL.replace(r"'^([A-Z0-9]+)-([A-Z0-9]+)$'", "'^P[0-9+'");
-        let errs = parse_err(&text);
-        let msg = messages(&errs);
-        assert!(msg.contains(r"C:\cfg.toml:"), "{msg}");
-        assert!(msg.contains("mapping \"jobs\""), "{msg}");
-        assert!(msg.contains("rule 0"), "{msg}");
-        assert!(msg.contains("^P[0-9+"), "{msg}");
-    }
-
     #[test]
     fn a_duplicate_name_is_rejected() {
         let text = format!(
             "{MINIMAL}\n{}",
-            MINIMAL.trim_start_matches("\nversion = 1\n")
+            MINIMAL.trim_start_matches("\nversion = 2\n")
         );
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("duplicate mapping name"));
     }
-
-    #[test]
-    fn folder_on_a_flat_mapping_is_rejected() {
-        let text = MINIMAL.replace("kind = \"job-folder\"", "kind = \"flat\"");
-        let errs = parse_err(&text);
-        assert!(messages(&errs).contains("only meaningful on a job-folder"));
-    }
-
-    #[test]
-    fn a_job_mapping_without_a_folder_is_rejected() {
-        let text = MINIMAL.replace("  folder  = '${1}'\n", "");
-        let errs = parse_err(&text);
-        let msg = messages(&errs);
-        assert!(msg.contains("missing `folder`"), "{msg}");
-        assert!(msg.contains("share root"), "{msg}");
-    }
-
-    /// The silent one: an unsatisfiable reference expands to nothing and the
-    /// search falls back to the whole share.
-    #[test]
-    fn a_folder_referencing_a_missing_group_is_rejected() {
-        let text = MINIMAL.replace("folder  = '${1}'", "folder  = '${3}'");
-        let errs = parse_err(&text);
-        let msg = messages(&errs);
-        assert!(msg.contains("$3"), "{msg}");
-        assert!(msg.contains("does not capture"), "{msg}");
-    }
-
-    #[test]
-    fn a_bare_reference_that_swallows_text_is_rejected() {
-        let text = MINIMAL.replace("folder  = '${1}'", "folder  = '$1x'");
-        let errs = parse_err(&text);
-        assert!(messages(&errs).contains("$1x"));
-    }
-
     #[test]
     fn an_empty_path_is_rejected() {
         let text = MINIMAL.replace(r"path = 'R:\'", "path = ''");
@@ -911,51 +746,58 @@ kind = "job-folder"
         assert!(messages(&errs).contains("empty `path`"));
     }
 
-    /// A job-folder mapping's rules are the only thing that can turn a code
-    /// into a directory, so without them it can never match anything.
+    /// Every kind an indexed mapping can be, and each is searched whatever
+    /// was typed.
     #[test]
-    fn a_job_folder_mapping_with_no_rules_is_rejected() {
-        let text =
-            "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"job-folder\"\n";
-        let errs = parse_err(text);
-        assert!(messages(&errs).contains("no `[[mapping.rules]]`"));
-    }
-
-    /// An indexed mapping is the opposite: every file under it is already
-    /// known, so there is nothing for a rule to deduce.
-    #[test]
-    fn an_indexed_mapping_needs_no_rules() {
+    fn an_indexed_mapping_is_searched_for_every_query() {
         for kind in ["flat", "tree"] {
             let text = format!(
-                "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
+                "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
             );
             let parsed = parse(&text, p(), ConfigSource::BuiltIn)
                 .unwrap_or_else(|e| panic!("{kind} was rejected: {:?}", messages(&e)));
-            assert_eq!(parsed.routes.enabled().count(), 1);
+            let targets = parsed.routes.targets();
+            assert_eq!(targets.len(), 1, "{kind} reached nothing");
+            assert_eq!(targets[0].dir, std::path::Path::new("R:\\"));
         }
     }
 
-    /// And it matches every query, rather than being declared unroutable.
+    /// A configuration carrying the old patterns is refused rather than
+    /// quietly ignoring them. Silently accepting keys that no longer do
+    /// anything is how someone spends an afternoon editing a file that has no
+    /// effect.
     #[test]
-    fn a_rule_less_indexed_mapping_matches_anything() {
-        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"tree\"\n";
-        let parsed = parse(text, p(), ConfigSource::BuiltIn).expect("valid");
-        for code in ["11-D-0704", "anything at all", "zzz"] {
-            let targets = parsed.routes.classify(code);
-            assert_eq!(targets.len(), 1, "{code:?} reached nothing");
-            assert_eq!(targets[0].kind, MappingKind::Tree);
-            assert_eq!(targets[0].dir, std::path::Path::new("R:\\"));
-        }
+    fn a_leftover_rules_block_is_rejected() {
+        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+                    kind = \"tree\"\n\n  [[mapping.rules]]\n  pattern = '^x$'\n";
+        let errs = parse_err(text);
+        assert!(messages(&errs).contains("unknown key \"rules\""));
+    }
+
+    /// And a version 1 file gets one instruction rather than a wall of
+    /// "unknown key" for every pattern it carries.
+    #[test]
+    fn a_version_one_configuration_is_told_exactly_what_to_change() {
+        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+                    kind = \"job-folder\"\n\n  [[mapping.rules]]\n  pattern = '^x$'\n\
+                      folder = 'x'\n";
+        let errs = parse_err(text);
+        let msg = messages(&errs);
+        assert!(msg.contains("version 1 configuration"), "{msg}");
+        assert!(msg.contains("version = 2"), "{msg}");
+        assert!(msg.contains("kind"), "{msg}");
+        // And nothing else. Every `rules` block and every `job-folder` in the
+        // file would otherwise report its own "unknown key" beneath the one
+        // message that matters, and a wall of errors reads as a broken file
+        // rather than as an out-of-date one.
+        assert_eq!(errs.len(), 1, "{msg}");
     }
 
     #[test]
     fn an_unknown_key_is_rejected_rather_than_ignored() {
         // `enable` instead of `enabled` would otherwise leave a share the
         // user believes they turned off still being searched.
-        let text = MINIMAL.replace(
-            "kind = \"job-folder\"",
-            "kind = \"job-folder\"\nenable = false",
-        );
+        let text = MINIMAL.replace("kind = \"tree\"", "kind = \"tree\"\nenable = false");
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("unknown key \"enable\""));
     }
@@ -1002,9 +844,9 @@ kind = "job-folder"
             // Root keys must precede the first table header, so this goes
             // beside `version` rather than after the mapping.
             let errs = parse_err(&MINIMAL.replace(
-                "version = 1",
+                "version = 2",
                 &format!(
-                    "version = 1
+                    "version = 2
 {bad}"
                 ),
             ));
@@ -1028,21 +870,17 @@ kind = "job-folder"
     #[test]
     fn a_second_enabled_flat_mapping_is_rejected_by_name() {
         let text = r#"
-version = 1
+version = 2
 
 [[mapping]]
 name = "custompro"
 path = 'V:\Documents\custpro'
 kind = "flat"
-  [[mapping.rules]]
-  pattern = '^P[0-9]+'
 
 [[mapping]]
 name = "archive"
 path = 'W:\archive'
 kind = "flat"
-  [[mapping.rules]]
-  pattern = '^AR[0-9]+'
 "#;
         let errs = parse_err(text);
         let msg = messages(&errs);
@@ -1050,7 +888,7 @@ kind = "flat"
         assert!(msg.contains("custompro"), "{msg}");
         assert!(msg.contains("archive"), "{msg}");
         assert!(
-            msg.contains("job-folder"),
+            msg.contains("tree"),
             "the message should say what to do: {msg}"
         );
     }
@@ -1058,94 +896,85 @@ kind = "flat"
     #[test]
     fn a_disabled_second_flat_mapping_is_fine() {
         let text = r#"
-version = 1
+version = 2
 
 [[mapping]]
 name = "custompro"
 path = 'V:\Documents\custpro'
 kind = "flat"
-  [[mapping.rules]]
-  pattern = '^P[0-9]+'
 
 [[mapping]]
 name = "archive"
 path = 'W:\archive'
 kind = "flat"
 enabled = false
-  [[mapping.rules]]
-  pattern = '^AR[0-9]+'
 "#;
         let c = parse_ok(text);
         assert_eq!(c.routes.flat().count(), 1);
         assert_eq!(c.routes.all().len(), 2);
     }
 
-    /// Several job-folder mappings are supported today.
+    /// Several tree mappings are supported, and all of them are searched.
     #[test]
-    fn several_job_folder_mappings_are_accepted() {
+    fn several_tree_mappings_are_accepted() {
         let text = r#"
-version = 1
+version = 2
 
 [[mapping]]
 name = "jobs"
 path = 'R:\'
-kind = "job-folder"
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
-  folder  = '${1}'
+kind = "tree"
 
 [[mapping]]
 name = "old-jobs"
 path = 'S:\archive'
-kind = "job-folder"
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
-  folder  = '${1}'
+kind = "tree"
 "#;
         let c = parse_ok(text);
         assert_eq!(c.routes.enabled().count(), 2);
-        // Both match, in configuration order.
-        let t = c.routes.classify("AB12-0704");
+        // Both searched, in configuration order.
+        let t = c.routes.targets();
         assert_eq!(t.len(), 2);
-        assert_eq!(t[0].dir, Path::new(r"R:\ab12"));
-        assert_eq!(t[1].dir, Path::new(r"S:\archive\ab12"));
+        assert_eq!(t[0].dir, Path::new(r"R:\"));
+        assert_eq!(t[1].dir, Path::new(r"S:\archive"));
     }
 
     #[test]
     fn an_unknown_kind_is_rejected() {
-        let text = MINIMAL.replace("kind = \"job-folder\"", "kind = \"folder\"");
+        let text = MINIMAL.replace("kind = \"tree\"", "kind = \"folder\"");
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("unknown kind"));
     }
 
     #[test]
     fn a_missing_or_wrong_version_is_rejected() {
-        let errs = parse_err(&MINIMAL.replace("version = 1", "version = 9"));
+        let errs = parse_err(&MINIMAL.replace("version = 2", "version = 9"));
         assert!(messages(&errs).contains("unsupported version 9"));
 
-        let errs = parse_err(&MINIMAL.replace("version = 1\n", ""));
+        let errs = parse_err(&MINIMAL.replace("version = 2\n", ""));
         assert!(messages(&errs).contains("missing `version`"));
     }
 
     #[test]
     fn a_file_with_no_mappings_is_rejected() {
-        let errs = parse_err("version = 1\n");
+        let errs = parse_err("version = 2\n");
         assert!(messages(&errs).contains("no `[[mapping]]`"));
     }
 
     /// Fixing four typos should take one run, not four.
+    ///
+    /// The one exception is a version 1 file, which stops at the migration
+    /// message - see `a_version_one_configuration_is_told_exactly_what_to_change`.
     #[test]
     fn every_error_is_reported_at_once() {
         let text = "
-version = 1
+version = 2
 
 [[mapping]]
 name = \"a\"
 path = ''
 kind = \"nonsense\"
-
-  [[mapping.rules]]
-  pattern = '^P[0-9+'
+enable = false
 ";
         let errs = parse_err(text);
         assert!(

@@ -9,7 +9,7 @@
 # Use literal strings ('...') for paths. TOML *basic* strings ("...") process
 # backslash escapes, so "R:\Documents" is a parse error.
 
-version = 1
+version = 2
 
 
 # ---------------------------------------------------------------------------

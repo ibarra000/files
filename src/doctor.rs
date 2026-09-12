@@ -46,50 +46,42 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  {:<3} {:<14} {:<11} {:<8} {:<28} {:>5}",
-        "#", "mapping", "kind", "enabled", "path", "rules"
+        "  {:<3} {:<14} {:<11} {:<8} path",
+        "#", "mapping", "kind", "enabled"
     );
     for m in routes.all() {
         let _ = writeln!(
             out,
-            "  {:<3} {:<14} {:<11} {:<8} {:<28} {:>5}",
+            "  {:<3} {:<14} {:<11} {:<8} {}",
             m.id.index(),
             m.name,
             m.kind.label(),
             if m.enabled { "yes" } else { "no" },
             m.path.display(),
-            m.rules.len()
         );
     }
 
+    // Kept, and deliberately boring. It used to answer "which folder will it
+    // look in, and why not the other share" - a real question when a pattern
+    // decided. Every share is searched now, so the honest answer is the list
+    // above, and saying so beats quietly dropping the flag people learned to
+    // reach for.
     if let Some(code) = query {
         let _ = writeln!(out);
-        let _ = writeln!(out, "route {code:?}:");
-        let targets = routes.classify(code);
+        let targets = routes.targets();
         if targets.is_empty() {
-            let _ = writeln!(out, "  (no mapping matches)");
-        }
-        for t in &targets {
-            let _ = writeln!(
-                out,
-                "  {:<14} {:<11} {}",
-                routes.label(t.mapping),
-                t.kind.label(),
-                t.dir.display()
-            );
-        }
-        // The single most useful line here: it answers "why did it not also
-        // look in the other share".
-        if let Some(last) = targets.last()
-            && let Some(m) = routes.get(last.mapping)
-            && m.rules.iter().any(|r| r.stop() && r.pattern_matches(code))
-            && routes.enabled().count() > targets.len()
-        {
-            let _ = writeln!(
-                out,
-                "  (stopped here: a rule in {:?} has stop = true)",
-                m.name
-            );
+            let _ = writeln!(out, "search {code:?}: no share is enabled");
+        } else {
+            let _ = writeln!(out, "search {code:?}: every enabled share, in order");
+            for t in &targets {
+                let _ = writeln!(
+                    out,
+                    "  {:<14} {:<11} {}",
+                    routes.label(t.mapping),
+                    t.kind.label(),
+                    t.dir.display()
+                );
+            }
         }
     }
 

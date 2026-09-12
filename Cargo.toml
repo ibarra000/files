@@ -17,7 +17,6 @@ crossterm = "0.27"
 # Fuzzy matching is not currently wired up, but is deliberately kept available:
 # the ranking pipeline in `search::topk` is shaped so a fuzzy scorer can drop in.
 nucleo = "0.5"
-regex = "1.10"
 
 # Load-bearing as of 0.2: previously only present transitively via `nucleo`.
 memchr = "2.8"

@@ -441,7 +441,6 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
     // Warm the SMB session before anything needs it. First contact with a
     // mapped drive can cost seconds of session setup and DFS resolution.
     ctx.source.prewarm(&dir);
-    ctx.source.prewarm(&ctx.settings.base_path);
 
     // Serve the previous run's index immediately. This is what turns a cold
     // start from "unusable for seconds" into "usable now, refreshing".

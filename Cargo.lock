@@ -478,7 +478,6 @@ dependencies = [
  "proptest",
  "ratatui",
  "rayon",
- "regex",
  "smallvec",
  "tempfile",
  "thiserror",
