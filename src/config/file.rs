@@ -737,9 +737,37 @@ kind = "job-folder"
 
     /// The precedence that keeps a dashed CustomPro code out of the job share.
     #[test]
-    fn the_shipped_default_stops_on_custompro() {
+    /// Every configured share is searched, and the results merge into one
+    /// ranked list.
+    ///
+    /// This used to assert the opposite: a CustomPro code `stop`ped there, so
+    /// the job share was never consulted. That existed because routing had to
+    /// *choose* a folder, and choosing wrongly meant probing a path that did
+    /// not exist on every keystroke. Both shares are indexed now, so there is
+    /// nothing to choose between - a code that matches in both legitimately
+    /// appears from both.
+    fn the_shipped_default_searches_every_share() {
         let c = builtin();
-        assert_eq!(c.routes.classify("P12345-001").len(), 1);
+        assert_eq!(c.routes.classify("P12345-001").len(), 2);
+        assert_eq!(c.routes.classify("anything at all").len(), 2);
+    }
+
+    /// And neither share carries a pattern any more, which is the point.
+    #[test]
+    fn the_shipped_default_has_no_rules_at_all() {
+        for mapping in builtin().routes.all() {
+            assert!(
+                mapping.rules.is_empty(),
+                "mapping {:?} still carries {} rule(s)",
+                mapping.name,
+                mapping.rules.len()
+            );
+            assert!(
+                mapping.kind.is_indexed(),
+                "{:?} is not indexed",
+                mapping.name
+            );
+        }
     }
 
     /// Guards the one silent way to break this file: writing a pattern as a

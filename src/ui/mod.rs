@@ -392,7 +392,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_code_offers_the_expected_forms() {
+    /// An unusual query is searched for rather than turned away.
+    ///
+    /// The screen used to explain which *shapes* of code it would accept,
+    /// because a pattern had to recognise one before anything looked
+    /// anywhere. Both shares are indexed now, so there is nothing to
+    /// recognise: an odd query finds nothing, and saying "no matches" is the
+    /// honest answer where "does not look like a job code" was a refusal
+    /// dressed as advice.
+    fn an_unusual_query_is_searched_rather_than_turned_away() {
         let mut s = state();
         let now = Instant::now();
         for c in "!!!!".chars() {
@@ -402,7 +410,7 @@ mod tests {
             );
         }
         let text = render_to_text(&s);
-        assert!(text.contains("does not look like a job code"), "{text}");
+        assert!(!text.contains("does not look like a job code"), "{text}");
     }
 
     #[test]

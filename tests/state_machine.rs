@@ -31,6 +31,33 @@ fn state() -> (AppState, Instant) {
     (AppState::new(Settings::default(), now), now)
 }
 
+/// A state whose job share still routes by pattern.
+///
+/// The shipped configuration indexes both shares, so it no longer produces a
+/// job-folder target at all - but the routing and prefetch machinery still
+/// exists and is still reachable by anyone who configures it, so the tests
+/// covering it supply their own table rather than leaning on a default that
+/// has moved on.
+fn routed_state() -> (AppState, Instant) {
+    let toml = "version = 1\n\n\
+         [[mapping]]\n\
+         name = 'jobs'\n\
+         path = 'R:\\'\n\
+         kind = \"job-folder\"\n\n\
+         [[mapping.rules]]\n\
+         pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\n\
+         folder = '${1}${2}'\n";
+    let parsed = files::config::file::parse(
+        toml,
+        std::path::Path::new("test"),
+        files::paths::ConfigSource::BuiltIn,
+    )
+    .expect("the fixture parses");
+    let settings = Settings::with_routes(Arc::new(parsed.routes), |s| s);
+    let now = Instant::now();
+    (AppState::new(settings, now), now)
+}
+
 fn key(c: char) -> AppEvent {
     AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
 }
@@ -95,9 +122,27 @@ fn every_keystroke_past_the_minimum_dispatches_a_local_search() {
     assert_eq!(s.phase, QueryPhase::LocalPending);
 }
 
+/// An unusual query is searched for rather than refused.
+///
+/// This asserted the opposite: a pattern had to recognise a code before
+/// anything would look anywhere, so a string matching none of them never
+/// reached the index at all. Both shares are indexed now, so there is nothing
+/// to recognise - the query runs and finds nothing, which is a different
+/// answer from declining to look, and the two used to be indistinguishable.
 #[test]
-fn an_unresolvable_code_says_so_rather_than_searching() {
+fn an_unusual_code_is_searched_for_rather_than_refused() {
     let (mut s, now) = state();
+    let r = type_in(&mut s, "!!!", now);
+    assert_eq!(s.phase, QueryPhase::LocalPending);
+    assert_ne!(s.empty_reason, Some(EmptyReason::NoPathPattern));
+    assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
+}
+
+/// The refusal remains for a configuration made only of patterns, where
+/// declining really is all it can do.
+#[test]
+fn a_patterns_only_configuration_still_declines_what_it_cannot_route() {
+    let (mut s, now) = routed_state();
     let r = type_in(&mut s, "!!!", now);
     assert_eq!(s.phase, QueryPhase::Unresolvable);
     assert_eq!(s.empty_reason, Some(EmptyReason::NoPathPattern));
@@ -504,7 +549,9 @@ fn continued_typing_pushes_the_verify_deadline_out() {
 #[test]
 fn prefetch_fires_sooner_than_verification() {
     assert!(PREFETCH_DEBOUNCE < VERIFY_DEBOUNCE);
-    let (mut s, now) = state();
+    // Only a routed job folder is ever prefetched: an indexed share is
+    // already in memory, so there is nothing to speculate about.
+    let (mut s, now) = routed_state();
     type_in(&mut s, "11-D-0704", now);
     let r = s.update(AppEvent::Tick, now + PREFETCH_DEBOUNCE);
     assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Prefetch { .. })));

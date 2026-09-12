@@ -1,111 +1,70 @@
-# files - job code routing
+# files - the shares to search
 #
 # Written automatically on first run. Edit freely, then check it with
 #
 #     files --check-config
 #
-# which validates everything below without touching the network, and prints
-# where a given code would be searched.
+# which validates everything below without touching the network.
 #
-# Use literal strings ('...') for paths and patterns. TOML *basic* strings
-# ("...") process backslash escapes, so "R:\Documents" is a parse error and
-# "\d" silently becomes "d".
+# Use literal strings ('...') for paths. TOML *basic* strings ("...") process
+# backslash escapes, so "R:\Documents" is a parse error.
 
 version = 1
 
 
 # ---------------------------------------------------------------------------
 # CustomPro. One large directory holding every job's files directly, so a
-# listing here is the whole share. That is why it is indexed and cached.
+# listing of it is the whole share.
 #
-# THIS MAPPING MUST COME FIRST. CustomPro codes contain dashes too
-# ("P12345-001", "PP987-A"), so if the job rules below were tried first they
-# would claim such a code, build a folder name from it, and probe a
-# nonexistent path under R:\ on every keystroke. `stop` is what prevents
-# that: when a rule here matches, no later mapping is consulted.
-#
-# Set stop = false to search the job shares for these codes as well; results
-# from every matching mapping are merged into one ranked list.
+# kind = "flat" reads that single directory and keeps it in memory. It also
+# gets the cheap freshness check: the directory's timestamp is probed about
+# once a minute - three round trips - and a full re-read only happens when it
+# has actually moved.
 # ---------------------------------------------------------------------------
 [[mapping]]
 name    = "custompro"
 path    = 'V:\Documents\custpro'
 kind    = "flat"
 enabled = true
-stop    = true
-
-  [[mapping.rules]]
-  pattern = '^PP'
-
-  [[mapping.rules]]
-  pattern = '^P[0-9]+'
 
 
 # ---------------------------------------------------------------------------
-# Per-job folders. Each code resolves to one small subdirectory of the root,
-# fetched on demand and cached briefly.
+# The job share. Walked whole, every folder, and kept in memory.
 #
-# Rules are ordered and the FIRST match within a mapping wins, so the more
-# specific patterns must come before the more general ones.
+# This used to be a set of regular expressions that turned a code into the one
+# folder it was expected to live in. That worked for codes whose folders
+# followed the naming rule and failed silently for every other: the file was
+# not reported as missing, it was invisible, because nothing ever looked in
+# the folder it was actually in.
 #
-# `folder` builds the subdirectory name from the pattern's capture groups. It
-# is a regex replacement template: use ${1}, ${2}. Prefer the braces - a bare
-# $1x means "the group named 1x", which does not exist and would expand to
-# nothing.
+# kind = "tree" removes the guess. Every folder under the path is read, so a
+# code is *searched for* rather than deduced, and a file in a folder no rule
+# would have predicted is found like any other. A match on a folder name
+# brings that folder's files with it, which is how a job code usually behaves.
+#
+# The cost is a background walk - one to three minutes for a share of a few
+# hundred thousand folders - which streams results as it goes, so the share is
+# searchable about a second in rather than when it finishes.
 # ---------------------------------------------------------------------------
 [[mapping]]
 name    = "jobs"
 path    = 'R:\'
-kind    = "job-folder"
+kind    = "tree"
 enabled = true
-case    = "lower"          # lower | upper | preserve
-
-  # Four fields, single-LETTER second field:  11-D-0704-A2 -> 11d
-  #
-  # The second field is [A-Z] - letters only, not [A-Z0-9]. Widening it
-  # reroutes codes such as 11-3-0704. Please do not "tidy" it.
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)-([A-Z0-9]+)$'
-  folder  = '${1}${2}'
-
-  # Three fields, single-LETTER second field:  11-D-0704 -> 11d
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'
-  folder  = '${1}${2}'
-
-  # Three fields, second field two or more characters:  11-DX-0704 -> 11
-  #
-  # Note the gap this leaves against the rule above: a single-DIGIT middle
-  # field (11-3-0704) satisfies neither and resolves to nothing. That is
-  # existing behaviour, pinned by a test. If such codes are real, add a rule
-  # here rather than widening the character class above.
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z0-9]{2,})-([A-Z0-9]+)$'
-  folder  = '${1}'
-
-  # Two fields:  AB12-0704 -> ab12
-  [[mapping.rules]]
-  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
-  folder  = '${1}'
 
 
 # ---------------------------------------------------------------------------
 # A third share. Uncomment, adjust, and check it with `files --check-config`.
 #
-# NOTE: this build indexes ONE flat mapping. A second enabled `kind = "flat"`
-# is refused at startup, by name, rather than silently searched against the
-# first one's index. Any number of `job-folder` mappings is fine.
+# An indexed mapping - "flat" or "tree" - needs no patterns: every file under
+# it is already known, so there is nothing to deduce. Results from every
+# configured share are merged into one ranked list.
 # ---------------------------------------------------------------------------
 # [[mapping]]
 # name    = "archive"
 # path    = 'S:\archive'
-# kind    = "job-folder"
+# kind    = "tree"
 # enabled = true
-#
-#   # AR1234-56 -> S:\archive\ar1234
-#   [[mapping.rules]]
-#   pattern = '^(AR[0-9]+)-([0-9]+)$'
-#   folder  = '${1}'
 
 
 # ---------------------------------------------------------------------------
@@ -113,27 +72,13 @@ case    = "lower"          # lower | upper | preserve
 # what is set here.
 # ---------------------------------------------------------------------------
 [settings]
-
-# Which program a chosen result is handed to.
-#
-#   pdf    gather every page of the code - `11-D-0704`, `11-D-0704_Page1`,
-#          `11-D-0704Page12` - into one document and open it with whatever
-#          this machine has registered for .pdf
-#   avwin  open the single selected file with avwin.exe
-#
-# Written uncommented because F2 switches viewers while the program is
-# running and saves the choice back here. Setting FILES_VIEWER or passing
-# --viewer makes F2 a session-only switch, since both outrank this file.
-viewer = "pdf"
-
-# Open merged PDFs with a specific program instead of the registered handler.
-# Not checked at startup: this file roams between machines, and refusing to
-# start on one where the program is not installed would be worse than the
-# error you get when you actually press Enter.
-# pdf_viewer    = 'C:\Program Files\SumatraPDF\SumatraPDF.exe'
-
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes
 # persist       = true               # keep the on-disk index between runs
-# history       = true               # remember codes for recall with the Up arrow
+# history       = true               # remember codes between sessions
+
+# Which viewer Enter uses. Left uncommented because F2 switches it while
+# running and saves the choice here, and the writer replaces this line rather
+# than appending a second one.
+viewer = "pdf"                       # pdf | avwin

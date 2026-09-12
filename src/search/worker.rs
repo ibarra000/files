@@ -358,8 +358,41 @@ mod tests {
     use std::time::Duration;
 
     fn backend(src: FakeDirSource) -> Arc<Backend> {
+        backend_with(Settings::default(), src)
+    }
+
+    /// A backend whose job share still routes by pattern.
+    ///
+    /// The shipped configuration indexes both shares now, so it no longer
+    /// produces a job-folder target at all - but the machinery still exists
+    /// and is still reachable by anyone who configures it, so the tests that
+    /// cover it supply their own routing table rather than leaning on a
+    /// default that has moved on.
+    fn job_backend(src: FakeDirSource) -> Arc<Backend> {
+        // Only the job mapping. An indexed share matches every query, so
+        // including one would make it the first target for every code and
+        // these tests would silently stop exercising the job path at all.
+        let toml = "version = 1\n\n\
+             [[mapping]]\n\
+             name = 'jobs'\n\
+             path = 'R:\\'\n\
+             kind = \"job-folder\"\n\n\
+             [[mapping.rules]]\n\
+             pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\n\
+             folder = '${1}${2}'\n";
+        let parsed = crate::config::file::parse(
+            toml,
+            std::path::Path::new("test"),
+            crate::paths::ConfigSource::BuiltIn,
+        )
+        .expect("the fixture parses");
+        let settings = Settings::with_routes(Arc::new(parsed.routes), |s| s);
+        backend_with(settings, src)
+    }
+
+    fn backend_with(settings: Settings, src: FakeDirSource) -> Arc<Backend> {
         Arc::new(Backend {
-            settings: Settings::default(),
+            settings,
             store: Arc::new(IndexStore::default()),
             source: Arc::new(src),
         })
@@ -383,7 +416,7 @@ mod tests {
 
     #[test]
     fn resolves_a_job_query_to_its_folder() {
-        let b = backend(FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]));
+        let b = job_backend(FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]));
         assert_eq!(b.dir_for("11-D-0704"), Some(PathBuf::from("R:\\11d")));
     }
 
@@ -393,10 +426,24 @@ mod tests {
         assert_eq!(b.dir_for("P12345"), Some(Settings::default().custpro_path));
     }
 
+    /// Nothing is unresolvable against an indexed share.
+    ///
+    /// This used to assert `None`: routing had to recognise a code before it
+    /// would look anywhere, so a string matching no pattern was refused
+    /// outright and the status line said "not a recognised job code". That is
+    /// the behaviour being removed - an indexed share knows every file it
+    /// holds, so an unusual query returns no matches rather than being
+    /// declined. Against a routing table that still has patterns, the old
+    /// answer is still the right one.
     #[test]
-    fn an_unresolvable_query_has_no_directory() {
+    fn nothing_is_unresolvable_against_an_indexed_share() {
         let b = backend(FakeDirSource::new());
-        assert_eq!(b.dir_for("!!!"), None);
+        assert_eq!(b.dir_for("!!!"), Some(Settings::default().custpro_path));
+
+        // A routing table made only of patterns still declines what matches
+        // none of them, which is what the whole change is moving away from.
+        let routed = job_backend(FakeDirSource::new());
+        assert_eq!(routed.dir_for("!!!"), None);
     }
 
     #[test]
@@ -414,7 +461,7 @@ mod tests {
     #[test]
     fn a_job_query_fetches_and_then_reuses_the_cache() {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf", "b.pdf"]);
-        let b = backend(src.clone());
+        let b = job_backend(src.clone());
         assert_eq!(
             b.snapshot_for("11-D-0704", &CancelToken::never())
                 .unwrap()
@@ -487,7 +534,7 @@ mod tests {
     fn a_failed_job_fetch_reports_the_reason() {
         let src = FakeDirSource::new();
         let (tx, rx) = bounded(64);
-        let mut w = spawn_search(backend(src), tx).unwrap();
+        let mut w = spawn_search(job_backend(src), tx).unwrap();
         w.submit(|epoch| SearchRequest {
             query: "11-D-0704".into(),
             epoch,
@@ -528,7 +575,7 @@ mod tests {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]);
         src.set_hang(true);
         let (tx, _rx) = bounded(64);
-        let mut w = spawn_search(backend(src), tx).unwrap();
+        let mut w = spawn_search(job_backend(src), tx).unwrap();
         w.submit(|epoch| SearchRequest {
             query: "11-D-0704".into(),
             epoch,

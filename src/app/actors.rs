@@ -362,10 +362,14 @@ mod tests {
     fn start() -> (Actors, Receiver<AppEvent>) {
         let source: Arc<dyn DirSource> = Arc::new(
             FakeDirSource::new()
-                .with_dir("V:\\", &["alpha.pdf"])
-                // The matcher looks for the typed code inside the filename,
-                // so the fixtures have to contain it.
-                .with_dir("R:\\11d", &["11-D-0704 one.pdf", "11-D-0704 two.pdf"]),
+                .with_dir(crate::config::CUSTPRO_PATH, &["alpha.pdf"])
+                // A tree now, reachable from its root, because the job share
+                // is walked rather than routed to. The matcher looks for the
+                // typed code inside the filename, so the fixtures contain it.
+                .with_tree(
+                    "R:\\",
+                    &["11d\\11-D-0704 one.pdf", "11d\\11-D-0704 two.pdf"],
+                ),
         );
         Actors::start(settings(), source, Some(1)).unwrap()
     }
@@ -373,6 +377,21 @@ mod tests {
     #[test]
     fn a_dispatched_search_produces_a_result() {
         let (actors, rx) = start();
+
+        // The job share is walked in the background now rather than fetched
+        // on demand, so a search dispatched before the walk has published
+        // anything legitimately finds nothing. Waiting for the index is the
+        // honest fixture; asserting on the first answer would be asserting on
+        // a race.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && actors.backend.store.tree().is_none() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            actors.backend.store.tree().is_some(),
+            "the tree should have been walked"
+        );
+
         let mut cmds = CmdList::new();
         cmds.push(Cmd::Search {
             query: "11-D-0704".into(),

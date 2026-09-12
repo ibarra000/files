@@ -115,8 +115,12 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
     let _ = writeln!(out, "source: {}", source.name());
     let _ = writeln!(out);
 
-    for root in [&settings.base_path, &settings.custpro_path] {
-        report_root(root, source.as_ref(), out);
+    // Every configured mapping, rather than the two derived convenience
+    // fields. Those name the first flat and first job-folder mapping, so a
+    // configuration without one of those kinds - which the shipped one now is
+    // - would have silently reported an empty path as a root.
+    for mapping in settings.routes.enabled() {
+        report_root(&mapping.path, source.as_ref(), out);
         let _ = writeln!(out);
     }
 

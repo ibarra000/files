@@ -357,9 +357,46 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_code_is_called_out() {
+    /// An unusual query is searched for rather than refused.
+    ///
+    /// This used to assert "not a recognised job code": a pattern had to
+    /// recognise a string before anything would look anywhere, so an
+    /// unfamiliar code was declined rather than searched. With both shares
+    /// indexed there is nothing to recognise - an odd query simply finds
+    /// nothing, which is a different and far more honest answer, because
+    /// "I will not look" and "I looked and it is not there" were previously
+    /// indistinguishable.
+    fn an_unusual_query_is_searched_for_rather_than_refused() {
         let now = Instant::now();
         let mut s = state_at(now);
+        for c in "!!!".chars() {
+            s.update(
+                AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                now,
+            );
+        }
+        let line = render(&s, now, EPOCH);
+        assert_ne!(line.text, "not a recognised job code");
+        assert_eq!(s.phase, QueryPhase::LocalPending);
+    }
+
+    /// The refusal still exists for a configuration made only of patterns,
+    /// where declining is the honest answer.
+    #[test]
+    fn a_patterns_only_configuration_still_declines_what_it_cannot_route() {
+        let now = Instant::now();
+        let toml = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+                    kind = \"job-folder\"\n\n[[mapping.rules]]\n\
+                    pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\nfolder = '${1}${2}'\n";
+        let parsed = crate::config::file::parse(
+            toml,
+            std::path::Path::new("test"),
+            crate::paths::ConfigSource::BuiltIn,
+        )
+        .expect("the fixture parses");
+        let settings = Settings::with_routes(std::sync::Arc::new(parsed.routes), |s| s);
+
+        let mut s = AppState::new(settings, now);
         for c in "!!!".chars() {
             s.update(
                 AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),

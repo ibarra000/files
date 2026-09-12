@@ -105,13 +105,60 @@ const LEGACY_BASE: &str = r"R:\";
 
 /// The shipped defaults with the *old* CustomPro path, so this compares
 /// routing alone and not the `V:\` -> `V:\Documents\custpro` correction.
+/// The rules the shipped configuration used to carry, restated here.
+///
+/// They used to be read from `default_routes()`. The shipped configuration
+/// indexes both shares now and carries no patterns at all, so reading them
+/// from it would test nothing - but the rule engine still exists and is still
+/// reachable by anyone who configures `kind = "job-folder"`, so the guarantee
+/// it reproduces the original implementation is still worth holding. Pinning
+/// the fixture here is what lets the shipped defaults move on without
+/// quietly turning this whole file into a tautology.
+const LEGACY_RULES: &str = "version = 1
+
+[[mapping]]
+name    = 'custompro'
+path    = 'V:\\'
+kind    = \"flat\"
+stop    = true
+
+  [[mapping.rules]]
+  pattern = '^PP'
+
+  [[mapping.rules]]
+  pattern = '^P[0-9]+'
+
+[[mapping]]
+name    = 'jobs'
+path    = 'R:\\'
+kind    = \"job-folder\"
+case    = \"lower\"
+
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)-([A-Z0-9]+)$'
+  folder  = '${1}${2}'
+
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'
+  folder  = '${1}${2}'
+
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z0-9]{2,})-([A-Z0-9]+)$'
+  folder  = '${1}'
+
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z0-9]+)$'
+  folder  = '${1}'
+";
+
 fn parity_routes() -> Arc<Routes> {
-    let mut routes = default_routes();
-    assert!(
-        routes.set_path("custompro", PathBuf::from(LEGACY_FLAT)),
-        "the shipped defaults should contain a mapping named custompro"
-    );
-    Arc::new(routes)
+    let parsed = files::config::file::parse(
+        LEGACY_RULES,
+        Path::new("routing_parity"),
+        files::paths::ConfigSource::BuiltIn,
+    )
+    .expect("the frozen rules parse");
+    Arc::new(parsed.routes)
 }
 
 #[track_caller]
@@ -229,17 +276,31 @@ fn the_shipped_defaults_use_the_corrected_custompro_directory() {
     assert_eq!(flat, vec![Path::new(r"V:\Documents\custpro")]);
 }
 
+/// The shipped defaults index both shares and route neither.
+///
+/// This asserted one flat and one *job-folder* mapping, which was the shape
+/// that made a file in an unpredicted folder unreachable. Both are indexed
+/// now: the flat share because it is one directory, the job share because it
+/// is a tree - and neither carries a pattern.
 #[test]
-fn the_shipped_defaults_have_one_flat_and_one_job_mapping() {
+fn the_shipped_defaults_index_both_shares_and_route_neither() {
     let routes = default_routes();
     assert_eq!(routes.enabled().count(), 2);
     assert_eq!(routes.flat().count(), 1);
     assert_eq!(
         routes
             .enabled()
-            .filter(|m| m.kind == MappingKind::JobFolder)
+            .filter(|m| m.kind == MappingKind::Tree)
             .count(),
         1
+    );
+    assert_eq!(
+        routes
+            .enabled()
+            .filter(|m| m.kind == MappingKind::JobFolder)
+            .count(),
+        0,
+        "nothing is routed by pattern any more"
     );
 }
 
