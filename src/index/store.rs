@@ -394,6 +394,28 @@ impl IndexStore {
         });
     }
 
+    /// Records that live change notification is not running here.
+    ///
+    /// Only when nothing worse is already being reported. A subtree the walk
+    /// could not read is a hole in what can be found at all, while a dead
+    /// watch only means new files take until the floor to appear - and
+    /// replacing the first message with the second would hide the one somebody
+    /// has to act on.
+    ///
+    /// Set from the actor on every wake rather than once, because a
+    /// *successful walk* publishes a fresh verdict on the tree's health, and a
+    /// walk succeeding is not evidence that the watch came back.
+    pub fn note_live_updates_unavailable(&self) {
+        self.update_tree_status(|s| {
+            if s.health == Health::Ok {
+                s.health = Health::Degraded {
+                    reason: DegradeReason::LiveUpdatesUnavailable,
+                    since: Instant::now(),
+                };
+            }
+        });
+    }
+
     pub fn note_tree_cache_rejected(&self, why: String) {
         self.update_tree_status(|s| s.cache_rejected = Some(why));
     }

@@ -206,6 +206,17 @@ impl WatchQueue {
         }
     }
 
+    /// Whether a batch is actionable now, and whether it needs a full re-walk.
+    ///
+    /// A peek, not a take. The scheduler may decide the update has to wait for
+    /// its spacing floor, and a set consumed before that decision would be a
+    /// set of changes nobody ever applies.
+    pub fn due(&self, now: Instant) -> Option<bool> {
+        let p = self.inner.lock();
+        let since = p.since?;
+        (now >= since + self.debounce).then_some(p.full)
+    }
+
     /// Why live updates are not running here, if they are not.
     pub fn unavailable(&self) -> Option<String> {
         self.inner.lock().unavailable.clone()

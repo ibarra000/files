@@ -53,6 +53,7 @@ struct Sim {
     have_snapshot: bool,
     scans: Vec<Scan>,
     probes: usize,
+    patches: usize,
 }
 
 impl Sim {
@@ -65,6 +66,7 @@ impl Sim {
             have_snapshot: false,
             scans: Vec::new(),
             probes: 0,
+            patches: 0,
         }
     }
 
@@ -73,7 +75,16 @@ impl Sim {
     /// Mirrors the actor's driver loop exactly, including its step bound, so a
     /// rule that failed to terminate would show up here first.
     fn wake(&mut self, share: &mut dyn Share, forced: bool) -> Instant {
-        let mut input = Input::Woke { forced };
+        self.drive(share, Input::Woke { forced })
+    }
+
+    /// One wake-up caused by the watcher rather than the clock.
+    fn notify(&mut self, share: &mut dyn Share, full: bool) -> Instant {
+        self.drive(share, Input::Changed { full })
+    }
+
+    fn drive(&mut self, share: &mut dyn Share, first: Input) -> Instant {
+        let mut input = first;
         for _ in 0..6 {
             let decision = self.sched.on(self.now, input, self.have_snapshot);
             match decision.step {
@@ -93,6 +104,10 @@ impl Sim {
                         ok,
                     });
                     input = Input::Scanned(outcome);
+                }
+                Step::ApplyChanges => {
+                    self.patches += 1;
+                    input = Input::Applied(Ok(()));
                 }
                 Step::ConfirmFresh | Step::Wait => {
                     assert!(
@@ -637,5 +652,155 @@ proptest! {
             "{} completed enumerations across {floors} floors is the probe interval, not the floor",
             refusing.completed_scans()
         );
+    }
+}
+
+// --- live change notification ----------------------------------------------
+
+/// A tree never probes, so a notification is the only thing that can tell it
+/// anything before the floor comes round. What it does with one is therefore
+/// the whole of the live-update behaviour.
+mod notifications {
+    use super::*;
+
+    /// A walked tree: no stamp, ever.
+    struct Tree;
+
+    impl Share for Tree {
+        fn probe(&mut self, _now: Instant) -> Result<DirStamp, EnumError> {
+            Err(EnumError::AccessDenied(5))
+        }
+        fn scan(&mut self, _now: Instant) -> Result<Option<DirStamp>, EnumError> {
+            Ok(None)
+        }
+    }
+
+    fn walked() -> Sim {
+        let mut sim = Sim::new(Cadence::tree());
+        sim.now = sim.wake(&mut Tree, false);
+        assert_eq!(sim.scan_count(), 1, "the first pass should have happened");
+        sim
+    }
+
+    /// The point of the whole mechanism: a described change is patched in, not
+    /// walked. A re-walk costs one to three minutes of round trips, so doing
+    /// one per notification would be a share under permanent enumeration.
+    #[test]
+    fn a_described_change_is_patched_rather_than_walked() {
+        let mut sim = walked();
+        sim.now += Duration::from_secs(60);
+        sim.notify(&mut Tree, false);
+
+        assert_eq!(sim.patches, 1);
+        assert_eq!(sim.scan_count(), 1, "no second pass over the share");
+    }
+
+    /// An overflow leaves nothing to patch, so only a full pass can say what
+    /// the share now holds - and it is paced like any other pass.
+    #[test]
+    fn an_overflow_is_a_full_pass() {
+        let mut sim = walked();
+        sim.now += Cadence::tree().min_scan_spacing + Duration::from_secs(1);
+        sim.notify(&mut Tree, true);
+
+        assert_eq!(sim.patches, 0);
+        assert_eq!(sim.scan_count(), 2);
+        assert_eq!(sim.scans[1].reason, ScanReason::Changed);
+    }
+
+    /// Otherwise a share that overflows continuously - which is exactly what a
+    /// share somebody is copying a job folder onto does - would re-walk itself
+    /// end to end, over and over, for as long as the copy lasted.
+    #[test]
+    fn overflowing_repeatedly_does_not_re_walk_continuously() {
+        let mut sim = walked();
+        // Time is advanced by hand rather than by following the deadline the
+        // scheduler hands back: jumping to it would satisfy the very floor
+        // under test.
+        for _ in 0..50 {
+            sim.now += Duration::from_secs(1);
+            sim.notify(&mut Tree, true);
+        }
+        assert!(
+            sim.scan_count() <= 2,
+            "fifty overflows in fifty seconds produced {} passes over the share",
+            sim.scan_count()
+        );
+    }
+
+    /// And the patches have a floor of their own, or a folder being written to
+    /// would have its subtree re-read on every event.
+    #[test]
+    fn patches_are_paced_by_their_own_floor() {
+        let mut sim = walked();
+        sim.now += Duration::from_secs(60);
+        sim.notify(&mut Tree, false);
+        let after_first = sim.patches;
+
+        for _ in 0..20 {
+            sim.now += Duration::from_millis(100);
+            sim.notify(&mut Tree, false);
+        }
+        assert_eq!(
+            sim.patches, after_first,
+            "every patch inside one spacing window should have been deferred"
+        );
+    }
+
+    /// Much shorter than the scan floor, though - a patch reads folders, not
+    /// the share, so pacing the two alike would make live updates pointless.
+    #[test]
+    fn the_patch_floor_is_far_shorter_than_the_scan_floor() {
+        let c = Cadence::tree();
+        assert!(c.patch_spacing < c.min_scan_spacing);
+        assert!(c.patch_spacing < c.rescan_floor);
+    }
+
+    /// A patch is not a full pass. If it satisfied the floor, a share changing
+    /// steadily would never be walked again - and the floor is precisely the
+    /// backstop against a watcher that silently stops firing.
+    #[test]
+    fn patching_does_not_postpone_the_floor() {
+        let mut sim = walked();
+        let started = sim.now;
+
+        let floor = Cadence::tree().rescan_floor;
+        let step = Cadence::tree().patch_spacing * 2;
+        while sim.now < started + floor * 2 {
+            sim.now += step;
+            sim.notify(&mut Tree, false);
+            // The timer still fires alongside the watcher, exactly as it does
+            // in the actor - the deadline there is the earlier of the two.
+            sim.wake(&mut Tree, false);
+        }
+
+        assert!(
+            sim.scan_count() >= 2,
+            "the floor should still have produced a pass; got {} scans and {} patches",
+            sim.scan_count(),
+            sim.patches
+        );
+    }
+
+    /// With nothing indexed there is nothing to patch, and the first pass has
+    /// to happen anyway.
+    #[test]
+    fn a_change_before_the_first_pass_is_the_first_pass() {
+        let mut sim = Sim::new(Cadence::tree());
+        sim.notify(&mut Tree, false);
+        assert_eq!(sim.patches, 0);
+        assert_eq!(sim.scan_count(), 1);
+        assert_eq!(sim.scans[0].reason, ScanReason::FirstRun);
+    }
+
+    /// A patch that fails must not back the floor off. A failing watcher is
+    /// exactly when the floor is the guarantee that matters.
+    #[test]
+    fn a_failed_patch_leaves_the_schedule_alone() {
+        let mut sched = Scheduler::new(Cadence::tree(), Some(SEED));
+        let now = Instant::now();
+        let after = sched.on(now, Input::Applied(Err(EnumError::Transient(53))), true);
+        assert_eq!(after.step, Step::Wait);
+        assert!(after.next_action > now);
     }
 }

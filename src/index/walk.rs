@@ -117,6 +117,19 @@ pub struct WalkErrors {
     pub other: u32,
 }
 
+/// Whether this failure leaves part of the share unsearchable.
+///
+/// The complement of "the folder has gone", which is ordinary churn. Exposed
+/// because an incremental update has to tell the two apart per folder: a
+/// vanished folder is deleted from the index, an unreadable one is left
+/// exactly as it was.
+pub fn is_hole(err: EnumError) -> bool {
+    !matches!(
+        err,
+        EnumError::PathNotFound(_) | EnumError::NotADirectory(_)
+    )
+}
+
 impl WalkErrors {
     /// Failures that leave part of the share unsearchable.
     ///
@@ -383,13 +396,90 @@ pub fn walk_tree(
     sink: &dyn TreeSink,
     cancel: &CancelToken,
 ) -> WalkReport {
+    walk_from(source, root, &[String::new()], opts, sink, cancel)
+}
+
+/// Walks only the named subtrees of `root`.
+///
+/// This is what turns a change notification into work proportional to what
+/// changed. A notification names a file; the directory holding it is dirty,
+/// and so is everything beneath it - because a new job folder arrives as one
+/// event on its parent and a hundred files nobody was told about.
+///
+/// `seeds` are relative to `root`, spelled as the index spells them, and an
+/// empty string means the root itself - so a dirty root degenerates to a full
+/// walk, which is the honest answer.
+///
+/// Depth restarts at zero for each seed. `max_depth` is a runaway guard, not a
+/// statement about where a subtree sits, and measuring it from the share root
+/// would make a deep folder unrefreshable rather than merely deep.
+pub fn walk_subtrees(
+    source: &dyn DirSource,
+    root: &Path,
+    seeds: &[String],
+    opts: &WalkOpts,
+    sink: &dyn TreeSink,
+    cancel: &CancelToken,
+) -> WalkReport {
+    walk_from(source, root, &prune_seeds(seeds), opts, sink, cancel)
+}
+
+/// Drops seeds already covered by another, and collapses the set to the root
+/// if the root is in it.
+///
+/// Without this, a batch naming both `11d` and `11d84` would read the
+/// second one twice and hand the sink the same directory twice - which the run
+/// table records as two directories with the same name, so a folder match
+/// would return its contents doubled.
+fn prune_seeds(seeds: &[String]) -> Vec<String> {
+    if seeds.iter().any(|s| s.is_empty()) {
+        return vec![String::new()];
+    }
+    let mut sorted: Vec<String> = seeds.to_vec();
+    sorted.sort();
+    sorted.dedup();
+
+    let mut out: Vec<String> = Vec::with_capacity(sorted.len());
+    for seed in sorted {
+        // Sorted, so an ancestor always precedes its descendants.
+        if out.last().is_some_and(|kept| is_within(&seed, kept)) {
+            continue;
+        }
+        out.push(seed);
+    }
+    out
+}
+
+/// Whether `rel` is `ancestor` or sits beneath it.
+///
+/// The separator check is what stops `11d2` being treated as a child of
+/// `11d`, which would silently drop a whole folder from a refresh.
+pub fn is_within(rel: &str, ancestor: &str) -> bool {
+    if ancestor.is_empty() || rel == ancestor {
+        return true;
+    }
+    rel.len() > ancestor.len()
+        && rel.as_bytes()[ancestor.len()] == b'\\'
+        && rel.starts_with(ancestor)
+}
+
+fn walk_from(
+    source: &dyn DirSource,
+    root: &Path,
+    seeds: &[String],
+    opts: &WalkOpts,
+    sink: &dyn TreeSink,
+    cancel: &CancelToken,
+) -> WalkReport {
     let started = Instant::now();
     let frontier = Arc::new(Frontier::default());
     let shared = Arc::new(Shared::default());
-    frontier.push(Pending {
-        rel: String::new(),
-        depth: 0,
-    });
+    for rel in seeds {
+        frontier.push(Pending {
+            rel: rel.clone(),
+            depth: 0,
+        });
+    }
 
     let workers = opts.concurrency.max(1);
     std::thread::scope(|scope| {

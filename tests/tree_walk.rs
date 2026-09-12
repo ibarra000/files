@@ -540,3 +540,145 @@ fn a_tree_spanning_many_segments_resolves_every_path() {
     assert_eq!(all.len(), 1_600, "a path was duplicated or lost");
     assert!(all.contains("R:\\a17\\b23\\report.pdf"));
 }
+
+// --- seeded walks ----------------------------------------------------------
+
+/// A walk seeded with the dirty folders is what turns a change notification
+/// into work proportional to what changed rather than to the share.
+mod subtrees {
+    use super::*;
+    use files::index::walk::walk_subtrees;
+
+    fn share() -> FakeDirSource {
+        FakeDirSource::new().with_tree(
+            "R:\\",
+            &[
+                "top.txt",
+                "11d\\quote.pdf",
+                "11d\\0704\\drawing.dwg",
+                "11d\\0704\\deep\\note.txt",
+                "ab12\\spec.pdf",
+                "ab12x\\decoy.pdf",
+            ],
+        )
+    }
+
+    fn seeded(seeds: &[&str]) -> (Collect, WalkReport) {
+        let sink = Collect::default();
+        let owned: Vec<String> = seeds.iter().map(|s| (*s).to_string()).collect();
+        let report = walk_subtrees(
+            &share(),
+            Path::new("R:\\"),
+            &owned,
+            &WalkOpts::default(),
+            &sink,
+            &CancelToken::never(),
+        );
+        (sink, report)
+    }
+
+    fn dirs(sink: &Collect) -> Vec<String> {
+        let mut out: Vec<String> = sink.seen.lock().iter().map(|(d, _)| d.clone()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn a_seed_brings_its_whole_subtree_and_nothing_else() {
+        let (sink, report) = seeded(&["11d"]);
+        assert!(report.complete(), "{report:?}");
+        assert_eq!(
+            dirs(&sink),
+            vec![
+                "11d".to_string(),
+                "11d\\0704".to_string(),
+                "11d\\0704\\deep".to_string(),
+            ]
+        );
+    }
+
+    /// A prefix is not a parent. Without the separator check, refreshing
+    /// `ab12` would read `ab12x` as well and then the caller would replace a
+    /// subtree it never walked.
+    #[test]
+    fn a_seed_does_not_pick_up_a_sibling_that_merely_starts_the_same() {
+        let (sink, _) = seeded(&["ab12"]);
+        assert_eq!(dirs(&sink), vec!["ab12".to_string()]);
+    }
+
+    /// Reading the same directory twice would hand the sink two directories
+    /// with one name, and a folder match would return its contents doubled.
+    #[test]
+    fn a_seed_already_covered_by_another_is_not_walked_twice() {
+        let (sink, _) = seeded(&["11d", "11d\\0704", "11d"]);
+        assert_eq!(
+            dirs(&sink),
+            vec![
+                "11d".to_string(),
+                "11d\\0704".to_string(),
+                "11d\\0704\\deep".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn several_disjoint_seeds_are_all_walked() {
+        let (sink, _) = seeded(&["ab12", "ab12x"]);
+        assert_eq!(dirs(&sink), vec!["ab12".to_string(), "ab12x".to_string()]);
+    }
+
+    /// A dirty root degenerates to a full walk, which is the honest answer.
+    #[test]
+    fn the_root_as_a_seed_walks_everything() {
+        let (sink, _) = seeded(&["", "ab12"]);
+        assert_eq!(dirs(&sink).len(), 6);
+    }
+
+    /// A folder that is gone is ordinary churn, and the caller needs to be
+    /// able to tell it from a folder it simply could not read - one means
+    /// "delete it from the index", the other means "leave it alone".
+    #[test]
+    fn a_seed_that_has_been_deleted_is_counted_as_vanished_not_as_a_hole() {
+        let sink = Collect::default();
+        let report = walk_subtrees(
+            &share(),
+            Path::new("R:\\"),
+            &["gone".to_string()],
+            &WalkOpts::default(),
+            &sink,
+            &CancelToken::never(),
+        );
+        assert_eq!(report.errors.vanished, 1);
+        assert_eq!(report.errors.holes(), 0);
+        assert!(report.complete());
+        assert!(
+            report.aborted.is_none(),
+            "a missing seed is not a missing share"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_seed_is_a_hole() {
+        let sink = Collect::default();
+        let src = share();
+        src.fail_dir("R:\\ab12", EnumError::AccessDenied(5));
+        let report = walk_subtrees(
+            &src,
+            Path::new("R:\\"),
+            &["ab12".to_string()],
+            &WalkOpts::default(),
+            &sink,
+            &CancelToken::never(),
+        );
+        assert_eq!(report.errors.holes(), 1);
+        assert!(!report.complete());
+    }
+
+    #[test]
+    fn no_seeds_walks_nothing_and_succeeds() {
+        let (sink, report) = seeded(&[]);
+        assert!(dirs(&sink).is_empty());
+        assert!(report.complete());
+        assert_eq!(report.dirs_visited, 0);
+    }
+}

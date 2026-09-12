@@ -176,6 +176,7 @@ fn step_name(step: Step) -> &'static str {
     match step {
         Step::Probe => "probe",
         Step::FullScan(_) => "full-scan",
+        Step::ApplyChanges => "apply-changes",
         Step::ConfirmFresh => "confirm-fresh",
         Step::Wait => "wait",
     }
@@ -188,6 +189,7 @@ fn reason_name(reason: ScanReason) -> &'static str {
         ScanReason::StampMoved => "directory-changed",
         ScanReason::Floor => "periodic-refresh",
         ScanReason::Blind => "no-change-detection",
+        ScanReason::Changed => "changes-detected",
     }
 }
 

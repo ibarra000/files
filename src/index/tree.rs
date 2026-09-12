@@ -407,27 +407,64 @@ impl SegmentBuilder {
     /// Adds one completed directory and its files.
     ///
     /// Returns false when an arena is full, which the walk reports as the
-    /// index being unable to take more. Pushing the run *before* the names
-    /// keeps the ordering promise the run table makes: its `first_file` is
-    /// where this directory's files begin, so it must be read before any of
-    /// them are added.
+    /// index being unable to take more. `first_file` is read *before* any name
+    /// is added, which is the ordering promise the run table makes, but the
+    /// run is only pushed once a file has actually landed: a run recorded
+    /// ahead of a push that then failed would name a range starting past the
+    /// end of the segment, and `dir_of` would attribute the next directory's
+    /// files to this one.
     pub fn push_dir(&mut self, rel: &str, files: &[String]) -> bool {
         let dir = self.dirs.len() as u32;
         if !self.dirs.push_str(rel) {
             return false;
         }
-        if !files.is_empty() {
-            self.runs.push(Run {
-                first_file: self.files.len() as u32,
-                dir,
-            });
-            for name in files {
-                if !self.files.push_str(name) {
-                    return false;
-                }
+        let first_file = self.files.len() as u32;
+        let mut pushed = 0usize;
+        let mut full = false;
+        for name in files {
+            if !self.files.push_str(name) {
+                full = true;
+                break;
             }
+            pushed += 1;
         }
-        true
+        if pushed > 0 {
+            self.runs.push(Run { first_file, dir });
+        }
+        !full
+    }
+
+    /// Copies one directory and every file in it verbatim from `seg`.
+    ///
+    /// Raw byte copies rather than re-folding. Re-deriving the folded form on
+    /// a rebuild would make a name that had been indexed under one fold
+    /// reappear under another, so the matcher would find it before the update
+    /// and not after - a file disappearing because its folder was refreshed.
+    pub(crate) fn push_dir_raw(&mut self, seg: &TreeSegment, d: u32) -> bool {
+        let dir = self.dirs.len() as u32;
+        if !self
+            .dirs
+            .push_raw(seg.dirs.name_orig(d), seg.dirs.name_lower(d))
+        {
+            return false;
+        }
+        let first_file = self.files.len() as u32;
+        let mut pushed = 0usize;
+        let mut full = false;
+        for i in seg.files_of(d) {
+            if !self
+                .files
+                .push_raw(seg.files.name_orig(i), seg.files.name_lower(i))
+            {
+                full = true;
+                break;
+            }
+            pushed += 1;
+        }
+        if pushed > 0 {
+            self.runs.push(Run { first_file, dir });
+        }
+        !full
     }
 
     /// Seals the segment. The builder is left empty and reusable.
@@ -552,6 +589,160 @@ impl TreeSink for SegmentSink {
         true
     }
 }
+// --- incremental update ----------------------------------------------------
+
+/// What was left of a segment after dropping some of its directories.
+enum Retained {
+    /// Nothing was dropped, so the original can be shared by refcount.
+    All,
+    /// Everything was dropped.
+    None,
+    /// Boxed only to keep the enum small: a `TreeSegment` is a quarter of a
+    /// kilobyte of headers, and every `Retained::All` - the common answer, one
+    /// per untouched segment - would otherwise be returned in a value that
+    /// size.
+    Some(Box<TreeSegment>),
+}
+
+impl TreeSegment {
+    /// Bytes in this segment's arenas, on the same basis
+    /// [`SegmentBuilder::arena_bytes`] counts them.
+    pub fn arena_bytes(&self) -> usize {
+        self.files.lower().len() + self.dirs.lower().len()
+    }
+
+    /// This segment without the directories `drop` selects.
+    ///
+    /// Returns [`Retained::All`] rather than a copy when nothing matched,
+    /// which is the case that matters: a change to one folder must not cost a
+    /// rebuild of the twenty segments it is not in.
+    fn retaining(&self, drop: &dyn Fn(&str) -> bool) -> Retained {
+        let dropped = (0..self.dir_count())
+            .filter(|d| drop(&self.dir_path(*d)))
+            .count() as u32;
+        if dropped == 0 {
+            return Retained::All;
+        }
+        if dropped == self.dir_count() {
+            return Retained::None;
+        }
+
+        let mut b = SegmentBuilder::new();
+        for d in 0..self.dir_count() {
+            if drop(&self.dir_path(d)) {
+                continue;
+            }
+            if !b.push_dir_raw(self, d) {
+                // The arena ceiling, reached while *shrinking* a segment that
+                // already fitted. Not reachable in practice, but "not
+                // reachable" is not a reason to publish a half-copied segment:
+                // keeping the original loses nothing but the deletion, which
+                // the next full walk collects.
+                return Retained::All;
+            }
+        }
+        Retained::Some(Box::new(b.seal()))
+    }
+}
+
+impl TreeIndex {
+    /// Assembles an index from segments that are already sealed.
+    fn from_segments(root: Arc<str>, segments: Vec<Arc<TreeSegment>>) -> Self {
+        let mut bases = Vec::with_capacity(segments.len() + 1);
+        bases.push(0u32);
+        let mut dirs = 0usize;
+        for seg in &segments {
+            let base = bases.last().copied().unwrap_or(0);
+            bases.push(base + seg.file_count());
+            dirs += seg.dir_count() as usize;
+        }
+        Self {
+            root,
+            segments,
+            bases,
+            dirs,
+            captured_at: SystemTime::UNIX_EPOCH,
+            volume_serial: 0,
+            complete: false,
+        }
+    }
+
+    /// This index with the subtrees named by `replaced` rebuilt from `fresh`.
+    ///
+    /// Every directory that is one of `replaced` or sits beneath one is
+    /// dropped, and everything `fresh` holds is appended. That is deliberately
+    /// coarser than "update these directories": a new job folder arrives as a
+    /// single notification on its *parent*, so anything that only refreshed
+    /// the directories it was told about would index the parent and miss every
+    /// file in the folder that was actually created.
+    ///
+    /// `captured_at` is left alone. The index really is as old as it was; a
+    /// handful of its folders are newer. Moving the timestamp forward would be
+    /// the index claiming to have been proven current everywhere, which is
+    /// exactly the false confidence a tree is not allowed to express.
+    pub fn with_subtrees_replaced(&self, replaced: &[String], fresh: &TreeIndex) -> Self {
+        let covered = |rel: &str| {
+            replaced
+                .iter()
+                .any(|r| crate::index::walk::is_within(rel, r))
+        };
+
+        let mut segments: Vec<Arc<TreeSegment>> = Vec::with_capacity(self.segments.len() + 1);
+        for seg in &self.segments {
+            match seg.retaining(&covered) {
+                Retained::All => segments.push(Arc::clone(seg)),
+                Retained::None => {}
+                Retained::Some(rebuilt) => segments.push(Arc::new(*rebuilt)),
+            }
+        }
+        segments.extend(fresh.segments.iter().map(Arc::clone));
+
+        Self::from_segments(Arc::clone(&self.root), coalesce(segments))
+            .with_metadata(self.captured_at, self.volume_serial)
+            .with_complete(self.complete)
+    }
+}
+
+/// Merges adjacent segments that fit together inside one segment's budget.
+///
+/// Without this, every update appends a segment and the count grows without
+/// bound between full walks - a few hundred of them by the time the floor
+/// comes round, each one a separate sweep per keystroke.
+///
+/// One rule does the whole job, and the shape of the data is why. Update
+/// segments are tiny and land at the end, so consecutive ones merge into a
+/// single growing tail; full-size segments never pair, because two of them
+/// exceed the budget by construction. So the work per update is bounded by one
+/// segment's worth of copying, and only where there was headroom for it.
+fn coalesce(segments: Vec<Arc<TreeSegment>>) -> Vec<Arc<TreeSegment>> {
+    let mut out: Vec<Arc<TreeSegment>> = Vec::with_capacity(segments.len());
+    for seg in segments {
+        let fits = out
+            .last()
+            .is_some_and(|prev| prev.arena_bytes() + seg.arena_bytes() <= SEGMENT_MAX_BYTES);
+        if fits && let Some(merged) = merge(out.last().expect("checked by fits"), &seg) {
+            out.pop();
+            out.push(Arc::new(merged));
+            continue;
+        }
+        out.push(seg);
+    }
+    out
+}
+
+/// Concatenates two segments, or `None` if the arenas will not take it.
+fn merge(a: &TreeSegment, b: &TreeSegment) -> Option<TreeSegment> {
+    let mut out = SegmentBuilder::new();
+    for seg in [a, b] {
+        for d in 0..seg.dir_count() {
+            if !out.push_dir_raw(seg, d) {
+                return None;
+            }
+        }
+    }
+    Some(out.seal())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,5 +884,236 @@ mod tests {
         assert_eq!(parent_rel("11d\\0704\\quote.pdf"), "11d\\0704");
         assert_eq!(parent_rel("loose.pdf"), "", "a file in the root");
         assert_eq!(parent_rel(""), "");
+    }
+}
+
+/// Replacing a subtree in place, which is what turns a change notification
+/// into work proportional to what changed rather than to the share.
+#[cfg(test)]
+mod apply_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::index::builder::MAX_NAME_BYTES;
+
+    const ROOT: &str = "R:\\";
+
+    /// One segment per group, so the tests can put a directory in a chosen
+    /// segment rather than hoping the size ladder puts it there.
+    fn tree_of(groups: &[&[(&str, &[&str])]]) -> TreeIndex {
+        let mut index = TreeIndex::empty(ROOT);
+        for group in groups {
+            let mut b = SegmentBuilder::new();
+            for (dir, files) in *group {
+                let owned: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+                assert!(b.push_dir(dir, &owned));
+            }
+            index = index.appended(Arc::new(b.seal()));
+        }
+        index
+            .with_metadata(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000), 7)
+            .with_complete(true)
+    }
+
+    fn paths(index: &TreeIndex) -> Vec<String> {
+        let mut out: Vec<String> = (0..index.len() as u32)
+            .map(|i| index.full_path(i).expect("every ordinal has a path"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn base() -> TreeIndex {
+        tree_of(&[
+            &[
+                ("", &["readme.txt"] as &[&str]),
+                ("11d", &["quote.pdf", "old.pdf"]),
+            ],
+            &[
+                ("11d\\0704", &["drawing.dwg"]),
+                ("ab12", &["spec.pdf"]),
+                ("ab12x", &["decoy.pdf"]),
+            ],
+        ])
+    }
+
+    #[test]
+    fn a_replaced_subtree_takes_the_fresh_contents() {
+        let fresh = tree_of(&[&[
+            ("11d", &["quote.pdf", "new.pdf"] as &[&str]),
+            ("11d\\0704", &["drawing.dwg", "revised.dwg"]),
+        ]]);
+        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
+
+        assert_eq!(
+            paths(&after),
+            vec![
+                "R:\\11d\\0704\\drawing.dwg",
+                "R:\\11d\\0704\\revised.dwg",
+                "R:\\11d\\new.pdf",
+                "R:\\11d\\quote.pdf",
+                "R:\\ab12\\spec.pdf",
+                "R:\\ab12x\\decoy.pdf",
+                "R:\\readme.txt",
+            ]
+        );
+    }
+
+    /// The reason a whole subtree is replaced rather than a directory. A new
+    /// job folder arrives as one notification on its parent; anything that
+    /// only refreshed the directory it was told about would index the parent
+    /// and miss every file in the folder that was actually created.
+    #[test]
+    fn a_folder_created_under_a_dirty_parent_is_picked_up() {
+        let fresh = tree_of(&[&[
+            ("11d", &["quote.pdf", "old.pdf"] as &[&str]),
+            ("11d\\0704", &["drawing.dwg"]),
+            ("11d\\0999", &["brand new.pdf"]),
+        ]]);
+        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
+        assert!(paths(&after).contains(&"R:\\11d\\0999\\brand new.pdf".to_string()));
+    }
+
+    #[test]
+    fn a_deleted_folder_leaves_the_index() {
+        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
+        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
+
+        assert!(!paths(&after).iter().any(|p| p.contains("0704")));
+        assert!(!paths(&after).iter().any(|p| p.contains("old.pdf")));
+        assert!(paths(&after).contains(&"R:\\ab12\\spec.pdf".to_string()));
+    }
+
+    /// A subtree that is gone entirely is replaced by nothing.
+    #[test]
+    fn replacing_a_subtree_with_nothing_removes_it() {
+        let after = base().with_subtrees_replaced(&["ab12".to_string()], &TreeIndex::empty(ROOT));
+        let got = paths(&after);
+        assert!(!got.iter().any(|p| p.contains("\\ab12\\")));
+        assert!(
+            got.contains(&"R:\\ab12x\\decoy.pdf".to_string()),
+            "a prefix match is not a subtree: {got:?}"
+        );
+    }
+
+    /// The separator check. Without it `ab12` would swallow `ab12x`.
+    #[test]
+    fn a_name_that_merely_starts_the_same_is_not_within_the_subtree() {
+        assert!(crate::index::walk::is_within("ab12\\sub", "ab12"));
+        assert!(crate::index::walk::is_within("ab12", "ab12"));
+        assert!(!crate::index::walk::is_within("ab12x", "ab12"));
+        assert!(crate::index::walk::is_within("anything", ""));
+    }
+
+    /// A dirty root is a full replacement, which is the honest answer.
+    #[test]
+    fn replacing_the_root_replaces_everything() {
+        let fresh = tree_of(&[&[("", &["only.txt"] as &[&str])]]);
+        let after = base().with_subtrees_replaced(&[String::new()], &fresh);
+        assert_eq!(paths(&after), vec!["R:\\only.txt"]);
+    }
+
+    /// The cost argument for the whole design: a change to one folder must not
+    /// rebuild the segments it is not in.
+    #[test]
+    fn untouched_segments_are_shared_rather_than_copied() {
+        let before = base();
+        let untouched = Arc::clone(&before.segments()[1]);
+        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
+
+        let after = before.with_subtrees_replaced(&["11d\\0704".to_string()], &fresh);
+        assert!(
+            after
+                .segments()
+                .iter()
+                .any(|s| Arc::ptr_eq(s, &untouched) || Arc::strong_count(&untouched) > 1),
+            "the segment holding no dirty directory should have been reused"
+        );
+    }
+
+    /// The metadata says what it says for a reason: a handful of refreshed
+    /// folders is not the whole share having been proven current.
+    #[test]
+    fn an_incremental_update_does_not_claim_the_index_is_newer() {
+        let before = base();
+        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
+        let after = before.with_subtrees_replaced(&["11d".to_string()], &fresh);
+
+        assert_eq!(after.captured_at(), before.captured_at());
+        assert_eq!(after.volume_serial(), before.volume_serial());
+        assert_eq!(after.complete(), before.complete());
+        assert_eq!(after.root(), before.root());
+    }
+
+    #[test]
+    fn the_directory_count_follows_the_update() {
+        let before = base();
+        assert_eq!(before.dir_count(), 5);
+        let after = before.with_subtrees_replaced(&["11d".to_string()], &TreeIndex::empty(ROOT));
+        assert_eq!(after.dir_count(), 3, "`11d` and `11d\\0704` both left");
+    }
+
+    /// Every update appends a segment. Left alone the count would run to
+    /// hundreds between full walks, each one a separate sweep per keystroke.
+    #[test]
+    fn repeated_updates_do_not_grow_the_segment_count_without_bound() {
+        let mut index = base();
+        for i in 0..50 {
+            let fresh = tree_of(&[&[(
+                "ab12",
+                &[Box::leak(format!("v{i}.pdf").into_boxed_str()) as &str] as &[&str],
+            )]]);
+            index = index.with_subtrees_replaced(&["ab12".to_string()], &fresh);
+        }
+        assert!(
+            index.segments().len() <= 2,
+            "fifty updates left {} segments",
+            index.segments().len()
+        );
+        assert_eq!(
+            paths(&index)
+                .iter()
+                .filter(|p| p.contains("ab12\\"))
+                .count(),
+            1,
+            "each update should supersede the last, not stack on it"
+        );
+    }
+
+    /// Coalescing must not disturb what the index reports.
+    #[test]
+    fn coalescing_preserves_every_path_and_its_folder() {
+        let before = base();
+        let fresh = tree_of(&[&[("ab12", &["spec.pdf", "extra.pdf"] as &[&str])]]);
+        let after = before.with_subtrees_replaced(&["ab12".to_string()], &fresh);
+
+        for seg in after.segments() {
+            seg.check_invariants()
+                .expect("a coalesced segment is sound");
+        }
+        assert!(paths(&after).contains(&"R:\\ab12\\extra.pdf".to_string()));
+        assert!(paths(&after).contains(&"R:\\11d\\0704\\drawing.dwg".to_string()));
+    }
+
+    /// Replacing nothing is a no-op, which matters because the actor reaches
+    /// this path whenever a batch turns out to name only unreadable folders.
+    #[test]
+    fn replacing_nothing_changes_nothing() {
+        let before = base();
+        let after = before.with_subtrees_replaced(&[], &TreeIndex::empty(ROOT));
+        assert_eq!(paths(&after), paths(&before));
+        assert_eq!(after.dir_count(), before.dir_count());
+    }
+
+    /// A run recorded before a push that then failed would name a range
+    /// starting past the end of the segment, and `dir_of` would hand this
+    /// directory's files to the next one.
+    #[test]
+    fn a_directory_whose_files_did_not_fit_leaves_a_sound_segment() {
+        let mut b = SegmentBuilder::new();
+        let huge = "x".repeat(MAX_NAME_BYTES + 1);
+        assert!(b.push_dir("a", &["real.pdf".to_string()]));
+        assert!(!b.push_dir("b", &[huge]));
+        assert!(b.seal().check_invariants().is_ok());
     }
 }

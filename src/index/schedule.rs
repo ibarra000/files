@@ -41,9 +41,9 @@ use std::time::{Duration, Instant};
 use super::DirStamp;
 use super::errors::EnumError;
 use crate::config::{
-    BACKOFF_BASE, BACKOFF_CAP, FULL_RESCAN_FLOOR, MIN_FULL_SCAN_SPACING, PROBE_JITTER_PERCENT,
-    SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP, STAMP_FAILURES_BEFORE_BLIND, STAMP_PROBE_INTERVAL,
-    TREE_MIN_SCAN_SPACING, TREE_RESCAN_FLOOR, env_secs,
+    BACKOFF_BASE, BACKOFF_CAP, FULL_RESCAN_FLOOR, MIN_FULL_SCAN_SPACING, PATCH_SPACING,
+    PROBE_JITTER_PERCENT, SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP, STAMP_FAILURES_BEFORE_BLIND,
+    STAMP_PROBE_INTERVAL, TREE_MIN_SCAN_SPACING, TREE_RESCAN_FLOOR, env_secs,
 };
 use crate::util::backoff::{Backoff, jitter};
 use crate::util::rng::Rng;
@@ -70,6 +70,14 @@ pub struct Cadence {
     pub rescan_floor: Duration,
     /// Hard lower bound on the gap between two enumerations.
     pub min_scan_spacing: Duration,
+    /// Hard lower bound on the gap between two incremental updates.
+    ///
+    /// Its own floor, and far shorter than [`Self::min_scan_spacing`], because
+    /// a patch reads the folders that changed rather than the share: seconds
+    /// of round trips against minutes. Pacing both by one number would mean
+    /// either re-walking every five minutes or learning about a new file half
+    /// an hour late, and neither is the behaviour anybody asked for.
+    pub patch_spacing: Duration,
     /// Jitter applied to `probe_interval`, in percent.
     pub jitter_percent: u32,
     /// Retry pacing for a failed probe.
@@ -94,6 +102,7 @@ impl Cadence {
             probe_interval: STAMP_PROBE_INTERVAL,
             rescan_floor: FULL_RESCAN_FLOOR,
             min_scan_spacing: MIN_FULL_SCAN_SPACING,
+            patch_spacing: PATCH_SPACING,
             jitter_percent: PROBE_JITTER_PERCENT,
             probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
             scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),
@@ -120,6 +129,7 @@ impl Cadence {
             probe_interval: TREE_MIN_SCAN_SPACING,
             rescan_floor: TREE_RESCAN_FLOOR,
             min_scan_spacing: TREE_MIN_SCAN_SPACING,
+            patch_spacing: PATCH_SPACING,
             jitter_percent: PROBE_JITTER_PERCENT,
             probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
             scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),
@@ -135,6 +145,7 @@ impl Cadence {
             probe_interval: Duration::from_millis(20),
             rescan_floor: Duration::from_millis(400),
             min_scan_spacing: Duration::from_millis(10),
+            patch_spacing: Duration::from_millis(2),
             jitter_percent: PROBE_JITTER_PERCENT,
             probe_backoff: Backoff::new(Duration::from_millis(2), Duration::from_millis(100)),
             scan_backoff: Backoff::new(Duration::from_millis(10), Duration::from_millis(200)),
@@ -223,6 +234,9 @@ pub enum ScanReason {
     Floor,
     /// Change detection is unavailable here, so the floor is all there is.
     Blind,
+    /// The watcher reported changes it could not describe, so nothing short of
+    /// a full pass can say what the share now holds.
+    Changed,
 }
 
 impl ScanReason {
@@ -234,6 +248,7 @@ impl ScanReason {
             Self::StampMoved => "directory changed",
             Self::Floor => "periodic refresh",
             Self::Blind => "no change detection",
+            Self::Changed => "changes detected",
         }
     }
 }
@@ -255,6 +270,16 @@ pub enum Input {
     /// captured alongside the listing, which is `None` when even that probe
     /// failed.
     Scanned(Result<Option<DirStamp>, EnumError>),
+    /// The watcher has changes pending. `full` means it could not say what
+    /// they were - an overflowed buffer, or more dirty folders than re-reading
+    /// one at a time could pay for.
+    ///
+    /// This is what a directory stamp supplies for a flat listing and cannot
+    /// supply for a tree: no single timestamp speaks for three hundred
+    /// thousand directories, so the notification has to.
+    Changed { full: bool },
+    /// The result of a [`Step::ApplyChanges`].
+    Applied(Result<(), EnumError>),
 }
 
 /// What the actor should do next.
@@ -264,6 +289,14 @@ pub enum Step {
     Probe,
     /// Enumerate the whole directory and report back with [`Input::Scanned`].
     FullScan(ScanReason),
+    /// Re-read the dirty subtrees and patch them into the index, reporting
+    /// back with [`Input::Applied`].
+    ///
+    /// A separate step from `FullScan` because the two differ by three orders
+    /// of magnitude in cost - a handful of round trips against nine hundred
+    /// thousand - and pacing them by one rule would either re-walk the share
+    /// every few minutes or make a live update as rare as the floor.
+    ApplyChanges,
     /// Nothing moved: mark the listing confirmed-current, then wait.
     ConfirmFresh,
     /// Wait until `next_action`.
@@ -307,6 +340,10 @@ pub struct Counters {
     /// Times an enumeration was suppressed by [`Cadence::min_scan_spacing`].
     /// Non-zero here means something upstream is asking too often.
     pub deferred_scans: u32,
+    /// Incremental updates applied from change notifications.
+    pub patches: u32,
+    /// Times one was suppressed by [`Cadence::patch_spacing`].
+    pub deferred_patches: u32,
 }
 
 /// Decides what the index actor does, and when.
@@ -325,6 +362,7 @@ pub struct Scheduler {
     /// scan; keying off successes is what let the old code retry a
     /// million-entry enumeration under a second after it failed.
     last_scan_attempt: Option<Instant>,
+    last_patch_attempt: Option<Instant>,
     probe_attempt: u32,
     scan_attempt: u32,
     unanswerable_streak: u32,
@@ -344,6 +382,7 @@ impl Scheduler {
             stamp_health: StampHealth::Unknown,
             last_full_scan: None,
             last_scan_attempt: None,
+            last_patch_attempt: None,
             probe_attempt: 0,
             scan_attempt: 0,
             unanswerable_streak: 0,
@@ -382,6 +421,8 @@ impl Scheduler {
             Input::Woke { forced } => self.on_woke(now, forced, have_snapshot),
             Input::Probed(result) => self.on_probed(now, result),
             Input::Scanned(result) => self.on_scanned(now, result),
+            Input::Changed { full } => self.on_changed(now, full, have_snapshot),
+            Input::Applied(result) => self.on_applied(now, result),
         }
     }
 
@@ -439,6 +480,47 @@ impl Scheduler {
             step: Step::Probe,
             next_action: now,
         }
+    }
+
+    /// The watcher has something pending.
+    ///
+    /// A batch it could describe is patched in; one it could not is a full
+    /// pass, paced by `min_scan_spacing` exactly as any other scan - which is
+    /// what stops an overflowing share from re-walking itself continuously.
+    fn on_changed(&mut self, now: Instant, full: bool, have_snapshot: bool) -> Decision {
+        // Nothing to patch into. The first pass has to happen anyway, and
+        // running it as a scan is what records the floor the rest depends on.
+        if !have_snapshot {
+            return self.scan(now, ScanReason::FirstRun);
+        }
+        if full {
+            return self.scan(now, ScanReason::Changed);
+        }
+        if let Some(last) = self.last_patch_attempt {
+            let earliest = last + self.cadence.patch_spacing;
+            if now < earliest {
+                self.counters.deferred_patches = self.counters.deferred_patches.saturating_add(1);
+                return self.wait(now, earliest);
+            }
+        }
+        self.last_patch_attempt = Some(now);
+        self.counters.patches = self.counters.patches.saturating_add(1);
+        Decision {
+            step: Step::ApplyChanges,
+            next_action: now,
+        }
+    }
+
+    /// A patch finished, well or badly.
+    ///
+    /// Either way the schedule is unchanged: a patch is not a full pass, so it
+    /// neither satisfies the floor nor - when it fails - justifies backing the
+    /// floor off. The floor is the guarantee that a missed notification costs
+    /// at most half an hour, and a failing watcher is precisely when that
+    /// guarantee is load-bearing.
+    fn on_applied(&mut self, now: Instant, _result: Result<(), EnumError>) -> Decision {
+        let at = self.floor_due_at(now);
+        self.wait(now, at)
     }
 
     fn on_probed(&mut self, now: Instant, result: Result<DirStamp, EnumError>) -> Decision {

@@ -149,6 +149,14 @@ pub const FULL_RESCAN_FLOOR: Duration = Duration::from_secs(60 * 60);
 /// invisible.
 pub const TREE_RESCAN_FLOOR: Duration = Duration::from_secs(30 * 60);
 
+/// Two incremental updates are never started closer together than this.
+///
+/// A patch reads the folders that changed, not the share, so it is paced in
+/// seconds where a full pass is paced in minutes. Its own floor rather than a
+/// share of [`MIN_FULL_SCAN_SPACING`], because a single number would have to
+/// be wrong for one of them.
+pub const PATCH_SPACING: Duration = Duration::from_secs(5);
+
 /// How long a burst of change notifications is allowed to accumulate before
 /// it is acted on.
 ///

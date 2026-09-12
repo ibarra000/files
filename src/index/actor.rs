@@ -48,6 +48,7 @@ use super::log::{IndexLog, Record};
 use super::persist;
 use super::schedule::{Cadence, Decision, Input, Scheduler, Step, is_probe_refusal};
 use super::store::{Activity, DegradeReason, IndexStore, Origin, TreeCoverage};
+use super::watch::{self, ChangeWatcher, WatchQueue};
 use super::{DirStamp, Snapshot};
 use super::{tree, walk};
 use crate::app::event::{AppEvent, IndexMsg};
@@ -84,6 +85,10 @@ pub enum IndexCmd {
     Refresh {
         force: bool,
     },
+    /// The watch queue has something in it. Carries no payload: the dirty set
+    /// lives in the queue, so a message dropped on a full channel costs a
+    /// wake-up rather than a file nobody can find again.
+    Changed,
     Shutdown,
 }
 
@@ -100,6 +105,10 @@ pub struct IndexActor {
     /// only thing that crosses that gap.
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// Kept only so shutdown can unblock it: a thread parked in
+    /// `ReadDirectoryChangesW` never gets to poll a cancellation flag.
+    watcher: Option<Arc<dyn ChangeWatcher>>,
+    pump: Option<JoinHandle<()>>,
 }
 
 impl IndexActor {
@@ -121,7 +130,17 @@ impl IndexActor {
         // message lands has already been told to stop. Sending first and
         // setting second would leave exactly the window this exists to close.
         self.stop.store(true, Ordering::Relaxed);
+        // The watcher before the actor. Its thread is parked in a call the
+        // flag cannot reach, so it has to be told out of band or shutdown
+        // waits out the whole budget for a thread that was never going to
+        // notice.
+        if let Some(watcher) = &self.watcher {
+            watcher.stop();
+        }
         let _ = self.tx.send(IndexCmd::Shutdown);
+        if let Some(pump) = self.pump.take() {
+            let _ = pump.join();
+        }
         let Some(handle) = self.handle.take() else {
             return true;
         };
@@ -159,6 +178,13 @@ pub struct IndexContext {
     /// application wants; a test passes `Some` and gets a fixed schedule.
     pub rng_seed: Option<u64>,
     pub log: Arc<IndexLog>,
+    /// Live change notifications, when they are available here.
+    ///
+    /// The queue rather than the watcher: the actor never talks to the
+    /// operating system about this, it reads a set somebody else fills in.
+    pub watch: Option<Arc<WatchQueue>>,
+    /// The watcher feeding [`Self::watch`], kept so shutdown can unblock it.
+    pub watcher: Option<Arc<dyn ChangeWatcher>>,
 }
 
 impl IndexContext {
@@ -177,7 +203,16 @@ impl IndexContext {
             cadence: Cadence::shipped().from_env(),
             rng_seed: None,
             log: Arc::new(IndexLog::disabled()),
+            watch: None,
+            watcher: None,
         }
+    }
+
+    /// Feeds this actor live change notifications.
+    pub fn with_watch(mut self, watcher: Arc<dyn ChangeWatcher>, queue: Arc<WatchQueue>) -> Self {
+        self.watcher = Some(watcher);
+        self.watch = Some(queue);
+        self
     }
 
     /// Makes this actor own the walked tree instead of the flat index.
@@ -281,6 +316,8 @@ pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<Ind
     let (tx, rx) = crossbeam_channel::bounded(16);
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = CancelToken::from_flag(Arc::clone(&stop));
+    let watcher = ctx.watcher.clone();
+    let pump = spawn_pump(&ctx, tx.clone(), &cancel, &events)?;
     let handle = std::thread::Builder::new()
         .name("files-index".into())
         .spawn(move || {
@@ -298,7 +335,47 @@ pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<Ind
         tx,
         stop,
         handle: Some(handle),
+        watcher,
+        pump,
     })
+}
+
+/// Starts the thread that drains the watcher into the queue.
+///
+/// Its own thread because `next_event` blocks - over SMB it is an outstanding
+/// `CHANGE_NOTIFY` that may not answer for hours - and the actor thread cannot
+/// afford to be in it. All it ever does is fold events into a set and nudge
+/// the actor, so a lost nudge costs a wake-up rather than a change.
+fn spawn_pump(
+    ctx: &IndexContext,
+    tx: Sender<IndexCmd>,
+    cancel: &CancelToken,
+    events: &Sender<AppEvent>,
+) -> std::io::Result<Option<JoinHandle<()>>> {
+    let (Some(watcher), Some(queue)) = (ctx.watcher.clone(), ctx.watch.clone()) else {
+        return Ok(None);
+    };
+    let cancel = cancel.clone();
+    let events = events.clone();
+    let handle = std::thread::Builder::new()
+        .name("files-watch".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                watch::pump(watcher.as_ref(), &queue, &cancel, || {
+                    // Dropped on a full channel on purpose. The actor reads
+                    // the queue, not the message, so the only thing lost is
+                    // one early wake-up out of the sixteen already queued.
+                    let _ = tx.try_send(IndexCmd::Changed);
+                });
+            }));
+            if result.is_err() {
+                let _ = events.send(AppEvent::ActorDied {
+                    actor: "watch",
+                    detail: "panicked".into(),
+                });
+            }
+        })?;
+    Ok(Some(handle))
 }
 
 /// What ended the wait.
@@ -306,6 +383,7 @@ pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<Ind
 enum Wake {
     Timer,
     Refresh { force: bool },
+    Changed,
     Shutdown,
 }
 
@@ -344,13 +422,28 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
     log_decision(&ctx, &sched, "start", &describe_load(loaded), &decision);
 
     loop {
-        let mut input = match next_wake(&rx, decision.next_action) {
+        // The wait ends at whichever comes first: what the scheduler asked
+        // for, or the moment a pending change batch becomes actionable. The
+        // debounce is the queue's business, not the scheduler's, so it is
+        // folded in here rather than taught to `schedule.rs`.
+        let deadline = match ctx.watch.as_ref().and_then(|q| q.due_at()) {
+            Some(due) => decision.next_action.min(due),
+            None => decision.next_action,
+        };
+        let mut input = match next_wake(&rx, deadline) {
             Wake::Shutdown => return,
-            Wake::Timer => Input::Woke { forced: false },
             Wake::Refresh { force } => Input::Woke { forced: force },
+            Wake::Timer | Wake::Changed => match pending_changes(&ctx, Instant::now()) {
+                Some(full) => Input::Changed { full },
+                None => Input::Woke { forced: false },
+            },
         };
         let forced = matches!(input, Input::Woke { forced: true });
-        let mut event = if forced { "f5" } else { "timer" };
+        let mut event = match input {
+            Input::Woke { forced: true } => "f5",
+            Input::Changed { .. } => "watch",
+            _ => "timer",
+        };
         let mut detail = String::new();
         let mut pending: Option<PendingFailure> = None;
 
@@ -379,7 +472,25 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                     input = Input::Probed(result);
                     event = "probe";
                 }
+                Step::ApplyChanges => {
+                    let outcome = apply_changes(&ctx, events, &mut detail, cancel);
+                    if let Err(err) = outcome {
+                        pending = Some(PendingFailure {
+                            err,
+                            from_probe: false,
+                        });
+                    }
+                    input = Input::Applied(outcome);
+                    event = "patch";
+                }
                 Step::FullScan(reason) => {
+                    // Whatever the watcher had pending is about to be covered
+                    // by a pass over the whole share, so it is dropped rather
+                    // than left to trigger a second one the moment this
+                    // finishes.
+                    if let Some(queue) = &ctx.watch {
+                        let _ = queue.take();
+                    }
                     ctx.note_scan_started(reason);
                     let outcome = scan_and_publish(
                         &ctx,
@@ -418,6 +529,17 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
             );
         }
 
+        // Re-asserted rather than set once. A walk that succeeds publishes a
+        // fresh verdict on the tree's health, and a walk succeeding is not
+        // evidence that a dead watch came back.
+        if ctx
+            .watch
+            .as_ref()
+            .is_some_and(|q| q.unavailable().is_some())
+        {
+            ctx.store.note_live_updates_unavailable();
+        }
+
         // Belt and braces. A non-terminal decision carries `next_action ==
         // now`, so leaving one in place would spin this thread against the
         // file server - the single worst outcome available here.
@@ -430,21 +552,49 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
     }
 }
 
+/// Whether the watch queue has an actionable batch, and whether it needs a
+/// full re-walk.
+///
+/// A peek. The scheduler may still defer the update to its spacing floor, and
+/// a set consumed before that decision would be a set of changes nobody ever
+/// applies.
+fn pending_changes(ctx: &IndexContext, now: Instant) -> Option<bool> {
+    ctx.watch.as_ref()?.due(now)
+}
+
 /// Blocks until the deadline or a command, coalescing queued refreshes.
 ///
 /// Holding F5 down used to enqueue up to sixteen `Refresh` messages, each of
 /// which was drained and executed as its own full enumeration.
 fn next_wake(rx: &Receiver<IndexCmd>, deadline: Instant) -> Wake {
-    let mut force = match rx.recv_deadline(deadline) {
+    let mut refresh = false;
+    let mut force = false;
+    match rx.recv_deadline(deadline) {
         Err(RecvTimeoutError::Timeout) => return Wake::Timer,
         Err(RecvTimeoutError::Disconnected) | Ok(IndexCmd::Shutdown) => return Wake::Shutdown,
-        Ok(IndexCmd::Refresh { force }) => force,
-    };
+        Ok(IndexCmd::Refresh { force: f }) => {
+            refresh = true;
+            force = f;
+        }
+        Ok(IndexCmd::Changed) => {}
+    }
     loop {
         match rx.try_recv() {
-            Ok(IndexCmd::Refresh { force: f }) => force |= f,
+            Ok(IndexCmd::Refresh { force: f }) => {
+                refresh = true;
+                force |= f;
+            }
+            // A change notification never outranks a refresh: an explicit F5
+            // re-reads the share, which covers whatever the watcher saw.
+            Ok(IndexCmd::Changed) => {}
             Ok(IndexCmd::Shutdown) => return Wake::Shutdown,
-            Err(_) => return Wake::Refresh { force },
+            Err(_) => {
+                return if refresh {
+                    Wake::Refresh { force }
+                } else {
+                    Wake::Changed
+                };
+            }
         }
     }
 }
@@ -1092,6 +1242,119 @@ impl ProgressGate {
         true
     }
 }
+/// Re-reads the dirty subtrees and patches them into the published index.
+///
+/// Cheap where a walk is expensive: the batch names the folders that changed,
+/// so this is a handful of round trips against the nine hundred thousand a
+/// full pass costs. That difference is the entire reason live updates are
+/// worth having - without it a change would either trigger a re-walk every few
+/// minutes or wait for the floor.
+fn apply_changes(
+    ctx: &IndexContext,
+    events: &Sender<AppEvent>,
+    detail: &mut String,
+    cancel: &CancelToken,
+) -> Result<(), EnumError> {
+    let (Some(queue), Some(index)) = (ctx.watch.as_ref(), ctx.store.tree()) else {
+        return Ok(());
+    };
+    // Taken, not peeked. The batch is consumed whether or not it can be
+    // applied: retaining it would have a share that refuses to answer retried
+    // every few seconds for as long as it refuses, and the floor already
+    // guarantees that a lost notification costs at most one floor.
+    let Some(batch) = queue.take() else {
+        return Ok(());
+    };
+    if batch.dirs.is_empty() {
+        return Ok(());
+    }
+
+    let root = indexed_dir(ctx).to_path_buf();
+    ctx.store.set_tree_activity(Activity::Walking {
+        dirs: 0,
+        queued: batch.dirs.len(),
+        files: 0,
+    });
+    publish_status(ctx, events);
+
+    let sink = tree::SegmentSink::new(&root.to_string_lossy());
+    let opts = walk::WalkOpts::default();
+    let report = walk::walk_subtrees(
+        ctx.source.as_ref(),
+        &root,
+        &batch.dirs,
+        &opts,
+        &sink,
+        cancel,
+    );
+    ctx.store.set_tree_activity(Activity::Idle);
+
+    if report.cancelled {
+        return Err(EnumError::Cancelled);
+    }
+    if let Some(err) = report.aborted {
+        *detail = format!("update aborted: {err}");
+        return Err(err);
+    }
+
+    let replaced = covered(&batch.dirs, &report);
+    if replaced.is_empty() {
+        // Every dirty folder failed to read. Replacing them would delete
+        // folders that are still there and whose files are still findable -
+        // turning a transient network error into exactly the silent
+        // disappearance this index exists to prevent.
+        *detail = format!("{} folders unreadable, left alone", batch.dirs.len());
+        return Ok(());
+    }
+
+    let next = index.with_subtrees_replaced(&replaced, &sink.index());
+    *detail = format!(
+        "{} folders refreshed, {} files",
+        report.dirs_visited,
+        next.len()
+    );
+    // `coverage` stays `None`: a patch has nothing to say about whether the
+    // *share* is fully covered, and overwriting the walk's verdict with the
+    // opinion of a three-folder update would clear a warning it never checked.
+    ctx.store
+        .publish_tree(Arc::new(next), Origin::Network, None);
+    let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
+    Ok(())
+}
+
+/// The seeds the walk actually covered, and which may therefore be replaced.
+///
+/// A folder that could not be read is left exactly as it was. The direction
+/// matters and is the same one the whole rewrite turns on: a stale entry is a
+/// result that might be wrong, while a dropped subtree is a file that cannot
+/// be found at all.
+///
+/// A folder that has *gone* is different, and is replaced - by nothing. That
+/// is a deletion, not a failure, and `WalkErrors` already separates the two.
+fn covered(seeds: &[String], report: &walk::WalkReport) -> Vec<String> {
+    let holes = report.errors.holes() as usize;
+    if holes == 0 {
+        return seeds.to_vec();
+    }
+    let recorded: Vec<&str> = report
+        .errors
+        .recorded
+        .iter()
+        .filter(|(_, err)| walk::is_hole(*err))
+        .map(|(rel, _)| rel.as_str())
+        .collect();
+    // More holes than examples kept, so which seeds they belong to cannot be
+    // worked out. Replacing none of them is the only safe reading.
+    if recorded.len() < holes {
+        return Vec::new();
+    }
+    seeds
+        .iter()
+        .filter(|seed| !recorded.iter().any(|rel| walk::is_within(rel, seed)))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

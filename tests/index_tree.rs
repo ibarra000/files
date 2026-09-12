@@ -450,3 +450,295 @@ fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
     assert!(store.tree().is_none(), "nothing should have been published");
     tree.shutdown(Duration::from_millis(500));
 }
+
+// --- live updates ----------------------------------------------------------
+
+/// A change notification arriving at a running actor, end to end: the fake
+/// watcher fires, the queue debounces, the scheduler asks for a patch, the
+/// actor re-reads the dirty folder and republishes.
+///
+/// The property that decides whether any of this was worth building is the
+/// last one here - that a live update reads the folders that changed and not
+/// the share.
+mod live {
+    use super::*;
+    use files::index::watch::fake::ScriptedWatcher;
+    use files::index::watch::{WatchEvent, WatchQueue};
+    use std::time::Duration as Dur;
+
+    /// Milliseconds, so a test can watch a debounce go by.
+    fn queue() -> Arc<WatchQueue> {
+        Arc::new(WatchQueue::new(Dur::from_millis(10), 1_000))
+    }
+
+    fn watching_actor(
+        src: FakeDirSource,
+        store: Arc<IndexStore>,
+        watcher: ScriptedWatcher,
+        queue: Arc<WatchQueue>,
+    ) -> actor::IndexActor {
+        let ctx = IndexContext::new(settings(), store, Arc::new(src), None)
+            .for_tree()
+            .with_cadence(Cadence::fast())
+            .with_seed(7)
+            .with_watch(Arc::new(watcher), queue);
+        actor::spawn(ctx, draining_events()).expect("the actor starts")
+    }
+
+    #[test]
+    fn a_notified_change_makes_a_new_file_findable() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let q = queue();
+        let mut actor = watching_actor(src.clone(), Arc::clone(&store), watcher.clone(), q);
+
+        assert!(wait_for(
+            &store,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Dur::from_secs(5)
+        ));
+        assert!(found(&store, "urgent").is_empty());
+
+        src.add_file("R:\\ab12", "urgent quote.pdf");
+        watcher.changed(&["ab12"]);
+
+        assert!(
+            wait_for(
+                &store,
+                |s| !found(s, "urgent").is_empty(),
+                Dur::from_secs(5)
+            ),
+            "the change never reached the index"
+        );
+        assert_eq!(
+            found(&store, "urgent"),
+            vec!["R:\\ab12\\urgent quote.pdf".to_string()]
+        );
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// A file deleted on the share has to leave the index, or a search offers
+    /// a path that opens nothing.
+    #[test]
+    fn a_notified_deletion_removes_the_file() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(src.clone(), Arc::clone(&store), watcher.clone(), queue());
+
+        assert!(wait_for(
+            &store,
+            |s| !found(s, "spec").is_empty(),
+            Dur::from_secs(5)
+        ));
+
+        src.remove_file("R:\\ab12", "spec.pdf");
+        watcher.changed(&["ab12"]);
+
+        assert!(
+            wait_for(&store, |s| found(s, "spec").is_empty(), Dur::from_secs(5)),
+            "the deleted file is still in the index"
+        );
+        // And the rest of the share is untouched.
+        assert!(!found(&store, "11-3-0704").is_empty());
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// The whole cost argument. If a notification re-walked the share there
+    /// would be no reason to have a watcher at all: the floor already does
+    /// that, once every half hour.
+    #[test]
+    fn a_live_update_reads_the_changed_folder_and_not_the_share() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(src.clone(), Arc::clone(&store), watcher.clone(), queue());
+
+        assert!(wait_for(
+            &store,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Dur::from_secs(5)
+        ));
+        src.clear_calls();
+
+        src.add_file("R:\\ab12", "urgent quote.pdf");
+        watcher.changed(&["ab12"]);
+        assert!(wait_for(
+            &store,
+            |s| !found(s, "urgent").is_empty(),
+            Dur::from_secs(5)
+        ));
+
+        assert_eq!(
+            src.list_count("R:\\archive\\2019\\odd name"),
+            0,
+            "a folder nobody touched was read anyway, so this is a re-walk"
+        );
+        assert!(src.list_count("R:\\ab12") >= 1);
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// An overflow cannot say what changed, so it is the one case that does
+    /// re-walk - and everything it lost comes back.
+    #[test]
+    fn an_overflow_falls_back_to_a_full_walk() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(src.clone(), Arc::clone(&store), watcher.clone(), queue());
+
+        assert!(wait_for(
+            &store,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Dur::from_secs(5)
+        ));
+
+        // Two folders changed; the watcher only knows that it lost track.
+        src.add_file("R:\\ab12", "one.pdf");
+        src.add_file("R:\\11d\\0704", "two.pdf");
+        watcher.push(WatchEvent::Overflow);
+
+        assert!(
+            wait_for(
+                &store,
+                |s| s.tree().is_some_and(|t| t.len() == 6),
+                Dur::from_secs(5)
+            ),
+            "an overflow should have recovered both files"
+        );
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// A folder that cannot be read is left exactly as it was. Replacing it
+    /// with nothing would turn a transient network error into files that
+    /// cannot be found at all - the failure this whole index exists to remove.
+    #[test]
+    fn an_unreadable_folder_is_left_alone_rather_than_emptied() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(src.clone(), Arc::clone(&store), watcher.clone(), queue());
+
+        assert!(wait_for(
+            &store,
+            |s| !found(s, "spec").is_empty(),
+            Dur::from_secs(5)
+        ));
+
+        src.fail_dir("R:\\ab12", EnumError::AccessDenied(5));
+        watcher.changed(&["ab12"]);
+        // Give the patch time to run and fail.
+        assert!(wait_for(
+            &store,
+            |s| s.tree_status().activity == Activity::Idle && src.list_count("R:\\ab12") >= 2,
+            Dur::from_secs(5)
+        ));
+
+        assert!(
+            !found(&store, "spec").is_empty(),
+            "an unreadable folder was emptied instead of being left alone"
+        );
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// Believing you are live when you are not is worse than knowing you are
+    /// not, so the failure is recorded rather than swallowed.
+    #[test]
+    fn an_unavailable_watch_is_recorded_and_costs_no_extra_walk() {
+        let src = share();
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let q = queue();
+        let mut actor = watching_actor(
+            src.clone(),
+            Arc::clone(&store),
+            watcher.clone(),
+            Arc::clone(&q),
+        );
+
+        assert!(wait_for(
+            &store,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Dur::from_secs(5)
+        ));
+        src.clear_calls();
+
+        watcher.push(WatchEvent::Unavailable("no CHANGE_NOTIFY".into()));
+        assert!(wait_for(
+            &store,
+            |_| q.unavailable().is_some(),
+            Dur::from_secs(5)
+        ));
+        assert!(
+            q.is_empty(),
+            "a dead watch is not a reason to re-read anything"
+        );
+        assert!(
+            wait_for(
+                &store,
+                |s| matches!(
+                    s.tree_status().health,
+                    Health::Degraded {
+                        reason: DegradeReason::LiveUpdatesUnavailable,
+                        ..
+                    }
+                ),
+                Dur::from_secs(5)
+            ),
+            "the status line never said live updates had stopped"
+        );
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// A real coverage hole outranks a dead watch. One means files that cannot
+    /// be found at all; the other means new ones take until the floor to
+    /// appear, and replacing the first message with the second would hide the
+    /// one somebody has to act on.
+    #[test]
+    fn an_unreadable_subtree_outranks_a_dead_watch_on_the_status_line() {
+        let src = share();
+        src.fail_dir("R:\\ab12", EnumError::AccessDenied(5));
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(src, Arc::clone(&store), watcher.clone(), queue());
+
+        assert!(wait_for(
+            &store,
+            |s| matches!(
+                s.tree_status().health,
+                Health::Degraded {
+                    reason: DegradeReason::PartiallyUnreadable,
+                    ..
+                }
+            ),
+            Dur::from_secs(5)
+        ));
+
+        watcher.push(WatchEvent::Unavailable("no CHANGE_NOTIFY".into()));
+        std::thread::sleep(Dur::from_millis(100));
+
+        assert!(
+            matches!(
+                store.tree_status().health,
+                Health::Degraded {
+                    reason: DegradeReason::PartiallyUnreadable,
+                    ..
+                }
+            ),
+            "the unreadable subtree was masked by the dead watch"
+        );
+        actor.shutdown(Dur::from_millis(500));
+    }
+
+    /// The watcher's thread parks in a call no flag can reach, so shutdown has
+    /// to tell it out of band or it waits out the whole budget.
+    #[test]
+    fn shutdown_stops_the_watcher_thread() {
+        let store = Arc::new(IndexStore::default());
+        let watcher = ScriptedWatcher::new();
+        let mut actor = watching_actor(share(), Arc::clone(&store), watcher, queue());
+        assert!(wait_for(&store, |s| s.tree().is_some(), Dur::from_secs(5)));
+        assert!(actor.shutdown(Dur::from_secs(2)), "shutdown timed out");
+    }
+}
