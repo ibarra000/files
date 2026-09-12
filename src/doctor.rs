@@ -126,8 +126,59 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
 
     report_index_cache(settings, out);
     let _ = writeln!(out);
+    report_live_updates(settings, out);
+    let _ = writeln!(out);
     report_viewer(settings, out);
     report_recommendations(settings, out);
+}
+
+/// Whether the tree root will actually accept a subtree watch.
+///
+/// Worth its own section because the failure it looks for has no symptom at
+/// all: a server can accept `CHANGE_NOTIFY` and then never fire it, and a
+/// server that refuses it outright looks identical from inside the running
+/// application to one that is simply quiet. This is the one place the question
+/// gets asked directly.
+fn report_live_updates(settings: &Settings, out: &mut dyn Write) {
+    let _ = writeln!(out, "LIVE UPDATES");
+    if settings.tree_path.as_os_str().is_empty() {
+        let _ = writeln!(out, "  no tree mapping configured");
+        return;
+    }
+    let _ = writeln!(out, "  root:      {}", settings.tree_path.display());
+    if !settings.live_updates {
+        let _ = writeln!(
+            out,
+            "  disabled by configuration; the {} rescan floor is the whole guarantee",
+            crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
+        );
+        return;
+    }
+    #[cfg(windows)]
+    {
+        match crate::index::win_watch::DirectoryWatcher::open(&settings.tree_path) {
+            Ok(_) => {
+                let _ = writeln!(out, "  watch:     accepted");
+                let _ = writeln!(
+                    out,
+                    "  note:      a share can accept the request and never fire it, which is                      why the {} floor still applies",
+                    crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
+                );
+            }
+            Err(why) => {
+                let _ = writeln!(out, "  watch:     unavailable - {why}");
+                let _ = writeln!(
+                    out,
+                    "  effect:    new files appear within the {} floor rather than in seconds",
+                    crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = writeln!(out, "  watch:     unavailable on this platform");
+    }
 }
 
 fn report_root(root: &Path, source: &dyn DirSource, out: &mut dyn Write) {
@@ -430,6 +481,11 @@ fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
         out,
         "  FILES_PERSIST={}",
         if settings.persist { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        out,
+        "  FILES_LIVE_UPDATES={}",
+        if settings.live_updates { "on" } else { "off" }
     );
     let _ = writeln!(out, "  FILES_VIEWER={}", settings.viewer.name());
     let _ = writeln!(out);

@@ -426,6 +426,16 @@ pub struct Settings {
     /// after `--bench` confirms the server's pattern matching drops nothing.
     pub server_filter: bool,
     pub persist: bool,
+    /// Live change notification for the walked tree.
+    ///
+    /// Ships **on**, unlike [`Self::server_filter`], and the asymmetry is
+    /// deliberate. A server filter that silently drops matches makes a file
+    /// unfindable, so it has to be proven before it is trusted; a watch that
+    /// silently stops firing costs nothing, because the rescan floor still
+    /// re-walks the share every half hour and the status line says the watch
+    /// is dead. The downside is bounded and the upside is a new job folder
+    /// appearing in seconds rather than in half an hour.
+    pub live_updates: bool,
     pub cache_dir: Option<PathBuf>,
     /// Where to append the index decision log, if anywhere.
     ///
@@ -503,6 +513,7 @@ impl Settings {
             enum_strategy: EnumStrategy::default(),
             matcher: MatcherKind::default(),
             server_filter: false,
+            live_updates: true,
             persist: true,
             cache_dir: default_cache_dir(),
             index_log: None,
@@ -587,6 +598,11 @@ impl Settings {
         {
             self.persist = v;
         }
+        if env_bool("FILES_LIVE_UPDATES").is_none()
+            && let Some(v) = f.live_updates
+        {
+            self.live_updates = v;
+        }
         if env_str("FILES_CACHE_DIR").is_none()
             && let Some(v) = &f.cache_dir
         {
@@ -637,6 +653,9 @@ impl Settings {
         }
         if let Some(v) = env_bool("FILES_PERSIST") {
             s.persist = v;
+        }
+        if let Some(v) = env_bool("FILES_LIVE_UPDATES") {
+            s.live_updates = v;
         }
         if let Some(v) = env_str("FILES_CACHE_DIR") {
             s.cache_dir = Some(PathBuf::from(v));

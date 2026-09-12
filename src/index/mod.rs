@@ -26,6 +26,9 @@ pub mod win_enum;
 #[cfg(windows)]
 pub mod win_util;
 
+#[cfg(windows)]
+pub mod win_watch;
+
 pub use errors::EnumError;
 pub use snapshot::Snapshot;
 pub use store::{Activity, Health, IndexStore, Origin};

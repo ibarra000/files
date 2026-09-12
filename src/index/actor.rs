@@ -215,6 +215,41 @@ impl IndexContext {
         self
     }
 
+    /// Attaches the operating system's change notifications, if they are
+    /// wanted and the share will open for them.
+    ///
+    /// A share that refuses is not a failure to report here. It is recorded in
+    /// the queue and reaches the status line on the next wake, which is where
+    /// the user is already being told what the index is doing - and the floor
+    /// carries on regardless, which is exactly what it is for.
+    #[cfg(windows)]
+    pub fn with_live_updates(self, settings: &Settings) -> Self {
+        use super::win_watch::DirectoryWatcher;
+
+        if !settings.live_updates || !self.is_tree() {
+            return self;
+        }
+        let queue = Arc::new(WatchQueue::default());
+        match DirectoryWatcher::open(&settings.tree_path) {
+            Ok(watcher) => self.with_watch(Arc::new(watcher), queue),
+            Err(why) => {
+                queue.record(super::watch::WatchEvent::Unavailable(why), Instant::now());
+                // The queue is attached even so. It carries the reason, and
+                // the actor reads it every wake - so the status line says live
+                // updates are off instead of quietly implying they are on.
+                Self {
+                    watch: Some(queue),
+                    ..self
+                }
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn with_live_updates(self, _settings: &Settings) -> Self {
+        self
+    }
+
     /// Makes this actor own the walked tree instead of the flat index.
     pub fn for_tree(mut self) -> Self {
         self.kind = MappingKind::Tree;

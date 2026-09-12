@@ -135,9 +135,10 @@ impl Actors {
                         None,
                     )
                     .for_tree()
-                    .with_log(Arc::new(
-                        crate::index::log::IndexLog::from_option(settings.index_log.as_deref()),
-                    )),
+                    .with_log(Arc::new(crate::index::log::IndexLog::from_option(
+                        settings.index_log.as_deref(),
+                    )))
+                    .with_live_updates(&settings),
                     tx.clone(),
                 )
             })

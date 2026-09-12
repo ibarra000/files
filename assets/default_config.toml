@@ -44,7 +44,15 @@ enabled = true
 #
 # The cost is a background walk - one to three minutes for a share of a few
 # hundred thousand folders - which streams results as it goes, so the share is
-# searchable about a second in rather than when it finishes.
+# searchable about a second in rather than when it finishes. The result is
+# cached, so only the first run after an upgrade pays for it in full.
+#
+# After that the share is kept current two ways. The server is asked to report
+# changes as they happen, and only the folders that changed are re-read - so a
+# new job folder appears within seconds. Independently of that, the whole share
+# is re-walked every half hour, because a server can accept the request for
+# notifications and then simply never send any, and that failure has no symptom
+# at all. `files --doctor` says which of the two is actually working.
 # ---------------------------------------------------------------------------
 [[mapping]]
 name    = "jobs"
@@ -76,6 +84,7 @@ enabled = true
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes
 # persist       = true               # keep the on-disk index between runs
+# live_updates  = true               # re-read changed folders as they change
 # history       = true               # remember codes between sessions
 
 # Which viewer Enter uses. Left uncommented because F2 switches it while

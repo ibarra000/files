@@ -146,6 +146,7 @@ const SETTINGS_KEYS: &[&str] = &[
     "matcher",
     "server_filter",
     "persist",
+    "live_updates",
     "cache_dir",
     "history",
     "viewer",
@@ -160,6 +161,7 @@ pub struct FileSettings {
     pub matcher: Option<String>,
     pub server_filter: Option<bool>,
     pub persist: Option<bool>,
+    pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
     pub history: Option<bool>,
     pub viewer: Option<String>,
@@ -577,6 +579,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "matcher" => out.matcher = value.and_then(Value::as_str).map(str::to_string),
             "server_filter" => out.server_filter = value.and_then(Value::as_bool),
             "persist" => out.persist = value.and_then(Value::as_bool),
+            "live_updates" => out.live_updates = value.and_then(Value::as_bool),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = value.and_then(Value::as_bool),
             "viewer" => {
