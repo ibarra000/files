@@ -33,7 +33,6 @@ use super::{OpenContext, OpenRequest};
 use crate::app::event::{AppEvent, OpenMsg};
 use crate::config::ViewerKind;
 use crate::search::worker::Backend;
-use crate::util::cancel::CancelToken;
 
 /// Queued opens.
 ///
@@ -148,9 +147,7 @@ fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
     // Only the PDF route needs a listing, and a failure to get one is not a
     // failure to open: it degrades to the single selected file.
     let snapshot = match request.viewer {
-        ViewerKind::Pdf => backend
-            .snapshot_for(&request.query, &CancelToken::never())
-            .ok(),
+        ViewerKind::Pdf => Some(backend.flat()),
         ViewerKind::Avwin => None,
     };
 

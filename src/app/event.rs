@@ -6,7 +6,6 @@
 //! makes the interaction model testable on a machine with no terminal and no
 //! network drives.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +34,6 @@ pub enum AppEvent {
     Search(SearchMsg),
     Verify(VerifyMsg),
     Index(IndexMsg),
-    Prefetch(PrefetchMsg),
     Open(OpenMsg),
     Clipboard(ClipboardMsg),
     /// A worker thread panicked. Surfaced rather than leaving a spinner up
@@ -78,12 +76,6 @@ pub enum IndexMsg {
         elapsed: Duration,
         error: Option<EnumError>,
     },
-}
-
-#[derive(Debug, Clone)]
-pub enum PrefetchMsg {
-    Ready { dir: PathBuf },
-    Failed { dir: PathBuf, err: EnumError },
 }
 
 #[derive(Debug, Clone)]
@@ -162,10 +154,6 @@ pub enum Cmd {
     },
     Verify {
         query: String,
-        epoch: u64,
-    },
-    Prefetch {
-        dir: PathBuf,
         epoch: u64,
     },
     RefreshIndex {

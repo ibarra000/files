@@ -6,7 +6,6 @@ pub mod builder;
 pub mod enumerate;
 pub mod errors;
 pub mod fake_source;
-pub mod jobs;
 pub mod log;
 pub mod persist;
 pub mod schedule;

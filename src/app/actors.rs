@@ -1,8 +1,9 @@
 //! Starting, feeding and stopping the background threads.
 //!
 //! The thread population is fixed for the life of the process: one input
-//! reader, one search worker, one verification worker, one index actor, two
-//! prefetchers, plus rayon's pool for the matcher. Nothing is spawned per
+//! reader, one search worker, one verification worker, one index actor per
+//! configured share, one change watcher, plus rayon's pool for the matcher.
+//! Nothing is spawned per
 //! keystroke, so thread growth is impossible by construction rather than by
 //! discipline.
 //!
@@ -24,7 +25,6 @@ use crate::index::enumerate::DirSource;
 use crate::index::store::IndexStore;
 use crate::index::{actor, fake_source::FakeDirSource};
 use crate::open;
-use crate::prefetch::{self, Prefetcher};
 use crate::search::verify::Verifier;
 use crate::search::worker::{self, Backend, SearchRequest, WorkerHandle};
 
@@ -43,7 +43,6 @@ pub struct Actors {
     index: IndexActor,
     /// Absent when no tree mapping is configured.
     tree_index: Option<IndexActor>,
-    prefetch: Prefetcher,
     /// Opens what Enter chose. One thread for the life of the process, like
     /// the rest: assembling a document reads every page off the share, which
     /// is far too much work to spawn a thread for per keypress.
@@ -143,7 +142,6 @@ impl Actors {
                 )
             })
             .transpose()?;
-        let prefetch = prefetch::spawn(Arc::clone(&backend), tx.clone())?;
         // Merged documents cannot be deleted once a viewer has them open, so
         // last session's are collected at the start of this one - the same
         // arrangement the index cache uses just above. Swept *before* the
@@ -171,7 +169,6 @@ impl Actors {
                 verify,
                 index,
                 tree_index,
-                prefetch,
                 opener,
                 history,
                 _input: input,
@@ -197,7 +194,6 @@ impl Actors {
                     self.verify
                         .submit_generation(epoch, SearchRequest { query, epoch });
                 }
-                Cmd::Prefetch { dir, .. } => self.prefetch.request(dir),
                 Cmd::RefreshIndex { force } => {
                     self.index.refresh(force);
                     // F5 means "re-examine the share", and there are two.
@@ -244,7 +240,6 @@ impl Actors {
         if let Some(tree) = &mut self.tree_index {
             clean &= tree.shutdown(budget);
         }
-        clean &= self.prefetch.shutdown(budget);
         clean &= self.opener.shutdown(budget);
         if let Some(writer) = &mut self.history {
             writer.shutdown();
@@ -445,36 +440,6 @@ mod tests {
             }
         }
         panic!("no result arrived");
-    }
-
-    #[test]
-    fn dispatching_a_prefetch_warms_the_cache() {
-        let (actors, _rx) = start();
-        let mut cmds = CmdList::new();
-        cmds.push(Cmd::Prefetch {
-            dir: "R:\\11d".into(),
-            epoch: 1,
-        });
-        actors.dispatch(cmds);
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut warmed = false;
-        while Instant::now() < deadline {
-            if matches!(
-                actors
-                    .backend
-                    .store
-                    .job(std::path::Path::new("R:\\11d"), Duration::from_secs(60)),
-                crate::index::store::Cached::Hit(_)
-            ) {
-                warmed = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(warmed);
-        let mut actors = actors;
-        actors.shutdown();
     }
 
     #[test]

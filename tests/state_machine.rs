@@ -8,18 +8,13 @@
 //! Everything here goes through the public API, so it also serves as a check
 //! that the surface is usable from outside the crate.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use files::app::event::{
-    AppEvent, Cmd, IndexMsg, OpenMsg, PrefetchMsg, Redraw, Response, SearchMsg, VerifyMsg,
-};
+use files::app::event::{AppEvent, Cmd, IndexMsg, OpenMsg, Redraw, Response, SearchMsg, VerifyMsg};
 use files::app::state::{AppState, EmptyReason, Focus, QueryPhase, Severity, TOAST_LIFETIME};
-use files::config::{
-    MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
-};
+use files::config::{MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind};
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
 use files::search::matcher::{Hit, SearchOutcome};
@@ -31,29 +26,16 @@ fn state() -> (AppState, Instant) {
     (AppState::new(Settings::default(), now), now)
 }
 
-/// A state whose job share still routes by pattern.
+/// A state with no share configured at all.
 ///
-/// The shipped configuration indexes both shares, so it no longer produces a
-/// job-folder target at all - but the routing and prefetch machinery still
-/// exists and is still reachable by anyone who configures it, so the tests
-/// covering it supply their own table rather than leaning on a default that
-/// has moved on.
-fn routed_state() -> (AppState, Instant) {
-    let toml = "version = 1\n\n\
-         [[mapping]]\n\
-         name = 'jobs'\n\
-         path = 'R:\\'\n\
-         kind = \"job-folder\"\n\n\
-         [[mapping.rules]]\n\
-         pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\n\
-         folder = '${1}${2}'\n";
-    let parsed = files::config::file::parse(
-        toml,
-        std::path::Path::new("test"),
-        files::paths::ConfigSource::BuiltIn,
-    )
-    .expect("the fixture parses");
-    let settings = Settings::with_routes(Arc::new(parsed.routes), |s| s);
+/// The only way a query now reaches nothing: every share is indexed, so there
+/// is no pattern left to fail to match.
+fn unconfigured_state() -> (AppState, Instant) {
+    // Built directly rather than parsed: the config layer refuses a file with
+    // no enabled mapping in it, which is why this phase is a defensive branch
+    // rather than something a user can reach by editing the file.
+    let routes = files::paths::Routes::new(Vec::new(), files::paths::ConfigSource::BuiltIn);
+    let settings = Settings::with_routes(Arc::new(routes), |s| s);
     let now = Instant::now();
     (AppState::new(settings, now), now)
 }
@@ -134,18 +116,18 @@ fn an_unusual_code_is_searched_for_rather_than_refused() {
     let (mut s, now) = state();
     let r = type_in(&mut s, "!!!", now);
     assert_eq!(s.phase, QueryPhase::LocalPending);
-    assert_ne!(s.empty_reason, Some(EmptyReason::NoPathPattern));
+    assert_ne!(s.empty_reason, Some(EmptyReason::NoSharesConfigured));
     assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
 }
 
-/// The refusal remains for a configuration made only of patterns, where
-/// declining really is all it can do.
+/// With no share enabled there is nowhere to look, and saying so beats
+/// searching nothing and reporting no matches.
 #[test]
-fn a_patterns_only_configuration_still_declines_what_it_cannot_route() {
-    let (mut s, now) = routed_state();
-    let r = type_in(&mut s, "!!!", now);
-    assert_eq!(s.phase, QueryPhase::Unresolvable);
-    assert_eq!(s.empty_reason, Some(EmptyReason::NoPathPattern));
+fn a_configuration_with_no_enabled_share_says_so() {
+    let (mut s, now) = unconfigured_state();
+    let r = type_in(&mut s, "11-D-0704", now);
+    assert_eq!(s.phase, QueryPhase::NoShares);
+    assert_eq!(s.empty_reason, Some(EmptyReason::NoSharesConfigured));
     assert!(r.cmds.iter().all(|c| !matches!(c, Cmd::Search { .. })));
 }
 
@@ -547,26 +529,6 @@ fn continued_typing_pushes_the_verify_deadline_out() {
 }
 
 #[test]
-fn prefetch_fires_sooner_than_verification() {
-    assert!(PREFETCH_DEBOUNCE < VERIFY_DEBOUNCE);
-    // Only a routed job folder is ever prefetched: an indexed share is
-    // already in memory, so there is nothing to speculate about.
-    let (mut s, now) = routed_state();
-    type_in(&mut s, "11-D-0704", now);
-    let r = s.update(AppEvent::Tick, now + PREFETCH_DEBOUNCE);
-    assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Prefetch { .. })));
-}
-
-#[test]
-fn a_custompro_code_is_never_prefetched() {
-    // The flat root is far too large to speculate on.
-    let (mut s, now) = state();
-    type_in(&mut s, "P12345", now);
-    let r = s.update(AppEvent::Tick, now + PREFETCH_DEBOUNCE * 2);
-    assert!(r.cmds.iter().all(|c| !matches!(c, Cmd::Prefetch { .. })));
-}
-
-#[test]
 fn a_wedged_verification_is_broken_by_the_watchdog() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
@@ -751,24 +713,6 @@ fn a_genuine_no_match_says_how_much_was_searched() {
         s.empty_reason,
         Some(EmptyReason::NoMatches { searched: 4321 })
     );
-}
-
-#[test]
-fn a_prefetch_failure_explains_a_missing_job_folder() {
-    let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
-    s.update(search_result(&view(&s), vec![], 0, 0), now);
-    s.update(
-        AppEvent::Prefetch(PrefetchMsg::Failed {
-            dir: PathBuf::from("R:\\11d"),
-            err: EnumError::PathNotFound(3),
-        }),
-        now,
-    );
-    assert!(matches!(
-        s.empty_reason,
-        Some(EmptyReason::PathNotFound { .. })
-    ));
 }
 
 // --- background messages ----------------------------------------------

@@ -278,7 +278,6 @@ impl AppState {
         // yet, so the pending work for the code being replaced is stood down
         // and re-armed when an entry is actually taken.
         self.verify_due_at = None;
-        self.prefetch_due_at = None;
         Response::redraw()
     }
 

@@ -18,8 +18,13 @@ pub enum QueryPhase {
     TooShort {
         need: usize,
     },
-    /// Typed, but it matches no known job-code pattern.
-    Unresolvable,
+    /// Typed, but there is no share to search.
+    ///
+    /// Was "this does not look like a job code", back when a code had to match
+    /// a pattern before anything would look for it. Every share is indexed
+    /// now, so the only way a query reaches nothing is a configuration with no
+    /// enabled share in it.
+    NoShares,
     /// Dispatched to the matcher. Sub-millisecond, so rarely rendered.
     LocalPending,
     /// Showing results from the in-memory index.
@@ -55,7 +60,7 @@ impl QueryPhase {
 pub enum EmptyReason {
     NoQuery,
     QueryTooShort { need: usize },
-    NoPathPattern,
+    NoSharesConfigured,
     NoMatches { searched: u32 },
     IndexUnavailable { detail: String },
     PathNotFound { dir: PathBuf },

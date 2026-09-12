@@ -311,10 +311,9 @@ fn browsing_recall_dispatches_no_work_until_an_entry_is_taken() {
     let step = s.update(press(KeyCode::Up), now);
     for r in [&open, &step] {
         assert!(
-            r.cmds.iter().all(|c| !matches!(
-                c,
-                Cmd::Search { .. } | Cmd::Verify { .. } | Cmd::Prefetch { .. }
-            )),
+            r.cmds
+                .iter()
+                .all(|c| !matches!(c, Cmd::Search { .. } | Cmd::Verify { .. })),
             "recall must not search: {:?}",
             r.cmds
         );

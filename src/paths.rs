@@ -493,6 +493,29 @@ impl Routes {
         self.mappings.iter().map(|m| m.name.as_ref()).collect()
     }
 
+    /// Every share a query is searched against, in configuration order.
+    ///
+    /// Takes no code, and that *is* the change. Routing existed to work out
+    /// which folder a code lived in before anything looked for it; an indexed
+    /// share already knows where every file is, so the question became a
+    /// search rather than a deduction and the answer stopped depending on what
+    /// was typed.
+    pub fn targets(&self) -> TargetList {
+        self.enabled()
+            .filter(|m| m.kind.is_indexed())
+            .map(|m| Target {
+                mapping: m.id,
+                kind: m.kind,
+                dir: m.path.clone(),
+            })
+            .collect()
+    }
+
+    /// Whether anything is searchable at all.
+    pub fn any_indexed(&self) -> bool {
+        self.enabled().any(|m| m.kind.is_indexed())
+    }
+
     /// Every target `code` resolves to, in evaluation order.
     pub fn classify(&self, code: &str) -> TargetList {
         let mut targets = TargetList::new();

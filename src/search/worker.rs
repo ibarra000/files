@@ -10,25 +10,23 @@
 //! request, so thread growth and network stampedes are prevented structurally
 //! rather than by discipline.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use crossbeam_channel::Sender;
 
-use super::matcher::{self, SearchOutcome};
+use super::matcher::{self};
 use super::verify::{SkipReason, Verifier, VerifyOutcome};
 use crate::app::event::{AppEvent, SearchMsg, VerifyMsg};
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
-use crate::index::errors::EnumError;
+use crate::index::snapshot;
 use crate::index::snapshot::Snapshot;
 use crate::index::store::IndexStore;
 use crate::index::tree::TreeIndex;
-use crate::index::{jobs, snapshot};
-use crate::paths::{MappingKind, TargetList};
-use crate::util::cancel::{CancelToken, Epoch};
+use crate::paths::TargetList;
+use crate::util::cancel::Epoch;
 use crate::util::latest_slot::LatestSlot;
 
 /// A request to match `query`.
@@ -46,62 +44,34 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// Resolves a query to the listing it should be matched against.
+    /// The flat index, or an empty listing until one exists.
     ///
-    /// The flat root is served entirely from the in-memory index; a job
-    /// folder is fetched on demand, usually finding the prefetcher has
-    /// already warmed it.
-    pub fn snapshot_for(
-        &self,
-        query: &str,
-        cancel: &CancelToken,
-    ) -> Result<Arc<Snapshot>, EnumError> {
-        let targets = self.targets_for(query);
-        let Some(target) = targets.iter().find(|t| t.kind != MappingKind::Tree) else {
-            return Ok(Arc::new(Snapshot::empty("")));
-        };
-        match target.kind {
-            MappingKind::Flat => Ok(self
-                .store
-                .flat()
-                .unwrap_or_else(|| Arc::new(Snapshot::empty(&target.dir.to_string_lossy())))),
-            // Searched through `trees_for`, not here: a tree is not a listing
-            // and cannot be represented as one.
-            MappingKind::Tree => unreachable!("filtered out above"),
-            MappingKind::JobFolder => jobs::fetch(
-                self.source.as_ref(),
-                &self.store,
-                &target.dir,
-                false,
-                cancel,
-            )
-            .map(|(s, _)| s),
-        }
+    /// Takes no query and cannot fail. It used to do both: a code was routed
+    /// to a folder, and the folder was listed over the network on the search
+    /// thread. Every share is indexed now, so the listing is already in
+    /// memory and there is nothing left to resolve or to wait for.
+    pub fn flat(&self) -> Arc<Snapshot> {
+        self.store.flat().unwrap_or_else(|| {
+            Arc::new(Snapshot::empty(
+                &self.settings.custpro_path.to_string_lossy(),
+            ))
+        })
     }
 
-    /// The walked tree, when the query reaches one.
+    /// The walked tree, once it holds anything.
     ///
-    /// Separate from [`Self::snapshot_for`] because a tree is a different
-    /// shape, not a different listing: it spans many directories and carries
-    /// the folder names alongside the filenames. Forcing it through
-    /// `Arc<Snapshot>` would mean flattening away exactly the structure that
-    /// makes a folder-name match possible.
-    pub fn tree_for(&self, query: &str) -> Option<Arc<TreeIndex>> {
-        self.targets_for(query)
-            .iter()
-            .any(|t| t.kind == MappingKind::Tree)
-            .then(|| self.store.tree())
-            .flatten()
+    /// Separate from [`Self::flat`] because a tree is a different shape, not a
+    /// different listing: it spans many directories and carries the folder
+    /// names alongside the filenames. Forcing it through `Arc<Snapshot>` would
+    /// mean flattening away exactly the structure that makes a folder-name
+    /// match possible.
+    pub fn tree(&self) -> Option<Arc<TreeIndex>> {
+        self.store.tree()
     }
 
-    /// Every target a query resolves to, in configuration order.
-    pub fn targets_for(&self, query: &str) -> TargetList {
-        self.settings.routes.classify(query)
-    }
-
-    /// The directory a query resolves to, for prefetching and diagnostics.
-    pub fn dir_for(&self, query: &str) -> Option<PathBuf> {
-        self.targets_for(query).first().map(|t| t.dir.clone())
+    /// Every share a query is searched against, in configuration order.
+    pub fn targets(&self) -> TargetList {
+        self.settings.routes.targets()
     }
 }
 
@@ -212,32 +182,17 @@ fn run_search(
             continue;
         }
 
-        let snapshot = match backend.snapshot_for(&request.query, &cancel) {
-            Ok(s) => s,
-            Err(EnumError::Cancelled) => continue,
-            Err(err) => {
-                // Order matters. The empty result goes first, then the
-                // reason: the state machine only adopts a specific
-                // explanation once the query has settled into a completed,
-                // empty search. Sending them the other way round would let
-                // the generic "no matches among 0 files" overwrite
-                // "no such job folder".
-                let _ = tx.send(AppEvent::Search(SearchMsg {
-                    epoch: request.epoch,
-                    query: request.query.clone(),
-                    elapsed: started.elapsed(),
-                    result: Ok(SearchOutcome::default()),
-                }));
-                let _ = tx.send(AppEvent::Prefetch(crate::app::event::PrefetchMsg::Failed {
-                    dir: backend.dir_for(&request.query).unwrap_or_default(),
-                    err,
-                }));
-                continue;
-            }
-        };
-
-        let flat = matcher::search(&snapshot, &request.query, backend.settings.matcher, &cancel);
-        let result = match backend.tree_for(&request.query) {
+        // No network call and no failure path. Both indexes are already in
+        // memory, so a search is a sweep over bytes this process owns - which
+        // is why the "no such job folder" error this used to have to report
+        // does not exist any more.
+        let flat = matcher::search(
+            &backend.flat(),
+            &request.query,
+            backend.settings.matcher,
+            &cancel,
+        );
+        let result = match backend.tree() {
             // One merged, ranked list: which share a file came from is shown
             // on the row, but it must not decide where in the list it sits.
             Some(tree) => flat.and_then(|flat| {
@@ -305,37 +260,18 @@ fn run_verify(
             continue;
         }
 
-        // Only a flat mapping is worth verifying against the server: a job
-        // folder costs one round trip to list in full either way.
-        let targets = backend.targets_for(&request.query);
-        let Some(target) = targets.first() else {
-            continue;
-        };
-        let outcome = match target.kind {
-            MappingKind::Flat => {
-                let snapshot = backend.store.flat();
-                verifier.verify(&request.query, snapshot.as_deref(), &cancel)
-            }
-            // A tree has no single directory to ask the server about.
-            // `FindFirstFileExW` matches within one folder, so verifying a
-            // tree would mean one round trip per folder the hits came from -
-            // turning the one cheap round trip this exists for into hundreds.
-            // Freshness for a tree comes from the change watcher and the
-            // re-walk floor instead, and saying so is better than implying a
-            // check that did not happen.
-            MappingKind::Tree => VerifyOutcome::Skipped(SkipReason::NotApplicable),
-            MappingKind::JobFolder => {
-                match jobs::fetch(
-                    backend.source.as_ref(),
-                    &backend.store,
-                    &target.dir,
-                    true,
-                    &cancel,
-                ) {
-                    Ok(_) => VerifyOutcome::IndexAuthoritative { stamp: None },
-                    Err(err) => VerifyOutcome::Failed(err),
-                }
-            }
+        // Only a flat mapping is worth verifying against the server, and a
+        // tree cannot be: `FindFirstFileExW` matches within one folder, so
+        // verifying a tree would mean one round trip per folder the hits came
+        // from - turning the one cheap round trip this exists for into
+        // hundreds. Freshness for a tree comes from the change watcher and the
+        // re-walk floor instead, and saying so is better than implying a check
+        // that did not happen.
+        let outcome = if backend.settings.custpro_path.as_os_str().is_empty() {
+            VerifyOutcome::Skipped(SkipReason::NotApplicable)
+        } else {
+            let snapshot = backend.store.flat();
+            verifier.verify(&request.query, snapshot.as_deref(), &cancel)
         };
 
         let _ = tx.send(AppEvent::Verify(VerifyMsg {
@@ -354,40 +290,12 @@ pub use snapshot::Snapshot as WorkerSnapshot;
 mod tests {
     use super::*;
     use crate::index::fake_source::FakeDirSource;
+    use crate::paths::MappingKind;
     use crossbeam_channel::bounded;
     use std::time::Duration;
 
     fn backend(src: FakeDirSource) -> Arc<Backend> {
         backend_with(Settings::default(), src)
-    }
-
-    /// A backend whose job share still routes by pattern.
-    ///
-    /// The shipped configuration indexes both shares now, so it no longer
-    /// produces a job-folder target at all - but the machinery still exists
-    /// and is still reachable by anyone who configures it, so the tests that
-    /// cover it supply their own routing table rather than leaning on a
-    /// default that has moved on.
-    fn job_backend(src: FakeDirSource) -> Arc<Backend> {
-        // Only the job mapping. An indexed share matches every query, so
-        // including one would make it the first target for every code and
-        // these tests would silently stop exercising the job path at all.
-        let toml = "version = 1\n\n\
-             [[mapping]]\n\
-             name = 'jobs'\n\
-             path = 'R:\\'\n\
-             kind = \"job-folder\"\n\n\
-             [[mapping.rules]]\n\
-             pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\n\
-             folder = '${1}${2}'\n";
-        let parsed = crate::config::file::parse(
-            toml,
-            std::path::Path::new("test"),
-            crate::paths::ConfigSource::BuiltIn,
-        )
-        .expect("the fixture parses");
-        let settings = Settings::with_routes(Arc::new(parsed.routes), |s| s);
-        backend_with(settings, src)
     }
 
     fn backend_with(settings: Settings, src: FakeDirSource) -> Arc<Backend> {
@@ -414,67 +322,32 @@ mod tests {
         out
     }
 
-    #[test]
-    fn resolves_a_job_query_to_its_folder() {
-        let b = job_backend(FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]));
-        assert_eq!(b.dir_for("11-D-0704"), Some(PathBuf::from("R:\\11d")));
-    }
-
-    #[test]
-    fn resolves_a_custompro_query_to_the_flat_root() {
-        let b = backend(FakeDirSource::new());
-        assert_eq!(b.dir_for("P12345"), Some(Settings::default().custpro_path));
-    }
-
-    /// Nothing is unresolvable against an indexed share.
+    /// Every configured share is searched, whatever was typed.
     ///
-    /// This used to assert `None`: routing had to recognise a code before it
-    /// would look anywhere, so a string matching no pattern was refused
-    /// outright and the status line said "not a recognised job code". That is
+    /// This used to be a routing test: a code had to match a pattern before
+    /// anything would look for it, and a string matching none was refused
+    /// outright with "not a recognised job code" on the status line. That is
     /// the behaviour being removed - an indexed share knows every file it
     /// holds, so an unusual query returns no matches rather than being
-    /// declined. Against a routing table that still has patterns, the old
-    /// answer is still the right one.
+    /// declined.
     #[test]
-    fn nothing_is_unresolvable_against_an_indexed_share() {
+    fn every_configured_share_is_a_target_whatever_the_query() {
         let b = backend(FakeDirSource::new());
-        assert_eq!(b.dir_for("!!!"), Some(Settings::default().custpro_path));
-
-        // A routing table made only of patterns still declines what matches
-        // none of them, which is what the whole change is moving away from.
-        let routed = job_backend(FakeDirSource::new());
-        assert_eq!(routed.dir_for("!!!"), None);
+        let targets = b.targets();
+        assert_eq!(targets.len(), 2, "{targets:?}");
+        assert!(targets.iter().any(|t| t.kind == MappingKind::Flat));
+        assert!(targets.iter().any(|t| t.kind == MappingKind::Tree));
     }
 
     #[test]
     fn the_flat_root_is_served_from_the_index_without_touching_the_network() {
         let src = FakeDirSource::new().with_dir(crate::config::CUSTPRO_PATH, &["a.pdf"]);
         let b = backend(src.clone());
-        let snapshot = b.snapshot_for("P12345", &CancelToken::never()).unwrap();
-        assert!(snapshot.is_empty(), "no index published yet");
+        assert!(b.flat().is_empty(), "no index published yet");
         assert!(
             src.calls().is_empty(),
             "the flat root must never be enumerated inline"
         );
-    }
-
-    #[test]
-    fn a_job_query_fetches_and_then_reuses_the_cache() {
-        let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf", "b.pdf"]);
-        let b = job_backend(src.clone());
-        assert_eq!(
-            b.snapshot_for("11-D-0704", &CancelToken::never())
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            b.snapshot_for("11-D-0704", &CancelToken::never())
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(src.list_count("R:\\11d"), 1);
     }
 
     #[test]
@@ -495,73 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn a_burst_of_requests_collapses_to_the_last_one() {
-        let src = FakeDirSource::new().with_dir("R:\\11d", &["alpha.pdf"]);
-        // Slow enough that the worker is still busy while the burst arrives.
-        src.set_latency(Duration::from_millis(120));
-        let (tx, rx) = bounded(64);
-        let mut w = spawn_search(backend(src), tx).unwrap();
-
-        // Occupy the worker.
-        w.submit(|epoch| SearchRequest {
-            query: "11-D-0704".into(),
-            epoch,
-        });
-        std::thread::sleep(Duration::from_millis(20));
-
-        // Eight more land while it is blocked; only the last should survive.
-        for _ in 0..8 {
-            w.submit(|epoch| SearchRequest {
-                query: "11-D-0704".into(),
-                epoch,
-            });
-        }
-
-        let events = drain(&rx, Duration::from_secs(5));
-        let searches = events
-            .iter()
-            .filter(|e| matches!(e, AppEvent::Search(_)))
-            .count();
-        assert!(searches >= 1, "the final request must still be serviced");
-        assert!(
-            searches <= 3,
-            "eight superseded requests should not each run, ran {searches}"
-        );
-        w.shutdown(Duration::from_millis(500));
-    }
-
-    #[test]
-    fn a_failed_job_fetch_reports_the_reason() {
-        let src = FakeDirSource::new();
-        let (tx, rx) = bounded(64);
-        let mut w = spawn_search(job_backend(src), tx).unwrap();
-        w.submit(|epoch| SearchRequest {
-            query: "11-D-0704".into(),
-            epoch,
-        });
-
-        let events = drain(&rx, Duration::from_secs(2));
-        assert!(
-            events.iter().any(|e| matches!(e, AppEvent::Prefetch(_))),
-            "a missing folder should be explained, got {events:?}"
-        );
-
-        // The empty result must arrive first. The state machine only adopts a
-        // specific explanation once the search has settled, so the reverse
-        // order would let "no matches among 0 files" overwrite "no such job
-        // folder".
-        let search_at = events.iter().position(|e| matches!(e, AppEvent::Search(_)));
-        let reason_at = events
-            .iter()
-            .position(|e| matches!(e, AppEvent::Prefetch(_)));
-        assert!(
-            search_at < reason_at,
-            "the reason must land after the empty result, got {events:?}"
-        );
-        w.shutdown(Duration::from_millis(500));
-    }
-
-    #[test]
     fn shutdown_completes_promptly_for_an_idle_worker() {
         let (tx, _rx) = bounded(64);
         let mut w = spawn_search(backend(FakeDirSource::new()), tx).unwrap();
@@ -570,24 +376,29 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(400));
     }
 
+    /// A search cannot wedge, because it no longer touches the network.
+    ///
+    /// It used to: an unindexed job folder was listed inline on this thread,
+    /// so a hung share hung the search worker and shutdown had to give up on
+    /// it. Both shares are indexed now, so a search is a sweep over bytes this
+    /// process already owns.
     #[test]
-    fn shutdown_gives_up_on_a_wedged_worker_rather_than_hanging() {
+    fn a_search_never_reaches_the_share() {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]);
         src.set_hang(true);
-        let (tx, _rx) = bounded(64);
-        let mut w = spawn_search(job_backend(src), tx).unwrap();
+        let (tx, rx) = bounded(64);
+        let mut w = spawn_search(backend(src.clone()), tx).unwrap();
         w.submit(|epoch| SearchRequest {
             query: "11-D-0704".into(),
             epoch,
         });
-        std::thread::sleep(Duration::from_millis(50));
 
-        let started = Instant::now();
-        let clean = w.shutdown(Duration::from_millis(150));
-        assert!(!clean, "a blocked syscall cannot be woken");
+        let events = drain(&rx, Duration::from_secs(2));
         assert!(
-            started.elapsed() < Duration::from_millis(600),
-            "must not wait indefinitely"
+            events.iter().any(|e| matches!(e, AppEvent::Search(_))),
+            "a search against a hung share should still answer, got {events:?}"
         );
+        assert!(src.calls().is_empty(), "the search reached the network");
+        assert!(w.shutdown(Duration::from_millis(500)));
     }
 }

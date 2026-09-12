@@ -14,7 +14,6 @@ pub mod history;
 pub mod index;
 pub mod open;
 pub mod paths;
-pub mod prefetch;
 pub mod search;
 pub mod ui;
 pub mod util;

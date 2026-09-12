@@ -23,9 +23,8 @@ pub fn empty_message(reason: &EmptyReason) -> String {
         EmptyReason::QueryTooShort { need } => {
             format!("Type at least {need} characters.")
         }
-        EmptyReason::NoPathPattern => {
-            "That does not look like a job code. Expected forms: 11-D-0704, AB12-0704, P12345."
-                .into()
+        EmptyReason::NoSharesConfigured => {
+            "No shares are configured. Run `files --check-config` to see why.".into()
         }
         EmptyReason::NoMatches { searched } => {
             format!(
@@ -169,7 +168,7 @@ mod tests {
         let reasons = [
             EmptyReason::NoQuery,
             EmptyReason::QueryTooShort { need: 3 },
-            EmptyReason::NoPathPattern,
+            EmptyReason::NoSharesConfigured,
             EmptyReason::NoMatches {
                 searched: 1_284_551,
             },
@@ -206,11 +205,13 @@ mod tests {
         assert!(msg.contains("os error 53"), "{msg}");
     }
 
+    /// With nothing configured, the message says how to find out why rather
+    /// than listing job-code forms that no longer decide anything.
     #[test]
-    fn an_unrecognised_code_shows_the_expected_forms() {
-        let msg = empty_message(&EmptyReason::NoPathPattern);
-        assert!(msg.contains("11-D-0704"));
-        assert!(msg.contains("P12345"));
+    fn an_unconfigured_install_is_pointed_at_check_config() {
+        let msg = empty_message(&EmptyReason::NoSharesConfigured);
+        assert!(msg.contains("No shares"), "{msg}");
+        assert!(msg.contains("--check-config"), "{msg}");
     }
 
     #[test]

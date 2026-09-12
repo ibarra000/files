@@ -29,16 +29,13 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::layout::Rect;
 
-use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, PrefetchMsg, Redraw, Response};
+use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Response};
 use super::input::{self, Input};
 use crate::config::{
-    ANIMATION_TICK, MIN_QUERY_LEN, PREFETCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
-    ViewerKind,
+    ANIMATION_TICK, MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
 };
 use crate::history::History;
-use crate::index::errors::EnumError;
 use crate::index::store::IndexStatus;
-use crate::paths::MappingKind;
 use crate::search::matcher::{Hit, QueryReject};
 use crate::search::verify::{AuditVerdict, SkipReason, VerifyOutcome};
 
@@ -98,7 +95,6 @@ pub struct AppState {
 
     query_epoch: u64,
     verify_due_at: Option<Instant>,
-    prefetch_due_at: Option<Instant>,
     verify_watchdog_at: Option<Instant>,
     toast_expires_at: Option<Instant>,
     last_frame: Instant,
@@ -134,7 +130,6 @@ impl AppState {
             viewer,
             query_epoch: 0,
             verify_due_at: None,
-            prefetch_due_at: None,
             verify_watchdog_at: None,
             toast_expires_at: None,
             last_frame: now,
@@ -201,7 +196,6 @@ impl AppState {
     pub fn next_deadline(&self) -> Option<Instant> {
         [
             self.verify_due_at,
-            self.prefetch_due_at,
             self.verify_watchdog_at,
             self.toast_expires_at,
             self.wants_animation()
@@ -226,7 +220,6 @@ impl AppState {
             AppEvent::Search(msg) => self.on_search(msg),
             AppEvent::Verify(msg) => self.on_verify(msg, now),
             AppEvent::Index(msg) => self.on_index(msg, now),
-            AppEvent::Prefetch(msg) => self.on_prefetch(msg),
             AppEvent::Open(msg) => self.on_open(msg, now),
             AppEvent::Clipboard(msg) => self.on_clipboard(msg, now),
             AppEvent::ActorDied { actor, detail } => {
@@ -333,7 +326,6 @@ impl AppState {
             self.phase = QueryPhase::Idle;
             self.empty_reason = Some(EmptyReason::NoQuery);
             self.verify_due_at = None;
-            self.prefetch_due_at = None;
             self.selected_path = None;
             return Response::redraw();
         }
@@ -345,17 +337,14 @@ impl AppState {
                 need: MIN_QUERY_LEN,
             });
             self.verify_due_at = None;
-            self.prefetch_due_at = None;
             self.selected_path = None;
             return Response::redraw();
         }
 
-        let targets = self.settings.routes.classify(&self.input);
-        if targets.is_empty() {
-            self.phase = QueryPhase::Unresolvable;
-            self.empty_reason = Some(EmptyReason::NoPathPattern);
+        if !self.settings.routes.any_indexed() {
+            self.phase = QueryPhase::NoShares;
+            self.empty_reason = Some(EmptyReason::NoSharesConfigured);
             self.verify_due_at = None;
-            self.prefetch_due_at = None;
             self.selected_path = None;
             return Response::redraw();
         }
@@ -372,15 +361,6 @@ impl AppState {
         });
 
         self.verify_due_at = Some(now + VERIFY_DEBOUNCE);
-
-        // A resolvable job folder can be fetched speculatively. Prefetch is
-        // cheap and a wrong guess is harmless, so it fires sooner than the
-        // verify. Flat mappings are never speculated on: they are served from
-        // the in-memory index and there is nothing to warm.
-        self.prefetch_due_at = targets
-            .iter()
-            .any(|t| t.kind == MappingKind::JobFolder)
-            .then(|| now + PREFETCH_DEBOUNCE);
 
         response.redraw = Redraw::Yes;
         response
@@ -704,8 +684,7 @@ impl AppState {
                 // Re-run the local match so the display agrees with the
                 // index. Deliberately does NOT re-arm the verify debounce -
                 // that cycle would be a livelock.
-                if self.input.chars().count() >= MIN_QUERY_LEN
-                    && self.settings.routes.resolves(&self.input)
+                if self.input.chars().count() >= MIN_QUERY_LEN && self.settings.routes.any_indexed()
                 {
                     return Response::redraw().with(Cmd::Search {
                         query: self.input.text().to_string(),
@@ -734,27 +713,6 @@ impl AppState {
                 };
                 self.set_toast(text, severity, now);
                 Response::redraw()
-            }
-        }
-    }
-
-    fn on_prefetch(&mut self, msg: PrefetchMsg) -> Response {
-        match msg {
-            // A warmed cache changes nothing on screen until the next search
-            // uses it.
-            PrefetchMsg::Ready { .. } => Response::none(),
-            PrefetchMsg::Failed { dir, err } => {
-                if self.hits.is_empty() && self.phase == QueryPhase::Local {
-                    self.empty_reason = Some(match err {
-                        EnumError::PathNotFound(_) => EmptyReason::PathNotFound { dir },
-                        EnumError::AccessDenied(_) => EmptyReason::AccessDenied { dir },
-                        other => EmptyReason::IndexUnavailable {
-                            detail: other.describe(&dir.to_string_lossy()),
-                        },
-                    });
-                    return Response::redraw();
-                }
-                Response::none()
             }
         }
     }
@@ -835,21 +793,6 @@ impl AppState {
                 self.verify_watchdog_at = Some(now + VERIFY_WATCHDOG);
                 response.merge(Response::redraw().with(Cmd::Verify {
                     query: self.input.text().to_string(),
-                    epoch: self.query_epoch,
-                }));
-            }
-        }
-
-        if let Some(due) = self.prefetch_due_at
-            && now >= due
-        {
-            self.prefetch_due_at = None;
-            for target in self.settings.routes.classify(&self.input) {
-                if target.kind != MappingKind::JobFolder {
-                    continue;
-                }
-                response.merge(Response::none().with(Cmd::Prefetch {
-                    dir: target.dir,
                     epoch: self.query_epoch,
                 }));
             }

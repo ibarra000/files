@@ -114,8 +114,8 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
             text: format!("type at least {need} characters"),
             tone: Tone::Normal,
         },
-        QueryPhase::Unresolvable => StatusLine {
-            text: "not a recognised job code".into(),
+        QueryPhase::NoShares => StatusLine {
+            text: "no shares configured".into(),
             tone: Tone::Warn,
         },
         QueryPhase::LocalPending => StatusLine {
@@ -382,29 +382,32 @@ mod tests {
 
     /// The refusal still exists for a configuration made only of patterns,
     /// where declining is the honest answer.
+    /// With no share enabled, the status line says so rather than searching
+    /// nothing and reporting no matches.
+    ///
+    /// This used to read "not a recognised job code": a pattern had to match
+    /// before anything would look anywhere. Both shares are indexed now, so
+    /// the only way a query reaches nothing is a configuration with nothing
+    /// in it.
     #[test]
-    fn a_patterns_only_configuration_still_declines_what_it_cannot_route() {
+    fn a_configuration_with_no_enabled_share_says_so() {
         let now = Instant::now();
-        let toml = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
-                    kind = \"job-folder\"\n\n[[mapping.rules]]\n\
-                    pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'\nfolder = '${1}${2}'\n";
-        let parsed = crate::config::file::parse(
-            toml,
-            std::path::Path::new("test"),
-            crate::paths::ConfigSource::BuiltIn,
-        )
-        .expect("the fixture parses");
-        let settings = Settings::with_routes(std::sync::Arc::new(parsed.routes), |s| s);
+        // Built directly rather than parsed: the config layer refuses a file
+        // with no enabled mapping in it, which is why this phase is a
+        // defensive branch rather than something a user can reach by editing
+        // the file.
+        let routes = crate::paths::Routes::new(Vec::new(), crate::paths::ConfigSource::BuiltIn);
+        let settings = Settings::with_routes(std::sync::Arc::new(routes), |s| s);
 
         let mut s = AppState::new(settings, now);
-        for c in "!!!".chars() {
+        for c in "11-D-0704".chars() {
             s.update(
                 AppEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
                 now,
             );
         }
         let line = render(&s, now, EPOCH);
-        assert_eq!(line.text, "not a recognised job code");
+        assert_eq!(line.text, "no shares configured");
         assert_eq!(line.tone, Tone::Warn);
     }
 

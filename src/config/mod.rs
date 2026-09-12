@@ -113,11 +113,6 @@ pub const JOB_CACHE_CAPACITY: usize = 64;
 /// server CPU and must not fire per keystroke.
 pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Quiet period before speculatively enumerating a resolvable `R:\` folder.
-/// Shorter than the verify debounce because a prefetch is cheap and wrong
-/// guesses are harmless.
-pub const PREFETCH_DEBOUNCE: Duration = Duration::from_millis(60);
-
 /// How close together two clicks must be to count as a double-click.
 ///
 /// The terminal reports presses, not clicks, so this is the program's own
