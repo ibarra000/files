@@ -15,6 +15,7 @@ pub mod std_enum;
 pub mod store;
 pub mod tree;
 pub mod walk;
+pub mod watch;
 
 #[cfg(windows)]
 pub mod volume;

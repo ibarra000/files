@@ -149,6 +149,23 @@ pub const FULL_RESCAN_FLOOR: Duration = Duration::from_secs(60 * 60);
 /// invisible.
 pub const TREE_RESCAN_FLOOR: Duration = Duration::from_secs(30 * 60);
 
+/// How long a burst of change notifications is allowed to accumulate before
+/// it is acted on.
+///
+/// Measured from the *first* pending event, not the last; see
+/// [`crate::index::watch`] for why that distinction is the whole point.
+/// Two seconds is long enough that copying a job folder in arrives as one
+/// update rather than forty, and short enough that nobody waits for it.
+pub const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Dirty directories past which a full re-walk is cheaper than re-reading them
+/// one at a time.
+///
+/// Three round trips each, so a thousand directories is three thousand - about
+/// a third of a full walk, for a result that covers a fraction of the share.
+/// Past that the honest answer is to walk it.
+pub const WATCH_DIRTY_CAP: usize = 1_000;
+
 /// Two re-walks are never started closer together than this.
 ///
 /// Ten times [`MIN_FULL_SCAN_SPACING`], in proportion to what a walk costs
