@@ -77,11 +77,20 @@ impl Actors {
             // narrower list meant that launching with a different effective
             // configuration - an env override, an alternate `--config` - wiped
             // the other one's cache and guaranteed it a cold start.
+            //
+            // The two *derived* roots are added explicitly rather than trusted
+            // to fall out of the mapping list. They are what the index actors
+            // actually write under, and a sweep that disagrees with the
+            // writers by one entry does not fail loudly - it silently
+            // guarantees a cold start, which for the tree is one to three
+            // minutes of round trips on every launch.
             let live: Vec<_> = settings
                 .routes
                 .enabled()
-                .filter(|m| !m.path.as_os_str().is_empty())
-                .map(|m| crate::index::persist::MappingKey::of(&m.path))
+                .map(|m| m.path.clone())
+                .chain([settings.custpro_path.clone(), settings.tree_path.clone()])
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| crate::index::persist::MappingKey::of(&p))
                 .collect();
             crate::index::persist::gc_orphans(cache_dir, &live);
         }

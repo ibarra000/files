@@ -32,6 +32,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use memmap2::Mmap;
@@ -51,7 +52,12 @@ pub enum Arenas {
         orig: Box<[u8]>,
     },
     Mapped {
-        map: Mmap,
+        /// Shared, because a tree index stores its filenames and its folder
+        /// names as two snapshots inside one file. Mapping that file twice
+        /// would work and would be a waste; more importantly, each mapping is
+        /// an independent kernel object, so the two halves of one index could
+        /// then be backed by different views of the same bytes.
+        map: Arc<Mmap>,
         lower: Range<usize>,
         orig: Range<usize>,
     },

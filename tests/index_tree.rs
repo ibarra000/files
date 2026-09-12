@@ -19,7 +19,7 @@ use files::index::actor::{self, IndexContext};
 use files::index::errors::EnumError;
 use files::index::fake_source::FakeDirSource;
 use files::index::schedule::Cadence;
-use files::index::store::{Activity, DegradeReason, Health, IndexStore};
+use files::index::store::{Activity, DegradeReason, Health, IndexStore, Origin};
 use files::search::matcher;
 use files::util::cancel::CancelToken;
 
@@ -324,4 +324,129 @@ fn the_tree_is_searchable_before_the_walk_finishes() {
         "nothing was searchable until the walk had finished"
     );
     actor.shutdown(Duration::from_millis(500));
+}
+
+// --- persistence -----------------------------------------------------------
+
+/// As [`settings`], but writing and reading a cache under `cache`.
+fn persisting_settings(cache: &std::path::Path) -> Settings {
+    Settings {
+        persist: true,
+        cache_dir: Some(cache.to_path_buf()),
+        tree_path: TREE_ROOT.into(),
+        ..Default::default()
+    }
+}
+
+fn persisting_tree_actor(
+    src: FakeDirSource,
+    store: Arc<IndexStore>,
+    cache: &std::path::Path,
+) -> actor::IndexActor {
+    let ctx = IndexContext::new(persisting_settings(cache), store, Arc::new(src), None)
+        .for_tree()
+        .with_cadence(Cadence::fast())
+        .with_seed(7);
+    actor::spawn(ctx, draining_events()).expect("the actor starts")
+}
+
+/// True once the walk has written its cache file.
+fn cached(cache: &std::path::Path) -> bool {
+    std::fs::read_dir(cache).is_ok_and(|rd| {
+        rd.flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".idx"))
+    })
+}
+
+/// The point of persisting at all: 300,000 directories is one to three minutes
+/// of round trips, and without a cache that is the cost of every launch.
+///
+/// The second actor is given a share that is *not there*, so its own walk
+/// fails immediately and cannot mask the question being asked - whatever is in
+/// the store afterwards came off the disk.
+#[test]
+fn a_walked_tree_is_cached_and_comes_back_on_the_next_launch() {
+    let cache = tempfile::tempdir().unwrap();
+
+    let first = Arc::new(IndexStore::default());
+    let mut actor = persisting_tree_actor(share(), Arc::clone(&first), cache.path());
+    assert!(
+        wait_for(
+            &first,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Duration::from_secs(5)
+        ),
+        "the first launch should have walked the share"
+    );
+    assert!(
+        wait_for(&first, |_| cached(cache.path()), Duration::from_secs(5)),
+        "the walk should have written a cache file"
+    );
+    actor.shutdown(Duration::from_millis(500));
+
+    let second = Arc::new(IndexStore::default());
+    let mut actor = persisting_tree_actor(FakeDirSource::new(), Arc::clone(&second), cache.path());
+    assert!(
+        wait_for(
+            &second,
+            |s| s.tree().is_some_and(|t| t.len() == 4),
+            Duration::from_secs(5)
+        ),
+        "the second launch should have restored the index from its cache"
+    );
+    assert_eq!(second.tree_status().origin, Some(Origin::DiskCache));
+    assert_eq!(
+        found(&second, "11-3-0704"),
+        vec!["R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf"],
+        "a restored tree must answer exactly as the walked one did"
+    );
+    actor.shutdown(Duration::from_millis(500));
+}
+
+/// A tree actor pointed at a flat mapping's cache, or the reverse, must not
+/// decode it. The cache key is per-directory so this should never arise - but
+/// the two formats share a magic number and a version, and "should never
+/// arise" is how one directory comes to be served as a whole share.
+#[test]
+fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
+    let cache = tempfile::tempdir().unwrap();
+
+    // A *flat* actor indexing the tree root, so both write under the same key.
+    let flat_store = Arc::new(IndexStore::default());
+    let flat_settings = Settings {
+        persist: true,
+        cache_dir: Some(cache.path().to_path_buf()),
+        custpro_path: TREE_ROOT.into(),
+        ..Default::default()
+    };
+    let ctx = IndexContext::new(
+        flat_settings,
+        Arc::clone(&flat_store),
+        Arc::new(share()),
+        None,
+    )
+    .with_cadence(Cadence::fast())
+    .with_seed(7);
+    let mut flat = actor::spawn(ctx, draining_events()).expect("the actor starts");
+    assert!(wait_for(
+        &flat_store,
+        |s| s.flat().is_some() && cached(cache.path()),
+        Duration::from_secs(5)
+    ));
+    flat.shutdown(Duration::from_millis(500));
+
+    // Now a tree actor on the same root, with the share gone so nothing but
+    // the cache can populate it.
+    let store = Arc::new(IndexStore::default());
+    let mut tree = persisting_tree_actor(FakeDirSource::new(), Arc::clone(&store), cache.path());
+    assert!(
+        wait_for(
+            &store,
+            |s| s.tree_status().cache_rejected.is_some(),
+            Duration::from_secs(5)
+        ),
+        "the flat cache should have been refused, and visibly so"
+    );
+    assert!(store.tree().is_none(), "nothing should have been published");
+    tree.shutdown(Duration::from_millis(500));
 }

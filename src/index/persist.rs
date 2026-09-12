@@ -38,11 +38,14 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use memmap2::Mmap;
 
 use super::snapshot::{Arenas, Snapshot};
+use super::store::TreeCoverage;
+use super::tree::{Run, TreeIndex, TreeSegment};
 use super::{DirStamp, StampKind};
 use crate::config::MAX_INDEX_AGE;
 
@@ -54,7 +57,8 @@ const _: () = assert!(
 pub const MAGIC: [u8; 8] = *b"FILESIDX";
 
 /// Bumped to 2 when cache files became per-directory; to 3 when the directory
-/// stamp came under the checksum and gained a kind.
+/// stamp came under the checksum and gained a kind; to 4 when a whole walked
+/// tree became something this format can hold.
 ///
 /// A v1 index was named only by volume serial, so two directories on the same
 /// volume produced colliding names and a single shared `latest` pointer. A v2
@@ -65,8 +69,11 @@ pub const MAGIC: [u8; 8] = *b"FILESIDX";
 /// Each bump discards every pre-existing index once, cleanly, rather than
 /// relying on the new validation to reject them one at a time. That costs one
 /// cold start.
-pub const FORMAT_VERSION: u16 = 3;
-pub const HEADER_SIZE: usize = 96;
+pub const FORMAT_VERSION: u16 = 4;
+/// 128 rather than 96, and that costs nothing: `align_up(96)` is already 128,
+/// so v3 wrote exactly 32 bytes of padding here. Every section offset of a
+/// flat index is byte-identical across the change.
+pub const HEADER_SIZE: usize = 128;
 const ALIGN: usize = 64;
 
 /// Bit 0: entries are NUL-separated. Bit 1: the listing was truncated.
@@ -78,6 +85,18 @@ const FLAG_HAS_STAMP: u32 = 1 << 2;
 /// comparing stamps of different kinds is meaningless - see
 /// [`crate::index::StampKind`].
 const FLAG_STAMP_WRITE_ONLY: u32 = 1 << 3;
+/// Bit 4: this file holds a walked tree, not a single directory listing, so
+/// the sections after the flat ones are present and must be read.
+///
+/// Checked in both directions. Without that a tree actor pointed at a flat
+/// cache would decode the file happily - same magic, same version - and
+/// publish one directory as if it were the whole share.
+const FLAG_TREE: u32 = 1 << 4;
+/// Bit 5: the walk that produced the tree reached the end of it. A partial
+/// index is still worth caching, but the difference has to survive the round
+/// trip: results missing because a subtree was unreadable look exactly like
+/// results that do not exist.
+const FLAG_TREE_COMPLETE: u32 = 1 << 5;
 
 /// Stable cache identity for one indexed directory.
 ///
@@ -187,28 +206,81 @@ fn align_up(v: usize) -> usize {
     v.div_ceil(ALIGN) * ALIGN
 }
 
-/// The bytes the checksum covers: the whole header except the checksum field
-/// itself, followed by the offsets table.
+/// Copies a little-endian `u32` table out of the file bytes.
+///
+/// `try_cast_slice`, never the panicking `cast_slice`: a panic while loading a
+/// corrupt cache file would be a crash at startup. The unaligned fallback is
+/// not theoretical either - a mapped file is page aligned, but an owned read
+/// lands wherever the allocator put it.
+fn read_u32s(bytes: &[u8]) -> Box<[u32]> {
+    match bytemuck::try_cast_slice::<u8, u32>(bytes) {
+        Ok(slice) => slice.to_vec().into_boxed_slice(),
+        Err(_) => bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    }
+}
+
+/// FNV-1a, in streaming form.
+///
+/// Streaming rather than "concatenate then hash" because a tree's covered
+/// bytes run to about 24 MB across four separate tables, and building a
+/// throwaway copy of them to feed a one-shot hash would double the peak
+/// memory of a save for no benefit. Hashing the parts in order is
+/// bit-identical to hashing their concatenation.
+struct Fnv1a(u64);
+
+impl Fnv1a {
+    fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01B3);
+        }
+    }
+
+    fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+/// FNV-1a over one slice. Only the tests hash a single buffer; every caller
+/// in the program streams its tables through [`checksum`].
+#[cfg(test)]
+fn hash64(bytes: &[u8]) -> u64 {
+    let mut h = Fnv1a::new();
+    h.write(bytes);
+    h.finish()
+}
+
+/// The checksum over the whole header except the checksum field itself,
+/// followed by each index table in file order.
 ///
 /// One function, used by both the writer and the reader, so the two cannot
 /// disagree about the coverage - which is how the stamp came to sit outside
-/// it.
-fn hashable(header: &[u8], offsets_bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(HEADER_SIZE + offsets_bytes.len());
-    out.extend_from_slice(&header[0..48]);
-    out.extend_from_slice(&header[56..HEADER_SIZE]);
-    out.extend_from_slice(offsets_bytes);
-    out
-}
-
-/// FNV-1a. Used for corruption detection only, never for security.
-fn hash64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01B3);
+/// it in v2.
+///
+/// `tables` is every table whose corruption could be *silent*: the offsets,
+/// and for a tree the directory offsets and the run table too. The name
+/// arenas are deliberately excluded, and the asymmetry is the point. Bounds
+/// safety already comes from `check_invariants`, which is strictly stronger
+/// than a checksum; a corrupt arena byte can only garble a displayed name,
+/// whereas a corrupt run would file a real file under a path it is not at -
+/// a wrong answer with no symptom. Excluding the arenas is also what
+/// preserves lazy mapping, so a load does not fault in 300 MB.
+fn checksum(header: &[u8], tables: &[&[u8]]) -> u64 {
+    let mut h = Fnv1a::new();
+    h.write(&header[0..48]);
+    h.write(&header[56..HEADER_SIZE]);
+    for t in tables {
+        h.write(t);
     }
-    h
+    h.finish()
 }
 
 /// Validated header, layout, prefix and offsets, ready to assemble.
@@ -238,7 +310,156 @@ fn sections(prefix_len: usize, entry_count: usize, arena_len: usize) -> Sections
     }
 }
 
+/// Byte offsets of a tree index's sections.
+///
+/// The flat sections come first and unchanged, so the file opens with exactly
+/// the layout a flat index has; the directory listing, its offsets and the run
+/// table follow. That ordering is deliberate: the tables the checksum covers
+/// are the small ones, and keeping the two 150 MB arenas contiguous in the
+/// middle is what lets them stay unread until a query touches them.
+#[derive(Debug, Clone, Copy)]
+struct TreeSections {
+    root: usize,
+    offsets: usize,
+    lower: usize,
+    orig: usize,
+    dir_offsets: usize,
+    dir_lower: usize,
+    dir_orig: usize,
+    runs: usize,
+    total: usize,
+}
+
+fn tree_sections(
+    root_len: usize,
+    file_count: usize,
+    arena_len: usize,
+    dir_count: usize,
+    dir_arena_len: usize,
+    run_count: usize,
+) -> TreeSections {
+    let root = align_up(HEADER_SIZE);
+    let offsets = align_up(root + root_len);
+    let lower = align_up(offsets + (file_count + 1) * 4);
+    let orig = align_up(lower + arena_len);
+    let dir_offsets = align_up(orig + arena_len);
+    let dir_lower = align_up(dir_offsets + (dir_count + 1) * 4);
+    let dir_orig = align_up(dir_lower + dir_arena_len);
+    let runs = align_up(dir_orig + dir_arena_len);
+    TreeSections {
+        root,
+        offsets,
+        lower,
+        orig,
+        dir_offsets,
+        dir_lower,
+        dir_orig,
+        runs,
+        total: runs + run_count * 8,
+    }
+}
+
 // --- writing ---------------------------------------------------------------
+
+/// Writes sections at fixed offsets, padding the gaps.
+///
+/// Extracted from `save` when the tree format arrived: eight sections written
+/// by hand is eight chances to pad to the wrong place, and a section that
+/// starts one byte early is a corruption the checksum reports but cannot
+/// explain.
+struct SectionWriter<'a> {
+    f: &'a mut File,
+    written: usize,
+}
+
+impl SectionWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.f.write_all(bytes)?;
+        self.written += bytes.len();
+        Ok(())
+    }
+
+    fn pad_to(&mut self, target: usize) -> std::io::Result<()> {
+        debug_assert!(self.written <= target, "sections must not overlap");
+        while self.written < target {
+            let chunk = (target - self.written).min(ALIGN);
+            self.f.write_all(&vec![0u8; chunk])?;
+            self.written += chunk;
+        }
+        Ok(())
+    }
+
+    /// Pads to `target`, then writes.
+    fn at(&mut self, target: usize, bytes: &[u8]) -> std::io::Result<()> {
+        self.pad_to(target)?;
+        self.write(bytes)
+    }
+}
+
+/// Writes a file to a unique temporary, renames it into place, repoints this
+/// mapping and collects what it superseded.
+///
+/// The atomic-rename dance is identical for a flat listing and for a tree, and
+/// getting it subtly different in two places is how a half-written cache comes
+/// to be pointed at. `body` returns the total size it meant to write, which is
+/// checked against what it did.
+fn commit<F>(
+    dir: &Path,
+    key: MappingKey,
+    volume_serial: u32,
+    captured_nanos: i64,
+    body: F,
+) -> Result<PathBuf, LoadError>
+where
+    F: FnOnce(&mut SectionWriter<'_>) -> std::io::Result<usize>,
+{
+    // A unique temp name in the same directory, so the rename is atomic and
+    // never lands on an existing (possibly mapped) file.
+    //
+    // The temp name carries the mapping key too, and that is not cosmetic:
+    // `gc` sweeps stale temporaries, so with one index actor per mapping an
+    // unscoped sweep would delete a sibling mapping's temp file mid-write.
+    let tmp = dir.join(format!(
+        "{}{:x}.tmp",
+        temp_prefix(key),
+        crate::util::once::now_nanos()
+    ));
+    let final_name = format!(
+        "{}-{:08x}-{:016x}.idx",
+        key.hex(),
+        volume_serial,
+        captured_nanos.max(0) as u64
+    );
+    let final_path = dir.join(&final_name);
+
+    {
+        let mut f = File::create(&tmp).map_err(|e| LoadError::Io(e.to_string()))?;
+        (|| -> std::io::Result<()> {
+            let mut w = SectionWriter {
+                f: &mut f,
+                written: 0,
+            };
+            let total = body(&mut w)?;
+            debug_assert_eq!(w.written, total);
+            // Required: without it a power loss can leave a renamed but
+            // zero-length file, which the next start would have to reject.
+            f.sync_all()
+        })()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            LoadError::Io(e.to_string())
+        })?;
+    }
+
+    std::fs::rename(&tmp, &final_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        LoadError::Io(e.to_string())
+    })?;
+
+    write_pointer(dir, key, &final_name)?;
+    gc(dir, key, &final_name);
+    Ok(final_path)
+}
 
 /// Writes a snapshot to `dir`, returning the file written.
 ///
@@ -306,73 +527,207 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
     //
     // v2 stopped at byte 48 and so left the stamp unprotected, which is the
     // one field whose corruption is both silent and expensive.
-    let checksum = hash64(&hashable(&header, &offsets_bytes));
+    let checksum = checksum(&header, &[&offsets_bytes]);
     header[48..56].copy_from_slice(&checksum.to_le_bytes());
 
-    // A unique temp name in the same directory, so the rename is atomic and
-    // never lands on an existing (possibly mapped) file.
-    //
-    // The temp name carries the mapping key too, and that is not cosmetic:
-    // `gc` sweeps stale temporaries, so with one index actor per mapping an
-    // unscoped sweep would delete a sibling mapping's temp file mid-write.
-    let key_hex = key.hex();
-    let tmp = dir.join(format!(
-        "{}{:x}.tmp",
-        temp_prefix(key),
-        crate::util::once::now_nanos()
-    ));
-    let final_name = format!(
-        "{key_hex}-{:08x}-{:016x}.idx",
-        snapshot.volume_serial(),
-        captured_nanos.max(0) as u64
-    );
-    let final_path = dir.join(&final_name);
+    commit(dir, key, snapshot.volume_serial(), captured_nanos, |w| {
+        w.write(&header)?;
+        w.at(s.prefix, prefix)?;
+        w.at(s.offsets, &offsets_bytes)?;
+        w.at(s.lower, lower)?;
+        w.at(s.orig, orig)?;
+        Ok(s.total)
+    })
+}
 
-    {
-        let mut f = File::create(&tmp).map_err(|e| LoadError::Io(e.to_string()))?;
-        let mut written = 0usize;
-        let pad_to = |f: &mut File, written: &mut usize, target: usize| -> std::io::Result<()> {
-            while *written < target {
-                let chunk = (target - *written).min(ALIGN);
-                f.write_all(&vec![0u8; chunk])?;
-                *written += chunk;
-            }
-            Ok(())
-        };
+/// Writes a whole walked tree to `dir`, returning the file written.
+///
+/// # One segment on disk
+///
+/// The index in memory is a list of segments because a walk has to publish
+/// results while it is still running, and rebuilding a five-million-entry
+/// snapshot on every publish would be quadratic. None of that applies to a
+/// file: it is written once and read whole. So the segments are *concatenated*
+/// into a single compacted segment as they are written.
+///
+/// Concatenation is all it takes, and that is a property of the arena layout
+/// rather than a coincidence. Each arena is a run of NUL-terminated names, so
+/// laying them end to end produces exactly the arena a single builder would
+/// have produced; only the offset and run tables need shifting by the running
+/// base. Nothing is copied, and the peak memory of a save is the 24 MB of
+/// tables, not a second copy of the 300 MB of names.
+pub fn save_tree(
+    dir: &Path,
+    key: MappingKey,
+    index: &TreeIndex,
+    coverage: Option<&TreeCoverage>,
+) -> Result<PathBuf, LoadError> {
+    std::fs::create_dir_all(dir).map_err(|e| LoadError::Io(e.to_string()))?;
 
-        let write = |f: &mut File, written: &mut usize, bytes: &[u8]| -> std::io::Result<()> {
-            f.write_all(bytes)?;
-            *written += bytes.len();
-            Ok(())
-        };
+    let root = index.root().as_bytes();
+    let segments = index.segments();
 
-        (|| -> std::io::Result<()> {
-            write(&mut f, &mut written, &header)?;
-            pad_to(&mut f, &mut written, s.prefix)?;
-            write(&mut f, &mut written, prefix)?;
-            pad_to(&mut f, &mut written, s.offsets)?;
-            write(&mut f, &mut written, &offsets_bytes)?;
-            pad_to(&mut f, &mut written, s.lower)?;
-            write(&mut f, &mut written, lower)?;
-            pad_to(&mut f, &mut written, s.orig)?;
-            write(&mut f, &mut written, orig)?;
-            // Required: without it a power loss can leave a renamed but
-            // zero-length file, which the next start would have to reject.
-            f.sync_all()
-        })()
-        .map_err(|e| LoadError::Io(e.to_string()))?;
+    let file_count = index.len();
+    let dir_count = index.dir_count();
+    let run_count: usize = segments.iter().map(|s| s.runs().len()).sum();
 
-        debug_assert_eq!(written, s.total);
+    // The format addresses entries and arena bytes with `u32`. At the share
+    // this was built for - 5M files, ~150 MB of names - there is an order of
+    // magnitude of headroom, but refusing to write a file whose offsets would
+    // wrap is the difference between "no cache this run" and a cache that
+    // decodes into confident nonsense.
+    let (offsets_bytes, arena_len) = flatten_offsets(segments.iter().map(|s| s.files()))?;
+    let (dir_offsets_bytes, dir_arena_len) = flatten_offsets(segments.iter().map(|s| s.dirs()))?;
+    if file_count > u32::MAX as usize || dir_count > u32::MAX as usize {
+        return Err(LoadError::Invalid("tree index is too large to persist"));
     }
 
-    std::fs::rename(&tmp, &final_path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        LoadError::Io(e.to_string())
-    })?;
+    let mut runs_bytes = Vec::with_capacity(run_count * 8);
+    let mut file_base: u32 = 0;
+    let mut dir_base: u32 = 0;
+    for seg in segments {
+        for r in seg.runs() {
+            runs_bytes.extend_from_slice(&(file_base + r.first_file()).to_le_bytes());
+            runs_bytes.extend_from_slice(&(dir_base + r.dir()).to_le_bytes());
+        }
+        file_base += seg.file_count();
+        dir_base += seg.dir_count();
+    }
 
-    write_pointer(dir, key, &final_name)?;
-    gc(dir, key, &final_name);
-    Ok(final_path)
+    let s = tree_sections(
+        root.len(),
+        file_count,
+        arena_len,
+        dir_count,
+        dir_arena_len,
+        run_count,
+    );
+
+    let captured_nanos = index
+        .captured_at()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+
+    let mut flags = FLAG_NUL_SEPARATED | FLAG_TREE;
+    if index.complete() {
+        flags |= FLAG_TREE_COMPLETE;
+    }
+
+    let max_name_len = segments
+        .iter()
+        .map(|s| s.files().max_name_len())
+        .max()
+        .unwrap_or(0);
+    let max_dir_len = segments
+        .iter()
+        .map(|s| s.dirs().max_name_len())
+        .max()
+        .unwrap_or(0);
+    let avg_name_len = arena_len
+        .checked_div(file_count)
+        .map(|n| n.saturating_sub(1) as u32)
+        .unwrap_or(0);
+
+    let mut header = vec![0u8; HEADER_SIZE];
+    header[0..8].copy_from_slice(&MAGIC);
+    header[8..10].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
+    header[10..12].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+    header[12..16].copy_from_slice(&flags.to_le_bytes());
+    header[16..20].copy_from_slice(&index.volume_serial().to_le_bytes());
+    header[20..24].copy_from_slice(&(file_count as u32).to_le_bytes());
+    header[24..32].copy_from_slice(&captured_nanos.to_le_bytes());
+    header[32..36].copy_from_slice(&(root.len() as u32).to_le_bytes());
+    header[36..40].copy_from_slice(&(arena_len as u32).to_le_bytes());
+    header[40..44].copy_from_slice(&max_name_len.to_le_bytes());
+    header[44..48].copy_from_slice(&avg_name_len.to_le_bytes());
+    // 48..56 is the hash. 56..72 is the directory stamp, which a tree never
+    // has: no single timestamp can stand for a whole share, and pretending
+    // otherwise is what would make the scheduler claim the index was proven
+    // fresh while a thousand files had been added underneath it.
+    header[72..76].copy_from_slice(&(dir_count as u32).to_le_bytes());
+    header[76..80].copy_from_slice(&(dir_arena_len as u32).to_le_bytes());
+    header[80..84].copy_from_slice(&(run_count as u32).to_le_bytes());
+    header[84..88].copy_from_slice(&max_dir_len.to_le_bytes());
+    // What the walk could not reach, carried across the restart.
+    //
+    // Without these four numbers a share with an unreadable subtree would
+    // come back from its cache looking perfectly healthy: the index is a
+    // faithful copy of a partial walk, and nothing in it says so. The status
+    // line would then be silent about exactly the failure this whole rewrite
+    // exists to make visible, until the next re-walk half an hour later.
+    //
+    // The example paths are not persisted. They are a debugging aid, they
+    // would need a section of their own, and the re-walk restores them.
+    header[88..92].copy_from_slice(&coverage.map_or(0, |c| c.holes).to_le_bytes());
+    header[92..96].copy_from_slice(&coverage.map_or(0, |c| c.vanished).to_le_bytes());
+    header[96..100].copy_from_slice(&coverage.map_or(0, |c| c.skipped_junctions).to_le_bytes());
+    header[100..104].copy_from_slice(
+        &coverage
+            .map_or(0, |c| {
+                c.elapsed.as_millis().min(u128::from(u32::MAX)) as u32
+            })
+            .to_le_bytes(),
+    );
+
+    let sum = checksum(&header, &[&offsets_bytes, &dir_offsets_bytes, &runs_bytes]);
+    header[48..56].copy_from_slice(&sum.to_le_bytes());
+
+    commit(dir, key, index.volume_serial(), captured_nanos, |w| {
+        w.write(&header)?;
+        w.at(s.root, root)?;
+        w.at(s.offsets, &offsets_bytes)?;
+        w.pad_to(s.lower)?;
+        for seg in segments {
+            w.write(seg.files().lower())?;
+        }
+        w.pad_to(s.orig)?;
+        for seg in segments {
+            w.write(seg.files().orig())?;
+        }
+        w.at(s.dir_offsets, &dir_offsets_bytes)?;
+        w.pad_to(s.dir_lower)?;
+        for seg in segments {
+            w.write(seg.dirs().lower())?;
+        }
+        w.pad_to(s.dir_orig)?;
+        for seg in segments {
+            w.write(seg.dirs().orig())?;
+        }
+        w.at(s.runs, &runs_bytes)?;
+        Ok(s.total)
+    })
+}
+
+/// Concatenates several snapshots' offset tables into one, shifting each by
+/// the arena bytes before it.
+///
+/// Returns the table and the total arena length, which must agree with what
+/// writing the arenas back to back produces - so they are computed by the same
+/// loop rather than separately.
+fn flatten_offsets<'a>(
+    snapshots: impl Iterator<Item = &'a Snapshot>,
+) -> Result<(Vec<u8>, usize), LoadError> {
+    let mut out: Vec<u8> = Vec::new();
+    let mut base: u64 = 0;
+    for snap in snapshots {
+        let offsets = snap.offsets();
+        // The final entry is this snapshot's arena length, and it is the next
+        // snapshot's first offset - so it is dropped here and re-emitted once,
+        // at the end, as the table's terminator.
+        let (last, rest) = offsets
+            .split_last()
+            .expect("a snapshot always has its initial zero");
+        for &o in rest {
+            out.extend_from_slice(&((base + u64::from(o)) as u32).to_le_bytes());
+        }
+        base += u64::from(*last);
+        if base > u32::MAX as u64 {
+            return Err(LoadError::Invalid("tree index is too large to persist"));
+        }
+    }
+    out.extend_from_slice(&(base as u32).to_le_bytes());
+    Ok((out, base as usize))
 }
 
 /// Replaces this mapping's pointer atomically.
@@ -492,13 +847,22 @@ pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
 /// compared when known, and the directory the index describes is compared
 /// against the one the caller expects.
 pub fn load(dir: &Path, key: MappingKey, expect: Expect<'_>) -> Result<Snapshot, LoadError> {
+    load_file(&dir.join(read_pointer(dir, key)?), expect)
+}
+
+/// This mapping's current index file name.
+///
+/// The separator check is not paranoia about a hostile file: the pointer is
+/// joined onto the cache directory, so a name containing one would read an
+/// arbitrary path chosen by whatever wrote it.
+fn read_pointer(dir: &Path, key: MappingKey) -> Result<String, LoadError> {
     let pointer =
         std::fs::read_to_string(pointer_path(dir, key)).map_err(|_| LoadError::Missing)?;
     let name = pointer.trim();
     if name.is_empty() || name.contains(['/', '\\']) {
         return Err(LoadError::Missing);
     }
-    load_file(&dir.join(name), expect)
+    Ok(name.to_string())
 }
 
 /// Loads a specific index file.
@@ -512,7 +876,7 @@ pub fn load_file(path: &Path, expect: Expect<'_>) -> Result<Snapshot, LoadError>
     // share mode denying other writers, and no slice bound derived later
     // depends on the mapped bytes staying constant.
     match unsafe { Mmap::map(&file) } {
-        Ok(map) => decode_mapped(map, expect),
+        Ok(map) => decode_mapped(Arc::new(map), expect),
         Err(_) => {
             let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
             decode_owned(&bytes, expect)
@@ -557,9 +921,24 @@ struct Header {
     max_name_len: u32,
     hash: u64,
     stamp: Option<DirStamp>,
+    /// Zero throughout for a flat index, whose bytes 72..88 are padding.
+    dir_count: usize,
+    dir_arena_len: usize,
+    run_count: usize,
+    max_dir_len: u32,
+    holes: u32,
+    vanished: u32,
+    skipped_junctions: u32,
+    elapsed_ms: u32,
 }
 
-fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
+impl Header {
+    fn is_tree(&self) -> bool {
+        self.flags & FLAG_TREE != 0
+    }
+}
+
+fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Header, LoadError> {
     if bytes.len() < HEADER_SIZE {
         return Err(LoadError::TooSmall);
     }
@@ -621,6 +1000,19 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
         Some(DirStamp::new(i64at(56), i64at(64)))
     };
 
+    // Both directions. A flat actor reading a tree cache would decode one
+    // segment's filenames with no directory table and serve them as if they
+    // were a single folder; a tree actor reading a flat cache would publish
+    // one directory as the whole share. Same magic, same version, so nothing
+    // else catches it.
+    if (flags & FLAG_TREE != 0) != want_tree {
+        return Err(LoadError::Invalid(if want_tree {
+            "cached index is a flat listing, not a tree"
+        } else {
+            "cached index is a tree, not a flat listing"
+        }));
+    }
+
     Ok(Header {
         flags,
         volume_serial,
@@ -631,6 +1023,14 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
         max_name_len: u32at(40),
         hash: u64at(48),
         stamp,
+        dir_count: u32at(72) as usize,
+        dir_arena_len: u32at(76) as usize,
+        run_count: u32at(80) as usize,
+        max_dir_len: u32at(84),
+        holes: u32at(88),
+        vanished: u32at(92),
+        skipped_junctions: u32at(96),
+        elapsed_ms: u32at(100),
     })
 }
 
@@ -641,7 +1041,7 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>) -> Result<Header, LoadError> {
 /// property: no later slice bound depends on bytes that could change
 /// underneath the mapping.
 fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError> {
-    let h = parse_header(bytes, expect)?;
+    let h = parse_header(bytes, expect, false)?;
     let s = sections(h.prefix_len, h.entry_count, h.arena_len);
 
     if bytes.len() != s.total {
@@ -653,20 +1053,11 @@ fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError>
         .ok_or(LoadError::Truncated)?;
 
     // Verify before trusting a single offset.
-    if hash64(&hashable(&bytes[0..HEADER_SIZE], offsets_bytes)) != h.hash {
+    if checksum(&bytes[0..HEADER_SIZE], &[offsets_bytes]) != h.hash {
         return Err(LoadError::ChecksumMismatch);
     }
 
-    // `try_cast_slice`, never the panicking `cast_slice`: a panic while
-    // loading a corrupt cache file would be a crash at startup.
-    let offsets: Box<[u32]> = match bytemuck::try_cast_slice::<u8, u32>(offsets_bytes) {
-        Ok(slice) => slice.to_vec().into_boxed_slice(),
-        Err(_) => offsets_bytes
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    };
+    let offsets = read_u32s(offsets_bytes);
 
     let prefix_bytes = bytes
         .get(s.prefix..s.prefix + h.prefix_len)
@@ -694,7 +1085,7 @@ fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError>
     Ok((h, s, prefix, offsets))
 }
 
-fn decode_mapped(map: Mmap, expect: Expect<'_>) -> Result<Snapshot, LoadError> {
+fn decode_mapped(map: Arc<Mmap>, expect: Expect<'_>) -> Result<Snapshot, LoadError> {
     let (h, s, prefix, offsets) = decode_common(&map, expect)?;
     let arenas = Arenas::Mapped {
         map,
@@ -715,6 +1106,233 @@ fn decode_owned(bytes: &[u8], expect: Expect<'_>) -> Result<Snapshot, LoadError>
             .into_boxed_slice(),
     };
     finish(h, prefix, offsets, arenas)
+}
+
+/// A persisted tree index and the walk report that produced it.
+///
+/// The two travel together because the index alone cannot say whether it is
+/// complete coverage of the share or a partial view of one with an unreadable
+/// subtree - and those look identical from the inside.
+#[derive(Debug)]
+pub struct LoadedTree {
+    pub index: TreeIndex,
+    pub coverage: TreeCoverage,
+}
+
+/// Loads this mapping's most recent tree index from `dir`.
+pub fn load_tree(dir: &Path, key: MappingKey, expect: Expect<'_>) -> Result<LoadedTree, LoadError> {
+    load_tree_file(&dir.join(read_pointer(dir, key)?), expect)
+}
+
+/// Loads a specific tree index file.
+pub fn load_tree_file(path: &Path, expect: Expect<'_>) -> Result<LoadedTree, LoadError> {
+    let file = open_shared_read(path)?;
+    // SAFETY: see the module docs. The mapping is read-only, opened with a
+    // share mode denying other writers, and no slice bound derived later
+    // depends on the mapped bytes staying constant.
+    match unsafe { Mmap::map(&file) } {
+        Ok(map) => decode_tree(Arc::new(map), expect),
+        Err(_) => {
+            let bytes = std::fs::read(path).map_err(|e| LoadError::Io(e.to_string()))?;
+            decode_tree_owned(&bytes, expect)
+        }
+    }
+}
+
+/// Header, layout and every table a tree index carries, validated.
+struct DecodedTree {
+    h: Header,
+    s: TreeSections,
+    root: Box<str>,
+    offsets: Box<[u32]>,
+    dir_offsets: Box<[u32]>,
+    runs: Box<[Run]>,
+}
+
+/// Validates the layout and extracts the three tables the checksum covers.
+///
+/// As in the flat decoder, every table is copied into owned memory even for a
+/// mapped index: no later slice bound may depend on bytes that could change
+/// underneath the mapping. That is 24 MB at five million files, against the
+/// 300 MB of arenas which stay mapped and unread.
+fn decode_tree_common(bytes: &[u8], expect: Expect<'_>) -> Result<DecodedTree, LoadError> {
+    let h = parse_header(bytes, expect, true)?;
+    debug_assert!(h.is_tree());
+    let s = tree_sections(
+        h.prefix_len,
+        h.entry_count,
+        h.arena_len,
+        h.dir_count,
+        h.dir_arena_len,
+        h.run_count,
+    );
+
+    if bytes.len() != s.total {
+        return Err(LoadError::Truncated);
+    }
+
+    let offsets_bytes = bytes
+        .get(s.offsets..s.offsets + (h.entry_count + 1) * 4)
+        .ok_or(LoadError::Truncated)?;
+    let dir_offsets_bytes = bytes
+        .get(s.dir_offsets..s.dir_offsets + (h.dir_count + 1) * 4)
+        .ok_or(LoadError::Truncated)?;
+    let runs_bytes = bytes
+        .get(s.runs..s.runs + h.run_count * 8)
+        .ok_or(LoadError::Truncated)?;
+
+    // Verify before trusting a single offset or run.
+    if checksum(
+        &bytes[0..HEADER_SIZE],
+        &[offsets_bytes, dir_offsets_bytes, runs_bytes],
+    ) != h.hash
+    {
+        return Err(LoadError::ChecksumMismatch);
+    }
+
+    let root_bytes = bytes
+        .get(s.root..s.root + h.prefix_len)
+        .ok_or(LoadError::Truncated)?;
+    let root: Box<str> = String::from_utf8_lossy(root_bytes)
+        .into_owned()
+        .into_boxed_str();
+
+    // The root the index claims to describe must be the one the caller asked
+    // for, for exactly the reason the flat decoder checks its prefix: the
+    // volume serial is unchanged when a mapping is repointed within a drive,
+    // so without this a re-pointed tree mapping would serve the previous
+    // share's five million paths.
+    if !crate::util::winpath::same_dir(Path::new(root.as_ref()), expect.dir) {
+        return Err(LoadError::PrefixMismatch {
+            found: root.into_string(),
+            expected: expect.dir.to_string_lossy().into_owned(),
+        });
+    }
+
+    let runs: Box<[Run]> = runs_bytes
+        .chunks_exact(8)
+        .map(|c| {
+            Run::new(
+                u32::from_le_bytes(c[0..4].try_into().unwrap()),
+                u32::from_le_bytes(c[4..8].try_into().unwrap()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+
+    Ok(DecodedTree {
+        h,
+        s,
+        root,
+        offsets: read_u32s(offsets_bytes),
+        dir_offsets: read_u32s(dir_offsets_bytes),
+        runs,
+    })
+}
+
+fn decode_tree(map: Arc<Mmap>, expect: Expect<'_>) -> Result<LoadedTree, LoadError> {
+    let d = decode_tree_common(&map, expect)?;
+    // One `Mmap` behind both arenas of both snapshots. Mapping the file four
+    // times would work and would be a waste; more importantly each mapping is
+    // an independent kernel object, so the filenames and the directory names
+    // of one index could then be backed by different views of the same bytes.
+    let files = Arenas::Mapped {
+        map: Arc::clone(&map),
+        lower: d.s.lower..d.s.lower + d.h.arena_len,
+        orig: d.s.orig..d.s.orig + d.h.arena_len,
+    };
+    let dirs = Arenas::Mapped {
+        map,
+        lower: d.s.dir_lower..d.s.dir_lower + d.h.dir_arena_len,
+        orig: d.s.dir_orig..d.s.dir_orig + d.h.dir_arena_len,
+    };
+    finish_tree(d, files, dirs)
+}
+
+fn decode_tree_owned(bytes: &[u8], expect: Expect<'_>) -> Result<LoadedTree, LoadError> {
+    let d = decode_tree_common(bytes, expect)?;
+    let owned = |r: std::ops::Range<usize>| bytes[r].to_vec().into_boxed_slice();
+    let files = Arenas::Owned {
+        lower: owned(d.s.lower..d.s.lower + d.h.arena_len),
+        orig: owned(d.s.orig..d.s.orig + d.h.arena_len),
+    };
+    let dirs = Arenas::Owned {
+        lower: owned(d.s.dir_lower..d.s.dir_lower + d.h.dir_arena_len),
+        orig: owned(d.s.dir_orig..d.s.dir_orig + d.h.dir_arena_len),
+    };
+    finish_tree(d, files, dirs)
+}
+
+fn finish_tree(d: DecodedTree, files: Arenas, dirs: Arenas) -> Result<LoadedTree, LoadError> {
+    let DecodedTree {
+        h,
+        root,
+        offsets,
+        dir_offsets,
+        runs,
+        ..
+    } = d;
+
+    if offsets.len() != h.entry_count + 1 {
+        return Err(LoadError::Invalid(
+            "offsets length disagrees with entry count",
+        ));
+    }
+    if dir_offsets.len() != h.dir_count + 1 {
+        return Err(LoadError::Invalid(
+            "directory offsets length disagrees with directory count",
+        ));
+    }
+
+    // A segment's snapshots carry placeholders for the timestamps and the
+    // serial, exactly as `SegmentBuilder::seal` leaves them: those belong to
+    // the index as a whole, and storing them twice is storing them
+    // inconsistently.
+    let part = |offsets: Box<[u32]>, arenas: Arenas, max: u32| {
+        Snapshot::try_from_parts(
+            "".into(),
+            offsets,
+            arenas,
+            max,
+            SystemTime::UNIX_EPOCH,
+            0,
+            None,
+            false,
+        )
+        .map_err(LoadError::Invalid)
+    };
+    let files = part(offsets, files, h.max_name_len)?;
+    let dirs = part(dir_offsets, dirs, h.max_dir_len)?;
+
+    // Sampled rather than exhaustive, as in the flat decoder: checking every
+    // terminator would touch every page and defeat the lazy mapping.
+    files.sample_separators(1024).map_err(LoadError::Invalid)?;
+    dirs.sample_separators(1024).map_err(LoadError::Invalid)?;
+
+    // The run table is checked in full, and that asymmetry is deliberate. A
+    // bad arena byte garbles a name on screen; a run pointing one directory
+    // to the left reports a real file under a path it is not at, which is a
+    // wrong answer nobody can tell is wrong.
+    let segment = TreeSegment::from_parts(files, dirs, runs).map_err(LoadError::Invalid)?;
+
+    let index = TreeIndex::empty(&root)
+        .appended(Arc::new(segment))
+        .with_metadata(h.captured_at, h.volume_serial)
+        .with_complete(h.flags & FLAG_TREE_COMPLETE != 0);
+
+    let coverage = TreeCoverage {
+        dirs: index.dir_count(),
+        files: index.len(),
+        holes: h.holes,
+        vanished: h.vanished,
+        // Not persisted: a debugging aid that would need a section of its
+        // own, and the next re-walk restores it.
+        examples: Vec::new(),
+        skipped_junctions: h.skipped_junctions,
+        elapsed: Duration::from_millis(u64::from(h.elapsed_ms)),
+    };
+
+    Ok(LoadedTree { index, coverage })
 }
 
 fn finish(
@@ -1306,5 +1924,334 @@ mod tests {
         let c = hash64(b"the quick brown foy");
         assert_ne!(a, b);
         assert_ne!(a, c);
+    }
+}
+
+/// The tree layout, which shares a header and an atomic-rename path with the
+/// flat one but almost nothing else.
+///
+/// The property under test throughout is that a *segmented* index in memory
+/// becomes a *single compacted* segment on disk and comes back describing the
+/// same files at the same paths. Compaction is done by concatenating arenas
+/// and shifting tables, so if the shift is ever off by one the paths are the
+/// symptom - not a crash, which is exactly why it is checked by path and not
+/// by count.
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+    use crate::index::store::TreeCoverage;
+    use crate::index::tree::{SegmentBuilder, TreeIndex};
+
+    const ROOT: &str = r"R:\";
+
+    fn root_path() -> &'static Path {
+        Path::new(ROOT)
+    }
+
+    fn tree_key() -> MappingKey {
+        MappingKey::of(root_path())
+    }
+
+    fn tree_expect(serial: Option<u32>) -> Expect<'static> {
+        Expect::new(root_path(), serial)
+    }
+
+    /// One segment's worth of directories.
+    type Group<'a> = &'a [(&'a str, &'a [&'a str])];
+
+    /// Builds an index whose segments are sealed exactly where `groups` says.
+    ///
+    /// The split points are given explicitly rather than left to the sink's
+    /// size ladder, because the whole point is to exercise more than one
+    /// segment without building a share large enough to trigger a real seal.
+    fn tree_of(groups: &[Group<'_>]) -> TreeIndex {
+        let mut index = TreeIndex::empty(ROOT);
+        for group in groups {
+            let mut b = SegmentBuilder::new();
+            for (dir, files) in *group {
+                let owned: Vec<String> = files.iter().map(|f| (*f).to_string()).collect();
+                assert!(b.push_dir(dir, &owned), "the fixture must fit one segment");
+            }
+            index = index.appended(Arc::new(b.seal()));
+        }
+        index
+            .with_metadata(SystemTime::now(), 0xABCD_1234)
+            .with_complete(true)
+    }
+
+    /// Every file the index holds, by full path, in ordinal order.
+    fn paths(index: &TreeIndex) -> Vec<String> {
+        (0..index.len() as u32)
+            .map(|i| index.full_path(i).expect("every ordinal has a path"))
+            .collect()
+    }
+
+    /// Three segments, a directory with no files, a file straight in the root,
+    /// and a nested path - the four shapes whose run and offset arithmetic
+    /// differs.
+    fn fixture() -> TreeIndex {
+        tree_of(&[
+            &[
+                ("", &["readme.txt"] as &[&str]),
+                ("11d", &["quote.pdf", "drawing.dwg"]),
+            ],
+            &[
+                ("11d\\sub", &["nested.pdf"]),
+                ("empty folder", &[] as &[&str]),
+            ],
+            &[(
+                "archive\\2019\\odd name",
+                &["11-3-0704 survey.pdf", "notes.txt"],
+            )],
+        ])
+    }
+
+    fn save_fixture(index: &TreeIndex, coverage: Option<&TreeCoverage>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        save_tree(dir.path(), tree_key(), index, coverage).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_segmented_tree_round_trips_as_one_compacted_segment() {
+        let original = fixture();
+        assert_eq!(
+            original.segments().len(),
+            3,
+            "the fixture must be segmented"
+        );
+
+        let dir = save_fixture(&original, None);
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(Some(0xABCD_1234))).unwrap();
+
+        assert_eq!(
+            loaded.index.segments().len(),
+            1,
+            "segments are a streaming concern, not a storage one"
+        );
+        assert_eq!(paths(&loaded.index), paths(&original));
+        assert_eq!(loaded.index.len(), original.len());
+        assert_eq!(loaded.index.dir_count(), original.dir_count());
+        assert_eq!(loaded.index.root(), original.root());
+        assert_eq!(loaded.index.volume_serial(), 0xABCD_1234);
+        assert_eq!(loaded.index.captured_at(), original.captured_at());
+        assert!(loaded.index.complete());
+    }
+
+    /// The reason the directory dimension is persisted at all: a job code
+    /// usually names a folder, not a file.
+    #[test]
+    fn a_folder_still_owns_its_files_after_a_round_trip() {
+        let dir = save_fixture(&fixture(), None);
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap();
+
+        let seg = &loaded.index.segments()[0];
+        let folder = (0..seg.dir_count())
+            .find(|d| seg.dir_path(*d) == "11d")
+            .expect("the folder survived");
+
+        let files: Vec<String> = seg
+            .files_of(folder)
+            .map(|i| seg.files().display_name(i).into_owned())
+            .collect();
+        assert_eq!(files, vec!["quote.pdf", "drawing.dwg"]);
+    }
+
+    #[test]
+    fn an_empty_tree_round_trips() {
+        let index = TreeIndex::empty(ROOT).with_metadata(SystemTime::now(), 7);
+        let dir = save_fixture(&index, None);
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(Some(7))).unwrap();
+        assert_eq!(loaded.index.len(), 0);
+        assert!(!loaded.index.complete());
+    }
+
+    /// A partial walk that is cached must still look partial after a restart.
+    /// Otherwise the one restart between a walk and its re-walk is a window in
+    /// which the status line claims coverage the index never had.
+    #[test]
+    fn an_incomplete_walks_coverage_survives_the_restart() {
+        let index = tree_of(&[&[("11d", &["a.pdf"] as &[&str])]]).with_complete(false);
+        let coverage = TreeCoverage {
+            dirs: 900,
+            files: 1,
+            holes: 4,
+            vanished: 11,
+            examples: vec!["restricted".into()],
+            skipped_junctions: 2,
+            elapsed: Duration::from_millis(1234),
+        };
+
+        let dir = save_fixture(&index, Some(&coverage));
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap();
+
+        assert!(!loaded.index.complete());
+        assert_eq!(loaded.coverage.holes, 4);
+        assert_eq!(loaded.coverage.vanished, 11);
+        assert_eq!(loaded.coverage.skipped_junctions, 2);
+        assert_eq!(loaded.coverage.elapsed, Duration::from_millis(1234));
+        assert!(
+            loaded.coverage.examples.is_empty(),
+            "the example paths are deliberately not persisted"
+        );
+    }
+
+    /// Same magic, same version, same key length - so nothing but the flag
+    /// stands between a tree actor and one directory served as a whole share.
+    #[test]
+    fn a_flat_index_is_not_readable_as_a_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut b = crate::index::builder::SnapshotBuilder::new(ROOT);
+        b.push_str("a.pdf");
+        let flat = b.finish(SystemTime::now(), 7, None);
+        save(dir.path(), tree_key(), &flat).unwrap();
+
+        assert_eq!(
+            load_tree(dir.path(), tree_key(), tree_expect(Some(7))).unwrap_err(),
+            LoadError::Invalid("cached index is a flat listing, not a tree")
+        );
+    }
+
+    #[test]
+    fn a_tree_is_not_readable_as_a_flat_index() {
+        let dir = save_fixture(&fixture(), None);
+        assert_eq!(
+            load(dir.path(), tree_key(), tree_expect(Some(0xABCD_1234))).unwrap_err(),
+            LoadError::Invalid("cached index is a tree, not a flat listing")
+        );
+    }
+
+    #[test]
+    fn a_tree_written_for_another_root_is_refused() {
+        let dir = save_fixture(&fixture(), None);
+        let other = Path::new(r"S:\");
+        assert!(matches!(
+            load_tree_file(
+                &dir.path()
+                    .join(read_pointer(dir.path(), tree_key()).unwrap()),
+                Expect::new(other, None),
+            )
+            .unwrap_err(),
+            LoadError::PrefixMismatch { .. }
+        ));
+    }
+
+    /// The run table is last in the file, so the final byte is inside it.
+    ///
+    /// This is the corruption the checksum exists for. A bad arena byte
+    /// garbles a name on screen; a bad run reports a real file under a path it
+    /// is not at, which is a wrong answer nobody can tell is wrong.
+    #[test]
+    fn a_corrupt_run_table_is_rejected() {
+        let dir = save_fixture(&fixture(), None);
+        let path = dir
+            .path()
+            .join(read_pointer(dir.path(), tree_key()).unwrap());
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(
+            load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap_err(),
+            LoadError::ChecksumMismatch
+        );
+    }
+
+    /// A run that survives the checksum but points at a directory that is not
+    /// there must still be refused, because the checksum only proves the bytes
+    /// are the ones that were written - not that they meant anything.
+    #[test]
+    fn a_run_naming_a_missing_directory_is_rejected() {
+        let index = fixture();
+        let dir = save_fixture(&index, None);
+        let path = dir
+            .path()
+            .join(read_pointer(dir.path(), tree_key()).unwrap());
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let total = bytes.len();
+        let run_count: usize = index.segments().iter().map(|s| s.runs().len()).sum();
+        let runs_at = total - run_count * 8;
+
+        // The `dir` field of the *last* run, pushed past the end of the
+        // directory listing. The last one specifically, so the run table is
+        // still ascending and it is the range check that rejects it rather
+        // than the ordering check.
+        let at = runs_at + (run_count - 1) * 8;
+        bytes[at + 4..at + 8].copy_from_slice(&9_999u32.to_le_bytes());
+
+        // Re-checksum, so the structural check is what rejects it rather than
+        // the corruption detector.
+        let h = parse_header(&bytes, tree_expect(None), true).unwrap();
+        let layout = tree_sections(
+            h.prefix_len,
+            h.entry_count,
+            h.arena_len,
+            h.dir_count,
+            h.dir_arena_len,
+            h.run_count,
+        );
+        let offsets = bytes[layout.offsets..layout.offsets + (h.entry_count + 1) * 4].to_vec();
+        let dir_offsets =
+            bytes[layout.dir_offsets..layout.dir_offsets + (h.dir_count + 1) * 4].to_vec();
+        let runs = bytes[layout.runs..layout.runs + h.run_count * 8].to_vec();
+        let sum = checksum(&bytes[0..HEADER_SIZE], &[&offsets, &dir_offsets, &runs]);
+        bytes[48..56].copy_from_slice(&sum.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert_eq!(
+            load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap_err(),
+            LoadError::Invalid("a run names a directory that does not exist")
+        );
+    }
+
+    #[test]
+    fn a_missing_tree_cache_is_missing_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap_err(),
+            LoadError::Missing
+        );
+    }
+
+    /// A tree file must obey the same alignment rule every section of the flat
+    /// format does, or a mapped `u32` table is read unaligned on the fallback
+    /// path and byte-by-byte on the fast one.
+    #[test]
+    fn tree_sections_are_aligned_and_ordered() {
+        let s = tree_sections(3, 1_000, 24_000, 90, 1_800, 90);
+        for offset in [
+            s.root,
+            s.offsets,
+            s.lower,
+            s.orig,
+            s.dir_offsets,
+            s.dir_lower,
+            s.dir_orig,
+            s.runs,
+        ] {
+            assert_eq!(offset % ALIGN, 0, "section at {offset} is unaligned");
+        }
+        assert!(s.root >= HEADER_SIZE);
+        assert!(s.offsets >= s.root + 3);
+        assert!(s.lower >= s.offsets + 1_001 * 4);
+        assert!(s.orig >= s.lower + 24_000);
+        assert!(s.dir_offsets >= s.orig + 24_000);
+        assert!(s.dir_lower >= s.dir_offsets + 91 * 4);
+        assert!(s.dir_orig >= s.dir_lower + 1_800);
+        assert!(s.runs >= s.dir_orig + 1_800);
+        assert_eq!(s.total, s.runs + 90 * 8);
+    }
+
+    /// Growing the header from 96 to 128 bytes had to be free, and this is the
+    /// arithmetic that makes it so: both round up to the same alignment, so no
+    /// flat section moved.
+    #[test]
+    fn the_larger_header_moved_no_flat_section() {
+        assert_eq!(align_up(96), align_up(HEADER_SIZE));
+        assert_eq!(align_up(HEADER_SIZE), 128);
+        assert_eq!(sections(0, 0, 0).prefix, 128);
     }
 }

@@ -46,11 +46,25 @@ use crate::config::{SEGMENT_MAX_BYTES, SEGMENT_MIN_BYTES};
 
 /// Where one directory's files begin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Run {
+pub(crate) struct Run {
     /// Index of this directory's first file within the segment.
     first_file: u32,
     /// Index of the directory within the segment's directory snapshot.
     dir: u32,
+}
+
+impl Run {
+    pub(crate) fn new(first_file: u32, dir: u32) -> Self {
+        Self { first_file, dir }
+    }
+
+    pub(crate) fn first_file(self) -> u32 {
+        self.first_file
+    }
+
+    pub(crate) fn dir(self) -> u32 {
+        self.dir
+    }
 }
 
 /// A contiguous slice of a walked tree.
@@ -72,6 +86,30 @@ pub struct TreeSegment {
 }
 
 impl TreeSegment {
+    /// Assembles a segment from parts that came from somewhere other than a
+    /// walk - which today means the persisted index.
+    ///
+    /// Validating here rather than at the call site is what keeps
+    /// [`Self::check_invariants`] the single definition of a well-formed
+    /// segment: a decoder cannot accidentally accept a run table the builder
+    /// could never have produced.
+    pub(crate) fn from_parts(
+        files: Snapshot,
+        dirs: Snapshot,
+        runs: Box<[Run]>,
+    ) -> Result<Self, &'static str> {
+        let seg = Self { files, dirs, runs };
+        seg.check_invariants()?;
+        Ok(seg)
+    }
+
+    /// The run table, for the persistence layer. Not public: a run is
+    /// meaningless without the segment it indexes into, and every in-crate
+    /// reader goes through [`Self::dir_of`] or [`Self::files_of`].
+    pub(crate) fn runs(&self) -> &[Run] {
+        &self.runs
+    }
+
     pub fn files(&self) -> &Snapshot {
         &self.files
     }

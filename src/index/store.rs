@@ -394,6 +394,10 @@ impl IndexStore {
         });
     }
 
+    pub fn note_tree_cache_rejected(&self, why: String) {
+        self.update_tree_status(|s| s.cache_rejected = Some(why));
+    }
+
     pub fn set_tree_activity(&self, activity: Activity) {
         self.update_tree_status(|s| s.activity = activity);
     }

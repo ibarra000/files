@@ -244,6 +244,14 @@ impl IndexContext {
         }
     }
 
+    fn note_cache_rejected(&self, why: String) {
+        if self.is_tree() {
+            self.store.note_tree_cache_rejected(why);
+        } else {
+            self.store.note_cache_rejected(why);
+        }
+    }
+
     fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
         if self.is_tree() {
             self.store.record_tree_failure(err, attempt, next_retry_at);
@@ -474,12 +482,6 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
     if !ctx.settings.persist {
         return None;
     }
-    // The tree has no on-disk form yet, so it always starts cold. Returning
-    // early rather than attempting a flat load is what stops a tree actor
-    // decoding the *flat* share's cache and publishing it as its own.
-    if ctx.is_tree() {
-        return None;
-    }
     let cache_dir = ctx.settings.cache_dir.clone()?;
 
     ctx.set_activity(Activity::LoadingDisk);
@@ -487,28 +489,28 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
 
     let dir = indexed_dir(ctx);
     let key = persist::MappingKey::of(dir);
-    let loaded = match persist::load(
-        &cache_dir,
-        key,
-        persist::Expect::new(dir, ctx.volume_serial),
-    ) {
-        Ok(snapshot) => {
-            let stamp = snapshot.stamp();
-            let age = SystemTime::now()
-                .duration_since(snapshot.captured_at())
-                .ok();
-            ctx.store
-                .publish_flat(Arc::new(snapshot), Origin::DiskCache);
-            let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
-            Some(DiskLoad { stamp, age })
-        }
+    let expect = persist::Expect::new(dir, ctx.volume_serial);
+
+    // A tree and a flat listing are different file layouts, and the loader
+    // refuses to read one as the other - so a tree actor cannot decode the
+    // flat share's cache and publish one directory as the whole share. The
+    // cache key already differs, since it is derived from the directory; this
+    // is the backstop for that, not a substitute.
+    let result = if ctx.is_tree() {
+        load_tree_from_disk(ctx, events, &cache_dir, key, expect)
+    } else {
+        load_flat_from_disk(ctx, events, &cache_dir, key, expect)
+    };
+
+    let loaded = match result {
+        Ok(loaded) => Some(loaded),
         Err(err) => {
             // A missing cache is normal on first run. A *rejected* one is not,
             // and used to be indistinguishable from it - so a drive letter
             // pointing at a different volume looked exactly like a cold start,
             // every single launch, with nothing on screen to say why.
             if !matches!(err, persist::LoadError::Missing) {
-                ctx.store.note_cache_rejected(err.to_string());
+                ctx.note_cache_rejected(err.to_string());
             }
             None
         }
@@ -519,24 +521,73 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
     loaded
 }
 
+fn load_flat_from_disk(
+    ctx: &IndexContext,
+    events: &Sender<AppEvent>,
+    cache_dir: &Path,
+    key: persist::MappingKey,
+    expect: persist::Expect<'_>,
+) -> Result<DiskLoad, persist::LoadError> {
+    let snapshot = persist::load(cache_dir, key, expect)?;
+    let stamp = snapshot.stamp();
+    let age = SystemTime::now()
+        .duration_since(snapshot.captured_at())
+        .ok();
+    ctx.store
+        .publish_flat(Arc::new(snapshot), Origin::DiskCache);
+    let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
+    Ok(DiskLoad { stamp, age })
+}
+
+fn load_tree_from_disk(
+    ctx: &IndexContext,
+    events: &Sender<AppEvent>,
+    cache_dir: &Path,
+    key: persist::MappingKey,
+    expect: persist::Expect<'_>,
+) -> Result<DiskLoad, persist::LoadError> {
+    let loaded = persist::load_tree(cache_dir, key, expect)?;
+    let age = SystemTime::now()
+        .duration_since(loaded.index.captured_at())
+        .ok();
+    // The coverage is published with the index, not withheld until the next
+    // walk confirms it. A cache written from a walk that could not read part
+    // of the share must come back still saying so; otherwise the one restart
+    // between the walk and the re-walk is a window in which the status line
+    // quietly claims complete coverage of a share it never had.
+    ctx.store.publish_tree(
+        Arc::new(loaded.index),
+        Origin::DiskCache,
+        Some(Arc::new(loaded.coverage)),
+    );
+    let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
+    // A tree records no directory stamp, by design: no single timestamp can
+    // stand for a whole share. That is what settles the scheduler into
+    // `Blind`, where the re-walk floor is the whole freshness guarantee.
+    Ok(DiskLoad { stamp: None, age })
+}
+
 fn persist_current(ctx: &IndexContext, events: &Sender<AppEvent>) {
     if !ctx.settings.persist {
         return;
     }
-    if ctx.is_tree() {
-        return;
-    }
-    let (Some(cache_dir), Some(snapshot)) = (ctx.settings.cache_dir.clone(), ctx.store.flat())
-    else {
+    let Some(cache_dir) = ctx.settings.cache_dir.clone() else {
         return;
     };
+    let key = persist::MappingKey::of(indexed_dir(ctx));
 
     ctx.set_activity(Activity::Persisting);
     publish_status(ctx, events);
     // Best effort throughout: failing to write the cache costs a slow cold
     // start next time and nothing else.
-    let key = persist::MappingKey::of(indexed_dir(ctx));
-    let _ = persist::save(&cache_dir, key, &snapshot);
+    if ctx.is_tree() {
+        if let Some(index) = ctx.store.tree() {
+            let coverage = ctx.store.tree_status().coverage.clone();
+            let _ = persist::save_tree(&cache_dir, key, &index, coverage.as_deref());
+        }
+    } else if let Some(snapshot) = ctx.store.flat() {
+        let _ = persist::save(&cache_dir, key, &snapshot);
+    }
     ctx.set_activity(Activity::Idle);
     publish_status(ctx, events);
 }
@@ -921,6 +972,12 @@ fn walk_and_publish(
             error: None,
         }));
     }
+    // Persisted only here, at the end, never from the mid-walk publishes.
+    // Writing a 300 MB file twenty-odd times during a walk would cost more
+    // than the walk does, and every one of those files would be superseded
+    // minutes later by the next.
+    persist_current(ctx, events);
+
     // Deliberately no stamp; see this function's own doc comment.
     Ok(None)
 }
