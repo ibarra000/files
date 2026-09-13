@@ -124,6 +124,27 @@ impl History {
             return false;
         }
 
+        // A code typed on the way to a longer one supersedes it rather than
+        // joining it. `11-D` at the head, then `11-D-0704`, is one job being
+        // typed - not two jobs looked up - and a list that keeps both is a
+        // list with three quarters of the same code in it.
+        //
+        // Head-only, deliberately. The entry this can replace is the one
+        // recorded immediately before, which is the only one a chain of
+        // keystrokes can have produced; a `11-D` looked up yesterday sits
+        // further down and is never touched.
+        //
+        // The reverse - backspacing from `11-D-0704` to `11-D` and stopping -
+        // is *not* collapsed. Losing a shorter code somebody deliberately
+        // shortened to is more surprising than keeping it, and unlike the
+        // forward case it is not something typing produces by accident.
+        if self.supersedes_head(entry) {
+            self.entries[0] = entry.to_string();
+            self.cursor = None;
+            self.draft = None;
+            return true;
+        }
+
         self.entries.retain(|e| !e.eq_ignore_ascii_case(entry));
         self.entries.insert(0, entry.to_string());
         self.entries.truncate(MAX_ENTRIES);
@@ -133,6 +154,18 @@ impl History {
         self.cursor = None;
         self.draft = None;
         true
+    }
+
+    /// Whether `entry` is the head entry with more typed onto the end of it.
+    ///
+    /// Case-insensitive for the same reason the dedup below it is: the shares
+    /// do not distinguish `11-d` from `11-D`, so neither does this.
+    fn supersedes_head(&self, entry: &str) -> bool {
+        let Some(head) = self.entries.first() else {
+            return false;
+        };
+        entry.len() > head.len()
+            && entry.as_bytes()[..head.len()].eq_ignore_ascii_case(head.as_bytes())
     }
 
     /// Starts browsing, remembering `draft` so Esc can restore it.
@@ -396,6 +429,61 @@ mod tests {
         h.record("11-d-0704");
         assert_eq!(h.entries(), ["11-d-0704"], "newest spelling wins");
         assert_eq!(h.len(), 1);
+    }
+
+    /// The chain a pause in the middle of typing leaves behind.
+    ///
+    /// The quiet period is the first defence and it is not a complete one:
+    /// somebody reading a code off a drawing really does stop for two seconds
+    /// in the middle of it. This is what catches the prefix that gets through.
+    #[test]
+    fn a_code_typed_on_the_way_to_a_longer_one_is_superseded_by_it() {
+        let mut h = History::new();
+        for step in ["11", "11-D", "11-D-07", "11-D-0704"] {
+            h.record(step);
+        }
+        assert_eq!(h.entries(), ["11-D-0704"]);
+        assert_eq!(h.len(), 1, "the list kept the walk as well as the code");
+    }
+
+    /// Head-only. A code looked up earlier has moved down the list and is not
+    /// something the next few keystrokes can reach.
+    #[test]
+    fn only_the_entry_just_recorded_can_be_superseded() {
+        let mut h = history(&["P12345-001", "11-D"]);
+        h.record("11-D-0704");
+        assert_eq!(h.entries(), ["11-D-0704", "P12345-001", "11-D"]);
+    }
+
+    /// Case-insensitively, because the shares are.
+    #[test]
+    fn a_prefix_in_the_other_case_is_still_a_prefix() {
+        let mut h = history(&["11-d"]);
+        h.record("11-D-0704");
+        assert_eq!(h.entries(), ["11-D-0704"]);
+    }
+
+    /// The reverse is deliberately *not* collapsed. Backspacing to a shorter
+    /// code and stopping there is something somebody did on purpose, and
+    /// unlike the forward case it is not something typing produces by
+    /// accident.
+    #[test]
+    fn shortening_a_code_keeps_both() {
+        let mut h = history(&["11-D-0704"]);
+        h.record("11-D");
+        assert_eq!(h.entries(), ["11-D", "11-D-0704"]);
+    }
+
+    /// A different code that happens to start with the same characters is
+    /// still a different code - but it is also exactly what typing one
+    /// produces, so this is the case the rule is knowingly wrong about. It is
+    /// the right trade: the list holds two hundred codes and the alternative
+    /// is three quarters of them being halves of each other.
+    #[test]
+    fn a_longer_code_sharing_a_prefix_replaces_it() {
+        let mut h = history(&["11-D-07"]);
+        h.record("11-D-0704");
+        assert_eq!(h.entries(), ["11-D-0704"]);
     }
 
     #[test]

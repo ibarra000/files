@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use super::{OpenContext, OpenRequest};
-use crate::app::event::{AppEvent, OpenMsg};
+use crate::app::event::{AppEvent, Events, OpenMsg};
 use crate::config::ViewerKind;
 use crate::search::worker::Backend;
 
@@ -62,7 +62,7 @@ impl Opener {
     /// Never blocks the UI thread: a full queue means something is badly
     /// wedged, and dropping the newest request is better than freezing the
     /// interface behind it.
-    pub fn request(&self, request: OpenRequest, events: &Sender<AppEvent>) {
+    pub fn request(&self, request: OpenRequest, events: &Events) {
         let detail = match self.tx.try_send(request) {
             Ok(()) => return,
             Err(TrySendError::Full(r)) => (r.path, "still opening the last one"),
@@ -74,7 +74,21 @@ impl Opener {
                 (r.path, "the opener stopped; restart to open files again")
             }
         };
-        let _ = events.send(AppEvent::Open(OpenMsg::Failed {
+        // `try_send`, not `send`, and the distinction is a hang.
+        //
+        // This runs on the interface's own thread, and the interface is the
+        // only thing draining the event channel. A blocking send closes a
+        // cycle: the channel is full, so the send waits; the send is on the
+        // thread that would have drained it, so it waits for ever. It needs a
+        // full opener queue and a full event channel at the same moment, which
+        // is rare - and a wedged program with nothing on screen to explain it,
+        // which is not a thing to leave lying about because it is rare.
+        //
+        // The cost of the other choice is losing this one message when the
+        // channel is already holding two hundred and fifty-six others, at
+        // which point the interface is about to redraw anyway. That is a
+        // report delayed into irrelevance, against a program that stops.
+        let _ = events.try_send(AppEvent::Open(OpenMsg::Failed {
             path: detail.0,
             detail: detail.1.into(),
         }));
@@ -110,7 +124,7 @@ impl Opener {
 }
 
 /// Starts the open worker.
-pub fn spawn(backend: Arc<Backend>, events: Sender<AppEvent>) -> std::io::Result<Opener> {
+pub fn spawn(backend: Arc<Backend>, events: Events) -> std::io::Result<Opener> {
     let (tx, rx) = bounded::<OpenRequest>(QUEUE_DEPTH);
 
     let handle = std::thread::Builder::new()
@@ -134,7 +148,7 @@ pub fn spawn(backend: Arc<Backend>, events: Sender<AppEvent>) -> std::io::Result
     })
 }
 
-fn run(backend: &Backend, rx: &Receiver<OpenRequest>, events: &Sender<AppEvent>) {
+fn run(backend: &Backend, rx: &Receiver<OpenRequest>, events: &Events) {
     while let Ok(request) = rx.recv() {
         let msg = serve(backend, &request);
         if events.send(AppEvent::Open(msg)).is_err() {
@@ -147,7 +161,7 @@ fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
     // Only the PDF route needs a listing, and a failure to get one is not a
     // failure to open: it degrades to the single selected file.
     let snapshot = match request.viewer {
-        ViewerKind::Pdf => Some(backend.flat()),
+        ViewerKind::Pdf => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
         ViewerKind::Avwin => None,
     };
 
@@ -201,11 +215,53 @@ mod tests {
         }
     }
 
+    /// Reporting a failure must never park the caller.
+    ///
+    /// `request` runs on the interface's own thread, and the interface is the
+    /// only thing draining the event channel. A *blocking* send from here
+    /// closes a cycle: the channel is full, so the send waits; the send is on
+    /// the thread that would have drained it, so it waits forever. It takes a
+    /// full opener queue and a full event channel at the same moment, which is
+    /// rare - and a hang with no message and no way out, which is not a thing
+    /// to leave lying about because it is rare.
+    ///
+    /// Reproduced here with a rendezvous channel nobody is receiving on, which
+    /// is "full" by construction, and a shut-down worker, which is the
+    /// deterministic half of the pair.
+    #[test]
+    fn reporting_a_failure_never_blocks_the_caller() {
+        let (tx, _rx) = bounded::<AppEvent>(8);
+        let tx = Events::headless(tx);
+        let mut opener = spawn(backend(), tx).expect("the opener starts");
+        opener.shutdown(Duration::from_millis(250));
+
+        // Nobody is receiving, and there is no capacity, so `send` would park
+        // here for the life of the process.
+        let (blocked, _held) = bounded::<AppEvent>(0);
+        let blocked = Events::headless(blocked);
+
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            opener.request(request(r"V:\a.pdf"), &blocked);
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        for _ in 0..200 {
+            if done.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("`request` was still blocked a second later; the interface would be wedged");
+    }
+
     /// Silence is the failure this whole module exists to prevent: the user
     /// pressed a key, so something has to come back.
     #[test]
     fn the_worker_always_reports_back() {
         let (tx, rx) = bounded(8);
+        let tx = Events::headless(tx);
         let mut opener = spawn(backend(), tx.clone()).unwrap();
         opener.request(request(r"C:\definitely-not-here-4a91\nope.pdf"), &tx);
 
@@ -222,6 +278,7 @@ mod tests {
     #[test]
     fn every_queued_open_is_serviced_rather_than_superseded() {
         let (tx, rx) = bounded(64);
+        let tx = Events::headless(tx);
         let mut opener = spawn(backend(), tx.clone()).unwrap();
         for i in 0..4 {
             opener.request(
@@ -246,6 +303,7 @@ mod tests {
     #[test]
     fn an_open_after_the_worker_has_stopped_is_still_reported() {
         let (tx, rx) = bounded(8);
+        let tx = Events::headless(tx);
         let mut opener = spawn(backend(), tx.clone()).unwrap();
         assert!(opener.shutdown(Duration::from_millis(500)));
 
@@ -269,6 +327,7 @@ ope.pdf",
     #[test]
     fn a_second_shutdown_does_not_upgrade_an_abandoned_worker() {
         let (tx, _rx) = bounded(8);
+        let tx = Events::headless(tx);
         let mut opener = spawn(backend(), tx).unwrap();
         assert!(opener.shutdown(Duration::from_millis(500)));
         assert!(opener.shutdown(Duration::from_millis(500)));
@@ -277,6 +336,7 @@ ope.pdf",
     #[test]
     fn shutdown_stops_an_idle_worker_promptly() {
         let (tx, _rx) = bounded(8);
+        let tx = Events::headless(tx);
         let mut opener = spawn(backend(), tx).unwrap();
         let started = Instant::now();
         assert!(opener.shutdown(Duration::from_millis(500)));

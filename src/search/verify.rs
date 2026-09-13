@@ -36,6 +36,7 @@ use crate::index::DirStamp;
 use crate::index::enumerate::{DirSource, ListOpts, VecSink};
 use crate::index::errors::EnumError;
 use crate::index::snapshot::Snapshot;
+use crate::paths::Routes;
 use crate::util::cancel::CancelToken;
 
 /// Why verification did not reach the server.
@@ -49,6 +50,15 @@ pub enum SkipReason {
     AuditFailed { misses: u32 },
     /// The source cannot push filters down at all.
     Unsupported,
+    /// Several flat shares are configured, so the server-side check was not
+    /// attempted.
+    ///
+    /// The check replaces the on-screen result list with what the server
+    /// returned, which across several shares would mean re-merging and
+    /// auditing per share - real machinery for a feature that ships off and
+    /// disables itself on the first miss. Named rather than silent, for the
+    /// same reason as [`Self::NotApplicable`].
+    SeveralShares,
     /// There is no single directory to ask about.
     ///
     /// A walked tree spans hundreds of thousands of folders and the server's
@@ -69,6 +79,7 @@ impl SkipReason {
                 format!("server filter disabled after {misses} disagreements")
             }
             Self::Unsupported => "server-side filtering unavailable".into(),
+            Self::SeveralShares => "several shares; not checked against the server".into(),
             Self::NotApplicable => "kept live by the watcher".into(),
         }
     }
@@ -141,19 +152,46 @@ fn local_matches(snapshot: &Snapshot, query: &str) -> Vec<String> {
 /// Runs server-side verification, and polices it.
 pub struct Verifier {
     source: Arc<dyn DirSource>,
-    dir: PathBuf,
+    /// Every enabled flat mapping, in configuration order.
+    ///
+    /// A tree is absent on purpose: it records no directory stamp, by design,
+    /// so there is nothing here that could prove one current.
+    dirs: Box<[PathBuf]>,
     enabled: AtomicBool,
     misses: AtomicU32,
 }
 
 impl Verifier {
     pub fn new(source: Arc<dyn DirSource>, dir: PathBuf, enabled: bool) -> Self {
+        Self::over(source, vec![dir], enabled)
+    }
+
+    /// Builds one over every enabled flat mapping in a routing table.
+    pub fn for_routes(source: Arc<dyn DirSource>, routes: &Routes, enabled: bool) -> Self {
+        let dirs = routes
+            .flat()
+            .map(|m| m.path.clone())
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect();
+        Self::over(source, dirs, enabled)
+    }
+
+    fn over(source: Arc<dyn DirSource>, dirs: Vec<PathBuf>, enabled: bool) -> Self {
         Self {
             source,
-            dir,
+            dirs: dirs.into_boxed_slice(),
             enabled: AtomicBool::new(enabled),
             misses: AtomicU32::new(0),
         }
+    }
+
+    /// Whether there is anything here a server-side check could be put to.
+    pub fn is_empty(&self) -> bool {
+        self.dirs.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.dirs.len()
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -169,8 +207,12 @@ impl Verifier {
         self.enabled.store(false, Ordering::Relaxed);
     }
 
+    /// The single flat share, when there is exactly one.
     pub fn dir(&self) -> &Path {
-        &self.dir
+        self.dirs
+            .first()
+            .map(PathBuf::as_path)
+            .unwrap_or(Path::new(""))
     }
 
     /// Checks whether the directory has changed since `snapshot` was taken.
@@ -178,7 +220,7 @@ impl Verifier {
     /// `Some(stamp)` means unchanged and therefore authoritative.
     pub fn stamp_unchanged(&self, snapshot: Option<&Snapshot>) -> Option<DirStamp> {
         let recorded = snapshot?.stamp()?;
-        let current = self.source.probe_stamp(&self.dir).ok()?;
+        let current = self.source.probe_stamp(self.dir()).ok()?;
         (current == recorded).then_some(current)
     }
 
@@ -217,7 +259,7 @@ impl Verifier {
         let opts = ListOpts::default().with_max_entries(MAX_SERVER_HITS);
         let stats = match self
             .source
-            .query(&self.dir, &wildcard, &mut sink, &opts, cancel)
+            .query(self.dir(), &wildcard, &mut sink, &opts, cancel)
         {
             Ok(stats) => stats,
             // Zero matches is an answer, not a failure.
@@ -247,7 +289,7 @@ impl Verifier {
 
         let verdict = self.run_audit(&confirmed, snapshot, query);
         let matched = confirmed.len() as u32;
-        let hits = rank_server_names(&self.dir, confirmed, query);
+        let hits = rank_server_names(self.dir(), confirmed, query);
 
         VerifyOutcome::Server {
             hits,

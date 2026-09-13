@@ -22,8 +22,8 @@ pub struct WalkArgs {
 /// What the program was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    /// Run the interactive search.
-    Tui,
+    /// Run the search panel. The default, and what the program is.
+    Gui,
     /// Fast, read-only capability report.
     Doctor,
     /// Timing comparison across enumeration strategies.
@@ -54,6 +54,7 @@ pub struct Overrides {
     pub index_log: Option<PathBuf>,
     pub viewer: Option<ViewerKind>,
     pub pdf_viewer: Option<PathBuf>,
+    pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +95,9 @@ impl Args {
         }
         if let Some(v) = &self.overrides.pdf_viewer {
             s.pdf_viewer = Some(v.clone());
+        }
+        if let Some(v) = self.overrides.hotkey {
+            s.hotkey = v;
         }
         Ok(s)
     }
@@ -158,11 +162,22 @@ OPTIONS:
                         running, but this flag pins it for the run
     --pdf-viewer <PATH> open merged PDFs with this program instead of
                         whatever is registered for .pdf
+    --hotkey <CHORD>    the global hotkey that summons the compact quick
+                        search window, or \"off\" to claim no key. Modifiers
+                        ctrl/alt/shift/win plus a letter, a digit, f1-f24 or
+                        space (default: ctrl+shift+space). The Copilot key on
+                        newer keyboards sends shift+win+f23, so that value
+                        binds the key itself
     --no-persist        do not read or write the on-disk index
     --index-log <PATH>  append one line per index scheduling decision: what
                         woke it, what the directory stamp said, whether it
                         rebuilt and why, and when it will look again
                         (off by default; it answers why did it reindex)
+                        how much colour to use. Detection reads COLORTERM and
+                        WT_SESSION; NO_COLOR always wins, and FILES_COLOR sets
+                        it without a flag. FILES_GLYPHS=ascii replaces the
+                        marks for a font that lacks them
+    --gui               run the desktop window instead of the terminal
     --demo              run against synthetic data, with no drives at all
     -h, --help          show this
     -V, --version       show the version
@@ -177,7 +192,8 @@ ENVIRONMENT:
     FILES_BASE_PATH, FILES_CUSTPRO_PATH   repoint the 'jobs' / 'custompro'
                                           mappings
     FILES_FS_STRATEGY, FILES_MATCHER, FILES_SERVER_FILTER, FILES_PERSIST,
-    FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER
+    FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER,
+    FILES_HISTORY, FILES_HOTKEY
 
     Setting FILES_VIEWER also makes F2 a session-only switch: the environment
     outranks the file, so saving the choice would change nothing.
@@ -196,7 +212,7 @@ ENVIRONMENT:
 
 /// Parses arguments over a base of environment-derived settings.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> {
-    let mut mode = Mode::Tui;
+    let mut mode = Mode::Gui;
     let mut config = ConfigChoice::Default;
     let mut overrides = Overrides::default();
     let mut query = None;
@@ -267,6 +283,13 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
             "--pdf-viewer" => {
                 overrides.pdf_viewer = Some(PathBuf::from(value("--pdf-viewer")?));
             }
+            "--hotkey" => {
+                let v = value("--hotkey")?;
+                overrides.hotkey = Some(
+                    crate::hotkey::spec::parse(&v)
+                        .map_err(|e| ArgError(format!("--hotkey: {}", e.detail())))?,
+                );
+            }
             "--index-log" => {
                 overrides.index_log = Some(PathBuf::from(value("--index-log")?));
             }
@@ -336,7 +359,7 @@ mod tests {
 
     #[test]
     fn no_arguments_runs_the_interactive_search() {
-        assert_eq!(args(&[]).unwrap().mode, Mode::Tui);
+        assert_eq!(args(&[]).unwrap().mode, Mode::Gui);
     }
 
     #[test]
@@ -522,6 +545,7 @@ mod tests {
             "--index-log",
             "--viewer",
             "--pdf-viewer",
+            "--hotkey",
         ] {
             assert!(HELP.contains(flag), "{flag} is undocumented");
         }
@@ -542,6 +566,8 @@ mod tests {
             "FILES_INDEX_LOG",
             "FILES_VIEWER",
             "FILES_PDF_VIEWER",
+            "FILES_HISTORY",
+            "FILES_HOTKEY",
         ] {
             assert!(HELP.contains(var), "{var} is undocumented");
         }

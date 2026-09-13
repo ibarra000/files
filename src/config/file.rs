@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{ImDocument, Item, Value};
 
-use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, Routes};
+use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
 use crate::util::winpath;
 
 /// The file written on first run, and the compiled-in fallback.
@@ -105,7 +105,7 @@ pub fn report(errors: &[ConfigError]) -> String {
         if errors.len() == 1 { "" } else { "s" }
     ));
     out.push_str(
-        "try `files --check-config` after editing, or `files --no-config` to run on the \
+        "try `files-cli --check-config` after editing, or `--no-config` to run on the \
          built-in defaults\n",
     );
     out
@@ -158,15 +158,18 @@ impl Ctx<'_> {
 /// Keys accepted at each level. Anything else is an error: a typo like
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
-const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled"];
+const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh"];
 const SETTINGS_KEYS: &[&str] = &[
     "enum_strategy",
     "matcher",
     "server_filter",
     "persist",
+    "max_concurrent_scans",
+    "stale_notices",
     "live_updates",
     "cache_dir",
     "history",
+    "hotkey",
     "viewer",
     "pdf_viewer",
 ];
@@ -179,9 +182,12 @@ pub struct FileSettings {
     pub matcher: Option<String>,
     pub server_filter: Option<bool>,
     pub persist: Option<bool>,
+    pub max_concurrent_scans: Option<usize>,
+    pub stale_notices: Option<bool>,
     pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
     pub history: Option<bool>,
+    pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
 }
@@ -294,28 +300,66 @@ pub fn parse(
         );
     }
 
-    // Only one flat mapping can be indexed so far: there is a single snapshot
-    // slot, so a second one would be searched against the first one's listing
-    // and quietly return another share's files. Refusing is the honest
-    // response until the index is keyed per mapping.
-    let flat: Vec<&str> = mappings
-        .iter()
-        .filter(|m| m.enabled && m.kind == MappingKind::Flat)
-        .map(|m| m.name.as_ref())
-        .collect();
-    if flat.len() > 1 {
-        ctx.err(
-            None,
-            None,
-            None,
-            format!(
-                "{} enabled flat mappings ({}), but only one can be indexed in this build; \
-                 disable all but one, or make the others kind = \"tree\"",
-                flat.len(),
-                flat.join(", ")
-            ),
-            None,
-        );
+    // Two mappings on the same directory are refused rather than merged. The
+    // persisted index is keyed by a hash of the path (`persist::MappingKey`),
+    // so both actors would write the same cache entry and each cold start
+    // would restore whichever wrote last - and every result would appear
+    // twice in one merged list.
+    for (i, a) in mappings.iter().enumerate() {
+        if !a.enabled || !a.kind.is_indexed() {
+            continue;
+        }
+        for b in mappings.iter().skip(i + 1) {
+            if !b.enabled || !b.kind.is_indexed() {
+                continue;
+            }
+            if winpath::same_dir(&a.path, &b.path) {
+                ctx.err(
+                    None,
+                    None,
+                    None,
+                    format!(
+                        "mappings `{}` and `{}` both point at {}; \
+                         indexing one directory twice returns every file twice",
+                        a.name,
+                        b.name,
+                        a.path.display()
+                    ),
+                    None,
+                );
+                continue;
+            }
+            // A *tree* mapping containing another indexed mapping walks that
+            // one's files as well as its own, so every hit inside appears
+            // twice in one merged list and is walked twice on every pass.
+            //
+            // A flat parent is fine and stays legal: a flat mapping lists only
+            // its own directory's entries, so a child mapping's files are not
+            // in it to begin with.
+            let nested = if a.kind == MappingKind::Tree && winpath::contains(&a.path, &b.path) {
+                Some((a, b))
+            } else if b.kind == MappingKind::Tree && winpath::contains(&b.path, &a.path) {
+                Some((b, a))
+            } else {
+                None
+            };
+            if let Some((outer, inner)) = nested {
+                ctx.err(
+                    None,
+                    None,
+                    None,
+                    format!(
+                        "mapping `{}` ({}) lies inside the walked tree `{}` ({}); \
+                         every file under it would be indexed twice and shown twice",
+                        inner.name,
+                        inner.path.display(),
+                        outer.name,
+                        outer.path.display()
+                    ),
+                    None,
+                );
+            }
+        }
     }
 
     if ctx.errors.is_empty() {
@@ -424,12 +468,29 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         };
 
         let enabled = table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
+        let refresh = match table.get("refresh") {
+            None => RefreshPolicy::default_for(kind),
+            Some(item) => match item.as_str().and_then(RefreshPolicy::parse) {
+                Some(p) => p,
+                None => {
+                    ctx.err(
+                        item.span(),
+                        Some(&label),
+                        None,
+                        "`refresh` must be \"auto\" or \"manual\"",
+                        None,
+                    );
+                    RefreshPolicy::default_for(kind)
+                }
+            },
+        };
         mappings.push(Mapping {
             id: MappingId(index as u16),
             name: label.into(),
             path: winpath::normalise_root(Path::new(raw_path)),
             kind,
             enabled,
+            refresh,
         });
     }
 
@@ -474,9 +535,39 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "matcher" => out.matcher = value.and_then(Value::as_str).map(str::to_string),
             "server_filter" => out.server_filter = value.and_then(Value::as_bool),
             "persist" => out.persist = value.and_then(Value::as_bool),
+            "stale_notices" => out.stale_notices = value.and_then(Value::as_bool),
+            "max_concurrent_scans" => {
+                // Rejected rather than clamped. A zero here means "index
+                // nothing, ever", which nobody writes on purpose, and this
+                // file's policy is to say so rather than guess.
+                match value.and_then(Value::as_integer) {
+                    Some(n) if n >= 1 => out.max_concurrent_scans = Some(n as usize),
+                    Some(n) => ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("max_concurrent_scans must be at least 1, not {n}"),
+                        None,
+                    ),
+                    None => {}
+                }
+            }
             "live_updates" => out.live_updates = value.and_then(Value::as_bool),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = value.and_then(Value::as_bool),
+            "hotkey" => {
+                // Rejected here rather than ignored later, for the same reason
+                // as `viewer` below and more sharply: a hotkey that silently
+                // fell back to the default would look exactly like a working
+                // one, right up until someone pressed the combination they
+                // actually chose and nothing happened.
+                if let Some(v) = value.and_then(Value::as_str) {
+                    match crate::hotkey::spec::parse(v) {
+                        Ok(spec) => out.hotkey = Some(spec),
+                        Err(e) => ctx.err(item.span(), None, None, e.detail(), None),
+                    }
+                }
+            }
             "viewer" => {
                 let raw = value.and_then(Value::as_str);
                 // Rejected here rather than ignored later. A misspelt viewer
@@ -865,31 +956,145 @@ kind = "tree"
         assert!(messages(&errs).contains("unknown setting"));
     }
 
-    /// A second flat mapping would be searched against the first one's
-    /// snapshot and return another share's files. Refused rather than risked.
+    /// Two flat shares are both indexed now.
+    ///
+    /// This replaces a test asserting the opposite. The store held one flat
+    /// slot and one tree slot, so a second flat mapping would have been
+    /// searched against the first one's listing - refusing was the honest
+    /// answer while that was true. The store is keyed by mapping now, so the
+    /// honest answer is to index both.
+    /// Two flat shares are both indexed now.
+    ///
+    /// This replaces a test asserting the opposite. The store held one flat
+    /// slot and one tree slot, so a second flat mapping would have been
+    /// searched against the first one's listing - refusing was the honest
+    /// answer while that was true. The store is keyed by mapping now, so the
+    /// honest answer is to index both.
     #[test]
-    fn a_second_enabled_flat_mapping_is_rejected_by_name() {
+    fn two_enabled_flat_mappings_are_both_accepted() {
         let text = r#"
 version = 2
 
 [[mapping]]
-name = "custompro"
-path = 'V:\Documents\custpro'
+name = "one"
+path = 'V:\a'
 kind = "flat"
 
 [[mapping]]
-name = "archive"
-path = 'W:\archive'
+name = "two"
+path = 'W:\b'
 kind = "flat"
+
+[[mapping]]
+name = "jobs"
+path = 'R:\'
+kind = "tree"
+"#;
+        let c = parse(text, p(), ConfigSource::BuiltIn)
+            .unwrap_or_else(|e| panic!("rejected: {:?}", messages(&e)));
+        assert_eq!(c.routes.flat().count(), 2, "both flat shares are indexed");
+        assert_eq!(c.routes.targets().len(), 3, "and all three are searched");
+    }
+
+    /// Ten mappings, which is the configuration that prompted all of this.
+    #[test]
+    fn ten_mappings_are_all_accepted_and_all_searched() {
+        let mut text = String::from("version = 2\n");
+        for i in 0..10 {
+            let kind = if i % 3 == 0 { "flat" } else { "tree" };
+            text.push_str(&format!(
+                "\n[[mapping]]\nname = \"share{i}\"\npath = 'X:\\\\share{i}'\nkind = \"{kind}\"\n"
+            ));
+        }
+        let c = parse(&text, p(), ConfigSource::BuiltIn)
+            .unwrap_or_else(|e| panic!("rejected: {:?}", messages(&e)));
+        assert_eq!(c.routes.enabled().count(), 10);
+        assert_eq!(
+            c.routes.targets().len(),
+            10,
+            "every configured share is searched, not the first two"
+        );
+    }
+
+    /// Two mappings on one directory share a cache key, so each cold start
+    /// would restore whichever actor wrote last, and every hit would appear
+    /// twice in one merged list.
+    #[test]
+    fn two_mappings_on_the_same_directory_are_refused() {
+        let text = r#"
+version = 2
+
+[[mapping]]
+name = "one"
+path = 'V:\a'
+kind = "tree"
+
+[[mapping]]
+name = "two"
+path = 'V:\a\'
+kind = "tree"
 "#;
         let errs = parse_err(text);
         let msg = messages(&errs);
-        assert!(msg.contains("only one can be indexed"), "{msg}");
-        assert!(msg.contains("custompro"), "{msg}");
-        assert!(msg.contains("archive"), "{msg}");
+        assert!(msg.contains("one"), "{msg}");
+        assert!(msg.contains("two"), "{msg}");
+        assert!(msg.contains("twice"), "{msg}");
+    }
+
+    /// A tree that contains another mapping walks that one's files as well
+    /// as its own, so every hit inside appears twice in one merged list.
+    #[test]
+    fn a_mapping_nested_inside_a_walked_tree_is_refused() {
+        let text = r#"
+version = 2
+
+[[mapping]]
+name = "jobs"
+path = 'R:\'
+kind = "tree"
+
+[[mapping]]
+name = "inner"
+path = 'R:\11d'
+kind = "tree"
+"#;
+        let errs = parse_err(text);
+        let msg = messages(&errs);
+        assert!(msg.contains("inner"), "{msg}");
+        assert!(msg.contains("jobs"), "{msg}");
+        assert!(msg.contains("twice"), "{msg}");
+    }
+
+    /// A *flat* parent lists only its own directory, so a child mapping's
+    /// files were never in it and there is nothing to index twice.
+    #[test]
+    fn a_mapping_below_a_flat_share_is_allowed() {
+        let text = r#"
+version = 2
+
+[[mapping]]
+name = "top"
+path = 'V:\docs'
+kind = "flat"
+
+[[mapping]]
+name = "inner"
+path = 'V:\docs\jobs'
+kind = "tree"
+"#;
+        let c = parse(text, p(), ConfigSource::BuiltIn)
+            .unwrap_or_else(|e| panic!("rejected: {:?}", messages(&e)));
+        assert_eq!(c.routes.targets().len(), 2);
+    }
+
+    #[test]
+    fn a_zero_walk_cap_is_refused_rather_than_clamped() {
+        let text = format!("{MINIMAL}\n[settings]\nmax_concurrent_scans = 0\n");
+        let errs = parse_err(&text);
         assert!(
-            msg.contains("tree"),
-            "the message should say what to do: {msg}"
+            messages(&errs).contains("at least 1"),
+            "{:?}",
+            messages(&errs)
         );
     }
 

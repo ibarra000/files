@@ -2,6 +2,10 @@
 name = "files"
 version = "0.2.0"
 edition = "2024"
+# Read by the installer, by Apps & Features, and by the version block `build.rs`
+# embeds. Absent until there was something to install.
+description = "Search job codes across the drawing shares"
+authors = ["files"]
 
 [lib]
 name = "files"
@@ -11,9 +15,35 @@ path = "src/lib.rs"
 name = "files"
 path = "src/main.rs"
 
+# The console half. See its module note for why this is a second executable
+# rather than a flag on the first: the subsystem bit in the PE header is what
+# decides whether a shell waits for the output, and it is set per binary.
+[[bin]]
+name = "files-cli"
+path = "src/bin/files-cli.rs"
+
+[[bin]]
+name = "lens"
+path = "src/bin/lens.rs"
+
 [dependencies]
-ratatui = "0.26"
-crossterm = "0.27"
+# The desktop shell. `wgpu` rather than the default `glow`: a GL swapchain on a
+# transparent Win32 window offers no alpha mode that blends, so the panel would
+# be an opaque black rectangle. `accesskit` is on because it costs nothing and
+# is what makes the panel readable by Narrator and by a magnifier - something a
+# grid of characters never could be. `default_fonts` is the fallback stack
+# behind Segoe UI, for a glyph the system font has not got.
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }
+# Reading the panel's `HWND` back out of the toolkit, once, in `gui::hwnd_of`.
+raw-window-handle = "0.6"
+
+# `src/lens` logs through the `log` facade, which is also what `wgpu` and
+# `winit` use - so one filter covers this program and the toolkit under it.
+log = "0.4"
 # Fuzzy matching is not currently wired up, but is deliberately kept available:
 # the ranking pipeline in `search::topk` is shaped so a fuzzy scorer can drop in.
 nucleo = "0.5"
@@ -63,9 +93,51 @@ features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
+    # The panel's backdrop, its rounded corners and its dark frame. Every one of
+    # them is a no-op on a Windows that predates it, reported by return value -
+    # so there is no version check anywhere in `gui::window`.
+    "Win32_Graphics_Dwm",
+    # `MARGINS`, which `DwmExtendFrameIntoClientArea` is gated on.
+    "Win32_UI_Controls",
+    # `RegisterHotKey`, and `ToUnicodeEx` for the AltGr path in `gui::input`.
+    "Win32_UI_Input_KeyboardAndMouse",
+    # Attaching to the console that launched us, and the message box that says
+    # so when there is none.
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    # `MonitorFromWindow`, so the panel lands on the screen it was summoned on
+    # rather than on the primary one.
+    "Win32_Graphics_Gdi",
 ]
 
+# The notification-area icon and its menu. Windows-only, because the tray is:
+# scoping them here keeps GTK and X11 out of the dependency graph entirely.
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "0.25", default-features = false }
+muda = { version = "0.20", default-features = false }
+
+[build-dependencies]
+# The icon, the version block and the manifest. See `build.rs` for why each of
+# them cannot be arranged at run time.
+winresource = "0.1"
+
+[features]
+# Image snapshots need a GPU adapter to render through, which a build machine
+# may not have. The accessibility-tree half of `tests/panel.rs` needs neither
+# and runs unconditionally; the pictures are behind this.
+ui-snapshots = []
+
 [dev-dependencies]
+# Drives the real `gui::overlay::show` with synthetic keys and reads back both
+# the accessibility tree and the pixels. Pinned to the same 0.36 as `eframe`
+# above, because it builds an `egui::Context` and hands it to our code.
+#
+# This replaces something that was lost rather than adding something new: the
+# terminal build rendered into a `TestBackend` buffer and asserted on the
+# characters *and the styles* in it, so a selection highlight that stopped
+# being painted failed a test. Nothing has been able to make that claim since
+# the window replaced it.
+egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 proptest = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3"
@@ -82,8 +154,8 @@ codegen-units = 1
 # machine we cannot debug on is still actionable.
 strip = "debuginfo"
 # `panic` is deliberately left at the default "unwind": handle cleanup relies on
-# Drop running, and an abort inside raw mode + the alternate screen wrecks the
-# user's terminal.
+# Drop running, and `src/hotkey` is built around defining no `extern "system"`
+# callback precisely so that unwinding can never cross the foreign boundary.
 
 [profile.release-dbg]
 inherits = "release"

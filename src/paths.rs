@@ -76,13 +76,76 @@ impl MappingKind {
 }
 
 /// One configured share.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Mapping {
     pub id: MappingId,
     pub name: Box<str>,
     pub path: PathBuf,
     pub kind: MappingKind,
     pub enabled: bool,
+    /// Whether a timer may re-read this share. See [`RefreshPolicy`].
+    pub refresh: RefreshPolicy,
+}
+
+/// When a share is re-read in full, as opposed to patched from whatever the
+/// change watcher reports.
+///
+/// The distinction exists because the two costs are three orders of magnitude
+/// apart: a patch reads the handful of folders that changed, while a full pass
+/// over the job share is some nine hundred thousand round trips. One client
+/// doing that on a timer is a background hum; three hundred doing it on the
+/// same timer is an outage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RefreshPolicy {
+    /// Re-read on the built-in cadence.
+    ///
+    /// Right for a share small enough that a pass is seconds - a single
+    /// directory behind a three-round-trip freshness probe.
+    #[default]
+    Auto,
+    /// Never re-read on a timer.
+    ///
+    /// Live updates still apply, so an ordinary day's changes still arrive
+    /// within seconds; what stops is the unconditional periodic pass. Right
+    /// for anything that costs minutes and is read by more than a handful of
+    /// people.
+    Manual,
+}
+
+impl RefreshPolicy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "manual" | "on-demand" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+
+    /// What a mapping of this kind gets when the configuration does not say.
+    ///
+    /// A tree defaults to `Manual` and a flat share to `Auto`, and the
+    /// asymmetry is the whole point: a flat share is one directory that a
+    /// stamp probe can check for three round trips, so re-reading it when the
+    /// stamp moves costs almost nothing. A tree is three hundred thousand
+    /// directories with no stamp to check, so the only honest default is to
+    /// leave the timer off and let the watcher and the user drive it.
+    pub fn default_for(kind: MappingKind) -> Self {
+        match kind {
+            MappingKind::Flat => Self::Auto,
+            MappingKind::Tree => Self::Manual,
+        }
+    }
+
+    pub fn is_manual(self) -> bool {
+        self == Self::Manual
+    }
 }
 
 /// Where a code resolves to.
@@ -143,6 +206,24 @@ impl Routes {
         }
     }
 
+    /// A table holding exactly one enabled mapping.
+    ///
+    /// For `--doctor`, for benchmarks, and for the many tests that care about
+    /// one share's behaviour rather than about routing.
+    pub fn single(name: &str, path: PathBuf, kind: MappingKind) -> Self {
+        Self::new(
+            vec![Mapping {
+                id: MappingId(0),
+                name: name.into(),
+                path: winpath::normalise_root(&path),
+                kind,
+                enabled: true,
+                refresh: RefreshPolicy::default_for(kind),
+            }],
+            ConfigSource::BuiltIn,
+        )
+    }
+
     pub fn source(&self) -> &ConfigSource {
         &self.source
     }
@@ -167,6 +248,26 @@ impl Routes {
     /// The directory a mapping points at.
     pub fn dir(&self, id: MappingId) -> Option<&Path> {
         self.get(id).map(|m| m.path.as_path())
+    }
+
+    /// What to call a mapping in a message the user is expected to act on.
+    ///
+    /// The path, because every message routed through `EnumError::describe` is
+    /// a sentence about a *location* - "{target} is not mapped", "access
+    /// denied to {target}" - and a chosen name like "jobs" says nothing about
+    /// which drive letter to go and reconnect.
+    ///
+    /// Falls back to the name when the path is empty, and that case is not
+    /// hypothetical: it is the reported "random os error 03". `describe` was
+    /// handed a derived `custpro_path`, which was an empty `PathBuf` whenever
+    /// no flat mapping was enabled, and rendered a leading space followed by
+    /// an error code attached to nothing at all.
+    pub fn path_label(&self, id: MappingId) -> String {
+        match self.get(id) {
+            Some(m) if !m.path.as_os_str().is_empty() => m.path.to_string_lossy().into_owned(),
+            Some(m) => format!("the {} share", m.name),
+            None => "the share".into(),
+        }
     }
 
     /// Every enabled flat mapping, in configuration order.

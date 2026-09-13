@@ -10,10 +10,16 @@ pub mod cli;
 pub mod clipboard;
 pub mod config;
 pub mod doctor;
+pub mod gpu;
+pub mod gui;
 pub mod history;
+pub mod hotkey;
 pub mod index;
+pub mod lens;
 pub mod open;
 pub mod paths;
 pub mod search;
-pub mod ui;
+#[cfg(windows)]
+pub mod single;
 pub mod util;
+pub mod view;

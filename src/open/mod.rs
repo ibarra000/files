@@ -37,6 +37,8 @@ use std::sync::Arc;
 use crate::config::ViewerKind;
 use crate::search::pages::{self, PageGroup};
 
+#[cfg(windows)]
+pub use launch::shell_open;
 pub use launch::{AVWIN, LaunchError, avwin_available};
 
 /// Everything an open needs, gathered where it is still testable.

@@ -34,11 +34,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crossbeam_channel::Sender;
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use super::ViewerKind;
-use crate::app::event::{AppEvent, OpenMsg};
+use crate::app::event::{AppEvent, Events, OpenMsg};
 
 /// Why the configuration could not be updated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,7 +188,7 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 /// `Actors::shutdown`, so F2 immediately followed by closing the window can
 /// kill it mid-write. Temp-then-rename bounds that to a stray `.tmp` beside
 /// the configuration rather than a damaged one.
-pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Sender<AppEvent>) {
+pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Events) {
     let reporter = events.clone();
     let spawned = std::thread::Builder::new()
         .name("files-config-write".into())
@@ -199,7 +198,7 @@ pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Send
             // would take the thread with it and send nothing at all, so F2
             // would flip the footer and silently never save - and the default
             // hook would print the panic straight into the raw-mode terminal
-            // ratatui is drawing in.
+            // the panel is drawn in.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match path {
                 None => Err(WriteError::NoConfigFile.detail()),
                 Some(path) => save_viewer(&path, viewer).map_err(|e| e.detail()),

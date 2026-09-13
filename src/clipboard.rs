@@ -26,10 +26,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 
-use crate::app::event::{AppEvent, ClipboardMsg};
+use crate::app::event::{AppEvent, ClipboardMsg, Events};
 
 /// Serialises this process's own use of the clipboard.
 ///
@@ -88,7 +87,7 @@ impl fmt::Display for ClipboardError {
 impl std::error::Error for ClipboardError {}
 
 /// Copies on a detached thread and reports the result.
-pub fn copy_async(text: String, events: Sender<AppEvent>) {
+pub fn copy_async(text: String, events: Events) {
     let _ = std::thread::Builder::new()
         .name("files-clipboard".into())
         .spawn(move || {
@@ -104,7 +103,7 @@ pub fn copy_async(text: String, events: Sender<AppEvent>) {
 }
 
 /// Reads on a detached thread and reports the text back for insertion.
-pub fn read_async(events: Sender<AppEvent>) {
+pub fn read_async(events: Events) {
     let _ = std::thread::Builder::new()
         .name("files-clipboard".into())
         .spawn(move || {
@@ -367,6 +366,7 @@ mod tests {
         // report arrives at all does not, and a silent failure would leave
         // the user with no idea whether the copy happened.
         let (tx, rx) = bounded(4);
+        let tx = Events::headless(tx);
         copy_async("11-D-0704".into(), tx);
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(AppEvent::Clipboard(_)) => {}

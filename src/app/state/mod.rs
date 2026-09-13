@@ -13,42 +13,54 @@
 //! # Timing
 //!
 //! There is no tick thread. The main loop asks for the next deadline and
-//! blocks until then, synthesising [`AppEvent::Tick`] on expiry. Idle means a
-//! blocking receive with no deadline at all - zero wakeups, zero CPU, and no
-//! added latency, since a keystroke wakes the thread immediately.
+//! blocks until then, synthesising [`AppEvent::Tick`] on expiry. Idle with
+//! nothing stale on screen means a blocking receive with no deadline at all -
+//! zero wakeups, zero CPU, and no added latency, since a keystroke wakes the
+//! thread immediately.
+//!
+//! The status line's age readout is driven the same way. Its next deadline is
+//! the exact moment the rendered string would change, computed from the wall
+//! clock the renderer hands back on [`AppState::note_frame`] - so the state
+//! still reads no clock itself, and an hour-old index costs one wakeup an
+//! hour rather than thirty-six hundred.
 
 mod keys;
 mod model;
-mod mouse;
+mod overlay;
+pub mod pointer;
 
-pub use model::{EmptyReason, Focus, Grid, QueryPhase, Severity, TOAST_LIFETIME, Toast};
+pub use model::{EmptyReason, QueryPhase, Severity, TOAST_LIFETIME, Toast};
 
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use ratatui::layout::Rect;
-
 use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Response};
 use super::input::{self, Input};
+use crate::config::COUNTDOWN_TICK;
 use crate::config::{
-    ANIMATION_TICK, MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
+    ANIMATION_TICK, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
+    ViewerKind,
 };
 use crate::history::History;
-use crate::index::store::IndexStatus;
+use crate::index::store::{IndexOverview, IndexStatus};
+use crate::paths::MappingId;
 use crate::search::matcher::{Hit, QueryReject};
 use crate::search::verify::{AuditVerdict, SkipReason, VerifyOutcome};
 
-/// The last mouse press, for working out double- and triple-clicks.
+/// The right-click menu.
 ///
-/// The terminal reports presses; a "click count" is this program's own idea,
-/// so the previous press has to be remembered to recognise the next one.
-#[derive(Debug, Clone, Copy)]
-struct Click {
-    at: Instant,
-    column: u16,
-    row: u16,
-    count: u8,
+/// The one thing in this program that floats over another. It earns that: it
+/// is transient, it is dismissed by any means at all, and a context menu on a
+/// right-click is the single most universal mouse idiom there is. Everything
+/// else that could have been a pop-up - recall, help - borrows the results
+/// pane instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Menu {
+    /// The cell the pointer was over.
+    pub anchor: (u16, u16),
+    /// The result it was opened on.
+    pub rank: usize,
+    pub cursor: usize,
 }
 
 /// Everything rendered, and everything that decides what to do next.
@@ -57,21 +69,42 @@ pub struct AppState {
     pub input: Input,
     /// Codes used before, and where recall currently is within them.
     pub history: History,
-    pub focus: Focus,
-    /// Last known terminal size.
+    /// Whether the panel is up.
     ///
-    /// Only mouse handling needs it - a click arrives in screen coordinates
-    /// and has to be turned back into a caret position or a result row - and
-    /// it is fed through [`ui::layout`](crate::ui::layout), the same function
-    /// that drew the frame, so the two cannot disagree about where anything
-    /// is.
-    pub area: Rect,
+    /// Public because the shell reads it to start and finish the entrance, and
+    /// nothing here is derived from anything else. Set only from a
+    /// [`crate::app::event::HotkeyMsg`]: the thread that owns the window is the
+    /// authority on whether the panel is on screen, and a second opinion here
+    /// is how a panel comes to be drawn over a window that has already hidden
+    /// it.
+    pub overlay_up: bool,
+    /// Whether the drive picker is open.
+    ///
+    /// All that is left of a five-way `Focus`. The text field always has the
+    /// keyboard; this is the one thing that borrows the *body*, and it borrows
+    /// it for one keystroke at a time.
+    pub picking_share: bool,
     pub hits: Vec<Hit>,
     pub matched: u32,
     pub total: u32,
     pub phase: QueryPhase,
     pub empty_reason: Option<EmptyReason>,
-    pub index: Arc<IndexStatus>,
+    /// One status per configured mapping, indexed by `MappingId`.
+    ///
+    /// Private, so [`Self::index`] cannot go stale: `on_index` is the only
+    /// writer and it always recomputes. This was a single `Arc<IndexStatus>`
+    /// with one actor per share writing into it, so the status line described
+    /// whichever share happened to publish last.
+    statuses: Vec<Arc<IndexStatus>>,
+    /// Which row the share list is on. Only meaningful under `Focus::Shares`.
+    shares_cursor: usize,
+    /// The one-line truth about all of them, recomputed on every status.
+    ///
+    /// Cached rather than folded on demand because `next_deadline` reads it on
+    /// every loop iteration and must agree with the frame that was drawn about
+    /// which share is oldest and which is worst. Computing it at the single
+    /// mutation point makes that agreement structural.
+    pub index: IndexOverview,
     pub toast: Option<Toast>,
     pub should_quit: bool,
     /// Set once the user moves the selection, and cleared when they type.
@@ -83,6 +116,15 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
+    /// Whether `avwin.exe` could not be found on PATH when the program
+    /// started.
+    ///
+    /// Carried here rather than left on [`crate::app::App`] because the only
+    /// thing anybody can usefully do with it is say so, and saying things is
+    /// what `view::status` is for. It was probed and discarded for the whole
+    /// of the rewrite, so choosing the viewer that is not installed failed
+    /// silently at the moment a drawing was wanted.
+    pub avwin_missing: bool,
     /// Which viewer Enter uses, right now.
     ///
     /// Separate from `settings.viewer`, which is the value resolved at
@@ -95,47 +137,87 @@ pub struct AppState {
 
     query_epoch: u64,
     verify_due_at: Option<Instant>,
+    /// When the code on the line becomes worth remembering.
+    ///
+    /// A clock of its own rather than a share of `verify_due_at`, because the
+    /// two answer different questions. That one paces a round trip against
+    /// somebody else's file server and is measured in the third of a second a
+    /// typist pauses between syllables; this one decides what a colleague sees
+    /// in their recall list tomorrow, and a third of a second is nowhere near
+    /// long enough to tell a finished code from a half-typed one.
+    remember_due_at: Option<Instant>,
     verify_watchdog_at: Option<Instant>,
     toast_expires_at: Option<Instant>,
     last_frame: Instant,
+    /// Wall clock at the last frame, for working out when the age readout
+    /// next changes.
+    ///
+    /// The state still reads no clock: this arrives as a parameter from the
+    /// renderer, exactly as `Instant` already does on every `update`.
+    last_frame_wall: SystemTime,
     last_verified_query: Option<String>,
-    last_click: Option<Click>,
-    /// Whether the left button is down after a press inside the search box.
-    /// Without it, dragging over the results would extend a text selection.
-    dragging: bool,
+    /// Which result the pointer is over, if any.
+    ///
+    /// Never the same thing as `selected_path`: `Enter` opens the selection,
+    /// and a highlight that could be mistaken for it would be a highlight that
+    /// gets a file opened by accident. Cleared on any keystroke, because a
+    /// terminal reports no "the pointer left the window" event and a hover
+    /// that outlives the pointer is a lie.
+    hovered: Option<usize>,
+    /// How far the help panel is scrolled.
+    ///
+    /// Clamped against the pane on the way out rather than on the way in, so a
+    /// terminal that grows cannot leave the panel parked below its own end.
+    help_scroll: u16,
 }
 
 impl AppState {
     pub fn new(settings: Settings, now: Instant) -> Self {
         let viewer = settings.viewer;
+        // Sized over `all()`, not `enabled()`. `MappingId` is a position in
+        // the parsed list *including* disabled entries, so sizing over the
+        // enabled subset would misindex the moment a disabled mapping precedes
+        // an enabled one - and attribute one share's health to another, which
+        // is the bug this keying exists to fix.
+        let statuses: Vec<Arc<IndexStatus>> = (0..settings.routes.all().len())
+            .map(|_| Arc::new(IndexStatus::default()))
+            .collect();
         Self {
             settings,
             input: Input::new(),
             history: History::new(),
-            focus: Focus::Input,
+            overlay_up: false,
+            picking_share: false,
             // Replaced by the real size before the first frame; a sane default
             // means mouse arithmetic is never done against a zero rect.
-            area: Rect::new(0, 0, 80, 24),
             hits: Vec::new(),
             matched: 0,
             total: 0,
             phase: QueryPhase::Idle,
             empty_reason: Some(EmptyReason::NoQuery),
-            index: Arc::new(IndexStatus::default()),
+            statuses,
+            shares_cursor: 0,
+            index: IndexOverview::default(),
             toast: None,
             should_quit: false,
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
+            avwin_missing: false,
             viewer,
             query_epoch: 0,
             verify_due_at: None,
+            remember_due_at: None,
             verify_watchdog_at: None,
             toast_expires_at: None,
             last_frame: now,
+            // The epoch until the first frame reports a real one. Nothing
+            // reads it before then: `next_text_change` needs a published
+            // index, which needs an actor to have answered.
+            last_frame_wall: SystemTime::UNIX_EPOCH,
             last_verified_query: None,
-            last_click: None,
-            dragging: false,
+            help_scroll: 0,
+            hovered: None,
         }
     }
 
@@ -152,13 +234,12 @@ impl AppState {
         self.history = History::from_entries(entries);
     }
 
-    pub fn set_area(&mut self, area: Rect) {
-        self.area = area;
-    }
-
-    /// Where everything is on screen, for hit-testing a mouse event.
-    pub fn chunks(&self) -> crate::ui::Chunks {
-        crate::ui::layout(self.area)
+    /// Records the startup probe for `avwin.exe`.
+    ///
+    /// Separate from [`AppState::new`] for the same reason as the history: the
+    /// state machine does no I/O, and searching PATH is I/O.
+    pub fn set_avwin_missing(&mut self, missing: bool) {
+        self.avwin_missing = missing;
     }
 
     /// When the authoritative server-side check is due, if one is pending.
@@ -167,6 +248,16 @@ impl AppState {
     /// poking at private state.
     pub fn verify_due_at(&self) -> Option<Instant> {
         self.verify_due_at
+    }
+
+    /// How far the help panel is scrolled, for the renderer.
+    pub fn help_scroll(&self) -> u16 {
+        self.help_scroll
+    }
+
+    /// Which result the pointer is over, for the renderer.
+    pub fn hovered(&self) -> Option<usize> {
+        self.hovered
     }
 
     /// Row index of the current selection, for the list widget.
@@ -184,11 +275,64 @@ impl AppState {
     /// Derived from state rather than stored: a sticky flag is exactly how a
     /// UI ends up spinning forever after the work has finished.
     pub fn wants_animation(&self) -> bool {
-        self.phase.is_verifying() || self.index.activity.is_busy()
+        self.phase.is_verifying() || self.index.is_busy()
     }
 
-    pub fn note_frame(&mut self, now: Instant) {
+    pub fn note_frame(&mut self, now: Instant, wall: SystemTime) {
         self.last_frame = now;
+        self.last_frame_wall = wall;
+    }
+
+    /// True when the status line shows a value that goes stale on its own.
+    ///
+    /// The counterpart to [`Self::wants_animation`]: that one is about work in
+    /// flight, this one about text that is wrong a second from now with no
+    /// event to say so - the index age, and the countdown to a retry.
+    ///
+    /// A deliberate slight over-approximation. `index_summary` is not printed
+    /// in every phase, but mirroring the renderer's branch structure here
+    /// would create a second place to keep in step. The cost is at most one
+    /// needless wakeup per age bucket, in a phase the user leaves by typing.
+    pub fn shows_elapsed_text(&self) -> bool {
+        self.index.built_at.is_some() || self.index.unreachable().is_some()
+    }
+
+    /// When the time-derived text next changes, if any is shown.
+    ///
+    /// Both terms are anchored on `last_frame`, so drawing always pushes the
+    /// deadline forward - which is what stops the tick arm in `on_tick` from
+    /// spinning.
+    fn next_text_change(&self) -> Option<Instant> {
+        let mut out: Option<Instant> = None;
+        let mut earliest = |at: Instant| {
+            out = Some(out.map_or(at, |prev: Instant| prev.min(at)));
+        };
+
+        // The countdown is pure monotonic arithmetic and needs no wall clock.
+        //
+        // Contributed only while the retry is still ahead. `next_retry_at` is
+        // an absolute instant, unlike every other term here: once it passes,
+        // an ungated term is permanently due, and the loop would wake, draw,
+        // and find the deadline still in the past - a redraw at full speed
+        // rather than a countdown.
+        if let Some((_, crate::index::Health::Unreachable { next_retry_at, .. })) =
+            self.index.unreachable()
+            && *next_retry_at > self.last_frame
+        {
+            earliest(*next_retry_at);
+            earliest(self.last_frame + COUNTDOWN_TICK);
+        }
+
+        // The age readout, whose next change is exactly one bucket edge away.
+        if let Some(age) = self.index.age(self.last_frame_wall) {
+            earliest(self.last_frame + crate::util::humanize::next_age_change(age));
+        }
+        out
+    }
+
+    /// Whether a right-click menu is open, for the renderer and the tests.
+    pub fn menu_is_open(&self) -> bool {
+        false
     }
 
     /// The earliest pending deadline, or `None` when the loop can block
@@ -196,10 +340,15 @@ impl AppState {
     pub fn next_deadline(&self) -> Option<Instant> {
         [
             self.verify_due_at,
+            self.remember_due_at,
             self.verify_watchdog_at,
             self.toast_expires_at,
             self.wants_animation()
                 .then(|| self.last_frame + ANIMATION_TICK),
+            // Without this the loop parks in an unbounded receive whenever
+            // nothing else is pending, so the age on screen froze until a
+            // keystroke happened to arrive and then jumped.
+            self.next_text_change(),
         ]
         .into_iter()
         .flatten()
@@ -208,20 +357,26 @@ impl AppState {
 
     /// The one state transition.
     pub fn update(&mut self, event: AppEvent, now: Instant) -> Response {
+        // There is no longer a focus to watch for changes in. The text field
+        // always has the keyboard, so nothing on screen moves because of where
+        // the keyboard *is* - only because of what it did. This used to be
+        // fourteen assignments guarded by one comparison; it is now nothing at
+        // all, which is the clearest measure of what collapsing `Focus` bought.
+        self.dispatch(event, now)
+    }
+
+    fn dispatch(&mut self, event: AppEvent, now: Instant) -> Response {
         match event {
             AppEvent::Key(key) => self.on_key(key, now),
-            AppEvent::Mouse(event) => self.on_mouse(event, now),
+            AppEvent::Intent(intent) => self.on_intent(intent, now),
             AppEvent::Paste(text) => self.on_paste(&text, now),
-            AppEvent::Resize { cols, rows } => {
-                self.area = Rect::new(0, 0, cols, rows);
-                Response::redraw()
-            }
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg),
             AppEvent::Verify(msg) => self.on_verify(msg, now),
             AppEvent::Index(msg) => self.on_index(msg, now),
             AppEvent::Open(msg) => self.on_open(msg, now),
             AppEvent::Clipboard(msg) => self.on_clipboard(msg, now),
+            AppEvent::Hotkey(msg) => self.on_hotkey(msg, now),
             AppEvent::ActorDied { actor, detail } => {
                 self.clear_verifying();
                 self.set_toast(
@@ -290,10 +445,9 @@ impl AppState {
 
     /// Stops browsing, keeping whatever code was recalled.
     fn leave_history(&mut self) {
-        if self.focus == Focus::History {
+        if self.history.is_browsing() {
             self.history.accept();
         }
-        self.focus = Focus::Input;
     }
 
     /// Remembers a code once it has actually been searched for.
@@ -307,17 +461,31 @@ impl AppState {
         Some(Cmd::SaveHistory(Arc::new(self.history.snapshot())))
     }
 
-    fn on_input_changed(&mut self, now: Instant) -> Response {
-        self.query_epoch += 1;
-        // Editing the code is always a return to editing it: the results are
-        // about to be replaced, so a selection in a list of things that no
-        // longer exist would be meaningless.
-        self.focus = Focus::Input;
-        self.selection_pinned = false;
-        self.selection_lost = false;
+    /// Empties the result list and everything derived from it.
+    ///
+    /// Only ever called from a branch that has *decided* there is nothing to
+    /// search for. A query merely in flight deliberately does not come here -
+    /// see the note in [`Self::on_input_changed`].
+    fn clear_results(&mut self) {
         self.hits.clear();
+        self.hovered = None;
         self.matched = 0;
         self.total = 0;
+        self.selected_path = None;
+    }
+
+    fn on_input_changed(&mut self, now: Instant) -> Response {
+        // Editing the code accepts whatever was being previewed: the text in
+        // the field is now something the user typed rather than something they
+        // were looking at. This is the one place it happens, so no key handler
+        // has to remember to do it.
+        self.leave_history();
+        self.query_epoch += 1;
+        // Editing the code un-pins: the user is choosing a different code, not
+        // holding a place in the list for this one. The selected *path* is kept
+        // - see below - so a result set that still contains it keeps it.
+        self.selection_pinned = false;
+        self.selection_lost = false;
         self.verify_watchdog_at = None;
         self.last_verified_query = None;
 
@@ -326,7 +494,8 @@ impl AppState {
             self.phase = QueryPhase::Idle;
             self.empty_reason = Some(EmptyReason::NoQuery);
             self.verify_due_at = None;
-            self.selected_path = None;
+            self.remember_due_at = None;
+            self.clear_results();
             return Response::redraw();
         }
         if chars < MIN_QUERY_LEN {
@@ -337,7 +506,8 @@ impl AppState {
                 need: MIN_QUERY_LEN,
             });
             self.verify_due_at = None;
-            self.selected_path = None;
+            self.remember_due_at = None;
+            self.clear_results();
             return Response::redraw();
         }
 
@@ -345,13 +515,25 @@ impl AppState {
             self.phase = QueryPhase::NoShares;
             self.empty_reason = Some(EmptyReason::NoSharesConfigured);
             self.verify_due_at = None;
-            self.selected_path = None;
+            self.remember_due_at = None;
+            self.clear_results();
             return Response::redraw();
         }
 
+        // The results, the selection and the counts are deliberately left
+        // alone here. They are replaced wholesale by `apply_hits` when the
+        // answer lands, and `on_search` is epoch-guarded, so the worst a stale
+        // set can do is survive one frame.
+        //
+        // Clearing them instead is what made the panel flinch on every
+        // keystroke: `Cmd::Search` is dispatched at the end of the turn, so the
+        // matcher cannot answer before the frame is drawn - and a drawn frame
+        // with no hits is a different *body*, three hundred points shorter,
+        // reached through a cross-fade, with the footer chips re-flowing
+        // around it. All of that, per character, for a list that was about to
+        // come straight back.
         self.phase = QueryPhase::LocalPending;
         self.empty_reason = Some(EmptyReason::NotSearchedYet);
-        self.selected_path = None;
 
         // The local match is sub-millisecond, so it runs on every keystroke
         // with no debounce at all. Only the network-bound work is delayed.
@@ -361,27 +543,47 @@ impl AppState {
         });
 
         self.verify_due_at = Some(now + VERIFY_DEBOUNCE);
+        self.remember_due_at = Some(now + REMEMBER_DEBOUNCE);
 
         response.redraw = Redraw::Yes;
         response
     }
 
     fn on_enter(&mut self, now: Instant) -> Response {
-        // Enter always opens. Never blocks on the network: if the file turns
-        // out to be gone, that is reported afterwards.
+        // Enter takes the row you are on. On a remembered code that means
+        // filling the field and searching; on a file it means opening it. One
+        // rule, two kinds of row - and the rows look different enough that
+        // nobody has to be told which is which.
+        if self.history.is_browsing() {
+            return self.accept_recall(now);
+        }
+
+        // Never blocks on the network: if the file turns out to be gone, that
+        // is reported afterwards.
         let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
             if !self.input.is_empty() {
+                // A code that found nothing is exactly the one worth recalling
+                // and correcting, and pressing Enter on it says so more
+                // emphatically than letting the quiet period say it. Gated,
+                // unlike the branch below: with a hit the result is the
+                // evidence the code was meant, and with none the only evidence
+                // available is that the typing stopped. Enter on `inv` on the
+                // way to `invoice` is a keystroke, not a decision.
+                let mut response = Response::redraw();
+                if let Some(cmd) = self.remember_if_settled() {
+                    response = response.with(cmd);
+                }
                 self.set_toast("nothing to open".into(), Severity::Info, now);
-                return Response::redraw();
+                return response;
             }
             return Response::none();
         };
         let path = Arc::clone(&hit.path);
 
         // Opening a file is the strongest possible signal that this code was
-        // the one meant, so it is remembered here as well as on verification -
-        // someone who opens a result before the server answers must not lose
-        // the code.
+        // the one meant, so it is remembered here rather than waiting out the
+        // quiet period - someone who opens a result the moment it appears must
+        // not lose the code.
         let code = self.input.text().to_string();
         let request = crate::open::OpenRequest {
             path,
@@ -403,77 +605,56 @@ impl AppState {
             response.redraw = Redraw::Yes;
         }
 
-        if let Some(cmd) = self.remember(&code) {
+        // Ungated, and the only commit point that is: a file opening is the
+        // code being used, which outranks any question about whether the
+        // typing has stopped. Clears the pending deadline on the way through,
+        // so the tick it was armed for has nothing left to do.
+        if let Some(cmd) = self.remember_now() {
             response = response.with(cmd);
+        }
+
+        // The overlay exists to be got rid of: the drawing is opening, so the
+        // search is over. `request_dismiss` re-runs the gate and finds this
+        // code already at the head of the list, so no second write happens.
+        if self.overlay_up {
+            response.merge(self.request_dismiss());
         }
         response
     }
 
+    /// Moves the selection by `delta` ranks.
+    ///
+    /// Every relative move goes through here - Down, the wheel, Left and Right
+    /// by a column, PageUp and PageDown by a screen - so the ends of the list
+    /// behave the same way whichever of them was pressed. They did not before:
+    /// a step by one wrapped while a step by a column clamped, because the two
+    /// were separate copies of the same arithmetic.
+    ///
+    /// Both ends stop. The list used to be circular, so a step off the foot
+    /// landed back on rank 0 and the page snapped back to the first screen -
+    /// the results already read reappeared at the end, and returning to where
+    /// someone was meant walking the whole list again. Stopping means the way
+    /// back is the way they came.
     fn move_selection(&mut self, delta: isize) -> Response {
         if self.hits.is_empty() {
             return Response::none();
         }
-        let current = self.selected_row().map(|i| i as isize).unwrap_or(-1);
-        let len = self.hits.len() as isize;
-        let next = if current < 0 {
-            if delta > 0 { 0 } else { len - 1 }
-        } else {
-            (current + delta).rem_euclid(len)
-        };
-        self.selection_pinned = true;
-        self.selection_lost = false;
-        self.selected_path = Some(Arc::clone(&self.hits[next as usize].path));
-        Response::redraw()
-    }
-
-    /// The results grid, as it will next be drawn.
-    ///
-    /// Goes through [`Self::chunks`], the same function the renderer uses, so
-    /// navigation and rendering cannot disagree about how tall a column is.
-    pub fn grid(&self) -> Grid {
-        Grid::for_pane(self.chunks().results)
-    }
-
-    /// Half-open range of ranks currently on screen.
-    ///
-    /// Derived from the selection rather than stored. A stored page index
-    /// would be a second source of truth that every result update would have
-    /// to keep in step with a selection tracked by *path*, and the failure
-    /// mode is a cursor on a page nobody can see.
-    pub fn visible_range(&self) -> Range<usize> {
-        self.grid()
-            .page(self.selected_row().unwrap_or(0), self.hits.len())
-    }
-
-    /// Moves the selection by whole screens.
-    ///
-    /// A page is every column at once, so this is column movement scaled up
-    /// and clamps for the same reason.
-    fn move_pages(&mut self, pages: isize) -> Response {
-        let columns = self.grid().columns() as isize;
-        self.move_columns(pages * columns)
-    }
-
-    /// Moves the selection sideways by whole columns.
-    ///
-    /// Clamps where [`Self::move_selection`] wraps. The result count is not a
-    /// multiple of the column height, so wrapping horizontally would land on
-    /// an arbitrary rank rather than anywhere near where someone was looking.
-    fn move_columns(&mut self, columns: isize) -> Response {
-        if self.hits.is_empty() {
-            return Response::none();
-        }
-        let rows = self.grid().rows() as isize;
         let len = self.hits.len() as isize;
         let Some(current) = self.selected_row().map(|i| i as isize) else {
-            // Same rule as `move_selection`: enter the list from the near end.
-            let row = if columns > 0 { 0 } else { self.hits.len() - 1 };
+            // Nothing selected, which `apply_hits` makes unreachable while
+            // there are hits. Enter the list from the near end rather than
+            // assume a rank the caller never asked for.
+            let row = if delta > 0 { 0 } else { self.hits.len() - 1 };
             return self.jump_selection(row);
         };
-        let target = (current + columns * rows).clamp(0, len - 1);
+        let target = (current + delta).clamp(0, len - 1);
         if target == current {
-            // Already against the edge. Redrawing an identical frame is the
-            // thing this loop is built to avoid.
+            // Against the edge. The keypress still says "I am working in this
+            // list", so it pins, but the frame it would produce is the one
+            // already on screen and redrawing that is the thing this loop is
+            // built to avoid.
+            self.selection_pinned = true;
+            self.selection_lost = false;
             return Response::none();
         }
         self.jump_selection(target as usize)
@@ -528,25 +709,96 @@ impl AppState {
 
     /// Chooses the honest explanation for an empty list.
     fn no_match_reason(&self, searched: u32) -> EmptyReason {
-        match &self.index.health {
-            crate::index::Health::Unreachable { err, .. } if searched == 0 => {
+        match self.index.unreachable() {
+            Some((id, crate::index::Health::Unreachable { err, .. })) if searched == 0 => {
                 EmptyReason::IndexUnavailable {
-                    detail: err.describe(&self.flat_label()),
+                    // The share that actually failed, not the first flat one.
+                    detail: err.describe(&self.settings.routes.path_label(id)),
                 }
             }
             _ => EmptyReason::NoMatches { searched },
         }
     }
 
-    fn flat_label(&self) -> String {
-        self.settings.custpro_path.to_string_lossy().into_owned()
+    pub fn shares_cursor(&self) -> usize {
+        self.shares_cursor
+    }
+
+    /// The shares the update list offers, in configuration order.
+    ///
+    /// Only the ones a search actually visits: offering to update a share that
+    /// is switched off, or has no path, would be offering to do nothing.
+    pub fn share_ids(&self) -> Vec<MappingId> {
+        self.settings
+            .routes
+            .enabled()
+            .filter(|m| m.kind.is_indexed() && !m.path.as_os_str().is_empty())
+            .map(|m| m.id)
+            .collect()
+    }
+
+    /// One share, as the drive picker shows it.
+    ///
+    /// Assembled here rather than in the renderer because it joins three things
+    /// the state owns - the mapping, its status, and whether the overview has
+    /// judged it stale - and a renderer that joined them itself would be a
+    /// second opinion about which drive wants updating.
+    pub fn share_row(&self, id: MappingId) -> Option<crate::view::shares::Row<'_>> {
+        let mapping = self.settings.routes.enabled().find(|m| m.id == id)?;
+        let status = self.status_of(id)?;
+        Some(crate::view::shares::Row {
+            mapping,
+            status,
+            // The store's own note - events lost, live updates off - outranks
+            // mere age, because it says the index is wrong rather than old.
+            stale: status.stale.or_else(|| {
+                self.index
+                    .stalest
+                    .filter(|(stale_id, _)| *stale_id == id)
+                    .map(|(_, why)| why)
+            }),
+        })
+    }
+
+    /// One status per mapping, for anything needing detail the overview does
+    /// not carry - tree coverage, or why a cache was rejected.
+    pub fn status_of(&self, id: MappingId) -> Option<&Arc<IndexStatus>> {
+        self.statuses.get(id.index())
     }
 
     /// Installs a new result set while keeping the cursor where the user put
     /// it.
     fn apply_hits(&mut self, hits: Vec<Hit>) {
         let previous_row = self.selected_row();
+        let hovered_path = self
+            .hovered
+            .and_then(|rank| self.hits.get(rank))
+            .map(|h| Arc::clone(&h.path));
         self.hits = hits;
+
+        // The hover is a *rank*, and ranks do not survive the list being
+        // replaced: results land from another thread, and a verification
+        // replaces the whole list. Rank 100 of a list that is now empty would
+        // be a highlight drawn off the end of the panel.
+        //
+        // Never clamped, which is the opposite of what the selection below
+        // does - and deliberately. The selection is tracked by *path* because
+        // Enter opens it and moving it silently would open the wrong file; a
+        // hover is only ever a description of where the pointer is, and
+        // clamping it would invent a hover the pointer is not over.
+        //
+        // It is kept, though, when the row at that rank is the same file it
+        // was. That is not the same claim as clamping: nothing moved, so the
+        // pointer really is still over what it was over. Dropping it
+        // unconditionally meant the highlight under the pointer blinked out on
+        // every result set that arrived - which, with the local matcher
+        // answering per keystroke, was every character typed.
+        self.hovered = match (self.hovered, hovered_path) {
+            (Some(rank), Some(was)) if self.hits.get(rank).is_some_and(|h| h.path == was) => {
+                Some(rank)
+            }
+            _ => None,
+        };
 
         if let Some(target) = self.selected_path.clone() {
             if self.hits.iter().any(|h| h.path == target) {
@@ -579,18 +831,14 @@ impl AppState {
             return Response::none();
         }
         self.verify_watchdog_at = None;
-        let query = msg.query.clone();
         self.last_verified_query = Some(msg.query);
 
-        // Recorded on verification rather than on every keystroke, and that
-        // single choice is the whole filter: verification only ever runs for a
-        // code that survived the debounce, cleared the minimum length and
-        // resolved to a share, so the half-typed prefixes on the way to it
-        // never reach the list. A code that found nothing is still recorded -
-        // those are precisely the ones worth recalling and correcting.
-        let remembered = self.remember(&query);
-
-        let response = match msg.outcome {
+        // Deliberately *not* where the code is remembered any more. That rode
+        // on `VERIFY_DEBOUNCE`, which is 300ms - an ordinary mid-word pause -
+        // so `11`, `11-D` and `11-D-07` all reached the recall list on the way
+        // to `11-D-0704`. Remembering is now its own deadline with its own
+        // constant; see `remember_due_at` and `on_tick`.
+        match msg.outcome {
             VerifyOutcome::IndexAuthoritative { .. } => {
                 // The directory has not changed, so what is on screen is
                 // already correct. No query was issued at all.
@@ -652,16 +900,23 @@ impl AppState {
                 Response::redraw()
             }
             VerifyOutcome::Failed(err) => {
+                // Verification only ever runs against a flat share, and only
+                // when there is exactly one - see `worker::run_verify` - so
+                // that is the share this failure belongs to. Naming it beats
+                // the old `flat_label()`, which named the first flat mapping
+                // whatever had actually been checked.
+                let target = self
+                    .settings
+                    .routes
+                    .flat()
+                    .next()
+                    .map(|m| self.settings.routes.path_label(m.id))
+                    .unwrap_or_else(|| "the share".into());
                 self.phase = QueryPhase::VerifyFailed {
-                    detail: err.describe(&self.flat_label()),
+                    detail: err.describe(&target),
                 };
                 Response::redraw()
             }
-        };
-
-        match remembered {
-            Some(cmd) => response.with(cmd),
-            None => response,
         }
     }
 
@@ -676,8 +931,15 @@ impl AppState {
 
     fn on_index(&mut self, msg: IndexMsg, now: Instant) -> Response {
         match msg {
-            IndexMsg::Status(status) => {
-                self.index = status;
+            IndexMsg::Status { id, status } => {
+                // Dropped rather than panicking: an actor running against a
+                // routing table this state does not have is a bug, but not a
+                // reason to take the terminal down with it.
+                let Some(slot) = self.statuses.get_mut(id.index()) else {
+                    return Response::none();
+                };
+                *slot = status;
+                self.index = IndexOverview::of(&self.settings.routes, &self.statuses);
                 Response::redraw()
             }
             IndexMsg::SnapshotChanged => {
@@ -694,14 +956,24 @@ impl AppState {
                 Response::redraw()
             }
             IndexMsg::RefreshReport {
+                id,
                 entries,
                 elapsed,
                 error,
             } => {
                 let text = match error {
-                    Some(err) => format!("refresh failed: {}", err.describe(&self.flat_label())),
+                    // The path, because this is a failure the user is expected
+                    // to go and fix, and a chosen name does not say which
+                    // drive letter is missing.
+                    Some(err) => format!(
+                        "refresh failed: {}",
+                        err.describe(&self.settings.routes.path_label(id))
+                    ),
+                    // The name, because this is scope rather than failure and
+                    // the path would add nothing.
                     None => format!(
-                        "refreshed {} files in {}",
+                        "refreshed {} · {} files in {}",
+                        self.settings.routes.label(id),
                         crate::util::humanize::count(entries),
                         crate::util::humanize::elapsed(elapsed)
                     ),
@@ -798,6 +1070,20 @@ impl AppState {
             }
         }
 
+        // The typing has stopped for long enough that the code on the line is
+        // a code somebody meant rather than a prefix on the way to one. This
+        // used to ride on the verification coming back, which is the same
+        // event 300ms earlier - long enough to catch a finished code, and
+        // also long enough to catch every pause in the middle of one.
+        if let Some(due) = self.remember_due_at
+            && now >= due
+        {
+            self.remember_due_at = None;
+            if let Some(cmd) = self.remember_if_settled() {
+                response.merge(Response::redraw().with(cmd));
+            }
+        }
+
         // Independent of the worker: guards against a wedged or panicked
         // verify leaving a spinner up forever.
         if let Some(due) = self.verify_watchdog_at
@@ -822,6 +1108,16 @@ impl AppState {
             response.merge(Response::redraw());
         }
 
+        // The other half of the deadline above, and not optional. A deadline
+        // with no redraw arm is a busy spin: the loop wakes, synthesises a
+        // tick, gets `Response::none()`, leaves `dirty` false and re-blocks on
+        // a deadline already in the past. Both edits or neither.
+        if let Some(due) = self.next_text_change()
+            && now >= due
+        {
+            response.merge(Response::redraw());
+        }
+
         response
     }
 
@@ -830,7 +1126,7 @@ impl AppState {
         self.toast_expires_at = Some(now + TOAST_LIFETIME);
     }
 
-    /// Age of the served listing, for the status line.
+    /// Age of the oldest served listing, for the status line.
     pub fn index_age(&self, now: SystemTime) -> Option<Duration> {
         self.index.age(now)
     }

@@ -45,15 +45,16 @@ use super::builder::SnapshotBuilder;
 use super::enumerate::{DirSource, ListOpts};
 use super::errors::EnumError;
 use super::log::{IndexLog, Record};
+use super::permit::{Acquired, WalkPermits};
 use super::persist;
 use super::schedule::{Cadence, Decision, Input, Scheduler, Step, is_probe_refusal};
-use super::store::{Activity, DegradeReason, IndexStore, Origin, TreeCoverage};
+use super::store::{Activity, DegradeReason, IndexStore, MappingSlot, Origin, TreeCoverage};
 use super::watch::{self, ChangeWatcher, WatchQueue};
 use super::{DirStamp, Snapshot};
 use super::{tree, walk};
-use crate::app::event::{AppEvent, IndexMsg};
+use crate::app::event::{AppEvent, Events, IndexMsg};
 use crate::config::Settings;
-use crate::paths::MappingKind;
+use crate::paths::{MappingId, MappingKind};
 use crate::util::cancel::CancelToken;
 
 /// Progress is rate limited at the source, so the UI channel is never close
@@ -94,6 +95,8 @@ pub enum IndexCmd {
 
 /// Handle to the running actor.
 pub struct IndexActor {
+    /// Which share this actor owns, so a refresh can name one.
+    mapping: MappingId,
     tx: Sender<IndexCmd>,
     /// Set from the caller's thread, checked from inside a running scan.
     ///
@@ -112,6 +115,10 @@ pub struct IndexActor {
 }
 
 impl IndexActor {
+    pub fn mapping(&self) -> MappingId {
+        self.mapping
+    }
+
     /// Asks for a refresh.
     ///
     /// Requests are coalesced by the actor rather than here - see
@@ -125,7 +132,13 @@ impl IndexActor {
         }
     }
 
-    pub fn shutdown(&mut self, budget: Duration) -> bool {
+    /// Tells the actor to stop, without waiting for it.
+    ///
+    /// Separate from [`Self::join`] so a process with ten actors signals all
+    /// of them and then waits once. Signalling and joining one at a time makes
+    /// the shutdown budget per-thread, and quitting during a cold start would
+    /// take ten times as long as the budget promises.
+    pub fn begin_shutdown(&mut self) {
         // The flag first, so a scan that is between directories when the
         // message lands has already been told to stop. Sending first and
         // setting second would leave exactly the window this exists to close.
@@ -138,13 +151,16 @@ impl IndexActor {
             watcher.stop();
         }
         let _ = self.tx.send(IndexCmd::Shutdown);
+    }
+
+    /// Waits for the actor to finish, up to `deadline`.
+    pub fn join(&mut self, deadline: Instant) -> bool {
         if let Some(pump) = self.pump.take() {
             let _ = pump.join();
         }
         let Some(handle) = self.handle.take() else {
             return true;
         };
-        let deadline = Instant::now() + budget;
         while !handle.is_finished() {
             if Instant::now() >= deadline {
                 // A thread blocked in an SMB call cannot be woken. Leaking it
@@ -156,19 +172,28 @@ impl IndexActor {
         }
         handle.join().is_ok()
     }
+
+    pub fn shutdown(&mut self, budget: Duration) -> bool {
+        self.begin_shutdown();
+        self.join(Instant::now() + budget)
+    }
 }
 
 /// Everything the actor needs.
 pub struct IndexContext {
     pub settings: Settings,
-    /// Which index this actor owns.
+    /// Which mapping this actor owns.
     ///
-    /// One actor per index, not one actor for both: a tree walk runs for
-    /// minutes, and sharing a thread would mean the flat share's freshness
-    /// waited behind it - or worse, that a five-minute backoff on an
-    /// unreachable tree delayed the healthy one. Each still has exactly one
-    /// writer, which is what the store's single-writer rule requires.
-    pub kind: MappingKind,
+    /// One actor per mapping, not one per kind: a tree walk runs for minutes,
+    /// and sharing a thread would mean another share's freshness waiting
+    /// behind it - or worse, a five-minute backoff on an unreachable share
+    /// delaying a healthy one. Each still has exactly one writer, which is
+    /// what the store's single-writer rule requires.
+    ///
+    /// Only the id is held. Path, kind and name are read from the slot, so an
+    /// actor cannot be pointed at one mapping and read another's state -
+    /// which is exactly what `custpro_path` did to every tree actor.
+    pub mapping: MappingId,
     pub store: Arc<IndexStore>,
     pub source: Arc<dyn DirSource>,
     /// Volume serial resolved at startup, if it was available then.
@@ -185,27 +210,63 @@ pub struct IndexContext {
     pub watch: Option<Arc<WatchQueue>>,
     /// The watcher feeding [`Self::watch`], kept so shutdown can unblock it.
     pub watcher: Option<Arc<dyn ChangeWatcher>>,
+    /// Shared cap on how many shares walk at once. See [`super::permit`].
+    ///
+    /// Defaulted per-context so a single-actor test needs no set-up; the
+    /// running program hands every actor the same set.
+    pub permits: Arc<WalkPermits>,
 }
 
 impl IndexContext {
     pub fn new(
         settings: Settings,
+        mapping: MappingId,
         store: Arc<IndexStore>,
         source: Arc<dyn DirSource>,
-        volume_serial: Option<u32>,
     ) -> Self {
+        // The cadence follows the kind rather than being chosen by a separate
+        // builder call, so "forgot `.for_tree()` and gave a three-hundred-
+        // thousand-directory walk the flat schedule" stops being reachable.
+        let kind = store
+            .slot(mapping)
+            .map(|s| s.kind())
+            .unwrap_or(MappingKind::Flat);
+        let cadence = match kind {
+            MappingKind::Tree => Cadence::tree(),
+            MappingKind::Flat => Cadence::shipped(),
+        };
+        let settings_max_scans = settings.max_concurrent_scans;
         Self {
             settings,
-            kind: MappingKind::Flat,
+            mapping,
             store,
             source,
-            volume_serial,
-            cadence: Cadence::shipped().from_env(),
+            // Resolved on the actor thread instead, before the cache is read:
+            // ten possibly-dead shares must not be probed from startup.
+            volume_serial: None,
+            cadence: cadence.from_env(),
             rng_seed: None,
             log: Arc::new(IndexLog::disabled()),
             watch: None,
             watcher: None,
+            permits: Arc::new(WalkPermits::new(settings_max_scans)),
         }
+    }
+
+    /// Pins the volume serial instead of resolving it from the share.
+    ///
+    /// The running program leaves this `None` and lets the actor resolve it on
+    /// its own thread; a test uses this to stand in for a drive letter that
+    /// has been remapped to a different volume.
+    pub fn with_volume_serial(mut self, serial: u32) -> Self {
+        self.volume_serial = Some(serial);
+        self
+    }
+
+    /// Shares one cap across every actor, rather than one cap each.
+    pub fn with_permits(mut self, permits: Arc<WalkPermits>) -> Self {
+        self.permits = permits;
+        self
     }
 
     /// Feeds this actor live change notifications.
@@ -230,7 +291,7 @@ impl IndexContext {
             return self;
         }
         let queue = Arc::new(WatchQueue::default());
-        match DirectoryWatcher::open(&settings.tree_path) {
+        match DirectoryWatcher::open(self.slot().dir()) {
             Ok(watcher) => self.with_watch(Arc::new(watcher), queue),
             Err(why) => {
                 queue.record(super::watch::WatchEvent::Unavailable(why), Instant::now());
@@ -250,13 +311,6 @@ impl IndexContext {
         self
     }
 
-    /// Makes this actor own the walked tree instead of the flat index.
-    pub fn for_tree(mut self) -> Self {
-        self.kind = MappingKind::Tree;
-        self.cadence = Cadence::tree().from_env();
-        self
-    }
-
     // --- which index this actor is talking about ---------------------------
     //
     // Routed in one place rather than at each of the twenty call sites, for
@@ -265,41 +319,48 @@ impl IndexContext {
     // every wake, make every scan a `FirstRun`, and leave `min_scan_spacing`
     // as the only thing between the share and a continuous re-walk.
 
+    /// This actor's slot.
+    ///
+    /// One bounds-checked index. Every accessor below goes through it, which
+    /// is what makes "an actor writes only its own mapping's state" true by
+    /// construction rather than by each of twenty call sites remembering to
+    /// branch on the kind - two of which did not, and silently wrote the flat
+    /// mapping's health from the tree actor.
+    pub fn slot(&self) -> &super::store::MappingSlot {
+        self.store
+            .slot(self.mapping)
+            .expect("an actor owns a configured slot")
+    }
+
     fn is_tree(&self) -> bool {
-        self.kind == MappingKind::Tree
+        self.slot().is_tree()
+    }
+
+    /// Whether a timer may re-read this share, or only the user and the
+    /// watcher may.
+    fn refresh(&self) -> crate::paths::RefreshPolicy {
+        self.settings
+            .routes
+            .get(self.mapping)
+            .map(|m| m.refresh)
+            .unwrap_or_default()
     }
 
     /// Whether this actor's index holds anything yet.
     fn have_index(&self) -> bool {
-        if self.is_tree() {
-            self.store.tree().is_some()
-        } else {
-            self.store.flat().is_some()
-        }
+        self.slot().has_index()
     }
 
     fn status(&self) -> Arc<super::store::IndexStatus> {
-        if self.is_tree() {
-            self.store.tree_status()
-        } else {
-            self.store.status()
-        }
+        self.slot().status()
     }
 
     fn set_activity(&self, activity: Activity) {
-        if self.is_tree() {
-            self.store.set_tree_activity(activity);
-        } else {
-            self.store.set_activity(activity);
-        }
+        self.slot().set_activity(activity);
     }
 
     fn note_scan_started(&self, reason: super::schedule::ScanReason) {
-        if self.is_tree() {
-            self.store.note_tree_scan_started(reason);
-        } else {
-            self.store.note_scan_started(reason);
-        }
+        self.slot().note_scan_started(reason);
     }
 
     fn note_schedule(
@@ -307,27 +368,39 @@ impl IndexContext {
         counters: super::schedule::Counters,
         health: super::schedule::StampHealth,
     ) {
-        if self.is_tree() {
-            self.store.note_tree_schedule(counters, health);
-        } else {
-            self.store.note_schedule(counters, health);
-        }
+        self.slot().note_schedule(counters, health);
     }
 
     fn note_cache_rejected(&self, why: String) {
-        if self.is_tree() {
-            self.store.note_tree_cache_rejected(why);
-        } else {
-            self.store.note_cache_rejected(why);
-        }
+        self.slot().note_cache_rejected(why);
     }
 
     fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
-        if self.is_tree() {
-            self.store.record_tree_failure(err, attempt, next_retry_at);
-        } else {
-            self.store.record_failure(err, attempt, next_retry_at);
+        self.slot().record_failure(err, attempt, next_retry_at);
+    }
+
+    fn set_degraded(&self, reason: DegradeReason) {
+        self.slot().set_degraded(reason);
+    }
+
+    fn confirm_fresh(&self, stamp: Option<DirStamp>, at: SystemTime) {
+        self.slot().confirm_fresh(stamp, at);
+    }
+
+    fn note_live_updates_unavailable(&self) {
+        self.slot().note_live_updates_unavailable();
+        // On a share nothing re-reads on a timer, a dead watch means nothing
+        // is arriving at all - so the index is not merely degraded, it has
+        // stopped tracking the drive. An auto share has the floor to fall back
+        // on and is only degraded.
+        if self.refresh().is_manual() {
+            self.slot()
+                .note_stale(super::store::StaleReason::NoLiveUpdates);
         }
+    }
+
+    fn note_stale(&self, reason: super::store::StaleReason) {
+        self.slot().note_stale(reason);
     }
 
     pub fn with_cadence(mut self, cadence: Cadence) -> Self {
@@ -347,11 +420,14 @@ impl IndexContext {
 }
 
 /// Starts the actor.
-pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<IndexActor> {
+pub fn spawn(ctx: IndexContext, events: Events) -> std::io::Result<IndexActor> {
     let (tx, rx) = crossbeam_channel::bounded(16);
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = CancelToken::from_flag(Arc::clone(&stop));
     let watcher = ctx.watcher.clone();
+    // Read before `ctx` is moved into the thread, so the handle can say which
+    // share it speaks for.
+    let mapping = ctx.mapping;
     let pump = spawn_pump(&ctx, tx.clone(), &cancel, &events)?;
     let handle = std::thread::Builder::new()
         .name("files-index".into())
@@ -367,6 +443,7 @@ pub fn spawn(ctx: IndexContext, events: Sender<AppEvent>) -> std::io::Result<Ind
             }
         })?;
     Ok(IndexActor {
+        mapping,
         tx,
         stop,
         handle: Some(handle),
@@ -385,7 +462,7 @@ fn spawn_pump(
     ctx: &IndexContext,
     tx: Sender<IndexCmd>,
     cancel: &CancelToken,
-    events: &Sender<AppEvent>,
+    events: &Events,
 ) -> std::io::Result<Option<JoinHandle<()>>> {
     let (Some(watcher), Some(queue)) = (ctx.watcher.clone(), ctx.watch.clone()) else {
         return Ok(None);
@@ -431,16 +508,42 @@ struct PendingFailure {
     from_probe: bool,
 }
 
-fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, cancel: &CancelToken) {
+fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &CancelToken) {
+    // A tree can never answer a stamp probe, so its cache's capture time is
+    // the only thing the floor can be measured from. Saying so here rather
+    // than letting the scheduler infer it from the first failed probe: a tree
+    // never probes at all, so there would be nothing to infer from.
     let mut sched = Scheduler::new(ctx.cadence, ctx.rng_seed);
-    let dir = ctx.settings.custpro_path.clone();
+    if ctx.is_tree() {
+        sched = sched.without_stamps();
+    }
+    if ctx.refresh().is_manual() {
+        sched = sched.on_demand_only();
+    }
+    // This mapping's directory. It used to be `settings.custpro_path`
+    // unconditionally, so a tree actor prewarmed and probed the *flat* share -
+    // and an actor spawned where no flat mapping was configured probed the
+    // empty path, which is where the permanent `os error 3` came from.
+    let dir = indexed_dir(&ctx).to_path_buf();
     let mut serial = ctx.volume_serial;
     let mut failures: u32 = 0;
     let mut empty_streak: u32 = 0;
+    // Patches that have not reached the disk yet. A manually-refreshed share
+    // is kept current by the watcher alone, so patches that never get written
+    // are patches that are lost on every restart - and with nothing re-walking
+    // on a timer, lost for good.
+    let mut unsaved_since: Option<Instant> = None;
 
     // Warm the SMB session before anything needs it. First contact with a
     // mapped drive can cost seconds of session setup and DFS resolution.
     ctx.source.prewarm(&dir);
+
+    // Resolved here rather than at startup, and *before* the cache is read:
+    // `load_from_disk` uses it to check that the drive letter still points at
+    // the volume the cache was written from, and ten possibly-dead shares must
+    // not each cost a blocking volume query on the thread drawing the first
+    // frame.
+    ctx.volume_serial = volume_serial_for(&ctx, &mut serial, &dir);
 
     // Serve the previous run's index immediately. This is what turns a cold
     // start from "unusable for seconds" into "usable now, refreshing".
@@ -465,14 +568,35 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
             None => decision.next_action,
         };
         let mut input = match next_wake(&rx, deadline) {
-            Wake::Shutdown => return,
+            Wake::Shutdown => {
+                // Quitting is the last chance to keep this session's patches.
+                // Losing them is not merely a slow start next time: with
+                // nothing re-walking on a timer, those folders stay stale
+                // until somebody asks for a pass.
+                if unsaved_since.is_some() {
+                    persist_current(&ctx, events);
+                }
+                return;
+            }
             Wake::Refresh { force } => Input::Woke { forced: force },
             Wake::Timer | Wake::Changed => match pending_changes(&ctx, Instant::now()) {
-                Some(full) => Input::Changed { full },
+                Some(full) => {
+                    // `full` means the watcher lost events - a bulk copy
+                    // overran the remote buffer - so nothing short of a full
+                    // pass can say what the share holds. Where that pass is
+                    // the user's to ask for, say so rather than starting it.
+                    if full && ctx.refresh().is_manual() {
+                        ctx.note_stale(super::store::StaleReason::EventsLost);
+                    }
+                    Input::Changed { full }
+                }
                 None => Input::Woke { forced: false },
             },
         };
-        let forced = matches!(input, Input::Woke { forced: true });
+        // Mutable because a forced refresh can also arrive while this
+        // actor is queued for a walk permit; it applies to the pass that is
+        // about to start, so it is folded in rather than dropped.
+        let mut forced = matches!(input, Input::Woke { forced: true });
         let mut event = match input {
             Input::Woke { forced: true } => "f5",
             Input::Changed { .. } => "watch",
@@ -513,11 +637,44 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                             err,
                             from_probe: false,
                         });
+                    } else {
+                        // Paced, not immediate. A patch is a handful of round
+                        // trips; the cache file is written whole, around a
+                        // hundred megabytes of it, so saving on every
+                        // two-second watch batch would cost far more than the
+                        // patching saves.
+                        let since = *unsaved_since.get_or_insert(now);
+                        if now.saturating_duration_since(since) >= ctx.cadence.persist_spacing {
+                            persist_current(&ctx, events);
+                            unsaved_since = None;
+                        }
                     }
                     input = Input::Applied(outcome);
                     event = "patch";
                 }
                 Step::FullScan(reason) => {
+                    // A full pass over a tree is the expensive thing this
+                    // process does, so it queues behind the shared cap. Said
+                    // out loud first: a share waiting three minutes behind two
+                    // others must not render as `Idle`, which is the
+                    // unexplained wait the activity states exist to prevent.
+                    //
+                    // An incremental patch deliberately takes no permit. It
+                    // reads the handful of folders that changed, and queueing
+                    // seconds of work behind minutes of it would throw away
+                    // the whole reason live updates are worth having.
+                    let permit = if ctx.is_tree() {
+                        ctx.set_activity(Activity::Queued);
+                        publish_status(&ctx, events);
+                        match ctx.permits.acquire(&rx, &mut forced) {
+                            // Told to stop while queueing. No permit was
+                            // taken, so nothing has to be given back.
+                            Acquired::Shutdown => return,
+                            Acquired::Held(p) => Some(p),
+                        }
+                    } else {
+                        None
+                    };
                     // Whatever the watcher had pending is about to be covered
                     // by a pass over the whole share, so it is dropped rather
                     // than left to trigger a second one the moment this
@@ -535,6 +692,11 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                         &mut detail,
                         cancel,
                     );
+                    // Explicit, and before the scheduler is told anything: the
+                    // permit covers the pass, not the bookkeeping after it,
+                    // and it must never be alive when the loop reaches
+                    // `Step::Wait`.
+                    drop(permit);
                     if let Err(err) = outcome {
                         pending = Some(PendingFailure {
                             err,
@@ -542,6 +704,9 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                         });
                     } else {
                         failures = 0;
+                        // `scan_and_publish` persists on the way out, and what
+                        // it wrote covers every patch that came before it.
+                        unsaved_since = None;
                     }
                     input = Input::Scanned(outcome);
                     event = "scan";
@@ -549,8 +714,7 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
                 Step::ConfirmFresh => {
                     // The common case by far: nothing moved, so the listing is
                     // provably still correct and no enumeration is needed.
-                    ctx.store
-                        .confirm_fresh(sched.recorded_stamp(), SystemTime::now());
+                    ctx.confirm_fresh(sched.recorded_stamp(), SystemTime::now());
                     failures = 0;
                     break;
                 }
@@ -571,7 +735,7 @@ fn run(ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Sender<AppEvent>, can
             .as_ref()
             .is_some_and(|q| q.unavailable().is_some())
         {
-            ctx.store.note_live_updates_unavailable();
+            ctx.note_live_updates_unavailable();
         }
 
         // Belt and braces. A non-terminal decision carries `next_action ==
@@ -647,7 +811,7 @@ fn apply_failure(
     retry_at: Instant,
 ) {
     if failure.from_probe && is_probe_refusal(failure.err) {
-        ctx.store.set_degraded(DegradeReason::StampUnreliable);
+        ctx.set_degraded(DegradeReason::StampUnreliable);
         return;
     }
     *failures = failures.saturating_add(1);
@@ -662,7 +826,7 @@ struct DiskLoad {
     age: Option<Duration>,
 }
 
-fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskLoad> {
+fn load_from_disk(ctx: &IndexContext, events: &Events) -> Option<DiskLoad> {
     if !ctx.settings.persist {
         return None;
     }
@@ -707,7 +871,7 @@ fn load_from_disk(ctx: &IndexContext, events: &Sender<AppEvent>) -> Option<DiskL
 
 fn load_flat_from_disk(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     cache_dir: &Path,
     key: persist::MappingKey,
     expect: persist::Expect<'_>,
@@ -717,7 +881,7 @@ fn load_flat_from_disk(
     let age = SystemTime::now()
         .duration_since(snapshot.captured_at())
         .ok();
-    ctx.store
+    ctx.slot()
         .publish_flat(Arc::new(snapshot), Origin::DiskCache);
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
     Ok(DiskLoad { stamp, age })
@@ -725,7 +889,7 @@ fn load_flat_from_disk(
 
 fn load_tree_from_disk(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     cache_dir: &Path,
     key: persist::MappingKey,
     expect: persist::Expect<'_>,
@@ -739,7 +903,7 @@ fn load_tree_from_disk(
     // of the share must come back still saying so; otherwise the one restart
     // between the walk and the re-walk is a window in which the status line
     // quietly claims complete coverage of a share it never had.
-    ctx.store.publish_tree(
+    ctx.slot().publish_tree(
         Arc::new(loaded.index),
         Origin::DiskCache,
         Some(Arc::new(loaded.coverage)),
@@ -751,7 +915,7 @@ fn load_tree_from_disk(
     Ok(DiskLoad { stamp: None, age })
 }
 
-fn persist_current(ctx: &IndexContext, events: &Sender<AppEvent>) {
+fn persist_current(ctx: &IndexContext, events: &Events) {
     if !ctx.settings.persist {
         return;
     }
@@ -765,11 +929,11 @@ fn persist_current(ctx: &IndexContext, events: &Sender<AppEvent>) {
     // Best effort throughout: failing to write the cache costs a slow cold
     // start next time and nothing else.
     if ctx.is_tree() {
-        if let Some(index) = ctx.store.tree() {
-            let coverage = ctx.store.tree_status().coverage.clone();
+        if let Some(index) = ctx.slot().as_tree() {
+            let coverage = ctx.status().coverage.clone();
             let _ = persist::save_tree(&cache_dir, key, &index, coverage.as_deref());
         }
-    } else if let Some(snapshot) = ctx.store.flat() {
+    } else if let Some(snapshot) = ctx.slot().as_flat() {
         let _ = persist::save(&cache_dir, key, &snapshot);
     }
     ctx.set_activity(Activity::Idle);
@@ -782,23 +946,24 @@ fn persist_current(ctx: &IndexContext, events: &Sender<AppEvent>) {
 /// scheduler needs to decide whether change detection is available at all.
 fn scan_and_publish(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     serial: &mut Option<u32>,
     empty_streak: &mut u32,
     forced: bool,
     detail: &mut String,
     cancel: &CancelToken,
 ) -> Result<Option<DirStamp>, EnumError> {
-    if ctx.kind == MappingKind::Tree {
+    if ctx.is_tree() {
         return walk_and_publish(ctx, events, forced, detail, cancel);
     }
-    let previous_entries = ctx.store.status().entries;
+    let previous_entries = ctx.status().entries;
     let (snapshot, elapsed) = match full_scan(ctx, events, serial, cancel) {
         Ok(v) => v,
         Err(err) => {
             *detail = format!("scan failed: {err}");
             if forced {
                 let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+                    id: ctx.mapping,
                     entries: 0,
                     elapsed: Duration::ZERO,
                     error: Some(err),
@@ -830,19 +995,20 @@ fn scan_and_publish(
     }
 
     let stamp = snapshot.stamp();
-    ctx.store.publish_flat(Arc::new(snapshot), Origin::Network);
+    ctx.slot().publish_flat(Arc::new(snapshot), Origin::Network);
     if stamp.is_none() {
         // Set *after* the publish, which clears the health because a fresh
         // listing normally resolves whatever was wrong. Change detection is
         // unavailable here, so the scheduler drops to the rescan floor rather
         // than re-enumerating on the probe cadence - the whole of the bug this
         // module was rewritten for - and the user is told why.
-        ctx.store.set_degraded(DegradeReason::StampUnreliable);
+        ctx.set_degraded(DegradeReason::StampUnreliable);
     }
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
 
     if forced {
         let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+            id: ctx.mapping,
             entries,
             elapsed,
             error: None,
@@ -858,10 +1024,7 @@ fn scan_and_publish(
 /// One accessor rather than repeated field reads, so making the actor
 /// per-mapping is a change in one place.
 fn indexed_dir(ctx: &IndexContext) -> &Path {
-    match ctx.kind {
-        MappingKind::Tree => &ctx.settings.tree_path,
-        _ => &ctx.settings.custpro_path,
-    }
+    ctx.slot().dir()
 }
 
 /// The volume serial for the persisted index's identity check.
@@ -888,12 +1051,12 @@ fn resolve_volume_serial(_dir: &Path) -> Option<u32> {
 
 fn full_scan(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     serial: &mut Option<u32>,
     cancel: &CancelToken,
 ) -> Result<(Snapshot, Duration), EnumError> {
     let started = Instant::now();
-    let dir = ctx.settings.custpro_path.clone();
+    let dir = indexed_dir(ctx).to_path_buf();
     let prefix = dir.to_string_lossy().into_owned();
 
     // Probed *before* the listing, and that is the value recorded with it.
@@ -908,8 +1071,8 @@ fn full_scan(
     // Size the arenas from what the previous run actually held, so from the
     // second run onward the buffers never grow.
     let (hint_entries, hint_avg) = ctx
-        .store
-        .flat()
+        .slot()
+        .as_flat()
         .map(|s| {
             let n = s.len().max(1);
             (s.len(), (s.lower().len() / n).saturating_sub(1))
@@ -920,7 +1083,7 @@ fn full_scan(
     let mut progress = ProgressSink {
         inner: &mut builder,
         events,
-        store: &ctx.store,
+        slot: ctx.slot(),
         last_report: Instant::now(),
         last_count: 0,
     };
@@ -945,10 +1108,13 @@ fn full_scan(
     Ok((snapshot, started.elapsed()))
 }
 
-fn publish_status(ctx: &IndexContext, events: &Sender<AppEvent>) {
+fn publish_status(ctx: &IndexContext, events: &Events) {
     // Droppable by nature: the next status supersedes this one, so a full
     // channel is not worth blocking the scan for.
-    let _ = events.try_send(AppEvent::Index(IndexMsg::Status(ctx.status())));
+    let _ = events.try_send(AppEvent::Index(IndexMsg::Status {
+        id: ctx.mapping,
+        status: ctx.status(),
+    }));
 }
 
 fn log_decision(
@@ -1006,8 +1172,8 @@ fn describe_probe(recorded: Option<DirStamp>, result: &Result<DirStamp, EnumErro
 /// Wraps the builder to emit rate-limited progress while a long scan runs.
 struct ProgressSink<'a> {
     inner: &'a mut SnapshotBuilder,
-    events: &'a Sender<AppEvent>,
-    store: &'a IndexStore,
+    events: &'a Events,
+    slot: &'a MappingSlot,
     last_report: Instant,
     last_count: usize,
 }
@@ -1022,10 +1188,11 @@ impl ProgressSink<'_> {
         }
         self.last_report = Instant::now();
         self.last_count = seen;
-        self.store.set_activity(Activity::Scanning { seen });
-        let _ = self
-            .events
-            .try_send(AppEvent::Index(IndexMsg::Status(self.store.status())));
+        self.slot.set_activity(Activity::Scanning { seen });
+        let _ = self.events.try_send(AppEvent::Index(IndexMsg::Status {
+            id: self.slot.id(),
+            status: self.slot.status(),
+        }));
     }
 }
 
@@ -1075,19 +1242,15 @@ pub fn scan_once(
 /// which is exactly a tree's situation.
 fn walk_and_publish(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     forced: bool,
     detail: &mut String,
     cancel: &CancelToken,
 ) -> Result<Option<DirStamp>, EnumError> {
     let root = indexed_dir(ctx).to_path_buf();
-    let sink = WalkSink::new(
-        &root.to_string_lossy(),
-        Arc::clone(&ctx.store),
-        events.clone(),
-    );
+    let sink = WalkSink::new(&root.to_string_lossy(), ctx.slot(), events.clone());
 
-    ctx.store.set_tree_activity(Activity::Walking {
+    ctx.slot().set_activity(Activity::Walking {
         dirs: 0,
         queued: 0,
         files: 0,
@@ -1096,7 +1259,7 @@ fn walk_and_publish(
 
     let opts = walk::WalkOpts::default();
     let report = walk::walk_tree(ctx.source.as_ref(), &root, &opts, &sink, cancel);
-    ctx.store.set_tree_activity(Activity::Idle);
+    ctx.slot().set_activity(Activity::Idle);
 
     if report.cancelled {
         *detail = "walk cancelled".into();
@@ -1108,6 +1271,7 @@ fn walk_and_publish(
         *detail = format!("walk aborted: {err}");
         if forced {
             let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+                id: ctx.mapping,
                 entries: 0,
                 elapsed: report.elapsed,
                 error: Some(err),
@@ -1145,12 +1309,13 @@ fn walk_and_publish(
         report.dirs_visited,
         crate::util::humanize::elapsed(report.elapsed)
     );
-    ctx.store
+    ctx.slot()
         .publish_tree(index, Origin::Network, Some(coverage));
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
 
     if forced {
         let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
+            id: ctx.mapping,
             entries,
             elapsed: report.elapsed,
             error: None,
@@ -1171,18 +1336,21 @@ fn walk_and_publish(
 /// Wraps [`tree::SegmentSink`] with the two things the actor needs on top of
 /// it: publication into the store, and progress the UI can render without
 /// being flooded.
-struct WalkSink {
+struct WalkSink<'a> {
     inner: tree::SegmentSink,
-    store: Arc<IndexStore>,
-    events: Sender<AppEvent>,
+    /// Borrowed rather than an `Arc<IndexStore>` plus an id: the sink lives
+    /// only for the walk, and holding the slot directly is what stops a
+    /// progress tick from publishing into a different mapping.
+    slot: &'a MappingSlot,
+    events: Events,
     gate: ProgressGate,
 }
 
-impl WalkSink {
-    fn new(root: &str, store: Arc<IndexStore>, events: Sender<AppEvent>) -> Self {
+impl<'a> WalkSink<'a> {
+    fn new(root: &str, slot: &'a MappingSlot, events: Events) -> Self {
         Self {
             inner: tree::SegmentSink::new(root),
-            store,
+            slot,
             events,
             gate: ProgressGate::new(),
         }
@@ -1196,7 +1364,7 @@ impl WalkSink {
     }
 }
 
-impl walk::TreeSink for WalkSink {
+impl walk::TreeSink for WalkSink<'_> {
     fn push_dir(&self, rel: &str, files: &[String]) -> bool {
         self.inner.push_dir(rel, files)
     }
@@ -1209,21 +1377,22 @@ impl walk::TreeSink for WalkSink {
         // rather than after the whole walk. The index is rebuilt from the
         // sealed segments each time, which is a vector of refcounts rather
         // than a byte of the hundreds of megabytes behind them.
-        self.store.publish_tree(
+        self.slot.publish_tree(
             Arc::new(self.inner.index()),
             Origin::Network,
             // No verdict yet: judging a half-finished walk would flag every
             // one of them as incomplete for the minutes it is running.
             None,
         );
-        self.store.set_tree_activity(Activity::Walking {
+        self.slot.set_activity(Activity::Walking {
             dirs: dirs_done,
             queued,
             files,
         });
-        let _ = self
-            .events
-            .try_send(AppEvent::Index(IndexMsg::Status(self.store.tree_status())));
+        let _ = self.events.try_send(AppEvent::Index(IndexMsg::Status {
+            id: self.slot.id(),
+            status: self.slot.status(),
+        }));
     }
 }
 
@@ -1285,11 +1454,11 @@ impl ProgressGate {
 /// minutes or wait for the floor.
 fn apply_changes(
     ctx: &IndexContext,
-    events: &Sender<AppEvent>,
+    events: &Events,
     detail: &mut String,
     cancel: &CancelToken,
 ) -> Result<(), EnumError> {
-    let (Some(queue), Some(index)) = (ctx.watch.as_ref(), ctx.store.tree()) else {
+    let (Some(queue), Some(index)) = (ctx.watch.as_ref(), ctx.slot().as_tree()) else {
         return Ok(());
     };
     // Taken, not peeked. The batch is consumed whether or not it can be
@@ -1304,7 +1473,7 @@ fn apply_changes(
     }
 
     let root = indexed_dir(ctx).to_path_buf();
-    ctx.store.set_tree_activity(Activity::Walking {
+    ctx.slot().set_activity(Activity::Walking {
         dirs: 0,
         queued: batch.dirs.len(),
         files: 0,
@@ -1321,7 +1490,7 @@ fn apply_changes(
         &sink,
         cancel,
     );
-    ctx.store.set_tree_activity(Activity::Idle);
+    ctx.slot().set_activity(Activity::Idle);
 
     if report.cancelled {
         return Err(EnumError::Cancelled);
@@ -1350,7 +1519,7 @@ fn apply_changes(
     // `coverage` stays `None`: a patch has nothing to say about whether the
     // *share* is fully covered, and overwriting the walk's verdict with the
     // opinion of a three-folder update would clear a warning it never checked.
-    ctx.store
+    ctx.slot()
         .publish_tree(Arc::new(next), Origin::Network, None);
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
     Ok(())
@@ -1408,7 +1577,7 @@ mod tests {
             persist: false,
             ..Default::default()
         };
-        IndexContext::new(settings, store, Arc::new(src), Some(1))
+        IndexContext::new(settings, MappingId(0), store, Arc::new(src))
     }
 
     /// As `ctx`, but with the compressed schedule and a fixed jitter seed.
@@ -1422,8 +1591,9 @@ mod tests {
     ///
     /// `SnapshotChanged` is sent blocking, so a test that provokes many scans
     /// without a reader would wedge the actor once 256 events accumulated.
-    fn draining_events() -> Sender<AppEvent> {
+    fn draining_events() -> Events {
         let (tx, rx) = bounded(256);
+        let tx = Events::headless(tx);
         std::thread::spawn(move || while rx.recv().is_ok() {});
         tx
     }
@@ -1459,14 +1629,15 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        assert_eq!(store.flat().unwrap().len(), 2);
+        assert_eq!(store.first_flat_slot().as_flat().unwrap().len(), 2);
         actor.shutdown(Duration::from_millis(500));
     }
 
@@ -1475,11 +1646,12 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         assert!(
@@ -1496,11 +1668,12 @@ mod tests {
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         let scans_after_first = src.list_count(CUSTPRO_PATH);
@@ -1525,11 +1698,12 @@ mod tests {
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some_and(|f| f.len() == 1),
+            |s| s.first_flat_slot().as_flat().is_some_and(|f| f.len() == 1),
             Duration::from_secs(3)
         ));
 
@@ -1540,7 +1714,7 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.flat().is_some_and(|f| f.len() == 2),
+                |s| s.first_flat_slot().as_flat().is_some_and(|f| f.len() == 2),
                 Duration::from_secs(3)
             ),
             "a moved timestamp should produce a fresh listing"
@@ -1554,11 +1728,12 @@ mod tests {
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         let before = src.list_count(CUSTPRO_PATH);
@@ -1582,11 +1757,12 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
 
@@ -1594,12 +1770,12 @@ mod tests {
         actor.refresh(true);
         assert!(wait_for(
             &store,
-            |s| s.status().health.is_unreachable(),
+            |s| s.first_flat_slot().status().health.is_unreachable(),
             Duration::from_secs(3)
         ));
 
         assert_eq!(
-            store.flat().unwrap().len(),
+            store.first_flat_slot().as_flat().unwrap().len(),
             2,
             "the listing must survive the failure"
         );
@@ -1611,10 +1787,11 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::default());
         let (tx, rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
 
@@ -1638,10 +1815,11 @@ mod tests {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
 
@@ -1668,6 +1846,7 @@ mod tests {
         src.set_hang(true);
         let store = Arc::new(IndexStore::default());
         let (tx, _rx) = bounded(256);
+        let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
 
         // Let the scan get properly under way, or this proves only that an
@@ -1675,7 +1854,7 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.status().activity.is_busy(),
+                |s| s.first_flat_slot().status().activity.is_busy(),
                 Duration::from_secs(2)
             ),
             "the scan should be in flight"
@@ -1707,7 +1886,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
 
@@ -1722,7 +1901,7 @@ mod tests {
             "expected about one enumeration per floor, got {scans}"
         );
         assert!(
-            store.status().stamp_health.is_blind(),
+            store.first_flat_slot().status().stamp_health.is_blind(),
             "and the UI must be able to say why"
         );
     }
@@ -1737,7 +1916,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         let after_first = src.list_count(CUSTPRO_PATH);
@@ -1790,7 +1969,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         let after_first = src.list_count(CUSTPRO_PATH);
@@ -1818,7 +1997,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         // Settle, so the initial scan is not still in flight.
@@ -1853,7 +2032,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some_and(|f| f.len() == 2),
+            |s| s.first_flat_slot().as_flat().is_some_and(|f| f.len() == 2),
             Duration::from_secs(3)
         ));
 
@@ -1862,7 +2041,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(60));
 
         assert_eq!(
-            store.flat().unwrap().len(),
+            store.first_flat_slot().as_flat().unwrap().len(),
             2,
             "the first empty answer must be treated as suspect"
         );
@@ -1879,7 +2058,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some_and(|f| f.len() == 2),
+            |s| s.first_flat_slot().as_flat().is_some_and(|f| f.len() == 2),
             Duration::from_secs(3)
         ));
 
@@ -1888,7 +2067,7 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.flat().is_some_and(|f| f.is_empty()),
+                |s| s.first_flat_slot().as_flat().is_some_and(|f| f.is_empty()),
                 Duration::from_secs(3)
             ),
             "a directory that is consistently empty really is empty"
@@ -1906,7 +2085,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.status().last_scan_reason == Some(ScanReason::FirstRun),
+            |s| s.first_flat_slot().status().last_scan_reason == Some(ScanReason::FirstRun),
             Duration::from_secs(3)
         ));
 
@@ -1914,7 +2093,7 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.status().last_scan_reason == Some(ScanReason::Forced),
+                |s| s.first_flat_slot().status().last_scan_reason == Some(ScanReason::Forced),
                 Duration::from_secs(3)
             ),
             "the user pressing F5 must be attributable afterwards"
@@ -1935,7 +2114,7 @@ mod tests {
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         // Polled rather than slept on. Fixed sleeps were long enough on an
@@ -1986,14 +2165,18 @@ mod tests {
                 cache_dir: Some(cache.path().to_path_buf()),
                 ..Default::default()
             };
-            let context =
-                IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
-                    .with_cadence(Cadence::fast())
-                    .with_seed(SEED);
+            let context = IndexContext::new(
+                settings,
+                MappingId(0),
+                Arc::clone(&store),
+                Arc::new(src.clone()),
+            )
+            .with_cadence(Cadence::fast())
+            .with_seed(SEED);
             let mut actor = spawn(context, draining_events()).unwrap();
             assert!(wait_for(
                 &store,
-                |s| s.status().origin == Some(Origin::Network),
+                |s| s.first_flat_slot().status().origin == Some(Origin::Network),
                 Duration::from_secs(3)
             ));
             std::thread::sleep(Duration::from_millis(60));
@@ -2008,20 +2191,24 @@ mod tests {
             cache_dir: Some(cache.path().to_path_buf()),
             ..Default::default()
         };
-        let context =
-            IndexContext::new(settings, Arc::clone(&store), Arc::new(src.clone()), Some(1))
-                .with_cadence(Cadence::fast())
-                .with_seed(SEED);
+        let context = IndexContext::new(
+            settings,
+            MappingId(0),
+            Arc::clone(&store),
+            Arc::new(src.clone()),
+        )
+        .with_cadence(Cadence::fast())
+        .with_seed(SEED);
         let mut actor = spawn(context, draining_events()).unwrap();
 
         assert!(wait_for(
             &store,
-            |s| s.flat().is_some(),
+            |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
         std::thread::sleep(Duration::from_millis(100));
         let scans = src.list_count(CUSTPRO_PATH);
-        let origin = store.status().origin;
+        let origin = store.first_flat_slot().status().origin;
         actor.shutdown(Duration::from_millis(500));
 
         assert_eq!(
@@ -2047,16 +2234,16 @@ mod tests {
             let store = Arc::new(IndexStore::default());
             let context = IndexContext::new(
                 settings(),
+                MappingId(0),
                 Arc::clone(&store),
                 Arc::new(src.clone()),
-                Some(1),
             )
             .with_cadence(Cadence::fast())
             .with_seed(SEED);
             let mut actor = spawn(context, draining_events()).unwrap();
             assert!(wait_for(
                 &store,
-                |s| s.status().origin == Some(Origin::Network),
+                |s| s.first_flat_slot().status().origin == Some(Origin::Network),
                 Duration::from_secs(3)
             ));
             std::thread::sleep(Duration::from_millis(60));
@@ -2071,10 +2258,11 @@ mod tests {
         let store = Arc::new(IndexStore::default());
         let context = IndexContext::new(
             settings(),
+            MappingId(0),
             Arc::clone(&store),
             Arc::new(src.clone()),
-            Some(1),
         )
+        .with_volume_serial(1)
         .with_cadence(Cadence::fast())
         .with_seed(SEED);
         let mut actor = spawn(context, draining_events()).unwrap();
@@ -2082,13 +2270,13 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.flat().is_some_and(|f| f.len() == 2),
+                |s| s.first_flat_slot().as_flat().is_some_and(|f| f.len() == 2),
                 Duration::from_secs(3)
             ),
             "a change made while the app was closed must still be picked up"
         );
         assert_eq!(
-            store.status().last_scan_reason,
+            store.first_flat_slot().status().last_scan_reason,
             Some(ScanReason::StampMoved)
         );
         actor.shutdown(Duration::from_millis(500));
@@ -2108,7 +2296,7 @@ mod tests {
             wait_for(
                 &store,
                 |s| matches!(
-                    s.status().health,
+                    s.first_flat_slot().status().health,
                     crate::index::Health::Degraded {
                         reason: DegradeReason::StampUnreliable,
                         ..
@@ -2119,7 +2307,7 @@ mod tests {
             "the user must be told change detection is unavailable"
         );
         assert_eq!(
-            store.status().stamp_health,
+            store.first_flat_slot().status().stamp_health,
             StampHealth::Blind { failures: 1 }
         );
         actor.shutdown(Duration::from_millis(500));
@@ -2141,16 +2329,17 @@ mod tests {
             let store = Arc::new(IndexStore::default());
             let context = IndexContext::new(
                 settings.clone(),
+                MappingId(0),
                 Arc::clone(&store),
                 Arc::new(src.clone()),
-                Some(0xAAAA),
             )
+            .with_volume_serial(0xAAAA)
             .with_cadence(Cadence::fast())
             .with_seed(SEED);
             let mut actor = spawn(context, draining_events()).unwrap();
             assert!(wait_for(
                 &store,
-                |s| s.status().origin == Some(Origin::Network),
+                |s| s.first_flat_slot().status().origin == Some(Origin::Network),
                 Duration::from_secs(3)
             ));
             std::thread::sleep(Duration::from_millis(60));
@@ -2161,10 +2350,11 @@ mod tests {
         let store = Arc::new(IndexStore::default());
         let context = IndexContext::new(
             settings,
+            MappingId(0),
             Arc::clone(&store),
             Arc::new(src.clone()),
-            Some(0xBBBB),
         )
+        .with_volume_serial(0xBBBB)
         .with_cadence(Cadence::fast())
         .with_seed(SEED);
         let mut actor = spawn(context, draining_events()).unwrap();
@@ -2172,7 +2362,7 @@ mod tests {
         assert!(
             wait_for(
                 &store,
-                |s| s.status().cache_rejected.is_some(),
+                |s| s.first_flat_slot().status().cache_rejected.is_some(),
                 Duration::from_secs(3)
             ),
             "a rejected cache must not look like a first run"

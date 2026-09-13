@@ -132,6 +132,29 @@ pub fn same_dir(a: &Path, b: &Path) -> bool {
     path_key(a) == path_key(b)
 }
 
+/// Whether `path` is `root` itself or lies beneath it.
+///
+/// Compared component by component rather than as a string prefix, which
+/// would call `V:\\jobs2` a child of `V:\\jobs`. Case-insensitive, because
+/// the file systems this runs against are.
+pub fn contains(root: &Path, path: &Path) -> bool {
+    let root = normalise_root(root);
+    let mut want = root.components();
+    let mut have = path.components();
+    loop {
+        match (want.next(), have.next()) {
+            (None, _) => return true,
+            (Some(_), None) => return false,
+            (Some(a), Some(b)) => {
+                let (a, b) = (a.as_os_str(), b.as_os_str());
+                if !a.eq_ignore_ascii_case(b) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

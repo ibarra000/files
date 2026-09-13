@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The installer.
+
+  Hand-written against the WiX 5 schema rather than generated. `cargo-wix`
+  produced a good starting point, but it only drives WiX 3 - which reached end
+  of life in February 2025 - and WiX 7 requires accepting a paid maintenance-fee
+  licence. WiX 5 is the current version that is free to build with, and its
+  schema is small enough that the file it wants is shorter and clearer than the
+  one being generated.
+
+  Build it with `tools/make_msi.ps1`, which is four lines and says what they are.
+
+  # What this installs, and what it deliberately does not
+
+  Three executables into Program Files, one Start-menu shortcut, and - only if
+  asked - a registry value that starts the program at sign-in. It does not add
+  anything to `PATH`: `files` is a windowed program summoned by a shortcut, and
+  `files-cli` is for the rare support call, so a machine-wide `PATH` entry would
+  be a permanent change to every command prompt in the company in exchange for
+  saving one person one `cd`.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- `UpgradeCode` never changes, for the life of the product: it is what
+       tells Windows that version 0.3 is an upgrade of version 0.2 rather than a
+       second program that happens to share a name. -->
+  <Package Name="files"
+           Manufacturer="files"
+           Version="$(var.Version)"
+           Scope="perMachine"
+           Compressed="yes"
+           Language="1033"
+           UpgradeCode="4008c9cd-48d4-41af-9df8-4900fd2fdda3">
+
+    <!-- Upgrade in place, and refuse to install over a newer version with a
+         message rather than by silently doing something surprising. -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of files is already installed. Uninstall it first if you really want this one." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The icon Apps &amp; Features shows beside the entry. -->
+    <Icon Id="ProductICO" SourceFile="assets\files.ico" />
+    <Property Id="ARPPRODUCTICON" Value="ProductICO" />
+
+    <!-- 64-bit only. There is no 32-bit Windows on any machine this runs on,
+         and the index holds a few hundred thousand paths in memory. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="files">
+
+        <Component Id="MainExe" Bitness="always64">
+          <File Id="filesExe" Source="$(var.TargetDir)\files.exe" KeyPath="yes" />
+        </Component>
+
+        <Component Id="CliExe" Bitness="always64">
+          <File Id="filesCliExe" Source="$(var.TargetDir)\files-cli.exe" KeyPath="yes" />
+        </Component>
+
+      </Directory>
+    </StandardDirectory>
+
+    <!-- The Start-menu entry: how somebody finds the program the first time,
+         before they have learned the shortcut, and how they get it back after
+         quitting it from the tray.
+
+         Directly under Programs rather than in a folder of its own. A folder
+         holding one shortcut is a folder nobody opens, and the Start menu
+         searches by name regardless. -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="c1e147a0-08ef-4cd1-a0ef-6b1eb096439f">
+        <Shortcut Id="FilesShortcut"
+                  Name="files"
+                  Description="Search job codes across the drawing shares"
+                  Target="[INSTALLFOLDER]files.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="ProductICO" />
+        <!-- A shortcut cannot be a key path, and a component needs one. This is
+             the conventional stand-in, and it is also what tells Windows the
+             component is still installed. -->
+        <RegistryValue Root="HKCU"
+                       Key="Software\files"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!-- Starting with Windows. Off unless asked for: a program that adds itself
+         to the startup list uninvited is one an administrator strips out of the
+         image.
+
+         `HKCU` rather than `HKLM`, so it follows the person rather than the
+         machine - which is right for a tool that reads *their* mapped drives,
+         and on a shared machine is the difference between one person's choice
+         and everybody's. -->
+    <Component Id="RunAtLogin" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryValue Root="HKCU"
+                     Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="files"
+                     Type="string"
+                     Value="&quot;[INSTALLFOLDER]files.exe&quot;"
+                     KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main"
+             Title="files"
+             Description="The search panel and its console companion."
+             Level="1"
+             AllowAbsent="no">
+      <ComponentRef Id="MainExe" />
+      <ComponentRef Id="CliExe" />
+      <ComponentRef Id="StartMenuShortcut" />
+
+      <!-- `Level="2"` means unselected by default, so clicking straight through
+           the installer does not silently produce a startup program. It is one
+           checkbox away for anybody who wants it - which will be most people
+           who use this dozens of times an hour. -->
+      <Feature Id="StartWithWindows"
+               Title="Start with Windows"
+               Description="Run files when you sign in, so the keyboard shortcut works without launching it first."
+               Level="2"
+               AllowAbsent="yes">
+        <ComponentRef Id="RunAtLogin" />
+      </Feature>
+    </Feature>
+
+    <!-- A feature tree, so the startup option is visible and switchable. The
+         alternative - a bare progress bar - would make it a thing only somebody
+         reading the documentation could find. -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+  </Package>
+</Wix>

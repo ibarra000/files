@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="files" version="0.2.0.0"/>
+
+  <!-- Per-monitor v2, which is the only setting that is right on the machines
+       this runs on: a laptop at 150% docked to a 100% monitor, with the panel
+       summoned onto whichever screen the pointer is on. Without it Windows
+       stretches the bitmap when the panel crosses between them, and a search
+       box rendered at 150% and scaled to 100% is blurred text in the one place
+       the whole program is about reading. "v2" rather than "true" because only
+       v2 also scales the non-client area and the dialogs. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <!-- The fallback for Windows 8.1 and early 10, which read this one. -->
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+
+      <!-- Paths on the shares this searches run past 260 characters routinely -
+           a job folder inside a year inside a client is most of it before any
+           filename. Without this the index simply stops seeing files at a
+           depth nobody can predict, which looks exactly like a job having no
+           drawings. -->
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+
+      <!-- UTF-8 as the process code page, so a filename with an accent in it
+           survives every ANSI entry point anything in the dependency tree
+           might still call. -->
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+
+  <!-- Version 6 of the common controls, which is what makes the tray icon's
+       menu look like this decade's menus rather than like Windows 95. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"/>
+    </dependentAssembly>
+  </dependency>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11. Claiming these is what stops the compatibility
+           shims lying to us about the OS version, which the backdrop probing in
+           `gui::window` would then believe. -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"/>
+    </application>
+  </compatibility>
+
+  <!-- No elevation, ever. This program reads shares the user already has and
+       writes a config file in their own profile; asking for administrator
+       would be asking for a great deal more than it needs, on a few hundred
+       machines. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>

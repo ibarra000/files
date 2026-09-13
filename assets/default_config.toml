@@ -26,6 +26,7 @@ name    = "custompro"
 path    = 'V:\Documents\custpro'
 kind    = "flat"
 enabled = true
+refresh = "auto"          # see the note under `jobs`
 
 
 # ---------------------------------------------------------------------------
@@ -47,26 +48,58 @@ enabled = true
 # searchable about a second in rather than when it finishes. The result is
 # cached, so only the first run after an upgrade pays for it in full.
 #
-# After that the share is kept current two ways. The server is asked to report
-# changes as they happen, and only the folders that changed are re-read - so a
-# new job folder appears within seconds. Independently of that, the whole share
-# is re-walked every half hour, because a server can accept the request for
-# notifications and then simply never send any, and that failure has no symptom
-# at all. `files --doctor` says which of the two is actually working.
+# After that the share is kept current by the server reporting changes as they
+# happen: only the folders that actually changed are re-read, which is a
+# handful of round trips against the nine hundred thousand a full pass costs.
+# A new job folder appears within seconds, and the result is written back to
+# the cache, so the index keeps its place between sessions.
+#
+#
+# refresh = "auto" | "manual"
+#
+# Whether a *timer* may re-read the whole share. Live updates apply either way,
+# and F5 works either way; what this decides is whether the share re-reads
+# itself when nobody asked.
+#
+# A tree defaults to "manual" and a flat share to "auto", and the asymmetry is
+# the point. A flat share is one directory behind a three-round-trip freshness
+# probe. A tree is three hundred thousand directories with no such probe, so a
+# timed pass is nine hundred thousand round trips - and with a few hundred
+# people running this, all of them starting that pass on the same schedule is
+# not a background hum, it is an outage. The half-hourly re-walk this used to
+# do was exactly that.
+#
+# What you give up: a share whose change notifications silently stop will go
+# stale without a timer to catch it. The status line says which share and why,
+# and F5 offers to update it - so the failure is visible rather than silent,
+# which is the trade being made. `files --doctor` says whether notifications
+# are working at all.
 # ---------------------------------------------------------------------------
 [[mapping]]
 name    = "jobs"
 path    = 'R:\'
 kind    = "tree"
 enabled = true
+refresh = "manual"
 
 
 # ---------------------------------------------------------------------------
-# A third share. Uncomment, adjust, and check it with `files --check-config`.
+# More shares. Add as many as you have; there is no limit, and every enabled
+# one is indexed, searched, and merged into a single ranked list.
 #
-# An indexed mapping - "flat" or "tree" - needs no patterns: every file under
-# it is already known, so there is nothing to deduce. Results from every
-# configured share are merged into one ranked list.
+# That was not true before: the index had one flat slot and one tree slot, so a
+# second flat mapping was refused outright and a second tree mapping was
+# accepted, listed by `--doctor`, and then silently never walked. If you have
+# been carrying extra mappings that never seemed to do anything, this is why.
+#
+# Two rules the checker enforces, both for the same reason - indexing one
+# directory twice returns every file twice:
+#
+#   * no two mappings may point at the same directory;
+#   * a tree mapping may not sit inside another enabled mapping.
+#
+# Check any change with `files --check-config`, which validates everything
+# here without touching the network.
 # ---------------------------------------------------------------------------
 # [[mapping]]
 # name    = "archive"
@@ -80,12 +113,42 @@ enabled = true
 # what is set here.
 # ---------------------------------------------------------------------------
 [settings]
+# How many shares are walked at once. Each walk already keeps eight directory
+# reads in flight, so 2 is sixteen outstanding requests against a file server
+# that belongs to somebody else. Raising it shortens a cold start over several
+# shares and lengthens everyone else's afternoon; a share waiting its turn says
+# so on the status line rather than looking idle.
+# max_concurrent_scans = 2
+
+# Whether the status line says a share needs refreshing, and which one.
+#
+# On by default: a list that has stopped tracking the drive is exactly the
+# thing this program refuses to hide. Turn it off for somebody who was handed
+# the tool, does not need current data, and should not be nagged - the ages are
+# still there on F5, which they only see by asking.
+# stale_notices = true
+
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes
 # persist       = true               # keep the on-disk index between runs
 # live_updates  = true               # re-read changed folders as they change
 # history       = true               # remember codes between sessions
+
+# The global hotkey that summons this window from wherever you are working,
+# into a compact quick-search view: type, press Enter to open, or Escape to
+# put it back. The window returns to the size and place it had, and the
+# program you were in gets the keyboard back.
+#
+# ctrl, alt, shift and win, plus a letter, a digit, f1-f24 or space. Use "off"
+# to claim no key at all. If another program already owns the combination this
+# one says so at startup and carries on without it - `files --doctor` reports
+# which window it would move, which is the thing worth checking if the key
+# seems to do nothing.
+#
+# The Copilot key on newer keyboards sends shift+win+f23, so that value binds
+# the key itself.
+# hotkey        = "ctrl+shift+space"
 
 # Which viewer Enter uses. Left uncommented because F2 switches it while
 # running and saves the choice here, and the writer replaces this line rather

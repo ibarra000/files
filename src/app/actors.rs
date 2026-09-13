@@ -2,7 +2,9 @@
 //!
 //! The thread population is fixed for the life of the process: one input
 //! reader, one search worker, one verification worker, one index actor per
-//! configured share, one change watcher, plus rayon's pool for the matcher.
+//! configured share, one change watcher, one hotkey listener where the
+//! platform has global hotkeys and one is configured, plus rayon's pool for
+//! the matcher.
 //! Nothing is spawned per
 //! keystroke, so thread growth is impossible by construction rather than by
 //! discipline.
@@ -12,14 +14,15 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::thread::JoinHandle;
+use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Receiver, bounded};
 
-use super::event::{AppEvent, Cmd, CmdList};
+use super::event::{AppEvent, Cmd, CmdList, Events, Wake};
 use crate::clipboard;
 use crate::config::{SHUTDOWN_JOIN_BUDGET, Settings};
 use crate::history;
+use crate::hotkey;
 use crate::index::actor::{IndexActor, IndexContext};
 use crate::index::enumerate::DirSource;
 use crate::index::store::IndexStore;
@@ -35,14 +38,18 @@ const EVENT_CAPACITY: usize = 256;
 
 /// Everything running in the background.
 pub struct Actors {
-    pub events: Sender<AppEvent>,
+    pub events: Events,
     pub backend: Arc<Backend>,
     pub verifier: Arc<Verifier>,
     search: WorkerHandle<SearchRequest>,
     verify: WorkerHandle<SearchRequest>,
-    index: IndexActor,
-    /// Absent when no tree mapping is configured.
-    tree_index: Option<IndexActor>,
+    /// One per enabled, indexed mapping, in configuration order.
+    ///
+    /// Was a fixed `index` plus an optional `tree_index`, which is why a
+    /// configuration naming ten shares indexed two of them - and why the flat
+    /// actor was started even when no flat mapping existed, leaving it to
+    /// probe an empty path and report `os error 3` forever.
+    indexes: Vec<IndexActor>,
     /// Opens what Enter chose. One thread for the life of the process, like
     /// the rest: assembling a document reads every page off the share, which
     /// is far too much work to spawn a thread for per keypress.
@@ -50,19 +57,43 @@ pub struct Actors {
     /// Absent when history is switched off, or when there is nowhere to put
     /// it. Recall still works within the session either way.
     history: Option<history::Writer>,
-    /// Detached on purpose: a thread blocked in `event::read` cannot be woken.
-    _input: JoinHandle<()>,
+    /// The global hotkey that summons the panel.
+    ///
+    /// `None` when it is switched off, when the platform has none, or when the
+    /// chord was already claimed - all three are ordinary, and none of them may
+    /// stop the program starting.
+    ///
+    /// Unlike `_input` this one is genuinely joinable: it parks in a message
+    /// pump that a posted quit reaches.
+    hotkey: Option<hotkey::HotkeyThread>,
+    /// How the drawing thread tells the hotkey thread which window to summon.
+    ///
+    /// Held here rather than passed straight through so the shell can reach it
+    /// after `Actors::start` has returned - which it must, because the window
+    /// does not exist until the toolkit has built one.
+    pub panel: Arc<hotkey::Panel>,
 }
 
 impl Actors {
     /// Starts every background thread.
+    /// Starts every worker, and hands back the channel they report on.
+    ///
+    /// `wake` is called after each event is posted. A driver that blocks on the
+    /// receiver - which the terminal loop does - needs nothing and passes
+    /// [`Events::headless`]'s no-op; a driver that owns its own event loop and
+    /// sleeps has to be told, or a walk that finishes while the screen is idle
+    /// is a walk nobody sees.
     pub fn start(
         settings: Settings,
         source: Arc<dyn DirSource>,
-        volume_serial: Option<u32>,
+        wake: Wake,
     ) -> std::io::Result<(Self, Receiver<AppEvent>)> {
-        let (tx, rx) = bounded(EVENT_CAPACITY);
-        let store = Arc::new(IndexStore::default());
+        let (raw, rx) = bounded(EVENT_CAPACITY);
+        let tx = Events::new(raw, wake);
+        let store = Arc::new(IndexStore::for_routes(
+            &settings.routes,
+            crate::config::JOB_CACHE_CAPACITY,
+        ));
 
         // Collect cache files that belong to no configured directory. Without
         // this the cache grows forever as roots are edited, and the previous
@@ -77,19 +108,18 @@ impl Actors {
             // configuration - an env override, an alternate `--config` - wiped
             // the other one's cache and guaranteed it a cold start.
             //
-            // The two *derived* roots are added explicitly rather than trusted
-            // to fall out of the mapping list. They are what the index actors
-            // actually write under, and a sweep that disagrees with the
-            // writers by one entry does not fail loudly - it silently
-            // guarantees a cold start, which for the tree is one to three
-            // minutes of round trips on every launch.
+            // `all()` rather than `enabled()`: a mapping switched off for a
+            // session keeps its cache, so switching it back on is not a cold
+            // start. The derived roots this used to append no longer exist -
+            // the actors now write under exactly the mapping paths listed
+            // here, so the sweep and the writers cannot disagree.
             let live: Vec<_> = settings
                 .routes
-                .enabled()
+                .all()
+                .iter()
                 .map(|m| m.path.clone())
-                .chain([settings.custpro_path.clone(), settings.tree_path.clone()])
                 .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| crate::index::persist::MappingKey::of(&p))
+                .map(|p| crate::index::persist::MappingKey::of(p.as_path()))
                 .collect();
             crate::index::persist::gc_orphans(cache_dir, &live);
         }
@@ -100,48 +130,45 @@ impl Actors {
             source: Arc::clone(&source),
         });
 
-        let verifier = Arc::new(Verifier::new(
+        let verifier = Arc::new(Verifier::for_routes(
             Arc::clone(&source),
-            settings.custpro_path.clone(),
+            &settings.routes,
             settings.server_filter,
         ));
 
         let search = worker::spawn_search(Arc::clone(&backend), tx.clone())?;
         let verify = worker::spawn_verify(Arc::clone(&backend), Arc::clone(&verifier), tx.clone())?;
-        let index = actor::spawn(
-            IndexContext::new(
-                settings.clone(),
-                Arc::clone(&store),
-                Arc::clone(&source),
-                volume_serial,
-            )
-            .with_log(Arc::new(crate::index::log::IndexLog::from_option(
-                settings.index_log.as_deref(),
-            ))),
-            tx.clone(),
-        )?;
-        // A second actor, only when a tree mapping is configured. One thread
-        // each rather than one for both: a walk runs for minutes, and sharing
-        // would mean the flat share's freshness queued behind it - or a
-        // five-minute backoff on an unreachable tree delaying a healthy one.
-        let tree_index = (!settings.tree_path.as_os_str().is_empty())
-            .then(|| {
-                actor::spawn(
-                    IndexContext::new(
-                        settings.clone(),
-                        Arc::clone(&store),
-                        Arc::clone(&source),
-                        None,
-                    )
-                    .for_tree()
-                    .with_log(Arc::new(crate::index::log::IndexLog::from_option(
-                        settings.index_log.as_deref(),
-                    )))
-                    .with_live_updates(&settings),
-                    tx.clone(),
+        // One actor per enabled, indexed mapping. One thread each rather than
+        // one for several: a walk runs for minutes, and sharing would mean one
+        // share's freshness queued behind another - or a five-minute backoff
+        // on an unreachable share delaying a healthy one.
+        //
+        // Driven off the store's own slots, so a mapping with an empty path is
+        // skipped by the same predicate a search uses. That is the whole of
+        // the `os error 3` fix: there is no longer an actor without a share.
+        let log = Arc::new(crate::index::log::IndexLog::from_option(
+            settings.index_log.as_deref(),
+        ));
+        // One set of permits shared by every actor, so the cap is on the
+        // machine rather than on each share independently.
+        let permits = Arc::new(crate::index::permit::WalkPermits::new(
+            settings.max_concurrent_scans,
+        ));
+        let mut indexes = Vec::new();
+        for slot in store.indexed() {
+            indexes.push(actor::spawn(
+                IndexContext::new(
+                    settings.clone(),
+                    slot.id(),
+                    Arc::clone(&store),
+                    Arc::clone(&source),
                 )
-            })
-            .transpose()?;
+                .with_log(Arc::clone(&log))
+                .with_permits(Arc::clone(&permits))
+                .with_live_updates(&settings),
+                tx.clone(),
+            )?);
+        }
         // Merged documents cannot be deleted once a viewer has them open, so
         // last session's are collected at the start of this one - the same
         // arrangement the index cache uses just above. Swept *before* the
@@ -150,7 +177,16 @@ impl Actors {
             open::pdf::gc(cache_dir, open::worker::CACHE_LIFETIME);
         }
         let opener = open::worker::spawn(Arc::clone(&backend), tx.clone())?;
-        let input = spawn_input(tx.clone())?;
+
+        // Best effort, like the history writer: a chord another program owns
+        // must cost the shortcut, never the program.
+        //
+        // Started before there is a window to summon. `Panel` is how the one
+        // that eventually exists reaches this thread, and a chord pressed
+        // before then does nothing - which is the right answer for the first
+        // few hundred milliseconds of a process's life.
+        let panel = hotkey::Panel::new();
+        let hotkey = hotkey::spawn(settings.hotkey, tx.clone(), Arc::clone(&panel))?;
 
         // Best effort: failing to start the writer costs recall next session,
         // so it must not stop the program starting.
@@ -167,11 +203,11 @@ impl Actors {
                 verifier,
                 search,
                 verify,
-                index,
-                tree_index,
+                indexes,
                 opener,
                 history,
-                _input: input,
+                hotkey,
+                panel,
             },
             rx,
         ))
@@ -181,6 +217,30 @@ impl Actors {
     ///
     /// The only place in the program that touches a channel on behalf of the
     /// UI, which keeps the state transition itself free of side effects.
+    /// Puts the panel away.
+    ///
+    /// Separate from [`Cmd::DismissOverlay`], and deliberately so: the command
+    /// is sent when the user asks to dismiss, and this is called when the exit
+    /// transition has finished playing. One is an intention and the other is
+    /// the moment the window may safely disappear, and collapsing them is how
+    /// a transition comes to be written and never seen.
+    pub fn dismiss_overlay(&self) {
+        if let Some(hotkey) = &self.hotkey {
+            hotkey.hide();
+        }
+    }
+
+    /// Brings the panel up, for the tray icon and for a second launch.
+    ///
+    /// Goes to the hotkey thread rather than being done here, because showing
+    /// the panel means taking the foreground and that is the one thread Windows
+    /// will accept it from.
+    pub fn summon_overlay(&self) {
+        if let Some(hotkey) = &self.hotkey {
+            hotkey.summon();
+        }
+    }
+
     pub fn dispatch(&self, cmds: CmdList) {
         for cmd in cmds {
             match cmd {
@@ -194,11 +254,16 @@ impl Actors {
                     self.verify
                         .submit_generation(epoch, SearchRequest { query, epoch });
                 }
-                Cmd::RefreshIndex { force } => {
-                    self.index.refresh(force);
-                    // F5 means "re-examine the share", and there are two.
-                    if let Some(tree) = &self.tree_index {
-                        tree.refresh(force);
+                Cmd::RefreshIndex { target, force } => {
+                    // Only the shares asked for. "All" is still a keystroke
+                    // away, but it is no longer the only thing F5 can mean:
+                    // a full pass over one large share is expensive enough
+                    // that doing it to every share by default is what put a
+                    // few hundred clients on the server at once.
+                    for index in &self.indexes {
+                        if target.wants(index.mapping()) {
+                            index.refresh(force);
+                        }
                     }
                 }
                 Cmd::Open(request) => self.opener.request(request, &self.events),
@@ -219,7 +284,21 @@ impl Actors {
                         writer.store(entries);
                     }
                 }
-                Cmd::Quit => {}
+                // Starts the exit. The hotkey thread owns whether the panel is
+                // up and reports back as `HotkeyMsg::Dismissed`, which is what
+                // sets the animation going; the window itself comes off the
+                // screen later, from `dismiss_overlay`. One thread hop of
+                // latency buys the impossibility of the two disagreeing about
+                // whether the panel is on screen.
+                Cmd::DismissOverlay => {
+                    if let Some(hotkey) = &self.hotkey {
+                        hotkey.dismiss();
+                    }
+                }
+                // Both are for whoever is drawing, not for a worker. Named
+                // rather than wildcarded, so a command nothing handles is a
+                // compile error here instead of a keystroke that does nothing.
+                Cmd::OpenHelp | Cmd::Quit => {}
             }
         }
     }
@@ -234,11 +313,23 @@ impl Actors {
     pub fn shutdown(&mut self) -> bool {
         let budget = SHUTDOWN_JOIN_BUDGET;
         let mut clean = true;
+        // First: it costs microseconds, and it is the only thread that can
+        // still put the terminal back where it was found.
+        if let Some(hotkey) = &mut self.hotkey {
+            clean &= hotkey.shutdown(budget);
+        }
         clean &= self.search.shutdown(budget);
         clean &= self.verify.shutdown(budget);
-        clean &= self.index.shutdown(budget);
-        if let Some(tree) = &mut self.tree_index {
-            clean &= tree.shutdown(budget);
+        // Every index actor is told to stop before any of them is waited on,
+        // and they share one deadline. Signalling and joining one at a time
+        // would make the budget per-thread, so quitting with ten shares
+        // configured could take ten times as long as it promises.
+        for index in &mut self.indexes {
+            index.begin_shutdown();
+        }
+        let deadline = Instant::now() + budget;
+        for index in &mut self.indexes {
+            clean &= index.join(deadline);
         }
         clean &= self.opener.shutdown(budget);
         if let Some(writer) = &mut self.history {
@@ -246,49 +337,6 @@ impl Actors {
         }
         clean
     }
-}
-
-/// Reads terminal events and forwards them.
-///
-/// Uses a blocking read rather than a poll loop, so an idle application costs
-/// nothing and a keystroke is delivered immediately.
-fn spawn_input(tx: Sender<AppEvent>) -> std::io::Result<JoinHandle<()>> {
-    std::thread::Builder::new()
-        .name("files-input".into())
-        .spawn(move || {
-            loop {
-                match crossterm::event::read() {
-                    Ok(crossterm::event::Event::Key(key)) => {
-                        // Blocking send, never try_send: a dropped keystroke is
-                        // far worse than a moment's backpressure, and the main
-                        // loop always drains.
-                        if tx.send(AppEvent::Key(key)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(crossterm::event::Event::Paste(text)) => {
-                        if tx.send(AppEvent::Paste(text)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(crossterm::event::Event::Mouse(mouse)) => {
-                        if tx.send(AppEvent::Mouse(mouse)).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(crossterm::event::Event::Resize(cols, rows)) => {
-                        // The size is carried rather than discarded: mouse
-                        // events arrive in screen coordinates, so the state
-                        // machine has to know where the widgets are.
-                        if tx.send(AppEvent::Resize { cols, rows }).is_err() {
-                            return;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => return,
-                }
-            }
-        })
 }
 
 /// Builds the platform's directory source.
@@ -376,7 +424,101 @@ mod tests {
                     &["11d\\11-D-0704 one.pdf", "11d\\11-D-0704 two.pdf"],
                 ),
         );
-        Actors::start(settings(), source, Some(1)).unwrap()
+        Actors::start(settings(), source, std::sync::Arc::new(|| {})).unwrap()
+    }
+
+    /// One actor per enabled indexed mapping, and none for anything else.
+    ///
+    /// The direct regression test for the reported `os error 3`. A flat actor
+    /// used to be started unconditionally; with no flat mapping configured its
+    /// directory was the derived `custpro_path`, which is an empty `PathBuf`,
+    /// so it probed `""`, got `ERROR_PATH_NOT_FOUND`, and pinned
+    /// `Health::Unreachable` forever with nothing named in the message.
+    #[test]
+    fn no_actor_is_started_for_a_share_that_is_not_configured() {
+        let routes = crate::paths::Routes::single(
+            "jobs",
+            std::path::PathBuf::from("R:\\"),
+            crate::paths::MappingKind::Tree,
+        );
+        let settings = Settings {
+            persist: false,
+            ..Settings::with_routes(Arc::new(routes), |s| s)
+        };
+        let source: Arc<dyn DirSource> =
+            Arc::new(FakeDirSource::new().with_tree("R:\\", &["11d\\one.pdf"]));
+
+        let (mut actors, _rx) =
+            Actors::start(settings, source, std::sync::Arc::new(|| {})).unwrap();
+        assert_eq!(
+            actors.indexes.len(),
+            1,
+            "a configuration with one share must start one actor"
+        );
+        actors.shutdown();
+    }
+
+    /// And with no flat mapping, nothing ever reports itself unreachable.
+    #[test]
+    fn a_configuration_with_no_flat_share_never_reports_a_missing_one() {
+        let routes = crate::paths::Routes::single(
+            "jobs",
+            std::path::PathBuf::from("R:\\"),
+            crate::paths::MappingKind::Tree,
+        );
+        let settings = Settings {
+            persist: false,
+            ..Settings::with_routes(Arc::new(routes), |s| s)
+        };
+        let source: Arc<dyn DirSource> =
+            Arc::new(FakeDirSource::new().with_tree("R:\\", &["11d\\one.pdf"]));
+
+        let (mut actors, _rx) =
+            Actors::start(settings, source, std::sync::Arc::new(|| {})).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            for slot in actors.backend.store.slots() {
+                assert!(
+                    !slot.status().health.is_unreachable(),
+                    "{} reported unreachable: {:?}",
+                    slot.name(),
+                    slot.status().health
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        actors.shutdown();
+    }
+
+    /// Ten shares, which is the configuration that prompted this work. Each
+    /// gets its own actor and its own slot; the store used to hold two.
+    #[test]
+    fn ten_configured_shares_each_get_an_actor_and_a_slot() {
+        let mut mappings = Vec::new();
+        let mut src = FakeDirSource::new();
+        for i in 0..10u16 {
+            let path = format!("X:\\share{i}");
+            src = src.with_tree(&path, &["a\\one.pdf"]);
+            mappings.push(crate::paths::Mapping {
+                id: crate::paths::MappingId(i),
+                name: format!("share{i}").into(),
+                path: path.into(),
+                kind: crate::paths::MappingKind::Tree,
+                enabled: true,
+                refresh: Default::default(),
+            });
+        }
+        let routes = crate::paths::Routes::new(mappings, crate::paths::ConfigSource::BuiltIn);
+        let settings = Settings {
+            persist: false,
+            ..Settings::with_routes(Arc::new(routes), |s| s)
+        };
+
+        let (mut actors, _rx) = Actors::start(settings, Arc::new(src), Arc::new(|| {})).unwrap();
+        assert_eq!(actors.indexes.len(), 10, "every share is indexed");
+        assert_eq!(actors.backend.store.slots().len(), 10);
+        assert_eq!(actors.backend.store.indexed().count(), 10);
+        actors.shutdown();
     }
 
     #[test]
@@ -389,11 +531,13 @@ mod tests {
         // honest fixture; asserting on the first answer would be asserting on
         // a race.
         let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline && actors.backend.store.tree().is_none() {
+        while Instant::now() < deadline
+            && actors.backend.store.first_tree_slot().as_tree().is_none()
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(
-            actors.backend.store.tree().is_some(),
+            actors.backend.store.first_tree_slot().as_tree().is_some(),
             "the tree should have been walked"
         );
 

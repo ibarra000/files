@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc fc1bf931f2887a2ccb4035b7485d07499934585ac1ed50d84ecc414b3cae8f06 # shrinks to code = "A-0"
+cc e9dfc6eccb4008f85fc755c566529468e4d5d2f57be1990af5355c2a34e89e99 # shrinks to steps = [Key(Up, Mods { ctrl: false, alt: false, shift: false }), Results(76), Point(Hover(Some(64))), Results(1)]

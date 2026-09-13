@@ -301,10 +301,16 @@ fn a_quiet_share_is_enumerated_only_on_the_floor() {
     let mut sim = Sim::new(Cadence::shipped());
     sim.run_for(DAY, &mut Stable(DirStamp::new(1, 1)));
 
-    let expected = (DAY.as_secs() / HOUR.as_secs()) as usize;
+    // The floor is "at least an hour, plus up to `FLOOR_SPREAD_PERCENT` of
+    // one", so a day holds between `DAY / (floor * 1.25)` and `DAY / floor`
+    // passes. The spread exists so that three hundred clients do not re-walk
+    // on the same minute; here it simply means the count is a band, not a
+    // number.
+    let most = (DAY.as_secs() / HOUR.as_secs()) as usize + 2;
+    let fewest = (DAY.as_secs() * 100 / (HOUR.as_secs() * (100 + 25))) as usize - 1;
     assert!(
-        (expected..=expected + 2).contains(&sim.scan_count()),
-        "expected about {expected} enumerations in a day, got {}",
+        (fewest..=most).contains(&sim.scan_count()),
+        "expected between {fewest} and {most} enumerations in a day, got {}",
         sim.scan_count()
     );
     assert!(
@@ -487,12 +493,13 @@ fn a_week_of_a_quiet_share_never_drifts() {
     sim.run_for(week, &mut Stable(DirStamp::new(1, 1)));
 
     let floors = (week.as_secs() / HOUR.as_secs()) as usize;
-    // A window either side: the floor fires at the first wake at or after
-    // the hour, and the probe jitter decides whether the last one lands
-    // inside the week or just past it.
+    // A window either side: the floor fires at the first wake at or after the
+    // hour, the probe jitter decides whether the last one lands inside the
+    // week, and the floor spread stretches each gap by up to a quarter.
+    let fewest = (week.as_secs() * 100 / (HOUR.as_secs() * (100 + 25))) as usize - 1;
     assert!(
-        (floors - 1..=floors + 1).contains(&sim.scan_count()),
-        "expected about {floors} enumerations in a week, got {}",
+        (fewest..=floors + 1).contains(&sim.scan_count()),
+        "expected between {fewest} and {floors} enumerations in a week, got {}",
         sim.scan_count()
     );
     assert!(

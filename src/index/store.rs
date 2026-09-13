@@ -34,6 +34,7 @@ use super::schedule::{Counters, ScanReason, StampHealth};
 use super::snapshot::Snapshot;
 use super::tree::TreeIndex;
 use crate::config::JOB_CACHE_CAPACITY;
+use crate::paths::{MappingId, MappingKind, Routes};
 
 /// Where the current listing came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,9 +59,16 @@ impl Origin {
 
 /// What the index is doing right now. Orthogonal to health and to whether
 /// data is present.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Activity {
+    #[default]
     Idle,
+    /// Waiting for a walk permit, because other shares are already walking.
+    ///
+    /// Its own state rather than `Idle`: a share sitting behind two walks for
+    /// three minutes while reporting nothing is exactly the unexplained wait
+    /// the other variants here exist to replace.
+    Queued,
     LoadingDisk,
     Scanning {
         seen: usize,
@@ -158,6 +166,50 @@ pub struct TreeCoverage {
     pub elapsed: Duration,
 }
 
+/// Why a share's index may no longer describe what is on the drive.
+///
+/// Distinct from [`Health`], which is about whether the share can be *reached*.
+/// A stale index is one that was read successfully and has since been
+/// overtaken: everything in it may still be right, and nothing in it can be
+/// trusted to be complete.
+///
+/// Named per share rather than reported as a single flag, because the answer
+/// is always "refresh that one" and a user asked to refresh everything will
+/// either refresh everything - which is the load this exists to avoid - or
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleReason {
+    /// The watcher lost events.
+    ///
+    /// A bulk copy overruns the remote 64 KB buffer, and the API reports that
+    /// by completing with zero bytes: nothing about what was lost can be
+    /// recovered. Only a full pass can say what the share now holds.
+    EventsLost,
+    /// Live updates are not running here, so nothing is arriving at all.
+    NoLiveUpdates,
+    /// Not re-read for longer than [`crate::config::MAX_INDEX_AGE`].
+    Age,
+}
+
+impl StaleReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::EventsLost => "changes were missed",
+            Self::NoLiveUpdates => "not receiving updates",
+            Self::Age => "not refreshed recently",
+        }
+    }
+
+    /// Higher wins when a share has more than one reason.
+    fn rank(self) -> u8 {
+        match self {
+            Self::Age => 0,
+            Self::NoLiveUpdates => 1,
+            Self::EventsLost => 2,
+        }
+    }
+}
+
 /// Index health, independent of whether a snapshot is present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Health {
@@ -216,6 +268,11 @@ pub struct IndexStatus {
     /// Set when the last refresh failed, even though the previous snapshot is
     /// still being served.
     pub last_error: Option<EnumError>,
+    /// Why this share's index may be behind the drive, if it is.
+    ///
+    /// Cleared by a completed full pass, which is the only thing that can
+    /// answer the question.
+    pub stale: Option<StaleReason>,
 }
 
 impl Default for IndexStatus {
@@ -235,6 +292,7 @@ impl Default for IndexStatus {
             coverage: None,
             cache_rejected: None,
             last_error: None,
+            stale: None,
         }
     }
 }
@@ -253,6 +311,196 @@ impl IndexStatus {
     pub fn confirmed_age(&self, now: SystemTime) -> Option<Duration> {
         let at = self.confirmed_at?;
         Some(now.duration_since(at).unwrap_or(Duration::ZERO))
+    }
+}
+
+/// One status line's worth of truth about every configured index.
+///
+/// Totals, because somebody searching four shares is searching one corpus and
+/// wants one number. Names, because a share that is down is one they have to
+/// go and fix, and "something is unreachable" sends nobody anywhere.
+///
+/// This exists because there used to be a single `IndexStatus` on the app
+/// state and one actor per index writing into it. With two actors the line
+/// already described whichever share published last; with ten it would be a
+/// flicker.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct IndexOverview {
+    /// Summed over every mapping holding data. `u64` because a share's own
+    /// count is a `u32` and ten of them is not obviously one.
+    pub entries: u64,
+    /// The mapping whose listing is *oldest*, and that mapping's timestamps.
+    ///
+    /// Oldest rather than newest: the newest lets one freshly rebuilt share
+    /// vouch for nine stale ones. All three fields come from that same
+    /// mapping, because the status line compares `built_at` against
+    /// `confirmed_at`, and two minima drawn from different shares would make
+    /// that comparison meaningless.
+    pub oldest: Option<MappingId>,
+    pub built_at: Option<SystemTime>,
+    pub confirmed_at: Option<SystemTime>,
+    pub origin: Option<Origin>,
+    /// Any mapping truncated. A truncated share means a file that exists is
+    /// not findable, which is the one thing this program refuses to hide, so
+    /// one of them outweighs nine clean ones.
+    pub truncated: bool,
+    /// The worst health, and whose. `Unreachable` beats `Degraded` beats
+    /// `Ok`; ties go to the lowest id, which is configuration order - the
+    /// order the user thinks in.
+    pub worst: Option<(MappingId, Health)>,
+    /// The most significant thing any share is doing, and how many are doing
+    /// something. Averaging three shares' folder counts would be fiction, and
+    /// three sets of counters do not fit on one line.
+    pub activity: Activity,
+    pub busy: usize,
+    /// Set when exactly one share is busy, so the common case can read
+    /// "walking jobs..." rather than "walking 1 share...".
+    pub busy_only: Option<MappingId>,
+    /// Shares holding a listing, out of those configured to be searched - so
+    /// "3 of 10 shares indexed" can be said rather than implied by a total
+    /// that is quietly short.
+    pub ready: usize,
+    pub configured: usize,
+    /// The share with the strongest reason to be refreshed, and why.
+    ///
+    /// Named, because the answer is always "refresh that one" - and a user
+    /// told only that something is stale will refresh everything, which is the
+    /// load this whole arrangement exists to avoid.
+    pub stalest: Option<(MappingId, StaleReason)>,
+    /// How many shares are reporting themselves stale.
+    pub stale_count: usize,
+}
+
+impl IndexOverview {
+    /// Folds every mapping's status into one.
+    ///
+    /// `statuses` is indexed by [`MappingId`], the same way the store's slots
+    /// are, so a disabled mapping occupies a position and contributes nothing.
+    pub fn of(routes: &Routes, statuses: &[Arc<IndexStatus>]) -> Self {
+        let mut out = Self::default();
+        for m in routes.all() {
+            if !m.enabled || !m.kind.is_indexed() || m.path.as_os_str().is_empty() {
+                continue;
+            }
+            let Some(status) = statuses.get(m.id.index()) else {
+                continue;
+            };
+            out.configured += 1;
+            out.entries = out.entries.saturating_add(u64::from(status.entries));
+            out.truncated |= status.truncated;
+            if status.built_at.is_some() {
+                out.ready += 1;
+            }
+
+            // Oldest wins, and an absent timestamp is not "new".
+            if let Some(built) = status.built_at
+                && out.built_at.is_none_or(|worst| built < worst)
+            {
+                out.oldest = Some(m.id);
+                out.built_at = Some(built);
+                out.confirmed_at = status.confirmed_at;
+                out.origin = status.origin;
+            }
+
+            if let Some(reason) = status.stale {
+                out.stale_count += 1;
+                if out
+                    .stalest
+                    .is_none_or(|(_, held)| reason.rank() > held.rank())
+                {
+                    out.stalest = Some((m.id, reason));
+                }
+            }
+
+            if health_rank(&status.health) > out.worst.as_ref().map_or(0, |(_, h)| health_rank(h)) {
+                out.worst = Some((m.id, status.health.clone()));
+            }
+
+            if status.activity.is_busy() {
+                out.busy += 1;
+                out.busy_only = if out.busy == 1 { Some(m.id) } else { None };
+                if activity_rank(&status.activity) > activity_rank(&out.activity) {
+                    out.activity = status.activity.clone();
+                }
+            }
+        }
+        out
+    }
+
+    /// Wall-clock age of the oldest listing, clamped at zero.
+    pub fn age(&self, now: SystemTime) -> Option<Duration> {
+        let built = self.built_at?;
+        Some(now.duration_since(built).unwrap_or(Duration::ZERO))
+    }
+
+    /// How long ago that same listing was last proven current.
+    pub fn confirmed_age(&self, now: SystemTime) -> Option<Duration> {
+        let at = self.confirmed_at?;
+        Some(now.duration_since(at).unwrap_or(Duration::ZERO))
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.busy > 0
+    }
+
+    /// The share most in need of a refresh, and why.
+    ///
+    /// Age is judged here rather than stored, because it is the one reason
+    /// that becomes true while nothing happens - an actor for an on-demand
+    /// share may not wake for hours, and a flag it never got round to setting
+    /// would be a promise the status line could not keep.
+    ///
+    /// A reported reason always wins over age: "changes were missed" says the
+    /// index is *incomplete*, which is worth acting on however recently it was
+    /// built.
+    pub fn stale_at(&self, now: SystemTime) -> Option<(MappingId, StaleReason)> {
+        if let Some(found) = self.stalest {
+            return Some(found);
+        }
+        let old = self.age(now)? > crate::config::MAX_INDEX_AGE;
+        old.then(|| self.oldest.map(|id| (id, StaleReason::Age)))?
+    }
+
+    /// The unreachable share, when the worst thing happening is one.
+    pub fn unreachable(&self) -> Option<(MappingId, &Health)> {
+        match &self.worst {
+            Some((id, h @ Health::Unreachable { .. })) => Some((*id, h)),
+            _ => None,
+        }
+    }
+
+    /// The degraded share and its reason, when nothing worse is happening.
+    pub fn degraded(&self) -> Option<(MappingId, DegradeReason)> {
+        match &self.worst {
+            Some((id, Health::Degraded { reason, .. })) => Some((*id, *reason)),
+            _ => None,
+        }
+    }
+}
+
+/// `Unreachable` outranks `Degraded` outranks `Ok`.
+fn health_rank(h: &Health) -> u8 {
+    match h {
+        Health::Ok => 0,
+        Health::Degraded { .. } => 1,
+        Health::Unreachable { .. } => 2,
+    }
+}
+
+/// Which verb wins when several shares are busy at once.
+///
+/// The slowest work wins, because it is the one the user is waiting on.
+/// `Persisting` loses to everything: it is seconds where a walk is minutes.
+/// `Queued` loses to real work, so "two walking, three queued" reads as
+/// walking - which is what is actually happening to the machine.
+fn activity_rank(a: &Activity) -> u8 {
+    match a {
+        Activity::Idle => 0,
+        Activity::Persisting => 1,
+        Activity::Queued => 2,
+        Activity::LoadingDisk => 3,
+        Activity::Scanning { .. } => 4,
+        Activity::Walking { .. } => 5,
     }
 }
 
@@ -286,54 +534,160 @@ pub enum Cached {
     Absent,
 }
 
-/// The index, shared by every thread.
-pub struct IndexStore {
-    flat: ArcSwapOption<Snapshot>,
-    status: ArcSwap<IndexStatus>,
-    /// The walked tree, when a tree mapping is configured.
-    ///
-    /// A second slot rather than a map keyed by mapping: the shipped
-    /// configuration is exactly one flat share and one tree, and the two are
-    /// genuinely different things - one is a single directory with a cheap
-    /// freshness probe, the other is three hundred thousand directories with
-    /// none. A keyed map would hide that difference behind a uniformity the
-    /// rest of the program does not have.
-    ///
-    /// Each slot still has exactly one writer thread, which is what the
-    /// single-writer rule above actually requires.
-    tree: ArcSwapOption<TreeIndex>,
-    tree_status: ArcSwap<IndexStatus>,
-    jobs: Mutex<LruCache<PathBuf, JobSlot>>,
+/// What a slot holds.
+///
+/// One field rather than a `Snapshot` slot beside a `TreeIndex` slot: a
+/// mapping is one shape or the other, and two `Option`s where exactly one is
+/// ever populated makes "both at once" representable and then relies on every
+/// call site to remember that it cannot happen. The enum *is* the dispatch a
+/// search needs, so the check and the branch are one line.
+#[derive(Debug)]
+pub enum SlotIndex {
+    Flat(Arc<Snapshot>),
+    Tree(Arc<TreeIndex>),
 }
 
-impl Default for IndexStore {
-    fn default() -> Self {
-        Self::new(JOB_CACHE_CAPACITY)
-    }
-}
-
-impl IndexStore {
-    pub fn new(job_capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(job_capacity.max(1)).expect("capacity is at least one");
-        Self {
-            flat: ArcSwapOption::empty(),
-            status: ArcSwap::from_pointee(IndexStatus::default()),
-            tree: ArcSwapOption::empty(),
-            tree_status: ArcSwap::from_pointee(IndexStatus::default()),
-            jobs: Mutex::new(LruCache::new(cap)),
+impl SlotIndex {
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Flat(s) => s.len(),
+            Self::Tree(t) => t.len(),
         }
     }
 
-    // --- the walked tree ---------------------------------------------------
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
-    /// The current tree index, if a tree mapping is configured and has been
-    /// walked at all. Lock-free, like [`Self::flat`].
-    pub fn tree(&self) -> Option<Arc<TreeIndex>> {
-        self.tree.load_full()
+/// One mapping's index and its health.
+///
+/// Exactly one writer thread - the actor that owns this mapping - which is
+/// what the single-writer rule above actually requires. The previous shape
+/// was one flat slot beside one tree slot, which satisfied that rule only
+/// because there happened to be at most one actor of each kind.
+pub struct MappingSlot {
+    id: MappingId,
+    kind: MappingKind,
+    /// Copied from the routing table rather than looked up through it, so a
+    /// reader never needs `Routes` in hand and an actor cannot write one
+    /// mapping's state while reading another's.
+    name: Box<str>,
+    dir: PathBuf,
+    enabled: bool,
+    index: ArcSwapOption<SlotIndex>,
+    status: ArcSwap<IndexStatus>,
+}
+
+impl MappingSlot {
+    fn new(id: MappingId, kind: MappingKind, name: &str, dir: &Path, enabled: bool) -> Self {
+        Self {
+            id,
+            kind,
+            name: name.into(),
+            dir: dir.to_path_buf(),
+            enabled,
+            index: ArcSwapOption::empty(),
+            status: ArcSwap::from_pointee(IndexStatus::default()),
+        }
     }
 
-    pub fn tree_status(&self) -> Arc<IndexStatus> {
-        self.tree_status.load_full()
+    // --- identity ----------------------------------------------------------
+
+    pub fn id(&self) -> MappingId {
+        self.id
+    }
+
+    pub fn kind(&self) -> MappingKind {
+        self.kind
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn is_tree(&self) -> bool {
+        self.kind == MappingKind::Tree
+    }
+
+    /// Whether anything should index or search this mapping at all.
+    ///
+    /// The empty path is checked rather than assumed away. An empty `PathBuf`
+    /// standing in for "absent" is exactly what pinned a permanent
+    /// `os error 3` on an actor spawned for a mapping nobody configured.
+    pub fn is_searchable(&self) -> bool {
+        self.enabled && self.kind.is_indexed() && !self.dir.as_os_str().is_empty()
+    }
+
+    // --- reads, lock-free --------------------------------------------------
+
+    pub fn index(&self) -> Option<Arc<SlotIndex>> {
+        self.index.load_full()
+    }
+
+    /// This slot's listing, when it holds a flat one.
+    pub fn as_flat(&self) -> Option<Arc<Snapshot>> {
+        match &*self.index.load_full()? {
+            SlotIndex::Flat(s) => Some(Arc::clone(s)),
+            SlotIndex::Tree(_) => None,
+        }
+    }
+
+    /// This slot's walked tree, when it holds one.
+    pub fn as_tree(&self) -> Option<Arc<TreeIndex>> {
+        match &*self.index.load_full()? {
+            SlotIndex::Tree(t) => Some(Arc::clone(t)),
+            SlotIndex::Flat(_) => None,
+        }
+    }
+
+    pub fn has_index(&self) -> bool {
+        self.index.load().is_some()
+    }
+
+    pub fn status(&self) -> Arc<IndexStatus> {
+        self.status.load_full()
+    }
+
+    // --- writes, from this mapping's actor only ----------------------------
+
+    /// Installs a new flat snapshot and clears any error state.
+    pub fn publish_flat(&self, snapshot: Arc<Snapshot>, origin: Origin) {
+        let entries = snapshot.len() as u32;
+        let truncated = snapshot.truncated();
+        let built_at = snapshot.captured_at();
+        let stamp = snapshot.stamp();
+        self.index.store(Some(Arc::new(SlotIndex::Flat(snapshot))));
+        self.update_status(|s| {
+            s.origin = Some(origin);
+            s.built_at = Some(built_at);
+            // The listing *is* the confirmation now.
+            s.confirmed_at = Some(built_at);
+            s.entries = entries;
+            s.truncated = truncated;
+            s.stamp = stamp;
+            s.last_error = None;
+            // A completed pass is the only thing that can answer "is this
+            // still what the share holds", so it is the only thing that
+            // clears the question.
+            s.stale = None;
+            s.health = if truncated {
+                Health::Degraded {
+                    reason: DegradeReason::Truncated,
+                    since: Instant::now(),
+                }
+            } else {
+                Health::Ok
+            };
+        });
     }
 
     /// Installs a tree index.
@@ -351,13 +705,18 @@ impl IndexStore {
         let entries = index.len() as u32;
         let built_at = index.captured_at();
         let complete = index.complete();
-        self.tree.store(Some(index));
-        self.update_tree_status(|s| {
+        self.index.store(Some(Arc::new(SlotIndex::Tree(index))));
+        self.update_status(|s| {
             s.origin = Some(origin);
             s.built_at = Some(built_at);
             s.confirmed_at = Some(built_at);
             s.entries = entries;
             s.last_error = None;
+            // Only once the walk has finished: a mid-walk publish has not yet
+            // established anything about the share as a whole.
+            if coverage.is_some() {
+                s.stale = None;
+            }
             if let Some(coverage) = &coverage {
                 s.coverage = Some(Arc::clone(coverage));
             }
@@ -379,18 +738,82 @@ impl IndexStore {
         });
     }
 
-    /// Records a failed walk, leaving whatever index is already published in
-    /// place - a stale tree beats no tree.
-    pub fn record_tree_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
-        self.update_tree_status(|s| {
+    /// Records a failed refresh.
+    ///
+    /// Deliberately does not touch the index: stale data plus an honest label
+    /// beats an empty list.
+    ///
+    /// `since` survives a retry, so "unreachable for six minutes" stays true
+    /// instead of resetting on every attempt. `activity` is cleared, because a
+    /// walk that failed is not still walking - the tree half of this used to
+    /// do that and the flat half did not, and the tree half was right.
+    pub fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
+        self.update_status(|s| {
+            let since = match s.health {
+                Health::Unreachable { since, .. } => since,
+                _ => Instant::now(),
+            };
             s.last_error = Some(err);
             s.activity = Activity::Idle;
             s.health = Health::Unreachable {
                 err,
-                since: Instant::now(),
+                since,
                 attempt,
                 next_retry_at,
             };
+        });
+    }
+
+    /// Records that the listing is still current as of `at`, without having
+    /// rebuilt it. Used when the directory stamp proves nothing changed.
+    ///
+    /// Deliberately does not touch `built_at`: the data is exactly as old as
+    /// it was a moment ago, and claiming otherwise is how a stale index came
+    /// to render as a fresh one.
+    pub fn confirm_fresh(&self, stamp: Option<DirStamp>, at: SystemTime) {
+        self.update_status(|s| {
+            s.confirmed_at = Some(at);
+            if stamp.is_some() {
+                s.stamp = stamp;
+            }
+            s.last_error = None;
+            if s.health.is_unreachable() {
+                s.health = Health::Ok;
+            }
+        });
+    }
+
+    /// Records that this share's index may be behind the drive.
+    ///
+    /// Keeps the strongest reason: "changes were missed" is a statement about
+    /// completeness, while "not refreshed recently" is only about age, and
+    /// letting the second overwrite the first would soften the message that
+    /// actually needs acting on.
+    pub fn note_stale(&self, reason: StaleReason) {
+        self.update_status(|s| {
+            if s.stale.is_none_or(|held| reason.rank() >= held.rank()) {
+                s.stale = Some(reason);
+            }
+        });
+    }
+
+    pub fn set_activity(&self, activity: Activity) {
+        self.update_status(|s| s.activity = activity);
+    }
+
+    /// Marks the index degraded, unless something worse is already reported.
+    ///
+    /// The guard is the point: an unreachable share is a stronger statement
+    /// than a degraded one, and letting a refused probe overwrite it would
+    /// replace "this drive is gone" with "change detection unavailable".
+    pub fn set_degraded(&self, reason: DegradeReason) {
+        self.update_status(|s| {
+            if !matches!(s.health, Health::Unreachable { .. }) {
+                s.health = Health::Degraded {
+                    reason,
+                    since: Instant::now(),
+                };
+            }
         });
     }
 
@@ -406,118 +829,10 @@ impl IndexStore {
     /// *successful walk* publishes a fresh verdict on the tree's health, and a
     /// walk succeeding is not evidence that the watch came back.
     pub fn note_live_updates_unavailable(&self) {
-        self.update_tree_status(|s| {
+        self.update_status(|s| {
             if s.health == Health::Ok {
                 s.health = Health::Degraded {
                     reason: DegradeReason::LiveUpdatesUnavailable,
-                    since: Instant::now(),
-                };
-            }
-        });
-    }
-
-    pub fn note_tree_cache_rejected(&self, why: String) {
-        self.update_tree_status(|s| s.cache_rejected = Some(why));
-    }
-
-    pub fn set_tree_activity(&self, activity: Activity) {
-        self.update_tree_status(|s| s.activity = activity);
-    }
-
-    pub fn set_tree_degraded(&self, reason: DegradeReason) {
-        self.update_tree_status(|s| {
-            s.health = Health::Degraded {
-                reason,
-                since: Instant::now(),
-            };
-        });
-    }
-
-    pub fn note_tree_scan_started(&self, reason: ScanReason) {
-        self.update_tree_status(|s| s.last_scan_reason = Some(reason));
-    }
-
-    pub fn note_tree_schedule(&self, counters: Counters, stamp_health: StampHealth) {
-        self.update_tree_status(|s| {
-            s.counters = counters;
-            s.stamp_health = stamp_health;
-        });
-    }
-
-    fn update_tree_status(&self, f: impl FnOnce(&mut IndexStatus)) {
-        let mut next = (**self.tree_status.load()).clone();
-        f(&mut next);
-        self.tree_status.store(Arc::new(next));
-    }
-
-    // --- flat root ---------------------------------------------------------
-
-    /// The current flat-root snapshot. Lock-free, never blocks, never does
-    /// I/O.
-    pub fn flat(&self) -> Option<Arc<Snapshot>> {
-        self.flat.load_full()
-    }
-
-    pub fn status(&self) -> Arc<IndexStatus> {
-        self.status.load_full()
-    }
-
-    /// Installs a new flat snapshot and clears any error state.
-    pub fn publish_flat(&self, snapshot: Arc<Snapshot>, origin: Origin) {
-        let entries = snapshot.len() as u32;
-        let truncated = snapshot.truncated();
-        let built_at = snapshot.captured_at();
-        let stamp = snapshot.stamp();
-        self.flat.store(Some(snapshot));
-        self.update_status(|s| {
-            s.origin = Some(origin);
-            s.built_at = Some(built_at);
-            // The listing *is* the confirmation now.
-            s.confirmed_at = Some(built_at);
-            s.entries = entries;
-            s.truncated = truncated;
-            s.stamp = stamp;
-            s.last_error = None;
-            s.health = if truncated {
-                Health::Degraded {
-                    reason: DegradeReason::Truncated,
-                    since: Instant::now(),
-                }
-            } else {
-                Health::Ok
-            };
-        });
-    }
-
-    /// Records a failed refresh.
-    ///
-    /// Deliberately does not touch the snapshot: stale data plus an honest
-    /// label beats an empty list.
-    pub fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
-        self.update_status(|s| {
-            let since = match s.health {
-                Health::Unreachable { since, .. } => since,
-                _ => Instant::now(),
-            };
-            s.last_error = Some(err);
-            s.health = Health::Unreachable {
-                err,
-                since,
-                attempt,
-                next_retry_at,
-            };
-        });
-    }
-
-    pub fn set_activity(&self, activity: Activity) {
-        self.update_status(|s| s.activity = activity);
-    }
-
-    pub fn set_degraded(&self, reason: DegradeReason) {
-        self.update_status(|s| {
-            if !matches!(s.health, Health::Unreachable { .. }) {
-                s.health = Health::Degraded {
-                    reason,
                     since: Instant::now(),
                 };
             }
@@ -548,29 +863,115 @@ impl IndexStore {
         self.update_status(|s| s.cache_rejected = Some(why));
     }
 
-    /// Records that the listing is still current as of `at`, without having
-    /// rebuilt it. Used when the directory stamp proves nothing changed.
-    ///
-    /// Deliberately does not touch `built_at`: the data is exactly as old as
-    /// it was a moment ago, and claiming otherwise is how a stale index came
-    /// to render as a fresh one.
-    pub fn confirm_fresh(&self, stamp: Option<DirStamp>, at: SystemTime) {
-        self.update_status(|s| {
-            s.confirmed_at = Some(at);
-            if stamp.is_some() {
-                s.stamp = stamp;
-            }
-            s.last_error = None;
-            if s.health.is_unreachable() {
-                s.health = Health::Ok;
-            }
-        });
-    }
-
     fn update_status(&self, f: impl FnOnce(&mut IndexStatus)) {
-        let mut next = (*self.status.load_full()).clone();
+        let mut next = (**self.status.load()).clone();
         f(&mut next);
         self.status.store(Arc::new(next));
+    }
+}
+
+/// The index, shared by every thread.
+pub struct IndexStore {
+    /// One slot per configured mapping, indexed by [`MappingId`].
+    ///
+    /// Dense and allocated once, including disabled mappings, because
+    /// `MappingId` *is* a position in the configured list - which
+    /// [`Routes::get`] already relies on. A map keyed by id would cost a hash
+    /// on every slot lookup on the search path and, worse, would make the
+    /// container itself mutable, which quietly dissolves the single-writer
+    /// rule: a fixed slice means every `&MappingSlot` is stable for the life
+    /// of the process and each actor owns exactly one by construction.
+    slots: Box<[MappingSlot]>,
+    jobs: Mutex<LruCache<PathBuf, JobSlot>>,
+}
+
+impl Default for IndexStore {
+    /// A store over the shipped routing table, which is one flat mapping and
+    /// one tree. Used by tests; the running program builds from the
+    /// configuration that was actually loaded.
+    fn default() -> Self {
+        Self::for_routes(&crate::config::default_routes(), JOB_CACHE_CAPACITY)
+    }
+}
+
+impl IndexStore {
+    /// Builds a slot for every configured mapping, enabled or not.
+    ///
+    /// Disabled mappings get a slot and no actor. Keeping them means
+    /// `MappingId::index()` stays a direct index, so an out-of-range id is
+    /// unreachable except through a construction bug.
+    pub fn for_routes(routes: &Routes, job_capacity: usize) -> Self {
+        let slots = routes
+            .all()
+            .iter()
+            .map(|m| MappingSlot::new(m.id, m.kind, &m.name, &m.path, m.enabled))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self::from_slots(slots, job_capacity)
+    }
+
+    /// A store with no mappings and a bounded job cache, for the job-cache
+    /// tests, which are about the LRU rather than about any share.
+    pub fn with_job_capacity(job_capacity: usize) -> Self {
+        Self::from_slots(Box::new([]), job_capacity)
+    }
+
+    /// A store over a single mapping. For tests and for `--doctor`.
+    pub fn single(name: &str, dir: &Path, kind: MappingKind) -> Self {
+        let slots = vec![MappingSlot::new(MappingId(0), kind, name, dir, true)].into_boxed_slice();
+        Self::from_slots(slots, JOB_CACHE_CAPACITY)
+    }
+
+    fn from_slots(slots: Box<[MappingSlot]>, job_capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(job_capacity.max(1)).expect("capacity is at least one");
+        Self {
+            slots,
+            jobs: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
+    pub fn slot(&self, id: MappingId) -> Option<&MappingSlot> {
+        self.slots.get(id.index())
+    }
+
+    pub fn slots(&self) -> &[MappingSlot] {
+        &self.slots
+    }
+
+    /// Every mapping a search should visit, in configuration order.
+    pub fn indexed(&self) -> impl Iterator<Item = &MappingSlot> {
+        self.slots.iter().filter(|s| s.is_searchable())
+    }
+
+    /// Total entries across every mapping holding data.
+    pub fn entries(&self) -> u64 {
+        self.slots
+            .iter()
+            .map(|s| u64::from(s.status().entries))
+            .sum()
+    }
+
+    // --- first-match convenience -------------------------------------------
+    //
+    // Named `first_*` deliberately. An implicit first-match hiding behind an
+    // innocent name is the exact mechanism that produced the two derived
+    // `Settings` paths and the bug this module was re-keyed to remove, so
+    // these say what they do and nothing in the running program calls them.
+
+    /// The first enabled flat mapping's slot, for tests and diagnostics.
+    pub fn first_flat_slot(&self) -> &MappingSlot {
+        self.slots
+            .iter()
+            .find(|s| s.enabled && s.kind == MappingKind::Flat)
+            .expect("the store has a flat mapping")
+    }
+
+    /// The first enabled tree mapping's slot, for tests and diagnostics.
+    pub fn first_tree_slot(&self) -> &MappingSlot {
+        self.slots
+            .iter()
+            .find(|s| s.enabled && s.kind == MappingKind::Tree)
+            .expect("the store has a tree mapping")
     }
 
     // --- job folders -------------------------------------------------------
@@ -655,8 +1056,8 @@ mod tests {
     #[test]
     fn starts_with_no_snapshot_and_a_clean_status() {
         let s = IndexStore::default();
-        assert!(s.flat().is_none());
-        let st = s.status();
+        assert!(s.first_flat_slot().as_flat().is_none());
+        let st = s.first_flat_slot().status();
         assert!(st.health.is_ok());
         assert_eq!(st.entries, 0);
         assert!(st.origin.is_none());
@@ -665,9 +1066,10 @@ mod tests {
     #[test]
     fn publishing_makes_the_snapshot_and_its_metadata_visible() {
         let s = IndexStore::default();
-        s.publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
-        assert_eq!(s.flat().unwrap().len(), 2);
-        let st = s.status();
+        s.first_flat_slot()
+            .publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
+        assert_eq!(s.first_flat_slot().as_flat().unwrap().len(), 2);
+        let st = s.first_flat_slot().status();
         assert_eq!(st.entries, 2);
         assert_eq!(st.origin, Some(Origin::Network));
         assert!(st.health.is_ok());
@@ -677,15 +1079,20 @@ mod tests {
     #[test]
     fn a_failed_refresh_keeps_the_last_known_good_snapshot() {
         let s = IndexStore::default();
-        s.publish_flat(
+        s.first_flat_slot().publish_flat(
             snap(&["a", "b", "c"], SystemTime::UNIX_EPOCH),
             Origin::Network,
         );
 
-        s.record_failure(EnumError::Transient(53), 1, Instant::now());
+        s.first_flat_slot()
+            .record_failure(EnumError::Transient(53), 1, Instant::now());
 
-        assert_eq!(s.flat().unwrap().len(), 3, "data must survive the failure");
-        let st = s.status();
+        assert_eq!(
+            s.first_flat_slot().as_flat().unwrap().len(),
+            3,
+            "data must survive the failure"
+        );
+        let st = s.first_flat_slot().status();
         assert!(st.health.is_unreachable());
         assert_eq!(st.last_error, Some(EnumError::Transient(53)));
         assert_eq!(st.entries, 3, "the count still describes the served data");
@@ -694,15 +1101,17 @@ mod tests {
     #[test]
     fn repeated_failures_keep_the_original_onset_time() {
         let s = IndexStore::default();
-        s.record_failure(EnumError::Transient(53), 1, Instant::now());
-        let status = s.status();
+        s.first_flat_slot()
+            .record_failure(EnumError::Transient(53), 1, Instant::now());
+        let status = s.first_flat_slot().status();
         let first = match &status.health {
             Health::Unreachable { since, .. } => *since,
             other => panic!("expected unreachable, got {other:?}"),
         };
         std::thread::sleep(Duration::from_millis(5));
-        s.record_failure(EnumError::Transient(53), 2, Instant::now());
-        let status = s.status();
+        s.first_flat_slot()
+            .record_failure(EnumError::Transient(53), 2, Instant::now());
+        let status = s.first_flat_slot().status();
         match &status.health {
             Health::Unreachable { since, attempt, .. } => {
                 assert_eq!(*since, first, "onset should not reset on every retry");
@@ -715,9 +1124,11 @@ mod tests {
     #[test]
     fn a_successful_publish_clears_the_error() {
         let s = IndexStore::default();
-        s.record_failure(EnumError::Transient(53), 3, Instant::now());
-        s.publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
-        let st = s.status();
+        s.first_flat_slot()
+            .record_failure(EnumError::Transient(53), 3, Instant::now());
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
+        let st = s.first_flat_slot().status();
         assert!(st.health.is_ok());
         assert!(st.last_error.is_none());
     }
@@ -742,9 +1153,10 @@ mod tests {
             None,
             true,
         );
-        s.publish_flat(Arc::new(snapshot), Origin::Network);
+        s.first_flat_slot()
+            .publish_flat(Arc::new(snapshot), Origin::Network);
         assert!(matches!(
-            s.status().health,
+            s.first_flat_slot().status().health,
             Health::Degraded {
                 reason: DegradeReason::Truncated,
                 ..
@@ -755,10 +1167,13 @@ mod tests {
     #[test]
     fn confirming_freshness_recovers_from_unreachable() {
         let s = IndexStore::default();
-        s.publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
-        s.record_failure(EnumError::Transient(53), 1, Instant::now());
-        s.confirm_fresh(Some(DirStamp::new(9, 9)), SystemTime::UNIX_EPOCH);
-        let st = s.status();
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
+        s.first_flat_slot()
+            .record_failure(EnumError::Transient(53), 1, Instant::now());
+        s.first_flat_slot()
+            .confirm_fresh(Some(DirStamp::new(9, 9)), SystemTime::UNIX_EPOCH);
+        let st = s.first_flat_slot().status();
         assert!(st.health.is_ok());
         assert_eq!(st.stamp, Some(DirStamp::new(9, 9)));
     }
@@ -768,8 +1183,13 @@ mod tests {
         // A clock correction can put built_at in the future.
         let future = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
         let s = IndexStore::default();
-        s.publish_flat(snap(&["a"], future), Origin::Network);
-        let age = s.status().age(SystemTime::UNIX_EPOCH).unwrap();
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], future), Origin::Network);
+        let age = s
+            .first_flat_slot()
+            .status()
+            .age(SystemTime::UNIX_EPOCH)
+            .unwrap();
         assert_eq!(age, Duration::ZERO);
     }
 
@@ -859,7 +1279,7 @@ mod tests {
 
     #[test]
     fn the_job_cache_is_bounded() {
-        let s = IndexStore::new(4);
+        let s = IndexStore::with_job_capacity(4);
         for i in 0..10 {
             s.publish_job(
                 PathBuf::from(format!("R:\\job{i}")),
@@ -896,12 +1316,14 @@ mod tests {
     fn confirming_freshness_does_not_pretend_the_data_is_new() {
         let s = IndexStore::default();
         let built = SystemTime::UNIX_EPOCH;
-        s.publish_flat(snap(&["a"], built), Origin::Network);
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], built), Origin::Network);
 
         let later = built + Duration::from_secs(3600);
-        s.confirm_fresh(Some(DirStamp::new(9, 9)), later);
+        s.first_flat_slot()
+            .confirm_fresh(Some(DirStamp::new(9, 9)), later);
 
-        let st = s.status();
+        let st = s.first_flat_slot().status();
         assert_eq!(st.built_at, Some(built), "the data did not get any newer");
         assert_eq!(st.confirmed_at, Some(later));
         assert_eq!(st.age(later), Some(Duration::from_secs(3600)));
@@ -911,27 +1333,36 @@ mod tests {
     #[test]
     fn a_fresh_listing_is_its_own_confirmation() {
         let s = IndexStore::default();
-        s.publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
-        let st = s.status();
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
+        let st = s.first_flat_slot().status();
         assert_eq!(st.built_at, st.confirmed_at);
     }
 
     #[test]
     fn the_scan_reason_is_visible_to_the_ui() {
         let s = IndexStore::default();
-        assert!(s.status().last_scan_reason.is_none());
-        s.note_scan_started(ScanReason::StampMoved);
-        assert_eq!(s.status().last_scan_reason, Some(ScanReason::StampMoved));
+        assert!(s.first_flat_slot().status().last_scan_reason.is_none());
+        s.first_flat_slot()
+            .note_scan_started(ScanReason::StampMoved);
+        assert_eq!(
+            s.first_flat_slot().status().last_scan_reason,
+            Some(ScanReason::StampMoved)
+        );
 
         // It survives the publish, so the user can still see why afterwards.
-        s.publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
-        assert_eq!(s.status().last_scan_reason, Some(ScanReason::StampMoved));
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
+        assert_eq!(
+            s.first_flat_slot().status().last_scan_reason,
+            Some(ScanReason::StampMoved)
+        );
     }
 
     #[test]
     fn the_session_totals_reach_the_ui() {
         let s = IndexStore::default();
-        s.note_schedule(
+        s.first_flat_slot().note_schedule(
             Counters {
                 full_scans: 3,
                 probes: 40,
@@ -939,7 +1370,7 @@ mod tests {
             },
             StampHealth::Blind { failures: 2 },
         );
-        let st = s.status();
+        let st = s.first_flat_slot().status();
         assert_eq!(st.counters.full_scans, 3);
         assert!(st.stamp_health.is_blind());
     }
@@ -949,9 +1380,11 @@ mod tests {
     #[test]
     fn a_rejected_cache_is_recorded_rather_than_discarded() {
         let s = IndexStore::default();
-        s.note_cache_rejected("cached index belongs to volume 00000000".into());
+        s.first_flat_slot()
+            .note_cache_rejected("cached index belongs to volume 00000000".into());
         assert!(
-            s.status()
+            s.first_flat_slot()
+                .status()
                 .cache_rejected
                 .as_deref()
                 .is_some_and(|r| r.contains("volume")),
@@ -964,10 +1397,12 @@ mod tests {
         // Holding a snapshot must not prevent a publish - that is the whole
         // reason for the arc-swap.
         let s = IndexStore::default();
-        s.publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
-        let held = s.flat().unwrap();
-        s.publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
+        s.first_flat_slot()
+            .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
+        let held = s.first_flat_slot().as_flat().unwrap();
+        s.first_flat_slot()
+            .publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
         assert_eq!(held.len(), 1, "the old view stays consistent");
-        assert_eq!(s.flat().unwrap().len(), 2);
+        assert_eq!(s.first_flat_slot().as_flat().unwrap().len(), 2);
     }
 }

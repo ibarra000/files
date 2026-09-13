@@ -106,8 +106,12 @@ fn spawn(program: &str, path: &str) -> Result<(), LaunchError> {
 }
 
 /// Opens a file with whatever is registered for its type.
+///
+/// Public because the settings window opens the configuration file with it,
+/// which is the same act for the same reason: whatever the user has chosen for
+/// that kind of file, rather than an editor this program picked for them.
 #[cfg(windows)]
-fn shell_open(path: &str) -> Result<(), LaunchError> {
+pub fn shell_open(path: &str) -> Result<(), LaunchError> {
     use windows_sys::Win32::System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
     };

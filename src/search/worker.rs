@@ -10,22 +10,20 @@
 //! request, so thread growth and network stampedes are prevented structurally
 //! rather than by discipline.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crossbeam_channel::Sender;
-
 use super::matcher::{self};
 use super::verify::{SkipReason, Verifier, VerifyOutcome};
-use crate::app::event::{AppEvent, SearchMsg, VerifyMsg};
+use crate::app::event::{AppEvent, Events, SearchMsg, VerifyMsg};
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 use crate::index::snapshot;
 use crate::index::snapshot::Snapshot;
-use crate::index::store::IndexStore;
-use crate::index::tree::TreeIndex;
-use crate::paths::TargetList;
+use crate::index::store::{IndexStore, SlotIndex};
+use crate::paths::{MappingKind, TargetList};
 use crate::util::cancel::Epoch;
 use crate::util::latest_slot::LatestSlot;
 
@@ -44,29 +42,19 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// The flat index, or an empty listing until one exists.
+    /// The listing of the mapping `path` belongs to, when it has one.
     ///
-    /// Takes no query and cannot fail. It used to do both: a code was routed
-    /// to a folder, and the folder was listed over the network on the search
-    /// thread. Every share is indexed now, so the listing is already in
-    /// memory and there is nothing left to resolve or to wait for.
-    pub fn flat(&self) -> Arc<Snapshot> {
-        self.store.flat().unwrap_or_else(|| {
-            Arc::new(Snapshot::empty(
-                &self.settings.custpro_path.to_string_lossy(),
-            ))
-        })
-    }
-
-    /// The walked tree, once it holds anything.
-    ///
-    /// Separate from [`Self::flat`] because a tree is a different shape, not a
-    /// different listing: it spans many directories and carries the folder
-    /// names alongside the filenames. Forcing it through `Arc<Snapshot>` would
-    /// mean flattening away exactly the structure that makes a folder-name
-    /// match possible.
-    pub fn tree(&self) -> Option<Arc<TreeIndex>> {
-        self.store.tree()
+    /// Replaces a `flat()` accessor that returned the *first* flat share's
+    /// listing whatever was being opened - so with a second share configured,
+    /// a drawing set's sibling pages were looked for in the wrong share, and
+    /// with none configured it returned an empty listing built around an empty
+    /// path. `None` where the file belongs to a tree, which carries its own
+    /// structure and is not a single directory's listing.
+    pub fn snapshot_for(&self, path: &Path) -> Option<Arc<Snapshot>> {
+        self.store
+            .indexed()
+            .find(|s| crate::util::winpath::contains(s.dir(), path))
+            .and_then(|s| s.as_flat())
     }
 
     /// Every share a query is searched against, in configuration order.
@@ -135,7 +123,7 @@ impl<T> WorkerHandle<T> {
 /// Spawns the search worker.
 pub fn spawn_search(
     backend: Arc<Backend>,
-    tx: Sender<AppEvent>,
+    tx: Events,
 ) -> std::io::Result<WorkerHandle<SearchRequest>> {
     let slot = Arc::new(LatestSlot::<SearchRequest>::new());
     let epoch = Epoch::new();
@@ -167,12 +155,7 @@ pub fn spawn_search(
     })
 }
 
-fn run_search(
-    backend: &Backend,
-    slot: &LatestSlot<SearchRequest>,
-    epoch: &Epoch,
-    tx: &Sender<AppEvent>,
-) {
+fn run_search(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, tx: &Events) {
     while let Some(request) = slot.take_blocking() {
         let started = Instant::now();
         let cancel = epoch.token(request.epoch);
@@ -182,24 +165,54 @@ fn run_search(
             continue;
         }
 
-        // No network call and no failure path. Both indexes are already in
+        // No network call and no failure path. Every index is already in
         // memory, so a search is a sweep over bytes this process owns - which
         // is why the "no such job folder" error this used to have to report
         // does not exist any more.
-        let flat = matcher::search(
-            &backend.flat(),
-            &request.query,
-            backend.settings.matcher,
-            &cancel,
-        );
-        let result = match backend.tree() {
-            // One merged, ranked list: which share a file came from is shown
-            // on the row, but it must not decide where in the list it sits.
-            Some(tree) => flat.and_then(|flat| {
-                matcher::search_tree(&tree, &request.query, &cancel)
-                    .map(|tree| matcher::merge(flat, tree))
-            }),
-            None => flat,
+        //
+        // The query is judged once, before any index is consulted. `TooShort`
+        // and `ContainsNul` are properties of what was typed, not of a share,
+        // so asking each one would give N copies of the same answer - and with
+        // nothing indexed yet, no answer at all: a two-character query would
+        // come back "no matches" instead of "type at least 3 characters".
+        let result = match matcher::check_query(&request.query) {
+            Err(reject) => Err(reject),
+            Ok(()) => {
+                let mut parts = Vec::new();
+                let mut rejected = None;
+                for slot in backend.store.indexed() {
+                    // Checked between shares rather than only within one, so a
+                    // superseded keystroke abandons the shares not yet reached
+                    // instead of paying for all ten.
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let Some(index) = slot.index() else { continue };
+                    let part = match &*index {
+                        SlotIndex::Flat(s) => {
+                            matcher::search(s, &request.query, backend.settings.matcher, &cancel)
+                        }
+                        SlotIndex::Tree(t) => matcher::search_tree(t, &request.query, &cancel),
+                    };
+                    match part {
+                        Ok(part) => parts.push(part),
+                        // Unreachable once `check_query` has passed - both
+                        // rejections are properties of the query. Propagated
+                        // rather than unwrapped so that stays true by
+                        // construction if either function grows a third.
+                        Err(reject) => {
+                            rejected = Some(reject);
+                            break;
+                        }
+                    }
+                }
+                // One merged, ranked list: which share a file came from is
+                // shown on the row, but it must not decide where it sits.
+                match rejected {
+                    Some(reject) => Err(reject),
+                    None => Ok(matcher::merge_all(parts)),
+                }
+            }
         };
 
         let _ = tx.send(AppEvent::Search(SearchMsg {
@@ -215,7 +228,7 @@ fn run_search(
 pub fn spawn_verify(
     backend: Arc<Backend>,
     verifier: Arc<Verifier>,
-    tx: Sender<AppEvent>,
+    tx: Events,
 ) -> std::io::Result<WorkerHandle<SearchRequest>> {
     let slot = Arc::new(LatestSlot::<SearchRequest>::new());
     let epoch = Epoch::new();
@@ -251,7 +264,7 @@ fn run_verify(
     verifier: &Verifier,
     slot: &LatestSlot<SearchRequest>,
     epoch: &Epoch,
-    tx: &Sender<AppEvent>,
+    tx: &Events,
 ) {
     while let Some(request) = slot.take_blocking() {
         let started = Instant::now();
@@ -267,10 +280,16 @@ fn run_verify(
         // hundreds. Freshness for a tree comes from the change watcher and the
         // re-walk floor instead, and saying so is better than implying a check
         // that did not happen.
-        let outcome = if backend.settings.custpro_path.as_os_str().is_empty() {
+        let outcome = if verifier.is_empty() {
             VerifyOutcome::Skipped(SkipReason::NotApplicable)
+        } else if verifier.len() > 1 {
+            VerifyOutcome::Skipped(SkipReason::SeveralShares)
         } else {
-            let snapshot = backend.store.flat();
+            let snapshot = backend
+                .store
+                .indexed()
+                .find(|s| s.kind() == MappingKind::Flat)
+                .and_then(|s| s.as_flat());
             verifier.verify(&request.query, snapshot.as_deref(), &cancel)
         };
 
@@ -343,7 +362,10 @@ mod tests {
     fn the_flat_root_is_served_from_the_index_without_touching_the_network() {
         let src = FakeDirSource::new().with_dir(crate::config::CUSTPRO_PATH, &["a.pdf"]);
         let b = backend(src.clone());
-        assert!(b.flat().is_empty(), "no index published yet");
+        assert!(
+            b.store.indexed().all(|s| !s.has_index()),
+            "no index published yet"
+        );
         assert!(
             src.calls().is_empty(),
             "the flat root must never be enumerated inline"
@@ -354,6 +376,7 @@ mod tests {
     fn the_search_worker_answers_a_request() {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["alpha.pdf", "beta.pdf"]);
         let (tx, rx) = bounded(64);
+        let tx = Events::headless(tx);
         let mut w = spawn_search(backend(src), tx).unwrap();
 
         w.submit(|epoch| SearchRequest {
@@ -370,6 +393,7 @@ mod tests {
     #[test]
     fn shutdown_completes_promptly_for_an_idle_worker() {
         let (tx, _rx) = bounded(64);
+        let tx = Events::headless(tx);
         let mut w = spawn_search(backend(FakeDirSource::new()), tx).unwrap();
         let started = Instant::now();
         assert!(w.shutdown(Duration::from_millis(500)));
@@ -387,6 +411,7 @@ mod tests {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]);
         src.set_hang(true);
         let (tx, rx) = bounded(64);
+        let tx = Events::headless(tx);
         let mut w = spawn_search(backend(src.clone()), tx).unwrap();
         w.submit(|epoch| SearchRequest {
             query: "11-D-0704".into(),

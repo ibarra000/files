@@ -13,12 +13,11 @@
 pub mod file;
 pub mod write;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::paths::{MappingKind, Routes};
-use crate::util::winpath;
 
 // --- Roots -----------------------------------------------------------------
 
@@ -113,6 +112,24 @@ pub const JOB_CACHE_CAPACITY: usize = 64;
 /// server CPU and must not fire per keystroke.
 pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Quiet period after the last keystroke before the code on the line reaches
+/// the recall list.
+///
+/// Five times [`VERIFY_DEBOUNCE`], and a separate constant rather than a
+/// multiple of it, because the two are paying for different things. That one
+/// buys a round trip against somebody else's file server and is set by what a
+/// server costs; this one decides what somebody reads off their recall list
+/// tomorrow morning, and is set by how long a person pauses in the middle of
+/// typing a code they are reading off a drawing.
+///
+/// Recording rode on the verification for most of this program's life, which
+/// meant a third of a second. That is an ordinary mid-word pause, so `11`,
+/// `11-D` and `11-D-07` all reached the list on the way to `11-D-0704`. A
+/// second and a half is longer than a typist stops and shorter than anybody
+/// notices, and `History::record` collapses the chain that gets through
+/// anyway.
+pub const REMEMBER_DEBOUNCE: Duration = Duration::from_millis(1_500);
+
 /// How close together two clicks must be to count as a double-click.
 ///
 /// The terminal reports presses, not clicks, so this is the program's own
@@ -175,7 +192,17 @@ pub const WATCH_DIRTY_CAP: usize = 1_000;
 /// against a flat enumeration.
 pub const TREE_MIN_SCAN_SPACING: Duration = Duration::from_secs(5 * 60);
 
-/// Refuse a persisted index older than this.
+/// How old a persisted index may get before it is called stale.
+///
+/// Advisory, not a rejection. It used to be one, and that was safe only while
+/// every launch re-read the share anyway: with shares refreshed on demand, a
+/// week-old index is an ordinary state rather than a fault, and discarding it
+/// would leave nothing to serve and start exactly the full pass the on-demand
+/// policy exists to avoid - simultaneously, on every machine whose cache was
+/// built on the same rollout day.
+///
+/// A stale answer with an honest label beats an empty screen. The status line
+/// says how old it is and names the share, and `F5` is one keystroke.
 pub const MAX_INDEX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -212,10 +239,49 @@ pub const STAMP_FAILURES_BEFORE_BLIND: u32 = 2;
 /// these apps does not hammer the file server in lockstep on the minute.
 pub const PROBE_JITTER_PERCENT: u32 = 10;
 
+/// Spread applied to the full-rescan floor, in percent, added on top of it.
+///
+/// The probe jitter above does not reach a full pass: a scan is decided at a
+/// probe wake by comparing against the floor, and a *tree* never probes at
+/// all. So three hundred clients that started within a minute of each other
+/// re-walked in permanent lockstep, and nothing in the schedule widened that
+/// window - the floor is measured from the previous pass's completion, so each
+/// cycle re-synchronised them.
+///
+/// One-sided, and deliberately: the floor is a promise about the longest an
+/// index may go unchecked, so spreading a client *later* only ever costs
+/// freshness it already agreed to, while spreading one earlier would break the
+/// promise to buy nothing.
+///
+/// Twenty-five percent of half an hour is a seven-minute window, which is wide
+/// enough that a fleet arrives as a trickle rather than a wall.
+pub const FLOOR_SPREAD_PERCENT: u32 = 25;
+
+/// Shortest gap between two writes of the index to disk.
+///
+/// The watcher's patches are what keep a manually-refreshed share current, and
+/// they only survive a restart if they reach the cache. But the cache file is
+/// written whole - around a hundred megabytes for the job share - so writing
+/// on every two-second watch batch would cost more than the patching saves.
+///
+/// Five minutes is the compromise: the most a crash can cost is five minutes
+/// of folder updates, against a full pass that costs nine hundred thousand
+/// round trips.
+pub const PERSIST_SPACING: Duration = Duration::from_secs(5 * 60);
+
 /// Redraw cadence while something is animating. Nothing animates at a finer
 /// granularity than a spinner frame, and the elapsed readout is rounded to
 /// match so consecutive frames actually differ.
 pub const ANIMATION_TICK: Duration = Duration::from_millis(100);
+
+/// How often a visible countdown is redrawn.
+///
+/// Only ever armed while a share is unreachable and a retry is still in the
+/// future, so a healthy idle session still costs nothing. One second rather
+/// than a hundred milliseconds because `humanize::elapsed` renders the
+/// sub-minute form to a tenth, and a tenth that moves ten times a second is
+/// noise rather than information.
+pub const COUNTDOWN_TICK: Duration = Duration::from_secs(1);
 
 /// Per-thread budget when shutting down. Past this the process exits rather
 /// than waiting on a blocked SMB syscall that cannot be cancelled.
@@ -238,6 +304,20 @@ pub const DIR_BUFFER_MIN: usize = 64 << 10;
 /// gaining throughput - and because a share is someone else's production file
 /// server. It is the same default `robocopy /MT` picked.
 pub const WALK_CONCURRENCY: usize = 8;
+
+/// How many shares are walked at once, by default.
+///
+/// Multiplies against [`WALK_CONCURRENCY`], so two is sixteen directory reads
+/// in flight - already twice what that constant was sized for, and the reason
+/// this is not simply "all of them". A configuration naming ten tree shares
+/// would otherwise open eighty concurrent requests against one file server on
+/// its first run, which is the behaviour a server administrator blocks rather
+/// than tunes.
+///
+/// Two rather than one because a share that is merely slow should not stall
+/// every other share behind it, and because the second walk is usually
+/// waiting on the network rather than on this machine.
+pub const DEFAULT_MAX_CONCURRENT_SCANS: usize = 2;
 
 /// Per-directory buffer during a tree walk.
 ///
@@ -401,22 +481,28 @@ pub enum ConfigChoice {
 pub struct Settings {
     /// The routing table. Immutable once loaded, shared by every thread.
     pub routes: Arc<Routes>,
-    /// First enabled flat mapping, or empty when none is configured.
-    ///
-    /// Derived from `routes`, never set independently.
-    pub custpro_path: PathBuf,
-    /// First enabled tree mapping, or empty when none is configured.
-    ///
-    /// Derived from `routes` like the one above, and for the same reason: it
-    /// lets the index and the search be written against a root rather than
-    /// against the mapping list.
-    pub tree_path: PathBuf,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
     /// Server-side wildcard filtering. Ships **off** so it can be enabled only
     /// after `--bench` confirms the server's pattern matching drops nothing.
     pub server_filter: bool,
     pub persist: bool,
+    /// Whether the status line says a share needs refreshing.
+    ///
+    /// On by default, because a list that has stopped tracking the drive is
+    /// exactly the thing this program refuses to hide. Off for someone handed
+    /// the tool who does not need current data and should not be nagged about
+    /// it - the ages are still there in the share list, which they only see by
+    /// asking for it.
+    pub stale_notices: bool,
+    /// How many shares may be walked at once.
+    ///
+    /// One walk already keeps [`WALK_CONCURRENCY`] directory reads in flight,
+    /// so this multiplies against that: the shipped 2 is sixteen outstanding
+    /// requests against a file server that belongs to somebody else. Raising
+    /// it shortens a cold start over several shares and lengthens everyone
+    /// else's afternoon.
+    pub max_concurrent_scans: usize,
     /// Live change notification for the walked tree.
     ///
     /// Ships **on**, unlike [`Self::server_filter`], and the asymmetry is
@@ -439,6 +525,12 @@ pub struct Settings {
     /// Where they are remembered. `None` disables storage without disabling
     /// recall within the session.
     pub history_path: Option<PathBuf>,
+    /// The chord that summons the window into the compact overlay.
+    ///
+    /// Parsed at the edge rather than carried as text, so a typo is reported
+    /// against the line of the configuration file that holds it instead of
+    /// becoming a key that silently never fires.
+    pub hotkey: crate::hotkey::spec::HotkeySpec,
     /// The viewer at startup.
     ///
     /// Deliberately the *initial* value and nothing more. F2 changes which
@@ -475,35 +567,28 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Builds settings around a routing table, deriving the transitional
-    /// convenience paths from it so the two can never disagree.
+    /// Builds settings around a routing table.
+    ///
+    /// It used to also derive a `custpro_path` and a `tree_path` by taking the
+    /// first enabled mapping of each kind. Everything downstream was written
+    /// against those two paths, which is why a configuration could name ten
+    /// shares and have two of them indexed - and why an actor spawned with no
+    /// flat mapping configured probed an empty path forever.
     pub fn with_routes(routes: Arc<Routes>, tweak: impl FnOnce(Self) -> Self) -> Self {
-        let custpro_path = routes
-            .enabled()
-            .find(|m| m.kind == MappingKind::Flat)
-            .map(|m| m.path.clone())
-            .unwrap_or_default();
-        // Empty when no tree mapping is configured, which is how the rest of
-        // the program asks "is there a tree" without consulting the routing
-        // table.
-        let tree_path = routes
-            .enabled()
-            .find(|m| m.kind == MappingKind::Tree)
-            .map(|m| m.path.clone())
-            .unwrap_or_default();
         tweak(Self {
             routes,
-            custpro_path,
-            tree_path,
             enum_strategy: EnumStrategy::default(),
             matcher: MatcherKind::default(),
             server_filter: false,
             live_updates: true,
             persist: true,
+            stale_notices: true,
+            max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
             cache_dir: default_cache_dir(),
             index_log: None,
             history: true,
             history_path: crate::history::default_path(),
+            hotkey: crate::hotkey::spec::HotkeySpec::default(),
             viewer: ViewerKind::default(),
             pdf_viewer: None,
             // Assume not, and let `load` say otherwise once it knows there is
@@ -512,6 +597,11 @@ impl Settings {
             // claim it could save.
             viewer_persistable: false,
         })
+    }
+
+    /// Settings over a single mapping, for tests and diagnostics.
+    pub fn for_mapping(name: &str, path: impl Into<PathBuf>, kind: MappingKind) -> Self {
+        Self::with_routes(Arc::new(Routes::single(name, path.into(), kind)), |s| s)
     }
 
     /// Reads overrides from the environment, ignoring anything unparseable
@@ -568,6 +658,16 @@ impl Settings {
         {
             self.enum_strategy = v;
         }
+        if env_usize("FILES_MAX_CONCURRENT_SCANS").is_none()
+            && let Some(v) = f.max_concurrent_scans
+        {
+            self.max_concurrent_scans = v;
+        }
+        if env_bool("FILES_STALE_NOTICES").is_none()
+            && let Some(v) = f.stale_notices
+        {
+            self.stale_notices = v;
+        }
         if env_str("FILES_MATCHER").is_none()
             && let Some(v) = f.matcher.as_deref().and_then(MatcherKind::parse)
         {
@@ -597,6 +697,11 @@ impl Settings {
             && let Some(v) = f.history
         {
             self.history = v;
+        }
+        if env_str("FILES_HOTKEY").is_none()
+            && let Some(v) = f.hotkey
+        {
+            self.hotkey = v;
         }
         if env_str("FILES_VIEWER").is_none()
             && let Some(v) = f.viewer.as_deref().and_then(ViewerKind::parse)
@@ -639,6 +744,12 @@ impl Settings {
         if let Some(v) = env_bool("FILES_PERSIST") {
             s.persist = v;
         }
+        if let Some(v) = env_usize("FILES_MAX_CONCURRENT_SCANS") {
+            s.max_concurrent_scans = v;
+        }
+        if let Some(v) = env_bool("FILES_STALE_NOTICES") {
+            s.stale_notices = v;
+        }
         if let Some(v) = env_bool("FILES_LIVE_UPDATES") {
             s.live_updates = v;
         }
@@ -651,6 +762,12 @@ impl Settings {
         if let Some(v) = env_bool("FILES_HISTORY") {
             s.history = v;
         }
+        // Unparseable is ignored rather than fatal, which is this loader's
+        // rule for the environment throughout - unlike the configuration file,
+        // where the same mistake is reported against its line.
+        if let Some(v) = env_str("FILES_HOTKEY").and_then(|v| crate::hotkey::spec::parse(&v).ok()) {
+            s.hotkey = v;
+        }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;
         }
@@ -658,15 +775,6 @@ impl Settings {
             s.pdf_viewer = Some(PathBuf::from(v));
         }
         s
-    }
-
-    /// True when `dir` is the flat CustomPro directory, which is the only one
-    /// large enough to justify the persisted index and the stamp probe.
-    ///
-    /// Compares by path identity rather than `PathBuf` equality, which would
-    /// call `V:\x` and `V:\x\` different places.
-    pub fn is_flat_root(&self, dir: &Path) -> bool {
-        winpath::same_dir(dir, &self.custpro_path)
     }
 }
 
@@ -683,6 +791,13 @@ pub(crate) fn env_str(key: &str) -> Option<String> {
 pub(crate) fn env_secs(key: &str) -> Option<Duration> {
     let secs: u64 = env_str(key)?.parse().ok()?;
     (secs > 0).then(|| Duration::from_secs(secs))
+}
+
+/// Reads a positive whole number. Zero and unparseable values are ignored
+/// rather than accepted, for the same reason [`env_secs`] rejects zero.
+pub(crate) fn env_usize(key: &str) -> Option<usize> {
+    let n: usize = env_str(key)?.parse().ok()?;
+    (n > 0).then_some(n)
 }
 
 pub(crate) fn env_bool(key: &str) -> Option<bool> {
@@ -806,11 +921,21 @@ mod tests {
         assert!(!Settings::default().server_filter);
     }
 
+    /// The shipped configuration names two shares, and both are indexed.
+    ///
+    /// Replaces a test for `is_flat_root`, which asked whether a path was
+    /// *the* flat root - a question with no answer once a configuration can
+    /// name several.
     #[test]
-    fn recognises_the_flat_root() {
+    fn the_shipped_configuration_indexes_every_share_it_names() {
         let s = Settings::default();
-        assert!(s.is_flat_root(Path::new(CUSTPRO_PATH)));
-        assert!(!s.is_flat_root(&Path::new(BASE_PATH).join("ab1234")));
+        let indexed: Vec<_> = s
+            .routes
+            .enabled()
+            .filter(|m| m.kind.is_indexed())
+            .map(|m| m.name.as_ref())
+            .collect();
+        assert_eq!(indexed, vec!["custompro", "jobs"]);
     }
 
     /// Checked at compile time: a shorter needle would make `memmem` weak

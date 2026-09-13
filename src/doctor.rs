@@ -26,6 +26,7 @@ use crate::index::enumerate::{CountingSink, DirSource, ListOpts, VecSink};
 use crate::index::errors::EnumError;
 use crate::index::persist;
 use crate::index::walk::{WalkCounts, WalkOpts, WalkReport, walk_tree};
+use crate::paths::{Mapping, MappingKind};
 use crate::search::pattern;
 use crate::util::cancel::CancelToken;
 use crate::util::humanize;
@@ -46,17 +47,18 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  {:<3} {:<14} {:<11} {:<8} path",
-        "#", "mapping", "kind", "enabled"
+        "  {:<3} {:<14} {:<11} {:<8} {:<8} path",
+        "#", "mapping", "kind", "enabled", "refresh"
     );
     for m in routes.all() {
         let _ = writeln!(
             out,
-            "  {:<3} {:<14} {:<11} {:<8} {}",
+            "  {:<3} {:<14} {:<11} {:<8} {:<8} {}",
             m.id.index(),
             m.name,
             m.kind.label(),
             if m.enabled { "yes" } else { "no" },
+            m.refresh.label(),
             m.path.display(),
         );
     }
@@ -120,8 +122,63 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
     let _ = writeln!(out);
     report_live_updates(settings, out);
     let _ = writeln!(out);
+    report_quick_search(settings, out);
+    let _ = writeln!(out);
     report_viewer(settings, out);
     report_recommendations(settings, out);
+}
+
+/// The global hotkey, and whether the window it would move can be found.
+///
+/// Worth its own section for the same reason as live updates: both failures
+/// here are silent. A chord another program already owns simply never fires,
+/// and under Windows Terminal the obvious answer to "which window is the
+/// terminal" is a hidden pseudo-console that accepts every instruction and
+/// acts on none of them. Neither has a symptom inside the running program, so
+/// this is the one place the questions get asked out loud.
+fn report_quick_search(settings: &Settings, out: &mut dyn Write) {
+    let _ = writeln!(out, "QUICK SEARCH");
+    let probe = crate::hotkey::probe(settings.hotkey);
+
+    if !probe.supported {
+        let _ = writeln!(out, "  unavailable on this platform");
+        return;
+    }
+    match &probe.chord {
+        Some(chord) => {
+            let _ = writeln!(out, "  hotkey:    {chord}");
+        }
+        None => {
+            let _ = writeln!(out, "  hotkey:    off");
+            return;
+        }
+    }
+    match &probe.registered {
+        Some(Ok(())) => {
+            let _ = writeln!(out, "  claim:     accepted");
+        }
+        Some(Err(why)) => {
+            let _ = writeln!(out, "  claim:     refused - {why}");
+        }
+        None => {}
+    }
+    match &probe.window {
+        // Naming *which* window is about to be moved is the single most
+        // diagnostic line here: it is the difference between working and
+        // quietly rearranging some other program.
+        Some(Ok(how)) => {
+            let _ = writeln!(out, "  window:    found, as {how}");
+        }
+        Some(Err(why)) => {
+            let _ = writeln!(out, "  window:    not found - {why}");
+            let _ = writeln!(
+                out,
+                "             the hotkey will still switch to the compact view,"
+            );
+            let _ = writeln!(out, "             but nothing will be moved or focused");
+        }
+        None => {}
+    }
 }
 
 /// Whether the tree root will actually accept a subtree watch.
@@ -133,44 +190,77 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
 /// gets asked directly.
 fn report_live_updates(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out, "LIVE UPDATES");
-    if settings.tree_path.as_os_str().is_empty() {
+    let trees: Vec<_> = settings
+        .routes
+        .enabled()
+        .filter(|m| m.kind == MappingKind::Tree && !m.path.as_os_str().is_empty())
+        .collect();
+    if trees.is_empty() {
         let _ = writeln!(out, "  no tree mapping configured");
         return;
     }
-    let _ = writeln!(out, "  root:      {}", settings.tree_path.display());
+    for m in trees {
+        report_one_watch(settings, m, out);
+    }
+}
+
+/// Asked of each tree separately, because each is a different server and one
+/// of them refusing says nothing about the others.
+fn report_one_watch(settings: &Settings, m: &Mapping, out: &mut dyn Write) {
+    let _ = writeln!(
+        out,
+        "  {} ({})  refresh = {}",
+        m.name,
+        m.path.display(),
+        m.refresh.label()
+    );
     if !settings.live_updates {
         let _ = writeln!(
             out,
-            "  disabled by configuration; the {} rescan floor is the whole guarantee",
+            "    disabled by configuration; the {} rescan floor is the whole guarantee",
             crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
         );
         return;
     }
     #[cfg(windows)]
     {
-        match crate::index::win_watch::DirectoryWatcher::open(&settings.tree_path) {
+        match crate::index::win_watch::DirectoryWatcher::open(&m.path) {
             Ok(_) => {
-                let _ = writeln!(out, "  watch:     accepted");
+                let _ = writeln!(out, "    watch:   accepted");
                 let _ = writeln!(
                     out,
-                    "  note:      a share can accept the request and never fire it, which is                      why the {} floor still applies",
-                    crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
+                    "    note:    a share can accept the request and never fire it, and that failure has no symptom. {}",
+                    fallback(m)
                 );
             }
             Err(why) => {
-                let _ = writeln!(out, "  watch:     unavailable - {why}");
-                let _ = writeln!(
-                    out,
-                    "  effect:    new files appear within the {} floor rather than in seconds",
-                    crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
-                );
+                let _ = writeln!(out, "    watch:   unavailable - {why}");
+                let _ = writeln!(out, "    effect:  {}", fallback(m));
             }
         }
     }
     #[cfg(not(windows))]
     {
-        let _ = writeln!(out, "  watch:     unavailable on this platform");
+        let _ = writeln!(out, "    watch:   unavailable on this platform");
+        let _ = writeln!(out, "    effect:  {}", fallback(m));
     }
+}
+
+/// What keeps this share current when the watcher does not.
+///
+/// Policy-dependent, and saying so matters: promising a half-hourly re-read to
+/// a share that is only re-read on request would be exactly the kind of
+/// confident wrong answer this diagnostic exists to replace.
+fn fallback(m: &Mapping) -> String {
+    if m.refresh.is_manual() {
+        return "nothing re-reads this share on a timer; it is updated with F5, \
+                and the status line says when it was last read"
+            .into();
+    }
+    format!(
+        "new files appear within the {} re-read rather than in seconds",
+        crate::util::humanize::elapsed(crate::config::TREE_RESCAN_FLOOR)
+    )
 }
 
 fn report_root(root: &Path, source: &dyn DirSource, out: &mut dyn Write) {
@@ -321,46 +411,15 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
         let _ = writeln!(out, "  persistence         disabled");
         return;
     }
-    let indexed = &settings.custpro_path;
-    let key = persist::MappingKey::of(indexed);
-    let _ = writeln!(out, "  indexed directory   {}", indexed.display());
-    let _ = writeln!(out, "  cache key           {}", key.hex());
-
-    // Validated against the *real* volume serial, exactly as the running
-    // application does. Passing `None` here skipped the one check the app
-    // applies and nothing else does, so `--doctor` could report a perfectly
-    // healthy cache that every launch then threw away - which is the opposite
-    // of what a diagnostic is for.
-    let serial = volume_serial_of(indexed);
-    let _ = writeln!(
-        out,
-        "  volume serial       {}",
-        match serial {
-            Some(v) => format!("{v:08X}"),
-            None => "unknown (the identity check will be skipped)".into(),
-        }
-    );
-
-    match persist::load(dir, key, persist::Expect::new(indexed, serial)) {
-        Ok(snapshot) => {
-            let _ = writeln!(
-                out,
-                "  cached entries      {}",
-                humanize::count(snapshot.len())
-            );
-            let age = std::time::SystemTime::now()
-                .duration_since(snapshot.captured_at())
-                .unwrap_or_default();
-            let _ = writeln!(out, "  age                 {}", humanize::age(age));
-            let _ = writeln!(
-                out,
-                "  resident size       {}",
-                humanize::bytes(snapshot.memory_bytes() as u64)
-            );
-        }
-        Err(err) => {
-            let _ = writeln!(out, "  cached index        {err}");
-        }
+    // Every indexed mapping, because each writes its own cache entry keyed by
+    // a hash of its path. Reporting only the first was how a configuration
+    // naming ten shares produced a diagnostic about one.
+    for m in settings
+        .routes
+        .enabled()
+        .filter(|m| m.kind.is_indexed() && !m.path.as_os_str().is_empty())
+    {
+        report_one_cache(dir, m, out);
     }
 
     let _ = writeln!(
@@ -373,7 +432,51 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
     );
 }
 
-/// The flat root's volume serial, or `None` off Windows and when it cannot be
+fn report_one_cache(dir: &std::path::Path, m: &Mapping, out: &mut dyn Write) {
+    let indexed = m.path.as_path();
+    let key = persist::MappingKey::of(indexed);
+    let _ = writeln!(out, "  {} ({})", m.name, indexed.display());
+    let _ = writeln!(out, "    cache key         {}", key.hex());
+
+    // Validated against the *real* volume serial, exactly as the running
+    // application does. Passing `None` here skipped the one check the app
+    // applies and nothing else does, so `--doctor` could report a perfectly
+    // healthy cache that every launch then threw away - which is the opposite
+    // of what a diagnostic is for.
+    let serial = volume_serial_of(indexed);
+    let _ = writeln!(
+        out,
+        "    volume serial     {}",
+        match serial {
+            Some(v) => format!("{v:08X}"),
+            None => "unknown (the identity check will be skipped)".into(),
+        }
+    );
+
+    match persist::load(dir, key, persist::Expect::new(indexed, serial)) {
+        Ok(snapshot) => {
+            let _ = writeln!(
+                out,
+                "    cached entries    {}",
+                humanize::count(snapshot.len())
+            );
+            let age = std::time::SystemTime::now()
+                .duration_since(snapshot.captured_at())
+                .unwrap_or_default();
+            let _ = writeln!(out, "    age               {}", humanize::age(age));
+            let _ = writeln!(
+                out,
+                "    resident size     {}",
+                humanize::bytes(snapshot.memory_bytes() as u64)
+            );
+        }
+        Err(err) => {
+            let _ = writeln!(out, "    cached index      {err}");
+        }
+    }
+}
+
+/// A mapping root's volume serial, or `None` off Windows and when it cannot be
 /// resolved.
 fn volume_serial_of(dir: &std::path::Path) -> Option<u32> {
     #[cfg(windows)]
@@ -717,9 +820,21 @@ pub fn bench(
     allow_write: bool,
     out: &mut dyn Write,
 ) {
-    let dir = settings.custpro_path.clone();
+    // The first enabled flat share, else the first indexed one. Named in the
+    // output rather than assumed, because with several configured "target"
+    // was previously whichever the derived path happened to hold.
+    let Some(target) = settings
+        .routes
+        .flat()
+        .next()
+        .or_else(|| settings.routes.enabled().find(|m| m.kind.is_indexed()))
+    else {
+        let _ = writeln!(out, "no enabled mapping to benchmark");
+        return;
+    };
+    let dir = target.path.clone();
     let _ = writeln!(out, "files {} - benchmark", env!("CARGO_PKG_VERSION"));
-    let _ = writeln!(out, "target: {}", dir.display());
+    let _ = writeln!(out, "target: {} ({})", target.name, dir.display());
     let _ = writeln!(out);
 
     // --- enumeration shootout ---

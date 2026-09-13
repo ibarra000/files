@@ -7,6 +7,7 @@ pub mod enumerate;
 pub mod errors;
 pub mod fake_source;
 pub mod log;
+pub mod permit;
 pub mod persist;
 pub mod schedule;
 pub mod snapshot;

@@ -47,7 +47,6 @@ use super::snapshot::{Arenas, Snapshot};
 use super::store::TreeCoverage;
 use super::tree::{Run, TreeIndex, TreeSegment};
 use super::{DirStamp, StampKind};
-use crate::config::MAX_INDEX_AGE;
 
 const _: () = assert!(
     cfg!(target_endian = "little"),
@@ -424,11 +423,21 @@ where
         temp_prefix(key),
         crate::util::once::now_nanos()
     ));
+    // The write time, not just the capture time, so every save is a distinct
+    // file.
+    //
+    // A patched index deliberately keeps the capture time of the walk it grew
+    // from - it really is that old, a few folders excepted - so naming the
+    // file after the capture time alone meant a re-save landed on the name the
+    // running process already had mapped. Renaming over a mapped file is the
+    // `ERROR_SHARING_VIOLATION` this module's header is about, and it would
+    // have bitten only on the second save of a session.
     let final_name = format!(
-        "{}-{:08x}-{:016x}.idx",
+        "{}-{:08x}-{:016x}-{:016x}.idx",
         key.hex(),
         volume_serial,
-        captured_nanos.max(0) as u64
+        captured_nanos.max(0) as u64,
+        crate::util::once::now_nanos()
     );
     let final_path = dir.join(&final_name);
 
@@ -986,11 +995,9 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Hea
     } else {
         UNIX_EPOCH + Duration::from_nanos(captured_nanos as u64)
     };
-    if let Ok(age) = SystemTime::now().duration_since(captured_at)
-        && age > MAX_INDEX_AGE
-    {
-        return Err(LoadError::TooOld);
-    }
+    // Deliberately not rejected for age. See `MAX_INDEX_AGE`: an old index is
+    // reported as stale and served, because discarding it leaves nothing to
+    // serve and starts the very full pass the on-demand policy avoids.
 
     let stamp = if flags & FLAG_HAS_STAMP == 0 {
         None
@@ -1665,14 +1672,27 @@ mod tests {
         );
     }
 
+    /// An old index is served, not discarded.
+    ///
+    /// This used to reject. Rejecting leaves nothing to serve, which starts a
+    /// full pass - and with every client's cache written on the same rollout
+    /// day, they would all have started one within hours of each other. The
+    /// age is reported instead; see `MAX_INDEX_AGE`.
     #[test]
-    fn rejects_an_index_that_is_too_old() {
+    fn an_index_that_is_too_old_is_served_rather_than_discarded() {
         let dir = tempfile::tempdir().unwrap();
-        let mut b = SnapshotBuilder::new("V:\\");
+        let mut b = SnapshotBuilder::new(&dir_path().to_string_lossy());
         b.push_str("a.txt");
         let ancient = b.finish(UNIX_EPOCH + Duration::from_secs(1), 1, None);
         let path = save(dir.path(), key(), &ancient).unwrap();
-        assert_eq!(err(load_file(&path, expect(None))), LoadError::TooOld);
+        let loaded = load_file(&path, expect(None)).expect("an old index still loads");
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            SystemTime::now()
+                .duration_since(loaded.captured_at())
+                .is_ok_and(|age| age > crate::config::MAX_INDEX_AGE),
+            "and it still reports how old it is"
+        );
     }
 
     #[test]

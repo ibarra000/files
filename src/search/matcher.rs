@@ -217,6 +217,70 @@ pub fn search_tree(
 ///
 /// Both inputs are already capped at `topk::K`, so this sorts at most `2K`
 /// and truncates - a few hundred comparisons once per keystroke.
+/// Judges a query without consulting any index.
+///
+/// Both rejections are properties of what was typed, so they are decided once
+/// for the whole search rather than per share. Asking each index would give N
+/// copies of the same answer, and with nothing indexed yet it would give none
+/// at all - a two-character query would come back "no matches" instead of
+/// "type at least 3 characters".
+pub fn check_query(query: &str) -> Result<(), QueryReject> {
+    if query.chars().count() < MIN_QUERY_LEN {
+        return Err(QueryReject::TooShort {
+            need: MIN_QUERY_LEN,
+        });
+    }
+    if fold::fold_query(query).contains(&0) {
+        return Err(QueryReject::ContainsNul);
+    }
+    Ok(())
+}
+
+/// Folds every share's results into one ranked list.
+///
+/// One concat, one sort, one truncate, rather than folding [`merge`] N-1
+/// times. Equivalent because every input is already the [`MAX_RESULTS`]
+/// smallest of its own index under this same comparator, and "take the K
+/// smallest" is associative over multisets - so the intermediate truncations
+/// a fold would perform could never discard a row that belongs in the final
+/// answer. What it buys is one sort of N*K rows instead of N-1 sorts, and one
+/// place where the totals are summed instead of a chain of them.
+pub fn merge_all(parts: Vec<SearchOutcome>) -> SearchOutcome {
+    // The overwhelmingly common shapes, and both would otherwise pay for a
+    // re-sort of rows that are already in order.
+    if parts.len() <= 1 {
+        return parts.into_iter().next().unwrap_or_default();
+    }
+
+    let mut out = SearchOutcome {
+        hits: Vec::with_capacity(parts.iter().map(|p| p.hits.len()).sum()),
+        ..SearchOutcome::default()
+    };
+    for part in parts {
+        out.hits.extend(part.hits);
+        out.matched = out.matched.saturating_add(part.matched);
+        out.total = out.total.saturating_add(part.total);
+        out.cancelled |= part.cancelled;
+        out.unicode_fallback |= part.unicode_fallback;
+    }
+    sort_hits(&mut out.hits);
+    out.hits.truncate(crate::config::MAX_RESULTS);
+    out
+}
+
+/// The cross-index ranking, restated over the materialised rows because the
+/// packed ordinals are not comparable across indexes - they are positions
+/// within different arenas.
+fn sort_hits(hits: &mut [Hit]) {
+    hits.sort_by(|a, b| {
+        a.is_inherited()
+            .cmp(&b.is_inherited())
+            .then(a.match_pos.cmp(&b.match_pos))
+            .then(a.name.len().cmp(&b.name.len()))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
+
 pub fn merge(flat: SearchOutcome, tree: SearchOutcome) -> SearchOutcome {
     let mut hits = flat.hits;
     hits.extend(tree.hits);
@@ -909,5 +973,111 @@ mod tree_tests {
     fn an_inherited_hit_carries_no_highlight() {
         let ix = index(&[("0704", &["quote.pdf"])]);
         assert_eq!(run(&ix, "0704").hits[0].match_pos, u32::MAX);
+    }
+    // --- merging N shares -----------------------------------------------
+
+    fn outcome(names: &[(&str, u32)]) -> SearchOutcome {
+        let hits: Vec<Hit> = names
+            .iter()
+            .enumerate()
+            .map(|(i, (name, pos))| Hit {
+                path: format!("X:\\{name}").into(),
+                name: (*name).into(),
+                match_pos: *pos,
+                index: i as u32,
+            })
+            .collect();
+        SearchOutcome {
+            matched: hits.len() as u32,
+            total: hits.len() as u32,
+            hits,
+            cancelled: false,
+            unicode_fallback: false,
+        }
+    }
+
+    #[test]
+    fn merge_all_sums_the_counts_of_every_share() {
+        let out = merge_all(vec![outcome(&[("a", 0)]), outcome(&[("b", 0), ("c", 0)])]);
+        assert_eq!(out.matched, 3);
+        assert_eq!(out.total, 3);
+        assert_eq!(out.hits.len(), 3);
+    }
+
+    #[test]
+    fn merge_all_of_nothing_is_an_empty_answer() {
+        let out = merge_all(Vec::new());
+        assert_eq!(out.hits.len(), 0);
+        assert_eq!(out.matched, 0);
+        assert!(!out.cancelled);
+    }
+
+    #[test]
+    fn merge_all_of_one_share_returns_it_untouched() {
+        let one = outcome(&[("b", 1), ("a", 0)]);
+        let before = one.hits.clone();
+        assert_eq!(merge_all(vec![one]).hits, before);
+    }
+
+    #[test]
+    fn a_cancelled_share_cancels_the_merged_answer() {
+        let mut a = outcome(&[("a", 0)]);
+        a.cancelled = true;
+        let out = merge_all(vec![a, outcome(&[("b", 0)])]);
+        assert!(out.cancelled, "a partial answer must not look complete");
+    }
+
+    /// The property `merge_all` rests on: taking the K smallest is
+    /// associative, so one concat-and-sort equals folding the pairwise merge.
+    #[test]
+    fn merge_all_agrees_with_folding_the_pairwise_merge() {
+        let parts = vec![
+            outcome(&[("delta", 3), ("alpha", 0)]),
+            outcome(&[("echo", 1), ("bravo", 2)]),
+            outcome(&[("charlie", 0), ("foxtrot", 4)]),
+        ];
+
+        let folded = parts
+            .clone()
+            .into_iter()
+            .reduce(merge)
+            .expect("three parts");
+        let at_once = merge_all(parts);
+
+        let names = |o: &SearchOutcome| -> Vec<String> {
+            o.hits.iter().map(|h| h.name.to_string()).collect()
+        };
+        assert_eq!(names(&at_once), names(&folded));
+        assert_eq!(at_once.matched, folded.matched);
+        assert_eq!(at_once.total, folded.total);
+    }
+
+    /// The merged list is capped, however many shares contributed - otherwise
+    /// ten shares would hand the UI ten times what it can show.
+    #[test]
+    fn merge_all_caps_the_merged_list() {
+        let big: Vec<(&str, u32)> = vec![("a", 0); crate::config::MAX_RESULTS];
+        let parts = vec![outcome(&big), outcome(&big), outcome(&big)];
+        assert_eq!(merge_all(parts).hits.len(), crate::config::MAX_RESULTS);
+    }
+
+    // --- the query is judged once, not per share -------------------------
+
+    #[test]
+    fn check_query_rejects_a_short_query_before_any_index_is_consulted() {
+        assert!(matches!(
+            check_query("ab"),
+            Err(QueryReject::TooShort { .. })
+        ));
+        assert!(check_query("abc").is_ok());
+    }
+
+    /// With nothing indexed yet, asking each share would give no answer at
+    /// all, so a short query would read as "no matches" rather than as "type
+    /// at least 3 characters".
+    #[test]
+    fn a_short_query_is_rejected_even_with_no_shares_indexed() {
+        assert!(check_query("ab").is_err());
+        assert_eq!(merge_all(Vec::new()).hits.len(), 0);
     }
 }

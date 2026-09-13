@@ -1,36 +1,43 @@
-//! Entry point: argument dispatch, terminal lifecycle, panic safety.
+//! Entry point for the window.
 //!
-//! Deliberately thin. Everything real lives in the library so it can be
-//! reached from `tests/` and `benches/` - a binary-only crate cannot be, and
-//! on a machine without the network drives the tests are most of the
-//! verification there is.
+//! Deliberately thin. Everything real lives in the library so it can be reached
+//! from `tests/` and `benches/` - a binary-only crate cannot be, and on a
+//! machine without the network drives the tests are most of the verification
+//! there is.
+//!
+//! This file used to own a terminal: raw mode, the alternate screen, mouse
+//! capture, bracketed paste, and a panic hook whose only job was to put all
+//! four back if the program fell over - because a panic in raw mode leaves
+//! somebody with an invisible error message and an unusable shell. A window
+//! needs none of it.
+//!
+//! # No console
+//!
+//! `windows_subsystem = "windows"` is what stops a black rectangle flashing up
+//! behind the panel every time it is launched - from the Start menu, from a
+//! shortcut, from the installer, or at sign-in. It also means this program can
+//! print nothing at all, which is why every mode that answers in text lives in
+//! `files-cli` instead. What is left here is the window and the two errors that
+//! can stop it opening, and those are said in a message box, because a message
+//! box is the only thing a windowed program can say anything with.
 
-use std::io::{self, Write};
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
+use std::io;
+
 use std::sync::Arc;
-
-use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 
 use files::app;
 use files::cli::{self, Mode};
 use files::config::Settings;
 use files::config::file as configfile;
-use files::doctor;
 use files::index::enumerate::DirSource;
 
 fn main() -> io::Result<()> {
     let args = match cli::parse_env() {
         Ok(args) => args,
         Err(err) => {
-            eprintln!("files: {err}");
-            eprintln!("try `files --help`");
+            tell(&format!("{err}\n\nTry `files-cli --help`."));
             std::process::exit(2);
         }
     };
@@ -41,50 +48,61 @@ fn main() -> io::Result<()> {
     let settings = match args.settings() {
         Ok(s) => s,
         Err(errors) => {
-            eprint!("{}", configfile::report(&errors));
+            // The report is written for a terminal and reads perfectly well in
+            // a message box, which is the only place this program can put it.
+            // `files-cli --check-config` prints the same text, and the box says
+            // so, because somebody who wants to copy it needs a console.
+            tell(&format!(
+                "{}\nRun `files-cli --check-config` to see this at a prompt.",
+                configfile::report(&errors)
+            ));
             std::process::exit(2);
         }
     };
 
     match args.mode {
-        Mode::Help => {
-            print!("{}", cli::HELP);
-            Ok(())
+        Mode::Gui => run_gui(args, settings),
+        // Everything that answers in text. This program has no console to
+        // answer with, so rather than printing into the void it says where the
+        // answer lives - once, in the one way a windowed program can.
+        _ => {
+            tell(
+                "files is the search panel, and has no console to print to.\n\n\
+                 For --doctor, --check-config, --bench, --help and --version, \
+                 run files-cli instead.",
+            );
+            std::process::exit(2);
         }
-        Mode::Version => {
-            println!("files {}", env!("CARGO_PKG_VERSION"));
-            Ok(())
-        }
-        Mode::CheckConfig { ref query } => {
-            let mut out = io::stdout().lock();
-            doctor::check_config(&settings, query.as_deref(), &mut out);
-            out.flush()
-        }
-        Mode::Doctor => {
-            let source = source_for(&args, &settings);
-            let mut out = io::stdout().lock();
-            doctor::doctor(&settings, source, &mut out);
-            out.flush()
-        }
-        Mode::Bench {
-            ref query,
-            allow_write,
-            walk,
-        } => {
-            let source = source_for(&args, &settings);
-            let mut out = io::stdout().lock();
-            match walk {
-                // A tree walk answers a different question from the strategy
-                // shootout - how big the share is, not how fast one directory
-                // reads - and takes long enough that running both would bury
-                // it.
-                Some(w) => doctor::bench_walk(&settings, source, w, &mut out),
-                None => doctor::bench(&settings, source, query.as_deref(), allow_write, &mut out),
-            }
-            out.flush()
-        }
-        Mode::Tui => run_tui(args, settings),
     }
+}
+
+/// Says something to somebody who has no console to be told in.
+///
+/// The only two things this is ever used for are a configuration file that
+/// will not load and a window that will not open - both of which stop the
+/// program, and both of which would otherwise be a process that starts and
+/// vanishes with nothing on screen at all.
+fn tell(message: &str) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
+
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let text = wide(message);
+        let title = wide("files");
+        // SAFETY: two live NUL-terminated wide strings and a null owner window,
+        // which is the documented way to show a message box with no parent.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    eprintln!("files: {message}");
 }
 
 fn source_for(args: &cli::Args, settings: &Settings) -> Arc<dyn DirSource> {
@@ -95,46 +113,21 @@ fn source_for(args: &cli::Args, settings: &Settings) -> Arc<dyn DirSource> {
     }
 }
 
-fn run_tui(args: cli::Args, settings: Settings) -> io::Result<()> {
-    // Warm the SMB session before anything else. First contact with a mapped
-    // drive can cost seconds of session setup and DFS resolution, and doing
-    // it here overlaps that with terminal initialisation and the user's first
-    // keystrokes.
+/// Runs the window.
+///
+/// Shorter than the terminal entry point it replaced by everything that was
+/// about owning a terminal: no raw mode, no alternate screen, no mouse capture,
+/// and no panic hook whose only job was to put all three back if the program
+/// fell over.
+fn run_gui(args: cli::Args, settings: Settings) -> io::Result<()> {
     let source = source_for(&args, &settings);
     prewarm(&settings, Arc::clone(&source));
 
-    let volume_serial = volume_serial(&settings, args.demo);
-
-    install_panic_hook();
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    // Mouse capture is what makes click-to-place-a-caret and drag-to-select
-    // possible. It costs the terminal's own drag-to-select, which is why it
-    // was doing nothing but harm before: it was enabled and every mouse event
-    // was thrown away. Holding Shift while dragging still reaches the
-    // terminal's selection, over the whole window.
-    //
-    // Bracketed paste turns a paste into one event instead of a burst of
-    // keystrokes, which is what lets it replace a selection and land at the
-    // caret as a single edit.
-    execute!(
-        stdout,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-
-    let result = app::run(&mut terminal, settings, source, volume_serial);
-
-    // Restored before anything else is waited on, so a wedged network thread
-    // can never keep the user out of their shell.
-    restore_terminal();
-
-    if let Err(err) = &result {
-        eprintln!("files: {err}");
+    if let Err(err) = files::gui::run(settings, source) {
+        tell(&format!("The search panel could not be opened.\n\n{err}"));
+        std::process::exit(1);
     }
-    result
+    Ok(())
 }
 
 /// Touches both roots off-thread so the SMB session is established early.
@@ -149,52 +142,4 @@ fn prewarm(settings: &Settings, source: Arc<dyn DirSource>) {
                 source.prewarm(&root);
             }
         });
-}
-
-/// The volume serial of the flat root, used to validate the persisted index.
-///
-/// Without it, a drive letter remapped to a different share would serve the
-/// previous mapping's file list.
-fn volume_serial(settings: &Settings, demo: bool) -> Option<u32> {
-    if demo {
-        return None;
-    }
-    #[cfg(windows)]
-    {
-        files::index::volume::volume_serial(&settings.custpro_path)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = settings;
-        None
-    }
-}
-
-/// Leaves raw mode and the alternate screen, ignoring errors.
-///
-/// Safe to call twice, which matters because both the normal exit path and
-/// the panic hook call it.
-fn restore_terminal() {
-    let mut stdout = io::stdout();
-    let _ = execute!(
-        stdout,
-        DisableBracketedPaste,
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    );
-    let _ = disable_raw_mode();
-}
-
-/// Restores the terminal before a panic message is printed.
-///
-/// Without this, any panic leaves the user in raw mode inside the alternate
-/// screen - the message is invisible, the shell is unusable, and the window
-/// has to be closed. The previous implementation had exactly that failure
-/// mode.
-fn install_panic_hook() {
-    let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        previous(info);
-    }));
 }

@@ -45,6 +45,7 @@ use crate::config::{
     PROBE_JITTER_PERCENT, SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP, STAMP_FAILURES_BEFORE_BLIND,
     STAMP_PROBE_INTERVAL, TREE_MIN_SCAN_SPACING, TREE_RESCAN_FLOOR, env_secs,
 };
+use crate::config::{FLOOR_SPREAD_PERCENT, PERSIST_SPACING};
 use crate::util::backoff::{Backoff, jitter};
 use crate::util::rng::Rng;
 
@@ -70,6 +71,14 @@ pub struct Cadence {
     pub rescan_floor: Duration,
     /// Hard lower bound on the gap between two enumerations.
     pub min_scan_spacing: Duration,
+    /// Shortest gap between two writes of the index to disk.
+    ///
+    /// A patch is cheap over the network and expensive on the disk: it touches
+    /// a handful of folders but the cache file is written whole, some hundred
+    /// megabytes of it. Writing on every two-second watch batch would cost far
+    /// more than the patch saves, so saves are paced and a few minutes of
+    /// patches are allowed to ride in memory.
+    pub persist_spacing: Duration,
     /// Hard lower bound on the gap between two incremental updates.
     ///
     /// Its own floor, and far shorter than [`Self::min_scan_spacing`], because
@@ -80,6 +89,9 @@ pub struct Cadence {
     pub patch_spacing: Duration,
     /// Jitter applied to `probe_interval`, in percent.
     pub jitter_percent: u32,
+    /// Spread added on top of `rescan_floor`, in percent. See
+    /// [`crate::config::FLOOR_SPREAD_PERCENT`].
+    pub floor_spread_percent: u32,
     /// Retry pacing for a failed probe.
     pub probe_backoff: Backoff,
     /// Retry pacing for a failed enumeration.
@@ -103,7 +115,9 @@ impl Cadence {
             rescan_floor: FULL_RESCAN_FLOOR,
             min_scan_spacing: MIN_FULL_SCAN_SPACING,
             patch_spacing: PATCH_SPACING,
+            persist_spacing: PERSIST_SPACING,
             jitter_percent: PROBE_JITTER_PERCENT,
+            floor_spread_percent: FLOOR_SPREAD_PERCENT,
             probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
             scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),
             stamp_failures_before_blind: STAMP_FAILURES_BEFORE_BLIND,
@@ -130,7 +144,9 @@ impl Cadence {
             rescan_floor: TREE_RESCAN_FLOOR,
             min_scan_spacing: TREE_MIN_SCAN_SPACING,
             patch_spacing: PATCH_SPACING,
+            persist_spacing: PERSIST_SPACING,
             jitter_percent: PROBE_JITTER_PERCENT,
+            floor_spread_percent: FLOOR_SPREAD_PERCENT,
             probe_backoff: Backoff::new(BACKOFF_BASE, BACKOFF_CAP),
             scan_backoff: Backoff::new(SCAN_BACKOFF_BASE, SCAN_BACKOFF_CAP),
             stamp_failures_before_blind: STAMP_FAILURES_BEFORE_BLIND,
@@ -146,7 +162,9 @@ impl Cadence {
             rescan_floor: Duration::from_millis(400),
             min_scan_spacing: Duration::from_millis(10),
             patch_spacing: Duration::from_millis(2),
+            persist_spacing: Duration::from_millis(5),
             jitter_percent: PROBE_JITTER_PERCENT,
+            floor_spread_percent: FLOOR_SPREAD_PERCENT,
             probe_backoff: Backoff::new(Duration::from_millis(2), Duration::from_millis(100)),
             scan_backoff: Backoff::new(Duration::from_millis(10), Duration::from_millis(200)),
             stamp_failures_before_blind: STAMP_FAILURES_BEFORE_BLIND,
@@ -357,7 +375,19 @@ pub struct Scheduler {
     /// Stamp of the listing currently being served, mirroring the store.
     recorded_stamp: Option<DirStamp>,
     stamp_health: StampHealth,
+    /// Whether a directory stamp is obtainable here at all. See
+    /// [`Scheduler::without_stamps`].
+    stamps_possible: bool,
+    /// Whether a timer may start a full pass. See
+    /// [`Scheduler::on_demand_only`].
+    timed_scans: bool,
     last_full_scan: Option<Instant>,
+    /// This client's share of the floor spread, drawn once per pass.
+    ///
+    /// Stored rather than drawn on demand because the floor is asked about
+    /// from four places, and a deadline that answered differently each time
+    /// would wobble the wake it is computed for.
+    floor_slack: Duration,
     /// Attempts, not successes. This is what paces retries after a *failed*
     /// scan; keying off successes is what let the old code retry a
     /// million-entry enumeration under a second after it failed.
@@ -378,7 +408,10 @@ impl Scheduler {
         Self {
             cadence,
             rng: seed.map_or_else(Rng::from_entropy, Rng::from_seed),
+            stamps_possible: true,
+            timed_scans: true,
             recorded_stamp: None,
+            floor_slack: Duration::ZERO,
             stamp_health: StampHealth::Unknown,
             last_full_scan: None,
             last_scan_attempt: None,
@@ -389,6 +422,32 @@ impl Scheduler {
             counters: Counters::default(),
             last_scan_reason: None,
         }
+    }
+
+    /// Declares that this share can never produce a directory stamp.
+    ///
+    /// True of a walked tree, and not a transient condition: no single
+    /// timestamp can stand for three hundred thousand directories, so
+    /// `walk_and_publish` returns `Ok(None)` every time by design. The
+    /// scheduler has to know the difference between "no stamp yet" and "no
+    /// stamp, ever", because the remedy for the first - scan once and
+    /// establish one - never terminates for the second.
+    pub fn without_stamps(mut self) -> Self {
+        self.stamps_possible = false;
+        self
+    }
+
+    /// Stops the floor from ever starting a pass on its own.
+    ///
+    /// Everything else is unchanged: the first run still builds an index
+    /// because there must be something to serve, a forced refresh still runs
+    /// because the user asked, and live updates still patch folders in as the
+    /// watcher names them. What stops is the unconditional periodic pass -
+    /// which for a share of three hundred thousand directories, multiplied by
+    /// a few hundred clients on the same timer, is the entire problem.
+    pub fn on_demand_only(mut self) -> Self {
+        self.timed_scans = false;
+        self
     }
 
     pub fn cadence(&self) -> Cadence {
@@ -437,9 +496,16 @@ impl Scheduler {
     /// whole share no matter how good the cache was - which made the disk
     /// cache worth only the few seconds before the scan superseded it.
     ///
-    /// A cache with no stamp cannot be proven current, so it deliberately does
-    /// *not* satisfy the floor: one scan brings it up to date and establishes
-    /// a stamp for next time.
+    /// A cache with no stamp cannot be proven current, so where a stamp *is*
+    /// obtainable it deliberately does not satisfy the floor: one scan brings
+    /// it up to date and establishes a stamp for next time.
+    ///
+    /// That remedy needs a share where scanning can establish a stamp. A tree
+    /// is not one: the walk returns `Ok(None)` every time, so the next launch
+    /// is in exactly the same position and reads three hundred thousand
+    /// directories again - for as long as the program is installed. Where no
+    /// stamp will ever exist, the capture time is the only freshness evidence
+    /// there can be, and the floor is measured from it.
     fn on_disk_loaded(
         &mut self,
         now: Instant,
@@ -449,9 +515,11 @@ impl Scheduler {
         self.recorded_stamp = stamp;
         if stamp.is_some() {
             self.stamp_health = StampHealth::Working;
+        }
+        if stamp.is_some() || !self.stamps_possible {
             // `checked_sub` fails when the data predates the monotonic clock's
             // origin, which leaves the floor due - the safe direction.
-            self.last_full_scan = captured_age.and_then(|age| now.checked_sub(age));
+            self.note_full_scan(captured_age.and_then(|age| now.checked_sub(age)));
         }
         self.wait(now, now)
     }
@@ -462,6 +530,13 @@ impl Scheduler {
         }
         if !have_snapshot {
             return self.scan(now, ScanReason::FirstRun);
+        }
+        if !self.timed_scans {
+            // Nothing here starts a pass on a timer. Waking on the floor
+            // anyway would be a wake-up that can only ever decide to do
+            // nothing, so the next action is left to whatever else asks -
+            // a watch batch, or the user.
+            return self.wait(now, now + self.cadence.rescan_floor);
         }
         if self.stamp_health.is_blind() || self.recorded_stamp.is_none() {
             // Change detection is unavailable. The floor is the whole
@@ -494,6 +569,14 @@ impl Scheduler {
             return self.scan(now, ScanReason::FirstRun);
         }
         if full {
+            // Events were lost, so only a full pass can say what the share now
+            // holds. On an on-demand share that pass is the user's to ask for:
+            // one person copying a large folder in must not set every client
+            // walking at once, which is the burst this policy exists to
+            // prevent. The actor marks the share stale instead.
+            if !self.timed_scans {
+                return self.wait(now, now + self.cadence.rescan_floor);
+            }
             return self.scan(now, ScanReason::Changed);
         }
         if let Some(last) = self.last_patch_attempt {
@@ -582,7 +665,7 @@ impl Scheduler {
                 self.counters.full_scans = self.counters.full_scans.saturating_add(1);
                 self.probe_attempt = 0;
                 self.scan_attempt = 0;
-                self.last_full_scan = Some(now);
+                self.note_full_scan(Some(now));
                 self.recorded_stamp = stamp;
                 match stamp {
                     Some(_) => {
@@ -648,16 +731,36 @@ impl Scheduler {
         (now < earliest).then_some(earliest)
     }
 
+    /// Records a completed pass and draws this client's spread for the next
+    /// one.
+    ///
+    /// The draw happens here, once per pass, so `floor_elapsed` and
+    /// `floor_due_at` cannot disagree about when the floor is due.
+    fn note_full_scan(&mut self, at: Option<Instant>) {
+        self.last_full_scan = at;
+        let spread = self.cadence.rescan_floor / 100 * self.cadence.floor_spread_percent;
+        self.floor_slack = if spread.is_zero() {
+            Duration::ZERO
+        } else {
+            Duration::from_nanos(self.rng.next_in(spread.as_nanos() as u64))
+        };
+    }
+
+    /// The floor, plus this client's spread.
+    fn floor(&self) -> Duration {
+        self.cadence.rescan_floor + self.floor_slack
+    }
+
     fn floor_elapsed(&self, now: Instant) -> bool {
         match self.last_full_scan {
-            Some(t) => now.saturating_duration_since(t) >= self.cadence.rescan_floor,
+            Some(t) => now.saturating_duration_since(t) >= self.floor(),
             None => true,
         }
     }
 
     fn floor_due_at(&self, now: Instant) -> Instant {
         match self.last_full_scan {
-            Some(t) => t + self.cadence.rescan_floor,
+            Some(t) => t + self.floor(),
             None => now,
         }
     }
@@ -719,6 +822,16 @@ mod tests {
     use super::*;
 
     const SEED: u64 = 0xC0FF_EE00_1234_5678;
+
+    /// The longest the floor can be once this client's spread is added.
+    ///
+    /// The tests below advance past *this* rather than past the bare floor,
+    /// because the floor is now "at least `rescan_floor`, plus up to
+    /// `floor_spread_percent` of it" - the whole point being that three
+    /// hundred clients do not pick the same instant.
+    fn max_floor() -> Duration {
+        FULL_RESCAN_FLOOR + FULL_RESCAN_FLOOR / 100 * FLOOR_SPREAD_PERCENT
+    }
 
     /// Well clear of the monotonic clock's origin, so the tests that need to
     /// talk about the past can subtract without risking an underflow.
@@ -805,8 +918,70 @@ mod tests {
     fn the_floor_enumerates_without_probing() {
         let now = base();
         let mut s = settled(now);
-        let d = s.on(now + FULL_RESCAN_FLOOR, Input::Woke { forced: false }, true);
+        let d = s.on(now + max_floor(), Input::Woke { forced: false }, true);
         assert_eq!(d.step, Step::FullScan(ScanReason::Floor));
+    }
+
+    /// The fleet property, and the reason the spread exists.
+    ///
+    /// Jitter used to be applied only to the probe interval, and a full pass
+    /// is never decided at a probe - a tree does not probe at all. So three
+    /// hundred clients that started together re-walked together, and stayed
+    /// together, because the floor is measured from the previous pass and
+    /// each cycle re-synchronised them.
+    #[test]
+    fn two_clients_do_not_pick_the_same_moment_to_re_walk() {
+        let now = base();
+        let deadline = |seed: u64| {
+            let mut s = Scheduler::new(Cadence::shipped(), Some(seed));
+            s.on(now, Input::Woke { forced: false }, false);
+            s.on(now, Input::Scanned(Ok(Some(stamp(1)))), true);
+            // Drive the probe cycle until the floor wins. A `Probe` decision
+            // is due immediately, so the clock only advances once the probe
+            // itself has been answered.
+            let mut at = now;
+            for _ in 0..10_000 {
+                let d = s.on(at, Input::Woke { forced: false }, true);
+                match d.step {
+                    Step::FullScan(_) => return at,
+                    Step::Probe => {
+                        at = s.on(at, Input::Probed(Ok(stamp(1))), true).next_action;
+                    }
+                    _ => at = d.next_action,
+                }
+            }
+            panic!("never scanned")
+        };
+        let a = deadline(1);
+        let b = deadline(999);
+        assert_ne!(a, b, "two clients must not re-walk in lockstep");
+    }
+
+    /// One-sided, deliberately: the floor is a promise about the longest an
+    /// index may go unchecked, so spreading a client earlier would break that
+    /// promise to buy nothing.
+    #[test]
+    fn the_spread_only_ever_delays_a_pass_never_advances_one() {
+        let now = base();
+        for seed in 0..64u64 {
+            let mut s = Scheduler::new(Cadence::shipped(), Some(seed));
+            s.on(now, Input::Woke { forced: false }, false);
+            s.on(now, Input::Scanned(Ok(Some(stamp(1)))), true);
+            let just_before = s.on(
+                now + FULL_RESCAN_FLOOR - Duration::from_millis(1),
+                Input::Woke { forced: false },
+                true,
+            );
+            assert!(
+                !matches!(just_before.step, Step::FullScan(_)),
+                "seed {seed} scanned before the floor"
+            );
+            let after = s.on(now + max_floor(), Input::Woke { forced: false }, true);
+            assert!(
+                matches!(after.step, Step::FullScan(_)),
+                "seed {seed} never scanned even past the widest floor"
+            );
+        }
     }
 
     // --- the reload storm --------------------------------------------------
@@ -840,6 +1015,8 @@ mod tests {
         let mut scans = 0;
         let mut wakes = 0;
         while at < now + FULL_RESCAN_FLOOR {
+            // Bare floor, not `max_floor`: nothing may scan before the floor
+            // even at zero spread, which is the property under test.
             let d = s.on(at, Input::Woke { forced: false }, true);
             if matches!(d.step, Step::FullScan(_)) {
                 scans += 1;
@@ -853,7 +1030,7 @@ mod tests {
             "no enumeration may happen before the floor, however often we wake"
         );
 
-        let d = s.on(now + FULL_RESCAN_FLOOR, Input::Woke { forced: false }, true);
+        let d = s.on(now + max_floor(), Input::Woke { forced: false }, true);
         assert_eq!(d.step, Step::FullScan(ScanReason::Blind));
     }
 
@@ -866,9 +1043,8 @@ mod tests {
         s.on(now, Input::Woke { forced: false }, false);
         let d = s.on(now, Input::Scanned(Ok(None)), true);
         assert!(s.stamp_health().is_blind());
-        assert_eq!(
-            d.next_action,
-            now + FULL_RESCAN_FLOOR,
+        assert!(
+            d.next_action >= now + FULL_RESCAN_FLOOR && d.next_action <= now + max_floor(),
             "a stampless listing must wait out the floor, not the probe interval"
         );
     }
@@ -981,7 +1157,7 @@ mod tests {
             now,
             Input::DiskLoaded {
                 stamp: Some(stamp(1)),
-                captured_age: Some(FULL_RESCAN_FLOOR + Duration::from_secs(60)),
+                captured_age: Some(max_floor() + Duration::from_secs(60)),
             },
             true,
         );
