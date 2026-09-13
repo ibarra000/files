@@ -9,10 +9,11 @@
 //! The previous implementation showed `0 / 0 files matched` for every one of
 //! them.
 
-use std::time::{Duration, Instant, SystemTime};
+use std::ops::Range;
+use std::time::{Instant, SystemTime};
 
 use crate::app::state::{AppState, QueryPhase, Severity};
-use crate::config::{MIN_QUERY_LEN, ViewerKind};
+use crate::config::ViewerKind;
 use crate::index::store::{Activity, Health};
 use crate::util::humanize;
 
@@ -206,71 +207,71 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         };
     }
 
-    match &state.phase {
-        QueryPhase::Idle => StatusLine {
-            text: format!("Ready · {}", index_summary(state, wall)),
-            tone: Tone::Normal,
-        },
-        QueryPhase::TooShort { need } => StatusLine {
+    // The phase, where the phase is worth a sentence.
+    //
+    // `Idle`, `Local` and `Verified` are the quiet ones, and they yield to the
+    // index below rather than returning here. Everything else is either
+    // transient or something the user has to do about, and outranks an ambient
+    // note about the index - "Keep typing" while a code is half-entered is
+    // more use than "no file list yet", even when both are true.
+    let phase = match &state.phase {
+        QueryPhase::Idle | QueryPhase::Local => None,
+        QueryPhase::TooShort { need } => Some(StatusLine {
             text: format!("Keep typing - a code needs at least {need} characters"),
             tone: Tone::Normal,
-        },
-        QueryPhase::NoShares => StatusLine {
+        }),
+        QueryPhase::NoShares => Some(StatusLine {
             text: "No shares are set up - run files --check-config".into(),
             tone: Tone::Warn,
-        },
-        QueryPhase::LocalPending => StatusLine {
+        }),
+        QueryPhase::LocalPending => Some(StatusLine {
             text: "Searching...".into(),
             tone: Tone::Busy,
-        },
-        QueryPhase::Local => StatusLine {
-            text: format!(
-                "{} · {}",
-                index_summary(state, wall),
-                matches_summary(state)
-            ),
-            tone: base_tone(state),
-        },
-        QueryPhase::Verifying { .. } => StatusLine {
-            text: format!(
-                "Checking the drive - {} · {}",
-                index_summary(state, wall),
-                matches_summary(state)
-            ),
+        }),
+        QueryPhase::Verifying { .. } => Some(StatusLine {
+            text: "Checking the drive...".into(),
             tone: Tone::Busy,
-        },
-        QueryPhase::Verified { took, by_stamp } => StatusLine {
+        }),
+        // Short, and without the match count or the round-trip time it used to
+        // carry: the count is in the reserved slot to the left of this line,
+        // and how many milliseconds the server took is a fact about the server.
+        // What is worth a word is that somebody else has now confirmed what is
+        // on screen.
+        QueryPhase::Verified { by_stamp, .. } => Some(StatusLine {
             text: if *by_stamp {
-                // The directory has not changed, so the local index is
-                // provably current - no query was needed at all.
-                format!(
-                    "Up to date · {} · checked in {}",
-                    matches_summary(state),
-                    humanize::elapsed(*took)
-                )
+                "Up to date"
             } else {
-                format!(
-                    "Checked just now · {} · {}",
-                    matches_summary(state),
-                    humanize::elapsed(*took)
-                )
-            },
+                "Checked just now"
+            }
+            .into(),
             tone: Tone::Good,
-        },
-        QueryPhase::VerifyFailed { detail } => StatusLine {
-            text: format!(
-                "Showing the saved list - {detail} · {}",
-                matches_summary(state)
-            ),
+        }),
+        QueryPhase::VerifyFailed { detail } => Some(StatusLine {
+            text: format!("Showing the saved list - {detail}"),
+            tone: Tone::Warn,
+        }),
+    };
+    if let Some(line) = phase {
+        return line;
+    }
+
+    // Nothing is happening, so the only thing left worth saying is that the
+    // index is wrong - and usually it is not, so the line is empty.
+    //
+    // An empty footer is the point of all this. The count sits to the left of
+    // it and the keys to the right; the middle used to hold
+    // `Ready · 1,284,551 files · updated 2m ago`, which was a number nobody was
+    // looking for, in the one place the program has to say things people must
+    // act on, rewriting itself once a second.
+    match index_warning(state, wall) {
+        Some(warning) => StatusLine {
+            text: warning,
             tone: Tone::Warn,
         },
-    }
-}
-
-fn base_tone(state: &AppState) -> Tone {
-    match state.index.degraded() {
-        Some(_) => Tone::Warn,
-        None => Tone::Normal,
+        None => StatusLine {
+            text: String::new(),
+            tone: Tone::Normal,
+        },
     }
 }
 
@@ -310,99 +311,55 @@ fn busy_scan_reason(state: &AppState) -> Option<crate::index::schedule::ScanReas
         .and_then(|s| s.last_scan_reason)
 }
 
-/// Describes the index the results came from, including its age.
-fn index_summary(state: &AppState, wall: SystemTime) -> String {
+/// What is wrong with the index, if anything.
+///
+/// All that is left of a summary that used to lead every healthy status line
+/// with `Ready · 1,284,551 files · updated 2m ago`. Three things were wrong
+/// with that. It competed for width with the result count on the same line,
+/// and lost, so it was usually an ellipsis. Its age ticked, so the line
+/// rewrote itself once a second and then once a minute for as long as the
+/// panel was open. And it was ambient: a number nobody was looking for, in the
+/// one place the program has to say things people must act on.
+///
+/// The ages moved to `F5` when the drive picker was built - see
+/// [`crate::view::shares`] - which is where somebody goes when they suspect
+/// the list is out of date. What stays here is only what they cannot go and
+/// look for, because they do not yet know to look.
+///
+/// `None` when the index is healthy, which is what makes a healthy footer
+/// quiet.
+fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
     let status = &state.index;
-    let Some(_origin) = status.origin else {
-        return "no file list yet".into();
-    };
-    // The *oldest* share's age, not the newest. Taking the newest would let
-    // one freshly rebuilt share vouch for nine stale ones, and the age is the
-    // number somebody checks before trusting a result.
-    let age = status
-        .age(wall)
-        .map(humanize::age)
-        .unwrap_or_else(|| "unknown".into());
-    // One corpus, one number: somebody searching four shares is not asked to
-    // add up four counts. The label names the shape only when there is one
-    // share, because "files · updated" describing ten of them would be a claim
-    // about all of them that no single origin supports.
-    let mut s = if status.configured > 1 {
-        format!(
-            "{} files across {} shares · updated {age}",
-            humanize::count(status.entries as usize),
-            status.configured
-        )
-    } else {
-        format!(
-            "{} files · updated {age}",
-            humanize::count(status.entries as usize)
-        )
-    };
-    if status.truncated {
-        s.push_str(" (partial)");
+    if status.origin.is_none() {
+        return Some("no file list yet".into());
     }
-    // A total that is quietly short reads as a complete answer, which is the
-    // same silent-omission failure the walked index exists to prevent.
-    if status.ready < status.configured {
-        s.push_str(&format!(
-            " · {} of {} indexed",
-            status.ready, status.configured
-        ));
-    }
-    // How long ago the listing was last *proven* current, which is a
-    // different and usually much smaller number than its age. Shown only when
-    // it differs, so the quiet case stays short.
-    if let (Some(age), Some(confirmed)) = (status.age(wall), status.confirmed_age(wall))
-        && confirmed + Duration::from_secs(30) < age
-    {
-        s.push_str(" · checked ");
-        s.push_str(&humanize::age(confirmed));
-    }
+
     // Named, because a degraded share is one somebody has to go and look at.
-    if let Some((id, reason)) = status.degraded() {
-        s.push_str(" · ");
+    // A name only when there are several: "jobs: no live updates" is useful
+    // and "custompro: no live updates" when custompro is the only share is a
+    // word nobody needed.
+    let named = |id| {
         if status.configured > 1 {
-            s.push_str(state.settings.routes.label(id));
-            s.push_str(": ");
+            format!("{}: ", state.settings.routes.label(id))
+        } else {
+            String::new()
         }
-        s.push_str(reason.label());
+    };
+
+    if let Some((id, reason)) = status.degraded() {
+        return Some(format!("{}{}", named(id), reason.label()));
     }
+
     // Which share to refresh, and why - not merely that something is stale.
     // Somebody told only that "an index is out of date" refreshes everything,
     // and everything is what a few hundred people must not all read at once.
     if state.settings.stale_notices
         && let Some((id, reason)) = status.stale_at(wall)
     {
-        s.push_str(" · ");
-        if status.configured > 1 {
-            s.push_str(state.settings.routes.label(id));
-            s.push_str(": ");
-        }
-        s.push_str(reason.label());
-        s.push_str(" · F5");
+        return Some(format!("{}{} · F5", named(id), reason.label()));
     }
-    s
-}
 
-fn matches_summary(state: &AppState) -> String {
-    if state.matched == 0 {
-        return "no matches".into();
-    }
-    // How many were *found*. How many are on screen is a different number and
-    // is said in a different place - see [`result_count`] - because this one
-    // lives in the prose that the hint chips truncate, and a count that can be
-    // ellipsised away is not a count anybody can rely on.
-    //
-    // It used to read "4,321 matches (showing 15)", where fifteen was the
-    // length of `hits` rather than the eight rows the panel has room for. The
-    // parenthesis was a claim about the screen made by something that cannot
-    // see it.
-    format!(
-        "{} match{}",
-        humanize::count(state.matched as usize),
-        if state.matched == 1 { "" } else { "es" }
-    )
+    None
 }
 
 /// The two facts the footer reserves room for, so neither can be truncated.
@@ -426,46 +383,37 @@ fn matches_summary(state: &AppState) -> String {
 /// said which way it had been changed. The chip that names it is real but it is
 /// `Priority::Normal`, and at the shipped width it does not fit - so on its own
 /// it would be an answer that is there until the moment somebody needs it.
-pub fn footer_facts(state: &AppState, shown: usize) -> String {
-    let viewer = match state.viewer {
-        ViewerKind::Pdf => "F2: pdf",
-        ViewerKind::Avwin => "F2: avwin",
-    };
-    match result_count(state, shown) {
-        Some(count) => format!("{count}  ·  {viewer}"),
-        None => viewer.to_string(),
-    }
-}
-
-/// How many results were found, and how many of them fit.
+/// Where in the result list the rows on screen are.
 ///
-/// `None` when there is nothing to count, so the footer says nothing rather
-/// than a zero.
-fn result_count(state: &AppState, shown: usize) -> Option<String> {
+/// Empty when there is nothing to count, so the footer says nothing rather than
+/// a zero, and when it all fits, because "1-4 of 4" is four words for a fact
+/// the eye already has.
+///
+/// A *range*, not a count, because the list scrolls: "8 of 300" answers how
+/// many were left out but not which eight, and somebody holding Down through
+/// three hundred drawings wants to know how far they have got. This is the
+/// terminal build's `showing 9-16 of 300` restored.
+pub fn visible_range(state: &AppState, window: Range<usize>) -> String {
     let found = state.matched as usize;
-    if found == 0 || state.hits.is_empty() {
-        return None;
+    if found == 0 || state.hits.is_empty() || window.is_empty() {
+        return String::new();
     }
-    if shown < found {
-        Some(format!("{shown} of {}", humanize::count(found)))
-    } else {
-        Some(humanize::count(found))
+    if window.len() >= found {
+        return humanize::count(found);
     }
-}
-
-/// Describes the minimum query length, for the empty state.
-pub fn min_query_hint() -> String {
-    format!("type at least {MIN_QUERY_LEN} characters")
-}
-
-/// Age formatting shared with the results pane.
-pub fn age_of(state: &AppState, wall: SystemTime) -> Option<Duration> {
-    state.index.age(wall)
+    format!(
+        "{}-{} of {}",
+        window.start + 1,
+        window.end,
+        humanize::count(found)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
     use crate::app::event::{AppEvent, IndexMsg};
     use crate::app::key::{Key, KeyEvent, Mods};
     use crate::app::state::AppState;
@@ -561,15 +509,35 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_app_invites_input_and_describes_the_index() {
+    fn an_idle_app_with_a_healthy_index_says_nothing_at_all() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(1_284_551, Duration::ZERO));
 
         let line = render(&s, now, EPOCH);
-        assert!(line.text.starts_with("Ready"));
-        assert!(line.text.contains("1,284,551 files"));
+        assert_eq!(line.text, "", "a healthy footer is a quiet one");
         assert_eq!(line.tone, Tone::Normal);
+    }
+
+    /// The counts and the age did not move somewhere shorter - they left.
+    ///
+    /// They were ambient: a number nobody was looking for, sitting in the one
+    /// place the program has to say things people must act on, rewriting
+    /// itself once a second as the age ticked. The ages are in the drive
+    /// picker, which is where somebody goes when they suspect the list is out
+    /// of date; how many matched is in the reserved slot beside this line.
+    #[test]
+    fn the_file_count_and_the_index_age_are_not_on_this_line() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, healthy_status(1_284_551, Duration::ZERO));
+        type_code(&mut s, now);
+        give_results(&mut s, now, vec![hit("a.pdf")], 1, 1_284_551);
+
+        let line = render(&s, now, EPOCH + Duration::from_secs(180)).text;
+        for gone in ["Ready", "1,284,551", "updated", "3m", "match"] {
+            assert!(!line.contains(gone), "{gone:?} is still there: {line:?}");
+        }
     }
 
     #[test]
@@ -636,43 +604,69 @@ mod tests {
     }
 
     #[test]
-    fn results_report_the_index_age_and_the_match_count() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, healthy_status(1_284_551, Duration::ZERO));
-        type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a.pdf")], 1, 1_284_551);
-
-        let line = render(&s, now, EPOCH + Duration::from_secs(180));
-        assert!(line.text.contains("files · updated"));
-        assert!(
-            line.text.contains("3m"),
-            "the age must be visible: {}",
-            line.text
-        );
-        assert!(line.text.contains("1 match"));
-    }
-
-    #[test]
-    fn a_capped_result_list_says_how_many_are_hidden() {
+    fn the_range_follows_the_window_down_the_list() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
         type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a"), hit("b")], 4321, 9_000);
+        let many: Vec<_> = (0..300).map(|i| hit(&format!("a{i}.pdf"))).collect();
+        give_results(&mut s, now, many, 300, 9_000);
 
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("4,321 matches"), "{}", line.text);
+        assert_eq!(
+            visible_range(&s, s.visible_rows()),
+            format!("1-{} of 300", crate::config::VISIBLE_ROWS)
+        );
+
+        // To the foot of the list, the way an arrow key does it.
+        for _ in 0..299 {
+            s.update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
+        }
+        assert_eq!(
+            visible_range(&s, s.visible_rows()),
+            format!("{}-300 of 300", 300 - crate::config::VISIBLE_ROWS + 1)
+        );
     }
 
     #[test]
-    fn no_matches_is_stated_plainly() {
+    fn a_capped_result_list_says_which_of_them_is_on_screen() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
+        type_code(&mut s, now);
+        let many: Vec<_> = (0..40).map(|i| hit(&format!("a{i}.pdf"))).collect();
+        give_results(&mut s, now, many, 4321, 9_000);
+
+        assert_eq!(
+            visible_range(&s, s.visible_rows()),
+            format!("1-{} of 4,321", crate::config::VISIBLE_ROWS)
+        );
+    }
+
+    /// It all fits, so there is no range worth stating - only the total.
+    #[test]
+    fn a_result_list_that_fits_is_reported_as_a_count() {
+        let now = Instant::now();
+        let mut s = state_at(now);
+        with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
+        type_code(&mut s, now);
+        give_results(&mut s, now, vec![hit("a"), hit("b")], 2, 9_000);
+
+        assert_eq!(visible_range(&s, s.visible_rows()), "2");
+    }
+
+    #[test]
+    /// Nothing found is said by the body, at length, with what to try next -
+    /// see [`crate::view::empty`]. Repeating it here as a count of zero would
+    /// be the same news twice.
+    fn no_matches_is_left_to_the_body_to_explain() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
         type_code(&mut s, now);
         give_results(&mut s, now, vec![], 0, 9_000);
-        assert!(render(&s, now, EPOCH).text.contains("no matches"));
+
+        assert_eq!(render(&s, now, EPOCH).text, "");
+        assert_eq!(visible_range(&s, s.visible_rows()), "");
     }
 
     /// The condition the previous implementation rendered as `0 / 0 files`.
@@ -764,31 +758,6 @@ mod tests {
         assert_eq!(render(&s, now, EPOCH).text, "Saving the file list...");
     }
 
-    /// The index age is the first thing a user checks before trusting a
-    /// result. It must describe the data, not the last time we asked about it.
-    #[test]
-    fn a_confirmed_index_reports_the_data_age_and_the_check_separately() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| {
-            st.origin = Some(Origin::Network);
-            st.entries = 10;
-            st.built_at = Some(EPOCH);
-            st.confirmed_at = Some(EPOCH + Duration::from_secs(3600));
-        });
-        let line = render(&s, now, EPOCH + Duration::from_secs(3660));
-        assert!(
-            line.text.contains("1h"),
-            "the data really is an hour old: {}",
-            line.text
-        );
-        assert!(
-            line.text.contains("checked"),
-            "and it was proven current a minute ago: {}",
-            line.text
-        );
-    }
-
     #[test]
     fn a_freshly_built_index_does_not_mention_the_check() {
         let now = Instant::now();
@@ -812,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn verification_in_flight_shows_a_spinner_and_keeps_the_counts() {
+    fn verification_in_flight_says_so_and_keeps_the_counts_beside_it() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(100, Duration::ZERO));
@@ -822,8 +791,10 @@ mod tests {
 
         let line = render(&s, now + crate::config::VERIFY_DEBOUNCE, EPOCH);
         assert!(line.text.contains("Checking the drive"));
-        assert!(line.text.contains("1 match"));
         assert_eq!(line.tone, Tone::Busy);
+        // The count is beside the line, not in it, so a round trip in flight
+        // does not cost the number somebody is reading.
+        assert_eq!(visible_range(&s, s.visible_rows()), "1");
     }
 
     #[test]
@@ -868,12 +839,10 @@ mod tests {
             }),
             now,
         );
+        // Short, and about the *check*: the count is in the reserved slot and
+        // how many milliseconds the server took is a fact about the server.
         let line = render(&s, now, EPOCH);
-        assert!(
-            line.text.starts_with("Checked just now · 1 match · 42ms"),
-            "{}",
-            line.text
-        );
+        assert_eq!(line.text, "Checked just now");
         assert_eq!(line.tone, Tone::Good);
     }
 
@@ -899,21 +868,10 @@ mod tests {
             "{}",
             line.text
         );
-        assert!(line.text.contains("1 match"));
         assert_eq!(line.tone, Tone::Warn);
-    }
-
-    #[test]
-    fn a_truncated_index_says_so() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| {
-            st.origin = Some(Origin::DiskCache);
-            st.entries = 1000;
-            st.built_at = Some(EPOCH);
-            st.truncated = true;
-        });
-        assert!(render(&s, now, EPOCH).text.contains("(partial)"));
+        // And the results are still reachable beside it: a warning about the
+        // index must not cost the count of what it found.
+        assert_eq!(visible_range(&s, s.visible_rows()), "1");
     }
 
     #[test]
@@ -1008,50 +966,6 @@ mod tests {
     }
 
     // --- several shares -------------------------------------------------
-
-    #[test]
-    fn the_summary_sums_every_share_and_ages_from_the_oldest() {
-        let now = Instant::now();
-        let mut s = state_with_two_shares(now);
-        publish(&mut s, MappingId(0), now, |st| {
-            st.origin = Some(Origin::Network);
-            st.entries = 1_000_000;
-            st.built_at = Some(EPOCH);
-        });
-        publish(&mut s, MappingId(1), now, |st| {
-            st.origin = Some(Origin::Network);
-            st.entries = 284_551;
-            st.built_at = Some(EPOCH + Duration::from_secs(3600));
-        });
-        type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a.pdf")], 1, 1_284_551);
-
-        let line = render(&s, now, EPOCH + Duration::from_secs(3660));
-        assert!(line.text.contains("2 shares"), "{}", line.text);
-        assert!(line.text.contains("1,284,551 files"), "{}", line.text);
-        assert!(
-            line.text.contains("1h"),
-            "the oldest share sets the age: {}",
-            line.text
-        );
-    }
-
-    /// A total that is quietly short reads as a complete answer.
-    #[test]
-    fn a_short_index_says_how_many_shares_have_answered() {
-        let now = Instant::now();
-        let mut s = state_with_two_shares(now);
-        publish(&mut s, MappingId(0), now, |st| {
-            st.origin = Some(Origin::Network);
-            st.entries = 10;
-            st.built_at = Some(EPOCH);
-        });
-        type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a.pdf")], 1, 10);
-
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("1 of 2 indexed"), "{}", line.text);
-    }
 
     #[test]
     fn a_degraded_share_is_named_when_there_are_several() {
@@ -1173,7 +1087,7 @@ mod tests {
     /// Silent mode, for somebody handed the tool who does not need current
     /// data and should not be nagged about it.
     #[test]
-    fn stale_notices_can_be_turned_off_without_hiding_the_age() {
+    fn stale_notices_can_be_turned_off() {
         let now = Instant::now();
         let quiet = Settings {
             stale_notices: false,
@@ -1188,20 +1102,12 @@ mod tests {
 
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
         let line = render(&s, now, wall);
-        assert!(
-            !line.text.contains("changes were missed"),
-            "silent mode must not nag: {}",
-            line.text
+        assert_eq!(
+            line.text, "",
+            "silent mode must not nag, about events or about age"
         );
-        assert!(
-            !line.text.contains("not refreshed"),
-            "nor about age: {}",
-            line.text
-        );
-        assert!(
-            line.text.contains("updated"),
-            "but the age itself is still there: {}",
-            line.text
-        );
+        // The ages are still one keypress away, which is the whole bargain:
+        // not shown, not hidden. See `view::shares`, which F5 opens.
+        assert!(s.index.age(wall).is_some());
     }
 }

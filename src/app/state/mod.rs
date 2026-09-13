@@ -39,7 +39,7 @@ use super::input::{self, Input};
 use crate::config::COUNTDOWN_TICK;
 use crate::config::{
     ANIMATION_TICK, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
-    ViewerKind,
+    VISIBLE_ROWS, ViewerKind,
 };
 use crate::history::History;
 use crate::index::store::{IndexOverview, IndexStatus};
@@ -116,6 +116,8 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
+    /// The first result rank on screen. See [`Self::scroll_into_view`].
+    scroll_top: usize,
     /// Whether `avwin.exe` could not be found on PATH when the program
     /// started.
     ///
@@ -203,6 +205,7 @@ impl AppState {
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
+            scroll_top: 0,
             avwin_missing: false,
             viewer,
             query_epoch: 0,
@@ -283,18 +286,19 @@ impl AppState {
         self.last_frame_wall = wall;
     }
 
-    /// True when the status line shows a value that goes stale on its own.
+    /// True when something on screen goes stale on its own.
     ///
     /// The counterpart to [`Self::wants_animation`]: that one is about work in
     /// flight, this one about text that is wrong a second from now with no
-    /// event to say so - the index age, and the countdown to a retry.
+    /// event to say so - the per-share ages in the drive picker, and the
+    /// countdown to a retry.
     ///
-    /// A deliberate slight over-approximation. `index_summary` is not printed
-    /// in every phase, but mirroring the renderer's branch structure here
-    /// would create a second place to keep in step. The cost is at most one
-    /// needless wakeup per age bucket, in a phase the user leaves by typing.
+    /// The index age used to be on the status line in every healthy phase, so
+    /// this was true whenever there was an index at all and the panel ticked
+    /// for as long as it was open. The ages live in the drive picker now, so
+    /// the wakeups do too: an idle panel with a healthy index costs nothing.
     pub fn shows_elapsed_text(&self) -> bool {
-        self.index.built_at.is_some() || self.index.unreachable().is_some()
+        (self.picking_share && self.index.built_at.is_some()) || self.index.unreachable().is_some()
     }
 
     /// When the time-derived text next changes, if any is shown.
@@ -323,8 +327,12 @@ impl AppState {
             earliest(self.last_frame + COUNTDOWN_TICK);
         }
 
-        // The age readout, whose next change is exactly one bucket edge away.
-        if let Some(age) = self.index.age(self.last_frame_wall) {
+        // The per-share ages in the drive picker, whose next change is exactly
+        // one bucket edge away. Only while the picker is up: nothing else on
+        // screen is derived from the wall clock any more.
+        if self.picking_share
+            && let Some(age) = self.index.age(self.last_frame_wall)
+        {
             earliest(self.last_frame + crate::util::humanize::next_age_change(age));
         }
         out
@@ -468,6 +476,7 @@ impl AppState {
     /// see the note in [`Self::on_input_changed`].
     fn clear_results(&mut self) {
         self.hits.clear();
+        self.scroll_top = 0;
         self.hovered = None;
         self.matched = 0;
         self.total = 0;
@@ -667,7 +676,56 @@ impl AppState {
         self.selection_pinned = true;
         self.selection_lost = false;
         self.selected_path = Some(Arc::clone(&self.hits[row.min(self.hits.len() - 1)].path));
+        self.scroll_into_view();
         Response::redraw()
+    }
+
+    /// The window over the result list: the first rank on screen.
+    ///
+    /// The list holds up to [`crate::config::MAX_RESULTS`] and the panel has
+    /// room for [`VISIBLE_ROWS`], so most of a broad search is off screen. This
+    /// is where.
+    pub fn scroll_top(&self) -> usize {
+        self.scroll_top
+    }
+
+    /// The ranks currently on screen.
+    pub fn visible_rows(&self) -> std::ops::Range<usize> {
+        let start = self.scroll_top.min(self.hits.len());
+        start..(start + VISIBLE_ROWS).min(self.hits.len())
+    }
+
+    /// Moves the window as little as it takes to contain the selected row.
+    ///
+    /// The **only** place `scroll_top` moves, called from the only two places
+    /// that can invalidate it: [`Self::jump_selection`], which moves the cursor,
+    /// and [`Self::apply_hits`], which moves the list out from under it. A
+    /// third caller would be a third opinion about where the window is.
+    ///
+    /// The terminal build derived its page from the selection instead, and its
+    /// note argued a stored offset would be "a second source of truth that
+    /// every result update would have to keep in step". That was written for a
+    /// three-column grid, where the page was the unit somebody moved in. For a
+    /// single column of twelve, flipping the whole list on the twelfth Down is
+    /// worse than sliding it by one - so the offset is stored, and the
+    /// invariant it has to hold is asserted directly by the interleaving
+    /// fuzzer rather than argued about here.
+    fn scroll_into_view(&mut self) {
+        let Some(row) = self.selected_row() else {
+            self.scroll_top = 0;
+            return;
+        };
+        if row < self.scroll_top {
+            self.scroll_top = row;
+        } else if row >= self.scroll_top + VISIBLE_ROWS {
+            self.scroll_top = row + 1 - VISIBLE_ROWS;
+        }
+        // A list that shrank under a window near its end would otherwise leave
+        // the window pointing past it, showing fewer rows than there is room
+        // for with nothing below them.
+        self.scroll_top = self
+            .scroll_top
+            .min(self.hits.len().saturating_sub(VISIBLE_ROWS));
     }
 
     // --- results ----------------------------------------------------------
@@ -767,8 +825,18 @@ impl AppState {
     }
 
     /// Installs a new result set while keeping the cursor where the user put
-    /// it.
+    /// it, and the window where the cursor is.
+    ///
+    /// Split so that `place_selection` below can return early from any of its
+    /// four arms without each one having to remember the window. Forgetting it
+    /// on one arm is a cursor on a screen nobody can see, which is the failure
+    /// the stored offset has to be proof against.
     fn apply_hits(&mut self, hits: Vec<Hit>) {
+        self.place_selection(hits);
+        self.scroll_into_view();
+    }
+
+    fn place_selection(&mut self, hits: Vec<Hit>) {
         let previous_row = self.selected_row();
         let hovered_path = self
             .hovered

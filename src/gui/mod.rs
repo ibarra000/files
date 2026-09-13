@@ -226,7 +226,11 @@ impl Shell {
         requests: crossbeam_channel::Receiver<Request>,
         post: impl Fn(Request) + Clone + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let dark = cc.egui_ctx.theme() == egui::Theme::Dark;
+        // What the configuration asked for, which is usually not what Windows
+        // is doing. `system` is still available and still means this.
+        let dark = settings
+            .theme
+            .is_dark(cc.egui_ctx.theme() == egui::Theme::Dark);
 
         // Dressed before anything is drawn, and - for the taskbar bit - before
         // the window is ever shown, because the shell reads that one once.
@@ -291,7 +295,12 @@ impl Shell {
     /// desktop in the right one is the most obvious way for a window to look
     /// like it does not belong here.
     fn follow_theme(&mut self, ctx: &egui::Context) {
-        let dark = ctx.theme() == egui::Theme::Dark;
+        let dark = self
+            .app
+            .state
+            .settings
+            .theme
+            .is_dark(ctx.theme() == egui::Theme::Dark);
         if dark == self.theme.dark {
             return;
         }

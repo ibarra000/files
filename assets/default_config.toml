@@ -150,6 +150,15 @@ refresh = "manual"
 # the key itself.
 # hotkey        = "ctrl+shift+space"
 
+# How the panel is coloured.
+#
+# "light" is a warm, bright panel and is what you get if this is not set.
+# "dark" is the same scheme on a low ground, for a dark room. "system" follows
+# the Windows setting, which is what this program used to do unconditionally -
+# and which meant a machine in dark mode got a near-black panel whether or not
+# that was wanted.
+# theme         = "light"            # light | dark | system
+
 # Which viewer Enter uses. Left uncommented because F2 switches it while
 # running and saves the choice here, and the writer replaces this line rather
 # than appending a second one.

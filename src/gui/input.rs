@@ -74,10 +74,42 @@ pub fn translate(input: &egui::InputState) -> Vec<AppEvent> {
                     out.push(AppEvent::Key(KeyEvent::new(mapped, mods)));
                 }
             }
+            // The wheel walks the list. It has been in the help panel since
+            // the help panel existed and has never once worked: this arm did
+            // not exist, so every wheel event fell through to the catch-all
+            // below.
+            //
+            // Emitted as arrow keys rather than as a scroll of its own, so
+            // there is one way to move through results and the selection
+            // cannot be left behind by the view. A notch is `unit`-dependent -
+            // lines on a mouse, points on a trackpad - so it is the *sign*
+            // that is read here and the count of notches that is honoured.
+            egui::Event::MouseWheel { delta, .. } => {
+                let notches = wheel_notches(delta.y);
+                let key = if delta.y > 0.0 { Key::Up } else { Key::Down };
+                for _ in 0..notches {
+                    out.push(AppEvent::Key(KeyEvent::new(key, Mods::NONE)));
+                }
+            }
             _ => {}
         }
     }
     out
+}
+
+/// How many rows one wheel event moves.
+///
+/// A mouse reports whole notches and a trackpad reports a stream of small
+/// fractions, so a bare `delta.y as usize` would move nothing at all on a
+/// trackpad. Anything non-zero is at least one row, and a fast flick is
+/// capped: a wheel that could throw the selection a hundred rows down the list
+/// is a wheel that loses somebody's place.
+fn wheel_notches(dy: f32) -> usize {
+    const MAX_PER_EVENT: usize = 4;
+    if dy == 0.0 || !dy.is_finite() {
+        return 0;
+    }
+    (dy.abs().round() as usize).clamp(1, MAX_PER_EVENT)
 }
 
 /// The keys that mean something regardless of what they would type.
@@ -378,6 +410,41 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         }]);
         assert_eq!(repeated, vec![KeyEvent::new(Key::Backspace, Mods::NONE)]);
+    }
+
+    fn wheel(dy: f32) -> Vec<KeyEvent> {
+        keys(vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        }])
+    }
+
+    /// The wheel has been in the help panel since the help panel existed and
+    /// has never worked: there was no arm for it, so every wheel event fell
+    /// through to the catch-all and was dropped.
+    #[test]
+    fn the_wheel_moves_through_the_results() {
+        assert_eq!(wheel(-1.0), vec![KeyEvent::new(Key::Down, Mods::NONE)]);
+        assert_eq!(wheel(1.0), vec![KeyEvent::new(Key::Up, Mods::NONE)]);
+    }
+
+    /// A trackpad reports a stream of small fractions rather than whole
+    /// notches, so a bare cast would scroll nowhere at all on one.
+    #[test]
+    fn a_trackpads_fraction_of_a_notch_still_moves_one_row() {
+        assert_eq!(wheel(0.2).len(), 1);
+        assert_eq!(wheel(-0.05).len(), 1);
+        assert!(wheel(0.0).is_empty(), "and a still wheel moves nothing");
+    }
+
+    /// A flick that threw the selection a hundred rows down the list is a
+    /// flick that lost somebody's place.
+    #[test]
+    fn a_fast_flick_is_capped() {
+        assert_eq!(wheel(-40.0).len(), 4);
+        assert!(wheel(f32::NAN).is_empty(), "and a broken one moves nothing");
     }
 
     /// The guard that keeps the AltGr reconstruction and the toolkit from both

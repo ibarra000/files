@@ -20,7 +20,8 @@
 //! somebody nudges a hue, and this one is read by people of every age for hours
 //! a day.
 
-use eframe::egui::{Color32, CornerRadius, FontId};
+use eframe::egui::epaint::Shadow;
+use eframe::egui::{Color32, CornerRadius, FontId, Rect};
 
 use crate::view::Emphasis;
 use crate::view::status::Tone;
@@ -42,9 +43,10 @@ pub const BAR_H: f32 = 2.0;
 
 /// The most rows shown at once.
 ///
-/// Eight is a scroll-free glance. More than that and the panel stops being an
-/// overlay and starts being a file manager, which is a different program.
-pub const MAX_ROWS: usize = 8;
+/// Re-exported rather than defined here: the arrows scroll a window over the
+/// result list and the state machine owns that window, so the number belongs
+/// where the state machine can reach it. See [`crate::config::VISIBLE_ROWS`].
+pub use crate::config::VISIBLE_ROWS as MAX_ROWS;
 
 /// Breathing room at the panel's edge.
 pub const PAD_X: f32 = 16.0;
@@ -151,6 +153,23 @@ pub struct Theme {
     /// The matched substring, so the eye lands on why a row is there.
     pub match_run: Color32,
 
+    /// A surface recessed into the panel: the search field.
+    ///
+    /// A shade off [`Self::surface`] and no more. The code being typed sits on
+    /// it, so it is a text ground and is held to the same ratio as one.
+    pub well: Color32,
+
+    /// The light that a raised surface catches, up and to the left.
+    ///
+    /// Soft UI models an element as pressed out of the panel rather than drawn
+    /// on top of it, so there is no border and no fill difference - the shape
+    /// is carried entirely by a pair of shadows, one the colour of the light
+    /// and one the colour of its absence. Take either away and the element
+    /// stops reading as a thing and becomes a smudge.
+    pub lit: Color32,
+    /// And the shadow it casts, down and to the right.
+    pub shade: Color32,
+
     /// A key name: ` Enter `.
     pub chip_bg: Color32,
     pub chip_fg: Color32,
@@ -162,86 +181,109 @@ pub struct Theme {
 pub const TONE_GLYPH: [char; 5] = ['\u{2022}', '\u{2219}', '\u{2713}', '\u{25B2}', '\u{00D7}'];
 
 impl Theme {
-    /// The dark palette, carried over from the terminal build.
+    /// The dark palette: the same warm scheme on a low ground.
+    ///
+    /// Softened from the near-black `0x10141C` and cold blue it carried over
+    /// from the terminal build. It shares the light theme's hue family so the
+    /// two read as one program rather than two, and it is lifted well off
+    /// black so the surface has somewhere to put a highlight.
     pub fn dark() -> Self {
-        let text = rgb(0xD6DCE8);
-        let strong = rgb(0xF2F5FA);
-        // ~6.5:1 on this ground. The 16-colour `DarkGray` it replaced is
-        // 4.7:1, and was the legibility complaint that started all of this.
-        let dim = rgb(0x8A94A6);
-        // Raised from the terminal build's 0x545E70, which came to 2.85:1 on
-        // this surface - under the 3:1 that WCAG 1.4.11 asks of a boundary you
-        // are meant to be able to see. Raised again once the ratio was checked
-        // against a panel summoned over a *white* window, where the surface
-        // lightens toward its ground and a dark rule has least to work with.
-        let faint = rgb(0x657082);
-        let accent = rgb(0x6FB3FF);
+        let text = rgb(0xE8E2D6);
+        let strong = rgb(0xF9F5ED);
+        let dim = rgb(0xAAA192);
+        // Rules and borders. Must clear 3:1 - WCAG 1.4.11 asks it of a
+        // boundary you are meant to be able to see - and must still be
+        // fainter than `dim`, or a separator competes with a label.
+        let faint = rgb(0x7E7666);
+        let accent = rgb(0xA6C88F);
         Self {
             dark: true,
-            surface: tint(0x10141C, 0xF0),
-            edge: tint(0x8CA0C0, 0x3D),
+            surface: tint(0x232019, 0xF0),
+            edge: tint(0xC8BFA8, 0x3D),
             text,
             strong,
             dim,
             faint,
             accent,
-            input: rgb(0xE8F0FF),
+            input: rgb(0xF4EFE4),
             caret: accent,
-            selection: tint(0x6FB3FF, 0x3D),
+            selection: tint(0xA6C88F, 0x33),
             hover: tint(0xFFFFFF, 0x14),
-            text_selection: tint(0x6FB3FF, 0x59),
-            match_run: rgb(0xFFD166),
+            text_selection: tint(0xA6C88F, 0x50),
+            match_run: rgb(0xF2C46E),
+            // Weaker than the light theme's pair. On a low ground the eye has
+            // far less headroom above the surface, so the same strength reads
+            // as a glow rather than as a shape.
+            well: tint(0x1A1813, 0xF4),
+            lit: tint(0xFFFFFF, 0x10),
+            shade: tint(0x000000, 0x2E),
             chip_bg: tint(0xFFFFFF, 0x1A),
-            chip_fg: rgb(0xCFE2FF),
+            chip_fg: rgb(0xEDE6D8),
             tones: [
                 text,
-                rgb(0x58C6E8),
-                rgb(0x5FD38B),
-                rgb(0xF0B34A),
-                rgb(0xF2685F),
+                rgb(0x7FD0E0),
+                rgb(0x8ED9A2),
+                rgb(0xEFC05A),
+                rgb(0xF09184),
             ],
         }
     }
 
-    /// The light palette.
+    /// The light palette: warm sand, a sage accent, soft edges.
     ///
     /// Not the dark one inverted - inverting a palette tuned for a dark ground
-    /// gives washed-out pastels - but the same *roles* re-picked against a
-    /// near-white surface, at the same contrast ratios, which is what the tests
+    /// gives washed-out pastels - but the same *roles* re-picked against a warm
+    /// near-white surface at the same contrast ratios, which is what the tests
     /// at the bottom of this file actually check.
+    ///
+    /// # Why the type is darker than the reference it came from
+    ///
+    /// The look this is drawn from is soft-UI: surfaces shaded rather than
+    /// outlined, everything a step or two from the ground, nothing shouting.
+    /// The *surfaces* are exactly that. The type is not, and deliberately.
+    ///
+    /// A neumorphic mood board picks its secondary greys around `#8F887C` and
+    /// its accents around `#6F8F63`; on this ground those are 2.6:1 and 2.7:1,
+    /// against the 4.5:1 the tests below hold every one of these to. This is a
+    /// tool somebody reads all day, at a glance, over whatever window they had
+    /// open - so the shading carries the style and the contrast stays where it
+    /// was. Where the two disagree, the lever is the surface, never the text.
     pub fn light() -> Self {
-        let text = rgb(0x1C2330);
-        let strong = rgb(0x0A0E15);
-        let dim = rgb(0x4E5867);
-        let faint = rgb(0x6E7889);
-        let accent = rgb(0x0B5ED7);
+        let text = rgb(0x332F28);
+        let strong = rgb(0x1A1712);
+        let dim = rgb(0x5F594E);
+        let faint = rgb(0x7E7769);
+        let accent = rgb(0x3F5E33);
         Self {
             dark: false,
-            surface: tint(0xF7F9FC, 0xF0),
-            edge: tint(0x2E3A4C, 0x33),
+            surface: tint(0xEFEBE3, 0xF0),
+            edge: tint(0x4A4238, 0x33),
             text,
             strong,
             dim,
             faint,
             accent,
-            input: rgb(0x0D1220),
+            input: rgb(0x241F19),
             caret: accent,
-            selection: tint(0x0B5ED7, 0x33),
-            hover: tint(0x2E3A4C, 0x12),
-            text_selection: tint(0x0B5ED7, 0x45),
+            selection: tint(0x3F5E33, 0x2A),
+            hover: tint(0x4A4238, 0x12),
+            text_selection: tint(0x3F5E33, 0x45),
             // Darker than the amber the dark theme uses, and darker than the
             // warn tone it is derived from: a matched run is most often read
             // on the *selected* row, and the light theme's selection is a pale
-            // blue wash that a mid-amber all but disappears into.
-            match_run: rgb(0x7A4200),
-            chip_bg: tint(0x2E3A4C, 0x1F),
-            chip_fg: rgb(0x1B2534),
+            // wash that a mid-amber all but disappears into.
+            match_run: rgb(0x6B4100),
+            well: tint(0xE6E1D6, 0xF6),
+            lit: tint(0xFFFFFF, 0x9A),
+            shade: tint(0xC2B8A6, 0x76),
+            chip_bg: tint(0x4A4238, 0x22),
+            chip_fg: rgb(0x2A251E),
             tones: [
                 text,
-                rgb(0x0B6480),
-                rgb(0x11703C),
+                rgb(0x1F5A66),
+                rgb(0x2E6B3A),
                 rgb(0x8A4B00),
-                rgb(0xB3261E),
+                rgb(0xA32820),
             ],
         }
     }
@@ -272,19 +314,6 @@ impl Theme {
             Emphasis::Tone(tone) => self.tone(tone),
         }
     }
-
-    /// The background of a row, given what is true of it.
-    ///
-    /// Selection wins over hover, because Enter opens the selection and a row
-    /// that looked selected merely by being pointed at would get a file opened
-    /// by accident.
-    pub fn row_fill(self, selected: bool, hovered: bool) -> Option<Color32> {
-        match (selected, hovered) {
-            (true, _) => Some(self.selection),
-            (false, true) => Some(self.hover),
-            (false, false) => None,
-        }
-    }
 }
 
 /// Scales a colour's alpha, for fading a whole body in or out.
@@ -298,6 +327,79 @@ pub fn faded(color: Color32, alpha: f32) -> Color32 {
         return color;
     }
     color.linear_multiply(alpha)
+}
+
+/// How far a raised surface is lifted off the panel, in points.
+///
+/// Small. The whole idea is an element a step out of the ground, not a card
+/// floating over it, and a shadow long enough to notice is a shadow that reads
+/// as a drop shadow instead.
+pub const LIFT: f32 = 2.0;
+
+/// And how soft the lift is.
+pub const BLUR: f32 = 6.0;
+
+/// The pair of shadows, in the given order, behind `rect`.
+///
+/// `Shadow::as_shape` fills the rectangle as well as feathering around it, so
+/// both callers below paint a surface over the top afterwards. Without that the
+/// two stack into a muddy patch and whatever wash goes on it reads as dirt.
+fn shadows(
+    painter: &eframe::egui::Painter,
+    rect: Rect,
+    r: u8,
+    alpha: f32,
+    pairs: [(f32, Color32); 2],
+) {
+    for (offset, colour) in pairs {
+        painter.add(
+            Shadow {
+                offset: [offset as i8, offset as i8],
+                blur: BLUR as u8,
+                spread: 0,
+                color: faded(colour, alpha),
+            }
+            .as_shape(rect, radius(r)),
+        );
+    }
+}
+
+/// Draws `rect` as a surface pressed out of the panel.
+///
+/// A light shadow up and to the left, a dark one down and to the right, and
+/// then the panel's own colour over the top: a soft-UI element is the *same*
+/// colour as its ground and is legible only by the shading at its edges. Take
+/// either shadow away and it stops reading as a thing and becomes a smudge.
+///
+/// `alpha` is the panel's entrance fade, so the shading arrives with everything
+/// else rather than appearing once the panel has landed.
+pub fn raise(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8, alpha: f32) {
+    shadows(
+        painter,
+        rect,
+        r,
+        alpha,
+        [(-LIFT, theme.lit), (LIFT, theme.shade)],
+    );
+    painter.rect_filled(rect, radius(r), faded(theme.surface, alpha));
+}
+
+/// And `rect` as a surface pressed *into* it: the same pair, swapped, over a
+/// slightly recessed fill.
+///
+/// The fill is what carries it. `Shadow` casts outwards and there is no inset
+/// form, so the shading alone would put the light on the wrong side of an
+/// element that is otherwise identical to its ground - and a trough that is a
+/// shade darker than the panel is what says "put something here" anyway.
+pub fn press(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8, alpha: f32) {
+    shadows(
+        painter,
+        rect,
+        r,
+        alpha,
+        [(LIFT, theme.lit), (-LIFT, theme.shade)],
+    );
+    painter.rect_filled(rect, radius(r), faded(theme.well, alpha));
 }
 
 pub fn radius(r: u8) -> CornerRadius {
@@ -443,6 +545,42 @@ mod tests {
                         "{name}/{role} {ground}: {ratio:.2}:1, want 4.5:1"
                     );
                 }
+            }
+        }
+    }
+
+    /// The code being typed is the biggest text on the panel and sits in a
+    /// recessed well rather than on the panel itself, so the well is a text
+    /// ground and is held to the AAA ratio the rest of the body text is.
+    #[test]
+    fn the_code_is_legible_in_the_well_it_is_typed_into() {
+        for (name, theme) in both() {
+            for (ground, surface) in grounds(theme) {
+                let well = over(theme.well, surface);
+                for (role, fg) in [("input", theme.input), ("dim", theme.dim)] {
+                    let want = if role == "input" { 7.0 } else { 4.5 };
+                    let ratio = contrast(fg, well);
+                    assert!(
+                        ratio >= want,
+                        "{name}/{role} {ground}: {ratio:.2}:1 in the well, want {want}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A recessed surface that is not recessed is a flat panel with extra
+    /// drawing in it, and one that is recessed too far is a hole.
+    #[test]
+    fn the_well_is_a_shade_off_the_panel_and_no_more() {
+        for (name, theme) in both() {
+            for (ground, surface) in grounds(theme) {
+                let well = over(theme.well, surface);
+                let ratio = contrast(well, surface);
+                assert!(
+                    (1.02..1.35).contains(&ratio),
+                    "{name} {ground}: the well is {ratio:.3}:1 against the panel"
+                );
             }
         }
     }

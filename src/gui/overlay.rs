@@ -76,10 +76,15 @@ pub fn measure(state: &AppState) -> Measured {
         Content::Empty => shown as f32 * LINE_H + theme::PAD_Y * 2.0,
     };
 
+    // Relative to the window, not to the list. This used to be
+    // `rank.min(shown - 1)`, which pinned the highlight to the last visible row
+    // for every rank past it - so with three hundred results the arrows walked
+    // the whole list while the panel drew the same eight rows and the same
+    // frozen band, and Enter opened a file that was not on screen.
     let selection_y = matches!(content, Content::Results)
         .then(|| state.selected_row())
         .flatten()
-        .map(|rank| rank.min(shown.saturating_sub(1)) as f32 * theme::ROW_H);
+        .map(|rank| rank.saturating_sub(state.scroll_top()) as f32 * theme::ROW_H);
 
     Measured {
         content,
@@ -297,6 +302,15 @@ fn draw_field(
     let alpha = visual.alpha;
     let fade = |c: Color32| theme::faded(c, alpha);
     let font = theme::font(theme::SIZE_INPUT, Weight::Light);
+
+    // The field reads as pressed into the panel rather than drawn on it: a
+    // trough is what a search box looks like in this idiom, and it is the one
+    // element here somebody puts something *into*.
+    let well = Rect::from_min_max(
+        pos2(rect.left() + theme::PAD_X - 4.0, rect.top() + 4.0),
+        pos2(rect.right() - theme::PAD_X + 4.0, rect.bottom() - 4.0),
+    );
+    theme::press(&painter, theme, well, theme::ROW_RADIUS, alpha);
 
     // A magnifier, which is what every search field on this operating system
     // has, so nobody has to be told what the box is for.
@@ -532,6 +546,10 @@ fn draw_results(
             pos2(rect.left() + theme::PAD_X, rect.top() + y),
             vec2(rect.width() - theme::PAD_X * 2.0, theme::ROW_H),
         );
+        // Raised, then washed. The shading is what says "this one", and the
+        // wash is what says which one - the pair is legible where either alone
+        // would not be, which is the point of shading a monochrome panel.
+        theme::raise(ui.painter(), theme, row_rect, theme::ROW_RADIUS, alpha);
         ui.painter().rect_filled(
             row_rect,
             theme::radius(theme::ROW_RADIUS),
@@ -559,7 +577,17 @@ fn draw_results(
     // their rows by arithmetic rather than by allocation, which is why this
     // only ever went wrong here.
     child.spacing_mut().item_spacing.y = 0.0;
-    for (rank, hit) in state.hits.iter().take(rows_shown(state)).enumerate() {
+    // Absolute ranks, not positions in the drawn window. Every `Intent` below
+    // is an index into `state.hits`, which is what `pointer.rs` expects and
+    // what lets `apply_hits` re-validate a hover by path across a result
+    // change - so the offset is added here, at the one place the two
+    // numberings meet, rather than being subtracted again at the far end.
+    let window = state.visible_rows();
+    for (rank, hit) in state.hits[window.clone()]
+        .iter()
+        .enumerate()
+        .map(|(i, hit)| (window.start + i, hit))
+    {
         let response = row::show(
             &mut child,
             theme,
@@ -757,15 +785,6 @@ fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, alpha: f32,
 /// The gap between the result count and the status prose beside it.
 const COUNT_GAP: f32 = 12.0;
 
-/// How many results the body has room for.
-///
-/// One definition, read by the rows that are drawn and by the count in the
-/// footer that says how many were left out, so the two cannot disagree about
-/// what is on screen.
-fn rows_shown(state: &AppState) -> usize {
-    state.hits.len().min(theme::MAX_ROWS)
-}
-
 fn draw_footer(
     ui: &mut Ui,
     state: &AppState,
@@ -793,32 +812,40 @@ fn draw_footer(
     // The reserved slot: drawn before the prose and outside its wrap width, so
     // it is the one part of this line that truncation cannot reach.
     //
-    // Strong rather than dim. These are values somebody is looking for, not
-    // notes about the state of the program.
-    {
-        let facts = view::status::footer_facts(state, rows_shown(state));
+    // Strong rather than dim. Where you are in three hundred results is
+    // something somebody is looking for, not a note about the state of the
+    // program.
+    let range = view::status::visible_range(state, state.visible_rows());
+    if !range.is_empty() {
         let width = painter
-            .layout_no_wrap(facts.clone(), font.clone(), Color32::WHITE)
+            .layout_no_wrap(range.clone(), font.clone(), Color32::WHITE)
             .rect
             .width();
         painter.text(
             pos2(status_left, rect.center().y),
             Align2::LEFT_CENTER,
-            &facts,
+            &range,
             font.clone(),
             theme::faded(theme.text, alpha),
         );
         announce(
             ui,
             Rect::from_min_size(pos2(status_left, rect.top()), vec2(width, rect.height())),
-            "facts",
-            &facts,
+            "range",
+            &range,
         );
         status_left += width + COUNT_GAP;
     }
 
     let hints = view::hints::hints(view::hints::Context::of(state));
-    let chips = draw_chips(ui, theme, rect, &hints, alpha);
+    let chips = draw_chips(
+        ui,
+        theme,
+        rect,
+        &hints,
+        chip_budget(rect, status_left),
+        alpha,
+    );
 
     // Whatever the chips left. Truncated rather than overlapped: a status line
     // running under `Esc  close` is unreadable, and the keys are the part
@@ -859,12 +886,38 @@ fn draw_footer(
     chips.1
 }
 
+/// Room kept for the status line, whether or not it has anything to say.
+///
+/// Wide enough for the longest transient - `Checking the drive...` - with a
+/// warning longer than that left to truncate, which is what truncation is for.
+const STATUS_RESERVE: f32 = 120.0;
+
+/// How much of the footer the key hints may have.
+///
+/// Everything the range readout did not take, less a *fixed* reserve for the
+/// status line - not the width that line actually needs. A budget that tracked
+/// the text would add and remove chips every time the phase changed, which is a
+/// footer reflowing under somebody reading it: the exact class of thing the last
+/// round of work went to remove. Fixed, it never moves.
+///
+/// The reserve is empty space when the line is quiet, which it usually now is.
+/// The chips are laid out from the right, so what that costs is a gap in the
+/// middle of the footer rather than anything anybody is looking at.
+///
+/// This replaces a flat `rect.width() * 0.55`, which was 396pt whatever else
+/// was on the line - and 396pt is not enough for the F2 chip, which is why the
+/// viewer indicator had to live on the left until now.
+fn chip_budget(rect: Rect, status_left: f32) -> f32 {
+    (rect.right() - theme::PAD_X - status_left - CHIP_GAP * 2.0 - STATUS_RESERVE).max(0.0)
+}
+
 /// Lays the key hints out from the right, and reports where they start.
 fn draw_chips(
     ui: &mut Ui,
     theme: &Theme,
     rect: Rect,
     hints: &[view::hints::Hint],
+    budget: f32,
     alpha: f32,
 ) -> (f32, Vec<Intent>) {
     let painter = ui.painter().clone();
@@ -885,7 +938,6 @@ fn draw_chips(
         key: &|text: &str| measure(text, &key_font),
         label: &|text: &str| measure(text, &label_font),
     };
-    let budget = rect.width() * 0.55;
     let (kept, labelled) = view::hints::fit(hints, budget, &widths);
 
     // The keys, as one string. A chip is a key and a label sitting beside each
@@ -929,6 +981,7 @@ fn draw_chips(
         x -= key_w;
 
         let chip = Rect::from_min_size(pos2(x, rect.center().y - 11.0), vec2(key_w - 4.0, 22.0));
+        theme::raise(&painter, theme, chip, theme::CHIP_RADIUS, alpha);
         painter.rect_filled(
             chip,
             theme::radius(theme::CHIP_RADIUS),
@@ -980,9 +1033,20 @@ impl view::hints::Measure for Points<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Settings;
+    use crate::app::event::AppEvent;
+    use crate::app::state::pointer::Intent;
+    use crate::config::{Settings, VISIBLE_ROWS};
     use crate::search::matcher::Hit;
     use std::sync::Arc;
+
+    /// Puts the cursor on `row` the way a click does.
+    ///
+    /// Through the real intent rather than by assigning `selected_path`, so the
+    /// window follows the cursor exactly as it does in the program - which is
+    /// the thing these tests are about.
+    fn select(state: &mut AppState, row: usize) {
+        state.update(AppEvent::Intent(Intent::Select(row)), Instant::now());
+    }
 
     fn state() -> AppState {
         AppState::new(Settings::default(), Instant::now())
@@ -1076,20 +1140,31 @@ mod tests {
     }
 
     /// The highlight is positioned by the animator, which needs a point, not a
-    /// rank - and a rank that scrolled off the visible eight must not place it
-    /// below the panel.
+    /// rank - and the point is measured from the top of the *window*, not from
+    /// the top of the list.
+    ///
+    /// This used to clamp the rank to the last visible row, which is why a
+    /// selection past the window left the band frozen on the bottom row while
+    /// the arrows walked on without it.
     #[test]
-    fn the_selection_is_reported_as_a_point_inside_the_list() {
-        let mut state = with_hits(20);
-        state.selected_path = Some(Arc::clone(&state.hits[3].path));
-        let measured = measure(&state);
-        assert_eq!(measured.selection_y, Some(3.0 * theme::ROW_H));
+    fn the_selection_is_reported_as_a_point_inside_the_window() {
+        let mut state = with_hits(VISIBLE_ROWS * 3);
+        select(&mut state, 3);
+        assert_eq!(measure(&state).selection_y, Some(3.0 * theme::ROW_H));
 
-        state.selected_path = Some(Arc::clone(&state.hits[19].path));
+        // Far down the list: the window has followed, so the point is still
+        // inside it - and is not pinned to the bottom row.
+        let last = state.hits.len() - 1;
+        select(&mut state, last);
         let far = measure(&state).selection_y.expect("still selected");
         assert!(
-            far <= (theme::MAX_ROWS - 1) as f32 * theme::ROW_H,
-            "the highlight was placed at {far}, below the visible list"
+            (0.0..=(VISIBLE_ROWS - 1) as f32 * theme::ROW_H).contains(&far),
+            "the highlight was placed at {far}, outside the window"
+        );
+        assert_eq!(
+            far,
+            (last - state.scroll_top()) as f32 * theme::ROW_H,
+            "the point must be the row's place in the window"
         );
     }
 

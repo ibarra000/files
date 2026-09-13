@@ -16,7 +16,9 @@ use files::app::event::{
 };
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
-use files::config::{MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind};
+use files::config::{
+    MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS, ViewerKind,
+};
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
 use files::paths::MappingId;
@@ -692,14 +694,27 @@ fn a_session_with_no_index_still_costs_zero_wakeups() {
     assert_eq!(s.next_deadline(), None, "idle must stay free");
 }
 
+/// The ages are only on screen while the drive picker is open, so the wakeups
+/// they cost are only owed while it is.
+///
+/// They used to lead the status line in every healthy phase, which meant an
+/// idle panel with a loaded index ticked for as long as it was up - once a
+/// second, then once a minute, for a number nobody had asked to see. The
+/// picker is where somebody goes when they suspect the list is stale, and that
+/// is where the clock now runs.
 #[test]
-fn a_loaded_index_schedules_the_redraw_its_age_needs() {
+fn a_loaded_index_costs_nothing_until_the_drive_list_is_open() {
     let (mut s, now) = state();
     s.note_frame(now, EPOCH + Duration::from_secs(10));
     publish(&mut s, MappingId(0), now, |st| {
         st.built_at = Some(EPOCH);
         st.entries = 5;
     });
+    assert!(!s.shows_elapsed_text(), "an idle panel owes no frames");
+    assert_eq!(s.next_deadline(), None);
+
+    s.update(press(Key::F(5)), now);
+    assert!(s.picking_share, "precondition");
     assert!(s.shows_elapsed_text());
     assert_eq!(
         s.next_deadline(),
@@ -717,6 +732,7 @@ fn an_aged_index_wakes_on_the_minute_rather_than_every_second() {
     publish(&mut s, MappingId(0), now, |st| {
         st.built_at = Some(EPOCH);
     });
+    s.update(press(Key::F(5)), now);
     assert_eq!(s.next_deadline(), Some(now + Duration::from_secs(43)));
 }
 
@@ -730,6 +746,7 @@ fn redrawing_advances_the_anchor_so_the_deadline_moves_forward() {
     publish(&mut s, MappingId(0), now, |st| {
         st.built_at = Some(EPOCH);
     });
+    s.update(press(Key::F(5)), now);
 
     let due = s.next_deadline().unwrap();
     assert_eq!(
@@ -753,6 +770,7 @@ fn a_tick_before_the_readout_changes_asks_for_nothing() {
     publish(&mut s, MappingId(0), now, |st| {
         st.built_at = Some(EPOCH);
     });
+    s.update(press(Key::F(5)), now);
     let due = s.next_deadline().unwrap();
     assert_eq!(
         s.update(AppEvent::Tick, due - Duration::from_millis(1))
@@ -1550,6 +1568,75 @@ fn paging_reaches_the_ends_of_the_list() {
         s.update(press(Key::PageUp), now);
     }
     assert_eq!(s.selected_row(), Some(0), "PageUp did not reach the top");
+}
+
+/// The bug that made holding an arrow key look like the program had hung.
+///
+/// The selection walked the whole list while the panel drew the first
+/// screenful and pinned the highlight to its last row, so every frame past
+/// that was pixel-identical to the one before it. Frames were still being
+/// produced - each auto-repeat woke the loop - the panel simply had nothing
+/// new to say, and `Enter` would have opened a file that was not on screen.
+#[test]
+fn holding_down_scrolls_the_list_rather_than_freezing_on_its_last_row() {
+    let (mut s, now) = state();
+    with_results(&mut s, now, 200);
+    assert_eq!(s.scroll_top(), 0, "it starts at the top");
+
+    // Down to the foot of the window: still no scrolling needed.
+    for _ in 0..VISIBLE_ROWS - 1 {
+        s.update(press(Key::Down), now);
+    }
+    assert_eq!(s.selected_row(), Some(VISIBLE_ROWS - 1));
+    assert_eq!(s.scroll_top(), 0, "the window has not had to move yet");
+
+    // One more, and the window follows by exactly one row.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(VISIBLE_ROWS));
+    assert_eq!(s.scroll_top(), 1, "the list scrolls under the cursor");
+    assert!(s.visible_rows().contains(&VISIBLE_ROWS));
+
+    // And all the way to the end, where the window stops rather than running
+    // off it.
+    for _ in 0..300 {
+        s.update(press(Key::Down), now);
+    }
+    assert_eq!(s.selected_row(), Some(199));
+    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS);
+    assert_eq!(s.visible_rows(), (200 - VISIBLE_ROWS)..200);
+
+    // Back up, and it comes with you.
+    for _ in 0..300 {
+        s.update(press(Key::Up), now);
+    }
+    assert_eq!(s.selected_row(), Some(0));
+    assert_eq!(s.scroll_top(), 0);
+}
+
+/// A list that shrinks under a window near its end must not leave the window
+/// pointing past it - half a screen of rows with nothing below them.
+#[test]
+fn a_shorter_result_set_pulls_the_window_back() {
+    let (mut s, now) = state();
+    with_results(&mut s, now, 200);
+    for _ in 0..199 {
+        s.update(press(Key::Down), now);
+    }
+    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS, "precondition");
+
+    // The server answers with far fewer.
+    let v = view(&s);
+    s.update(
+        search_result(&v, many_hits(VISIBLE_ROWS + 2), 14, 9_000),
+        now,
+    );
+
+    assert_eq!(s.scroll_top(), 2);
+    assert_eq!(s.visible_rows().end, VISIBLE_ROWS + 2);
+    assert!(
+        s.visible_rows().contains(&s.selected_row().unwrap()),
+        "the cursor is off screen"
+    );
 }
 
 /// The cap is what makes a long list worth having at all.

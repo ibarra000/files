@@ -48,6 +48,20 @@ pub const MIN_QUERY_LEN: usize = 3;
 /// reachable by arrow key.
 pub const MAX_RESULTS: usize = 300;
 
+/// How many results are on screen at once.
+///
+/// Here rather than beside the other layout numbers in `gui::theme` because the
+/// state machine needs it: the arrows scroll a window over the result list, and
+/// the window has to know how big it is. `keys.rs` used to reach into
+/// `gui::theme` for this, which is a dependency pointing the wrong way - the
+/// interaction model is meant to be drawable by anything.
+///
+/// Twelve rows of forty points is most of a laptop's vertical half. Past that
+/// the panel stops being an overlay and starts being a file manager, which is a
+/// different program; below it, a broad code spends too much of its time being
+/// scrolled.
+pub const VISIBLE_ROWS: usize = 12;
+
 /// Arena bytes in the first segment a walk publishes.
 ///
 /// Small on purpose. A walk of a large share runs for minutes, and the
@@ -418,6 +432,57 @@ pub enum ViewerKind {
     Avwin,
 }
 
+/// Which palette the panel is drawn in.
+///
+/// A setting rather than a follow of the Windows theme, which is what it used
+/// to be. The panel is a small bright thing summoned over whatever somebody is
+/// working in, and "what the rest of my desktop does" turned out to be a poor
+/// proxy for "what I want this to look like": a machine in dark mode got a
+/// near-black panel nobody had asked for.
+///
+/// [`Self::System`] keeps the old behaviour for anyone who wants it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeChoice {
+    #[default]
+    Light,
+    Dark,
+    /// Follow the Windows setting, as the panel used to.
+    System,
+}
+
+impl ThemeChoice {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "system" | "auto" => Some(Self::System),
+            _ => None,
+        }
+    }
+
+    /// The spelling written back to the config file, so it must be one
+    /// [`Self::parse`] accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+            Self::System => "system",
+        }
+    }
+
+    /// Whether to draw dark, given what the system says.
+    ///
+    /// The system answer is passed in rather than read here: this module does
+    /// no I/O and has never heard of a window.
+    pub fn is_dark(self, system_is_dark: bool) -> bool {
+        match self {
+            Self::Light => false,
+            Self::Dark => true,
+            Self::System => system_is_dark,
+        }
+    }
+}
+
 impl ViewerKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -538,6 +603,8 @@ pub struct Settings {
     /// cloned into the backend and every worker, so a mutable field would be
     /// one truth with several stale copies of it. See `AppState::viewer`.
     pub viewer: ViewerKind,
+    /// Which palette the panel is drawn in.
+    pub theme: ThemeChoice,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -590,6 +657,7 @@ impl Settings {
             history_path: crate::history::default_path(),
             hotkey: crate::hotkey::spec::HotkeySpec::default(),
             viewer: ViewerKind::default(),
+            theme: ThemeChoice::default(),
             pdf_viewer: None,
             // Assume not, and let `load` say otherwise once it knows there is
             // a file and that nothing outranks it. Defaulting the other way
@@ -713,6 +781,11 @@ impl Settings {
         {
             self.pdf_viewer = Some(v.clone());
         }
+        if env_str("FILES_THEME").is_none()
+            && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
+        {
+            self.theme = v;
+        }
     }
 
     /// As [`Settings::from_env`], but over a supplied routing table.
@@ -767,6 +840,9 @@ impl Settings {
         // where the same mistake is reported against its line.
         if let Some(v) = env_str("FILES_HOTKEY").and_then(|v| crate::hotkey::spec::parse(&v).ok()) {
             s.hotkey = v;
+        }
+        if let Some(v) = env_str("FILES_THEME").and_then(|v| ThemeChoice::parse(&v)) {
+            s.theme = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

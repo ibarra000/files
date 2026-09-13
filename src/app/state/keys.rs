@@ -18,6 +18,7 @@ use crate::app::key::{Key, KeyEvent};
 
 use super::{AppState, Severity};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
+use crate::config::VISIBLE_ROWS;
 
 impl AppState {
     pub(super) fn on_key(&mut self, key: KeyEvent, now: Instant) -> Response {
@@ -152,8 +153,8 @@ impl AppState {
             // A listful at a time. The list is at most a screenful, so this
             // reaches either end in one press - which is what makes it worth
             // having at all now that there is no grid to page through.
-            Key::PageDown => self.move_selection(crate::gui::theme::MAX_ROWS as isize),
-            Key::PageUp => self.move_selection(-(crate::gui::theme::MAX_ROWS as isize)),
+            Key::PageDown => self.move_selection(VISIBLE_ROWS as isize),
+            Key::PageUp => self.move_selection(-(VISIBLE_ROWS as isize)),
 
             Key::Up => self.on_up(now),
             Key::Down => self.on_down(),

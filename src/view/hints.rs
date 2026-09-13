@@ -24,6 +24,7 @@
 //! measuring is handed in by whoever is drawing.
 
 use crate::app::state::AppState;
+use crate::config::ViewerKind;
 
 /// How hard a hint fights for its place on the line.
 ///
@@ -102,6 +103,25 @@ pub struct Context {
     /// takes the whole index down with it in front of somebody in a hurry is
     /// the wrong thing to advertise.
     pub compact: bool,
+    /// Which viewer Enter uses, because the F2 chip names it.
+    pub viewer: ViewerKind,
+}
+
+/// What the F2 chip says.
+///
+/// The mode, not the verb. F2 decides whether Enter assembles a document or
+/// launches a program, and a chip reading a flat "viewer" said which key to
+/// press without ever saying what pressing it had done - so the one key whose
+/// whole job is to change a mode gave no sign of which mode it was in.
+///
+/// Two constants rather than a `format!` because [`Hint::label`] is
+/// `&'static str`: the hint sets are built by `const fn`s and the whole module
+/// is allocation-free by construction.
+const fn viewer_label(viewer: ViewerKind) -> &'static str {
+    match viewer {
+        ViewerKind::Pdf => "viewer: pdf",
+        ViewerKind::Avwin => "viewer: avwin",
+    }
 }
 
 impl Context {
@@ -113,6 +133,7 @@ impl Context {
             has_text: !state.input.is_empty(),
             has_text_selection: state.input.has_selection(),
             compact: state.overlay_up,
+            viewer: state.viewer,
         }
     }
 }
@@ -156,7 +177,7 @@ pub fn hints(cx: Context) -> Vec<Hint> {
                 Action::Results,
             ));
         }
-        v.push(hint("F2", "viewer", Priority::Low));
+        v.push(hint("F2", viewer_label(cx.viewer), Priority::Low));
         return v;
     }
 
@@ -214,13 +235,18 @@ pub fn hints(cx: Context) -> Vec<Hint> {
             if cx.has_text_selection {
                 v.push(hint("Ctrl+C", "copy", Priority::High));
             }
+            // Ahead of `F1 help`, and `High` rather than `Normal`. Both are
+            // deliberate: `fit` drops the lowest priority first and the
+            // rightmost among equals, so at `Normal` this chip sat behind help
+            // and was the first thing to go - which is how the viewer came to
+            // be advertised nowhere at the shipped width.
+            //
+            // It outranks help because it is the only chip carrying *state*.
+            // The others name a key; this one also answers "and what is it set
+            // to", which is the question F2 leaves behind every time it is
+            // pressed.
+            v.push(hint("F2", viewer_label(cx.viewer), Priority::High));
             v.push(clickable("F1", "help", Priority::Normal, Action::Help));
-            // Advertised outside the overlay, which it was not at all. Which
-            // viewer it is *currently* set to is said in the footer's reserved
-            // slot rather than here, because this chip is dropped at the
-            // shipped width and an answer that is only there when there is
-            // room is not an answer.
-            v.push(hint("F2", "viewer", Priority::Normal));
             v.push(clickable("F5", "refresh", Priority::Low, Action::Refresh));
             if cx.has_text {
                 v.push(hint("Esc", "clear", Priority::Low));
@@ -340,6 +366,7 @@ mod tests {
             has_text: true,
             has_text_selection: false,
             compact: false,
+            viewer: ViewerKind::Pdf,
         }
     }
 

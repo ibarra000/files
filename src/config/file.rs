@@ -172,6 +172,7 @@ const SETTINGS_KEYS: &[&str] = &[
     "hotkey",
     "viewer",
     "pdf_viewer",
+    "theme",
 ];
 const ROOT_KEYS: &[&str] = &["version", "mapping", "settings"];
 
@@ -190,6 +191,7 @@ pub struct FileSettings {
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
+    pub theme: Option<String>,
 }
 
 /// A parsed configuration.
@@ -587,6 +589,25 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 out.viewer = raw.map(str::to_string);
             }
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
+            "theme" => {
+                let raw = value.and_then(Value::as_str);
+                // Rejected here rather than ignored, for the same reason as
+                // `viewer` above: a misspelling that fell back silently would
+                // leave somebody staring at a panel that is still the colour
+                // they were trying to change.
+                if let Some(v) = raw
+                    && crate::config::ThemeChoice::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("unknown theme {v:?} (expected \"light\", \"dark\" or \"system\")"),
+                        None,
+                    );
+                }
+                out.theme = raw.map(str::to_string);
+            }
             _ => {}
         }
     }

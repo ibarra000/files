@@ -34,7 +34,7 @@ use egui_kittest::kittest::NodeT;
 use files::app::event::{AppEvent, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
-use files::config::{Settings, ViewerKind};
+use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Theme};
 use files::search::matcher::{Hit, SearchOutcome};
@@ -242,18 +242,18 @@ fn a_toast_gives_the_line_back_when_it_expires() {
     );
 }
 
-/// Eight rows, three hundred results. Until this was here the other two
-/// hundred and ninety-two were unreachable and unmentioned.
+/// Twelve rows, three hundred results. The rest used to be unreachable and
+/// unmentioned; they are reachable now, and this says where in them you are.
 #[test]
-fn the_footer_says_how_many_results_are_hidden() {
+fn the_footer_says_which_of_the_results_are_on_screen() {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains("8 of 300"),
-        "nothing said that the list was cut short:\n{screen}"
+        screen.contains(&format!("1-{VISIBLE_ROWS} of 300")),
+        "nothing said where in the list this is:\n{screen}"
     );
 }
 
@@ -270,7 +270,7 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     );
     // The viewer is still there: it is a fact about the program rather than
     // about the list, so it does not come and go with one.
-    assert!(screen.contains("F2: pdf"), "{screen}");
+    assert!(screen.contains("viewer: pdf"), "{screen}");
 }
 
 /// F2 changes what Enter does. With the confirming toast drawn nowhere and no
@@ -281,13 +281,13 @@ fn the_footer_names_the_viewer_enter_will_use() {
     with_results(&mut s, "11-D-0704", many(3), 3, now);
 
     let h = harness(s);
-    assert!(on_screen(&h).contains("F2: pdf"), "{}", on_screen(&h));
+    assert!(on_screen(&h).contains("viewer: pdf"), "{}", on_screen(&h));
 
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(3), 3, now);
     s.viewer = ViewerKind::Avwin;
     let h = harness(s);
-    assert!(on_screen(&h).contains("F2: avwin"), "{}", on_screen(&h));
+    assert!(on_screen(&h).contains("viewer: avwin"), "{}", on_screen(&h));
 }
 
 /// Choosing the viewer that is not installed used to fail silently, at the
@@ -489,6 +489,15 @@ snapshot!(looks_right_with_a_toast, || toasted(Instant::now()));
 snapshot!(looks_right_showing_recent_codes, || {
     let (mut s, _) = state();
     s.seed_history(vec!["11-D-0704".into(), "P12345-001".into()]);
+    s
+});
+
+// The drive picker: the one body that had never been photographed, along with
+// the hover and text-selection colours it is the only place to see.
+snapshot!(looks_right_picking_a_drive, || {
+    let (mut s, now) = state();
+    s.update(AppEvent::Key(KeyEvent::new(Key::F(5), Mods::NONE)), now);
+    assert!(s.picking_share, "the fixture did not open the picker");
     s
 });
 
