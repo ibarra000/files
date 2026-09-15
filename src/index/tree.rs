@@ -231,6 +231,20 @@ pub struct TreeIndex {
     /// results missing because a subtree was unreadable look exactly like
     /// results that do not exist.
     complete: bool,
+    /// Every directory here was seen through a *search* rather than read.
+    ///
+    /// True only for a share configured `kind = "live"`, which is never
+    /// walked: what it holds is whatever somebody has looked for, so a name
+    /// absent from it says nothing at all about the share. That is a stronger
+    /// claim than [`Self::complete`] makes - an incomplete walk still read
+    /// every folder it reached - and the two are kept apart because the
+    /// sentence each one licenses on screen is different.
+    ///
+    /// A share is never both. A live mapping gets no walk, and a walked one is
+    /// never asked per query, so this is a property of the whole index rather
+    /// than of any segment in it - which is what keeps it a single bit in the
+    /// header rather than something the persistence layer has to interleave.
+    observed: bool,
 }
 
 impl TreeIndex {
@@ -243,6 +257,7 @@ impl TreeIndex {
             captured_at: SystemTime::UNIX_EPOCH,
             volume_serial: 0,
             complete: false,
+            observed: false,
         }
     }
 
@@ -269,6 +284,91 @@ impl TreeIndex {
     pub fn with_complete(mut self, complete: bool) -> Self {
         self.complete = complete;
         self
+    }
+
+    pub fn with_observed(mut self, observed: bool) -> Self {
+        self.observed = observed;
+        self
+    }
+
+    /// True when this index holds only what searches have found.
+    pub fn observed(&self) -> bool {
+        self.observed
+    }
+
+    /// Whether this index already holds `file` in `rel`.
+    ///
+    /// Linear in the directory count, and called once per directory a search
+    /// touched rather than once per file on the share - a few dozen
+    /// comparisons against an index that only ever holds what has been looked
+    /// for.
+    pub fn holds(&self, rel: &str, file: &str) -> bool {
+        self.segments.iter().any(|seg| {
+            (0..seg.dir_count()).any(|d| {
+                seg.dir_path(d) == rel
+                    && seg
+                        .files_of(d)
+                        .any(|i| seg.files().display_name(i).eq_ignore_ascii_case(file))
+            })
+        })
+    }
+
+    /// This index plus files a search saw, leaving out anything already held.
+    ///
+    /// Appends and never replaces, which is the opposite of
+    /// [`Self::with_subtrees_replaced`] and deliberately so. A change
+    /// notification names folders that were *re-read*, so replacing them is
+    /// exact. A search result names the files that *matched*, and says nothing
+    /// whatever about the files that did not - so the only sound merge is the
+    /// one that adds. Replacing here would turn a partial answer into a
+    /// confident, wrong, complete one, which is the silent disappearance this
+    /// index exists to prevent arriving by the front door.
+    ///
+    /// `None` when every observation was already held, so repeating a search
+    /// costs no publication and no reader a re-read.
+    ///
+    /// `captured_at` is left alone, for the reason `confirm_fresh` leaves
+    /// `built_at` alone: the index is exactly as old as it was, and a handful
+    /// of names in it are newer.
+    pub fn with_observed_files(&self, seen: &[(String, Vec<String>)]) -> Option<Self> {
+        let mut builder = SegmentBuilder::new();
+        let mut added = false;
+        for (rel, files) in seen {
+            let fresh: Vec<String> = files
+                .iter()
+                .filter(|f| !self.holds(rel, f))
+                .cloned()
+                .collect();
+            if fresh.is_empty() {
+                continue;
+            }
+            if !builder.push_dir(rel, &fresh) {
+                break;
+            }
+            added = true;
+        }
+        if !added {
+            return None;
+        }
+        let mut next = self.appended(Arc::new(builder.seal()));
+        next.observed = true;
+        next.complete = false;
+        next.segments = coalesce(std::mem::take(&mut next.segments));
+        next.rebuild_bases();
+        Some(next)
+    }
+
+    /// Recomputes the prefix sums after the segment list has been rewritten.
+    fn rebuild_bases(&mut self) {
+        self.bases = Vec::with_capacity(self.segments.len() + 1);
+        self.bases.push(0);
+        let mut running = 0u32;
+        self.dirs = 0;
+        for seg in &self.segments {
+            running += seg.file_count();
+            self.dirs += seg.dir_count() as usize;
+            self.bases.push(running);
+        }
     }
 
     pub fn root(&self) -> &str {
@@ -664,6 +764,7 @@ impl TreeIndex {
             captured_at: SystemTime::UNIX_EPOCH,
             volume_serial: 0,
             complete: false,
+            observed: false,
         }
     }
 
@@ -700,6 +801,7 @@ impl TreeIndex {
         Self::from_segments(Arc::clone(&self.root), coalesce(segments))
             .with_metadata(self.captured_at, self.volume_serial)
             .with_complete(self.complete)
+            .with_observed(self.observed)
     }
 }
 
@@ -767,6 +869,132 @@ mod tests {
             ("empty", &[]),
             ("ab12", &["spec.pdf"]),
         ])
+    }
+
+    // --- remembering what a search found ------------------------------------
+
+    fn observed(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        pairs
+            .iter()
+            .map(|(d, fs)| {
+                (
+                    d.to_string(),
+                    fs.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
+                )
+            })
+            .collect()
+    }
+
+    fn files_in(ix: &TreeIndex, rel: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for seg in ix.segments() {
+            for d in 0..seg.dir_count() {
+                if seg.dir_path(d) == rel {
+                    for i in seg.files_of(d) {
+                        out.push(seg.files().display_name(i).into_owned());
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn an_empty_index_takes_what_a_search_found() {
+        let ix = TreeIndex::empty("V:\\archive");
+        let next = ix
+            .with_observed_files(&observed(&[("p12345", &["a.pdf", "b.dwg"])]))
+            .expect("something was new");
+        assert_eq!(next.len(), 2);
+        assert!(next.observed());
+        assert!(!next.complete(), "an observed index is never complete");
+        assert_eq!(files_in(&next, "p12345"), ["a.pdf", "b.dwg"]);
+    }
+
+    /// The common case for a code somebody searches twice. Publishing anyway
+    /// would cost every reader a re-read for nothing.
+    #[test]
+    fn a_search_that_found_only_what_was_already_held_changes_nothing() {
+        let ix = TreeIndex::empty("V:\\archive")
+            .with_observed_files(&observed(&[("p12345", &["a.pdf"])]))
+            .unwrap();
+        assert!(
+            ix.with_observed_files(&observed(&[("p12345", &["a.pdf"])]))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_name_already_held_is_not_stored_twice_beside_a_new_one() {
+        let ix = TreeIndex::empty("V:\\archive")
+            .with_observed_files(&observed(&[("p12345", &["a.pdf"])]))
+            .unwrap();
+        let next = ix
+            .with_observed_files(&observed(&[("p12345", &["a.pdf", "b.pdf"])]))
+            .expect("b.pdf was new");
+        assert_eq!(files_in(&next, "p12345"), ["a.pdf", "b.pdf"]);
+        assert_eq!(next.len(), 2, "a.pdf was stored twice");
+    }
+
+    /// A search result names the files that *matched*, and says nothing
+    /// whatever about the files that did not. Replacing the directory would
+    /// turn a partial answer into a confident, wrong, complete one - the
+    /// silent disappearance this index exists to prevent, arriving by the
+    /// front door.
+    #[test]
+    fn remembering_a_second_search_never_drops_what_the_first_one_found() {
+        let ix = TreeIndex::empty("V:\\archive")
+            .with_observed_files(&observed(&[("jobs", &["0704.pdf"])]))
+            .unwrap();
+        let next = ix
+            .with_observed_files(&observed(&[("jobs", &["0801.pdf"])]))
+            .unwrap();
+        assert_eq!(files_in(&next, "jobs"), ["0704.pdf", "0801.pdf"]);
+    }
+
+    #[test]
+    fn a_name_is_matched_for_holding_however_it_is_cased() {
+        let ix = TreeIndex::empty("V:\\archive")
+            .with_observed_files(&observed(&[("jobs", &["A.PDF"])]))
+            .unwrap();
+        assert!(ix.holds("jobs", "a.pdf"));
+        assert!(!ix.holds("other", "a.pdf"), "the folder has to match too");
+    }
+
+    /// Every pass appends, so without coalescing the segment count would grow
+    /// without bound and each one is a separate sweep per keystroke.
+    #[test]
+    fn many_small_observations_do_not_grow_the_segment_count_without_bound() {
+        let mut ix = TreeIndex::empty("V:\\archive");
+        for i in 0..40 {
+            ix = ix
+                .with_observed_files(&observed(&[("jobs", &[&format!("f{i:03}.pdf")])]))
+                .expect("each name is new");
+        }
+        assert_eq!(ix.len(), 40);
+        assert!(
+            ix.segments().len() <= 2,
+            "{} segments for 40 observations",
+            ix.segments().len()
+        );
+    }
+
+    #[test]
+    fn the_ordinals_still_address_every_file_after_coalescing() {
+        let mut ix = TreeIndex::empty("V:\\archive");
+        for i in 0..8 {
+            ix = ix
+                .with_observed_files(&observed(&[(&format!("d{i}"), &[&format!("f{i}.pdf")])]))
+                .unwrap();
+        }
+        for ordinal in 0..ix.len() as u32 {
+            assert!(
+                ix.full_path(ordinal).is_some(),
+                "ordinal {ordinal} of {} does not resolve",
+                ix.len()
+            );
+        }
     }
 
     #[test]

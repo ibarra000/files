@@ -124,6 +124,14 @@ pub enum DegradeReason {
     /// "change detection unavailable" would be true in a way that sends
     /// someone to check the wrong thing.
     LiveUpdatesUnavailable,
+    /// What is searchable here was never read - it was seen through a search
+    /// and remembered.
+    ///
+    /// Distinct from [`Self::IncompleteWalk`], which says a pass ran and
+    /// stopped short. This says no pass covered these folders at all, so what
+    /// is held of them is whatever somebody happened to type. A file nobody
+    /// has searched for is not merely stale here, it is absent.
+    PartiallyObserved,
 }
 
 impl DegradeReason {
@@ -135,6 +143,7 @@ impl DegradeReason {
             Self::PartiallyUnreadable => "part of the tree was unreadable",
             Self::IncompleteWalk => "tree only partly walked",
             Self::LiveUpdatesUnavailable => "no live updates",
+            Self::PartiallyObserved => "only what has been searched for",
         }
     }
 }
@@ -749,6 +758,38 @@ impl MappingSlot {
                 },
                 Some(_) => Health::Ok,
             };
+        });
+    }
+
+    /// Installs an index assembled from what searches have found.
+    ///
+    /// Separate from [`Self::publish_tree`] because almost every claim that one
+    /// makes would be false here. A walk establishes when the share was read;
+    /// nothing read this share. So `built_at` and `confirmed_at` are left
+    /// exactly where they were - an observation proves those files exist and
+    /// proves nothing whatever about the rest - and the health is degraded for
+    /// as long as the index is the only thing standing in for a listing.
+    ///
+    /// This is where [`Origin::ServerObserved`] is finally constructed. It had
+    /// sat unused since it was written, which is the shape of the gap this
+    /// fills: there was a word for data that came back from a query, and
+    /// nowhere that kept any.
+    pub fn publish_observed(&self, index: Arc<TreeIndex>) {
+        let entries = index.len() as u32;
+        self.index.store(Some(Arc::new(SlotIndex::Tree(index))));
+        self.update_status(|s| {
+            s.origin = Some(Origin::ServerObserved);
+            s.entries = entries;
+            s.last_error = None;
+            // Only when nothing worse is already being reported: a share that
+            // is unreachable has a more urgent thing to say than a share that
+            // is partial, and this runs on every settled keystroke.
+            if s.health.is_ok() {
+                s.health = Health::Degraded {
+                    reason: DegradeReason::PartiallyObserved,
+                    since: Instant::now(),
+                };
+            }
         });
     }
 

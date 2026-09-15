@@ -1052,6 +1052,17 @@ impl AppState {
 
     /// Chooses the honest explanation for an empty list.
     fn no_match_reason(&self, searched: u32) -> EmptyReason {
+        // Nothing has asked the drives yet, so there is no answer to report -
+        // only a wait. Without this an empty local sweep would render as "no
+        // matches" for the 600ms before the query even goes out, and on a
+        // share whose whole index is what past searches found, that first
+        // answer is empty far more often than not.
+        if self.settings.routes.live().next().is_some()
+            && self.live.as_ref().is_none_or(|l| l.is_asking())
+        {
+            return EmptyReason::NotSearchedYet;
+        }
+
         // A live share that could not be asked, or could not be asked about
         // everything, outranks every other explanation: it is the only one
         // where "nothing matched" would be a claim about folders nobody

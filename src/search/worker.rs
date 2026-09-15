@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use super::matcher::{self};
+use super::matcher::{self, Hit};
 use super::verify::{SkipReason, Verifier, VerifyOutcome};
 use crate::app::event::{AppEvent, Events, LiveMsg, SearchMsg, VerifyMsg};
 use crate::config::Settings;
@@ -23,8 +23,9 @@ use crate::index::enumerate::DirSource;
 use crate::index::snapshot;
 use crate::index::snapshot::Snapshot;
 use crate::index::store::{IndexStore, SlotIndex};
+use crate::index::tree::TreeIndex;
 use crate::paths::{MappingKind, TargetList};
-use crate::search::live::LiveShare;
+use crate::search::live::{LiveOutcome, LiveShare};
 use crate::search::query::Query;
 use crate::util::cancel::Epoch;
 use crate::util::latest_slot::LatestSlot;
@@ -371,6 +372,12 @@ pub fn spawn_live(
 }
 
 fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, tx: &Events) {
+    // Before the first keystroke rather than on demand, so a code searched
+    // yesterday is answered from memory by the *local* sweep today - which
+    // runs first and would otherwise see an empty share until the round trip
+    // came back.
+    restore(backend);
+
     while let Some(request) = slot.take_blocking() {
         let cancel = epoch.token(request.epoch);
         if cancel.is_cancelled() {
@@ -395,6 +402,12 @@ fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, 
                 Instant::now(),
                 &cancel,
             );
+            // Remembered before it is reported, so the next search for the
+            // same code is answered from memory rather than from the wire.
+            if let LiveOutcome::Answered { hits, .. } = &outcome {
+                remember(backend, share, hits);
+            }
+
             // One event per share rather than one for all of them: they answer
             // at different speeds, and holding the first until the last has
             // arrived would make two shares slower than one for no reason.
@@ -409,6 +422,101 @@ fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, 
     }
 }
 
+/// Reads back what earlier sessions of this share remembered.
+///
+/// Failure is silent and correct: there may be no cache, the format may have
+/// moved, or the share may be one nobody has searched yet. Every one of those
+/// is "start with nothing", which is what a live share does anyway.
+fn restore(backend: &Backend) {
+    let Some(cache) = backend.settings.cache_dir.as_deref() else {
+        return;
+    };
+    for share in &backend.live {
+        let Some(slot) = backend.store.slot(share.id()) else {
+            continue;
+        };
+        let key = crate::index::persist::MappingKey::of(share.root());
+        // The volume serial is left unknown rather than probed for. Resolving
+        // it costs a round trip to a share that may be down, on the path that
+        // exists so nothing touches it until somebody searches - and the
+        // directory check inside `Expect` is what actually guards against
+        // loading another share's index.
+        let expect = crate::index::persist::Expect::new(share.root(), None);
+        if let Ok(loaded) = crate::index::persist::load_tree(cache, key, expect)
+            && loaded.index.observed()
+        {
+            slot.publish_observed(Arc::new(loaded.index));
+        }
+    }
+}
+
+/// Folds what a live pass found into that share's index.
+///
+/// The whole point of a live share is that nothing reads it in the background,
+/// so the only listing it will ever have is the one searches build. Keeping
+/// what came back means a repeated code is answered from memory in about a
+/// millisecond instead of a round trip - and, because the per-share floor
+/// refuses a second query within the second, it is the difference between a
+/// repeated search being instant and it being *skipped*.
+///
+/// Writes from this thread and no other. The store's single-writer rule is
+/// about one writer per slot rather than about which thread it is, and a live
+/// mapping gets no index actor: this worker is the only thing that will ever
+/// publish here.
+fn remember(backend: &Backend, share: &LiveShare, hits: &[Hit]) {
+    if hits.is_empty() {
+        return;
+    }
+    let Some(slot) = backend.store.slot(share.id()) else {
+        return;
+    };
+
+    // Grouped by the folder each file sits in, because a directory listing is
+    // the unit the index stores.
+    let root = share.root();
+    let mut seen: Vec<(String, Vec<String>)> = Vec::new();
+    for hit in hits {
+        let path = std::path::Path::new(hit.path.as_ref());
+        let Some(parent) = path.parent() else {
+            continue;
+        };
+        let rel = match parent.strip_prefix(root) {
+            Ok(r) => r.to_string_lossy().replace('/', "\\"),
+            // A hit from outside the share cannot be placed in its index, and
+            // guessing where it belongs would be worse than dropping it.
+            Err(_) => continue,
+        };
+        let name = hit.name.to_string();
+        match seen.iter_mut().find(|(d, _)| *d == rel) {
+            Some((_, files)) => files.push(name),
+            None => seen.push((rel, vec![name])),
+        }
+    }
+
+    let current = slot
+        .as_tree()
+        .unwrap_or_else(|| Arc::new(TreeIndex::empty(&root.to_string_lossy())));
+    // `None` when every name was already held, which is the common case for a
+    // code somebody searches twice - and costs no publication and no reader a
+    // re-read.
+    let Some(next) = current.with_observed_files(&seen) else {
+        return;
+    };
+    slot.publish_observed(Arc::new(next.clone()));
+
+    // Written every time the index actually grew, which the `None` above makes
+    // rare: a code searched twice adds nothing the second time. There is no
+    // spacing guard beyond that because there is nothing to pace - this is a
+    // few kilobytes to a local disk, on a thread that has just spent a round
+    // trip on the network.
+    if backend.settings.persist
+        && let Some(cache) = backend.settings.cache_dir.as_deref()
+    {
+        let key = crate::index::persist::MappingKey::of(share.root());
+        let _ = crate::index::persist::save_tree(cache, key, &next, None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +527,138 @@ mod tests {
 
     fn backend(src: FakeDirSource) -> Arc<Backend> {
         backend_with(Settings::default(), src)
+    }
+
+    // --- remembering what a search found ------------------------------------
+
+    const LIVE_ROOT: &str = "V:\\archive";
+
+    fn live_backend(src: FakeDirSource) -> Arc<Backend> {
+        let source: Arc<dyn DirSource> = Arc::new(src);
+        let share = Arc::new(crate::search::live::LiveShare::new(
+            crate::paths::MappingId(0),
+            std::path::PathBuf::from(LIVE_ROOT),
+            1,
+            Vec::new(),
+            Arc::clone(&source),
+        ));
+        Arc::new(Backend {
+            settings: Settings {
+                // Nothing here should touch the disk; the format round trip is
+                // covered where the format is.
+                persist: false,
+                ..Settings::default()
+            },
+            store: Arc::new(IndexStore::single(
+                "archive",
+                Path::new(LIVE_ROOT),
+                MappingKind::Live,
+            )),
+            source,
+            live: vec![share],
+        })
+    }
+
+    fn ask_and_remember(backend: &Backend, line: &str) {
+        let share = &backend.live[0];
+        let outcome = share.search(
+            &crate::search::query::Query::parse(line),
+            &backend.settings.hidden,
+            Instant::now(),
+            &crate::util::cancel::CancelToken::never(),
+        );
+        if let LiveOutcome::Answered { hits, .. } = &outcome {
+            remember(backend, share, hits);
+        }
+    }
+
+    /// The payoff, and the reason writeback exists at all: the per-share floor
+    /// refuses a second query within the second, so without a remembered
+    /// listing a repeated code would not merely be slow, it would be *skipped*.
+    #[test]
+    fn a_code_searched_once_is_answered_from_memory_afterwards() {
+        let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
+        ask_and_remember(&backend, "p12345");
+
+        let slot = backend
+            .store
+            .slot(crate::paths::MappingId(0))
+            .expect("the slot exists");
+        let index = slot.as_tree().expect("the share remembered something");
+        assert!(index.observed());
+        assert_eq!(index.len(), 1);
+        assert_eq!(
+            slot.status().origin,
+            Some(crate::index::store::Origin::ServerObserved),
+            "the variant that had sat unused since it was written"
+        );
+
+        // The local sweep now finds it with the drive not asked at all.
+        let found = matcher::search_tree(
+            &index,
+            &crate::search::query::Query::parse("p12345"),
+            &backend.settings.hidden,
+            &crate::util::cancel::CancelToken::never(),
+        )
+        .unwrap();
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].path.as_ref(), "V:\\archive\\p12345.pdf");
+    }
+
+    /// An observation proves those files exist and proves nothing whatever
+    /// about the rest, so it must not move a clock only a pass could set.
+    #[test]
+    fn remembering_never_claims_the_share_was_read() {
+        let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
+        ask_and_remember(&backend, "p12345");
+
+        let status = backend
+            .store
+            .slot(crate::paths::MappingId(0))
+            .unwrap()
+            .status();
+        assert!(status.built_at.is_none(), "a search is not a pass");
+        assert!(status.confirmed_at.is_none(), "nothing was confirmed");
+        assert!(
+            !status.health.is_ok(),
+            "a share serving only what was searched for has to say so"
+        );
+    }
+
+    #[test]
+    fn a_pass_that_found_nothing_publishes_nothing() {
+        let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["other.pdf"]));
+        ask_and_remember(&backend, "p12345");
+        assert!(
+            backend
+                .store
+                .slot(crate::paths::MappingId(0))
+                .unwrap()
+                .as_tree()
+                .is_none()
+        );
+    }
+
+    /// A hit from outside the share cannot be placed in its index, and
+    /// guessing where it belongs would be worse than dropping it.
+    #[test]
+    fn a_hit_from_outside_the_share_is_dropped_rather_than_misfiled() {
+        let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
+        let stray = vec![Hit {
+            path: Arc::from("Z:\\elsewhere\\p12345.pdf"),
+            name: Arc::from("p12345.pdf"),
+            match_pos: 0,
+            index: 0,
+        }];
+        remember(&backend, &backend.live[0], &stray);
+        assert!(
+            backend
+                .store
+                .slot(crate::paths::MappingId(0))
+                .unwrap()
+                .as_tree()
+                .is_none()
+        );
     }
 
     fn backend_with(settings: Settings, src: FakeDirSource) -> Arc<Backend> {

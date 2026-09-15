@@ -132,9 +132,16 @@ refresh = "manual"
 # holding two hundred folders is two hundred round trips for one search. The
 # maximum is 4.
 #
-# There is no `refresh` key here and nothing is cached. A live share is read
-# when you search it and at no other time, so `refresh` is refused rather than
-# accepted and ignored.
+# There is no `refresh` key here: a live share is read when you search it and
+# at no other time, so `refresh` is refused rather than accepted and ignored.
+#
+# What a search finds *is* kept, and that is the whole of this share's index.
+# Ask for a code once and it is answered from memory afterwards, including
+# after a restart - which matters more than it sounds, because a share may
+# only be asked once a second, so a repeated search without this would not be
+# slow, it would be skipped. What is kept is only ever what somebody looked
+# for, so a name missing from it says nothing at all about the share, and the
+# panel never reports an empty result here as "no matches".
 #
 # A walked tree may sit *inside* a live share, and that is the useful
 # arrangement: index the folder people work in, and ask the server about the

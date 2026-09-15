@@ -160,6 +160,7 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
 
     report_index_cache(settings, out);
     let _ = writeln!(out);
+    report_live_shares(settings, out);
     report_live_updates(settings, out);
     let _ = writeln!(out);
     report_quick_search(settings, out);
@@ -470,6 +471,65 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
             None => "off (pass --index-log <PATH> to record why it reindexes)".into(),
         }
     );
+}
+
+/// What the shares that are never indexed are holding.
+///
+/// Its own section rather than a line in `INDEX CACHE`, because almost every
+/// heading there is a question a live share does not answer: it was not read,
+/// so there is no age, no entry count from a pass, and nothing a stamp could
+/// confirm. What it does have is whatever past searches found, and how much of
+/// that there is turns out to be the thing somebody actually wants to know -
+/// it is the difference between "this drive is slow" and "this drive has not
+/// been asked about your job yet".
+///
+/// Prints nothing at all when no live share is configured, rather than a
+/// heading over an empty list.
+fn report_live_shares(settings: &Settings, out: &mut dyn Write) {
+    if settings.routes.live().next().is_none() {
+        return;
+    }
+    let _ = writeln!(out, "LIVE SHARES");
+    for m in settings.routes.live() {
+        let _ = writeln!(out, "  {} ({})", m.name, m.path.display());
+        let _ = writeln!(
+            out,
+            "    read                never - every search asks the drive instead"
+        );
+        let _ = writeln!(
+            out,
+            "    depth               {}  ({})",
+            m.depth,
+            if m.depth == 1 {
+                "the share's own folder, plus any folder whose name matches"
+            } else {
+                "every folder on the way down is listed first"
+            }
+        );
+        let _ = writeln!(
+            out,
+            "    remembered          {}",
+            remembered(settings, m).unwrap_or_else(|| "nothing yet".into())
+        );
+    }
+    let _ = writeln!(out);
+}
+
+/// How much of a live share past searches have left behind, if any.
+fn remembered(settings: &Settings, m: &Mapping) -> Option<String> {
+    let dir = settings.cache_dir.as_deref()?;
+    if !settings.persist {
+        return Some("not kept - persistence is disabled".into());
+    }
+    let key = persist::MappingKey::of(&m.path);
+    // The volume serial is deliberately not resolved: this section exists to
+    // describe a share without touching it.
+    let loaded = persist::load_tree(dir, key, persist::Expect::new(&m.path, None)).ok()?;
+    Some(format!(
+        "{} files in {} folders, from earlier searches",
+        loaded.index.len(),
+        loaded.index.dir_count()
+    ))
 }
 
 fn report_one_cache(dir: &std::path::Path, m: &Mapping, out: &mut dyn Write) {
@@ -1224,6 +1284,43 @@ mod tests {
                 )
                 .with_dir(BASE_PATH, &["job.txt"]),
         )
+    }
+
+    /// A heading over an empty list is noise in a report somebody reads to
+    /// find one thing, and the shipped configuration names no live share.
+    #[test]
+    fn the_live_share_section_is_absent_when_none_is_configured() {
+        let report = text(|out| report_live_shares(&settings(), out));
+        assert!(report.is_empty(), "got {report:?}");
+    }
+
+    /// The two claims worth making about a share nothing reads: that nothing
+    /// reads it, and how far a search reaches into it.
+    #[test]
+    fn a_live_share_is_reported_as_never_read_and_with_its_depth() {
+        use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
+        let routes = Routes::new(
+            vec![Mapping {
+                id: MappingId(0),
+                name: "archive".into(),
+                path: std::path::PathBuf::from(r"S:\old"),
+                kind: MappingKind::Live,
+                enabled: true,
+                refresh: RefreshPolicy::Manual,
+                depth: 2,
+            }],
+            ConfigSource::BuiltIn,
+        );
+        let s = Settings::with_routes(std::sync::Arc::new(routes), |s| Settings {
+            persist: false,
+            ..s
+        });
+
+        let report = text(|out| report_live_shares(&s, out));
+        assert!(report.contains("LIVE SHARES"), "{report}");
+        assert!(report.contains("archive"), "{report}");
+        assert!(report.contains("never"), "{report}");
+        assert!(report.contains("depth               2"), "{report}");
     }
 
     fn text(f: impl FnOnce(&mut Vec<u8>)) -> String {

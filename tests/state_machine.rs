@@ -2369,18 +2369,27 @@ fn clearing_the_field_retires_the_live_deadline_too() {
 /// The claim this program exists not to let somebody act on by mistake. A live
 /// share answers for the folders one query reached, so an empty list is only
 /// honestly "no matches" when everything was reached.
+///
+/// Note what the list never passes *through*: not "no matches" before the
+/// drive is asked, and not "no matches" after it came back short. There is no
+/// moment in the sequence where the panel claims the file does not exist.
 #[test]
 fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
     let (mut s, now) = live_state();
     type_in(&mut s, "11-D-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
+    // The local sweep answers first and finds nothing. That is *not* an
+    // answer about the share: the drive has not been asked yet, and on a live
+    // share whose whole index is what past searches found, an empty first
+    // sweep is the ordinary case rather than the interesting one.
     let local = local_answer(&s, Vec::new());
     s.update(local, now);
-    assert!(matches!(
-        s.empty_reason,
-        Some(EmptyReason::NoMatches { .. })
-    ));
+    assert!(
+        matches!(s.empty_reason, Some(EmptyReason::NotSearchedYet)),
+        "got {:?}",
+        s.empty_reason
+    );
 
     // One folder reached, three not.
     let msg = live_msg(&s, answered(Vec::new(), 3));

@@ -57,7 +57,8 @@ pub const MAGIC: [u8; 8] = *b"FILESIDX";
 
 /// Bumped to 2 when cache files became per-directory; to 3 when the directory
 /// stamp came under the checksum and gained a kind; to 4 when a whole walked
-/// tree became something this format can hold.
+/// tree became something this format can hold; to 5 when a tree could hold
+/// directories nobody had enumerated.
 ///
 /// A v1 index was named only by volume serial, so two directories on the same
 /// volume produced colliding names and a single shared `latest` pointer. A v2
@@ -68,7 +69,7 @@ pub const MAGIC: [u8; 8] = *b"FILESIDX";
 /// Each bump discards every pre-existing index once, cleanly, rather than
 /// relying on the new validation to reject them one at a time. That costs one
 /// cold start.
-pub const FORMAT_VERSION: u16 = 4;
+pub const FORMAT_VERSION: u16 = 5;
 /// 128 rather than 96, and that costs nothing: `align_up(96)` is already 128,
 /// so v3 wrote exactly 32 bytes of padding here. Every section offset of a
 /// flat index is byte-identical across the change.
@@ -96,6 +97,16 @@ const FLAG_TREE: u32 = 1 << 4;
 /// trip: results missing because a subtree was unreadable look exactly like
 /// results that do not exist.
 const FLAG_TREE_COMPLETE: u32 = 1 << 5;
+/// Bit 6: every directory in the tree was seen through a *search* rather than
+/// read, which only a `kind = "live"` share produces.
+///
+/// A stronger claim than the absence of [`FLAG_TREE_COMPLETE`], and kept apart
+/// from it for that reason: an incomplete walk still read every folder it
+/// reached, whereas this says no pass covered any of them. Losing the
+/// distinction across a restart would let a handful of remembered names load
+/// back as if they were a listing, and "no matches" would start meaning
+/// something it has never been allowed to mean here.
+const FLAG_TREE_OBSERVED: u32 = 1 << 6;
 
 /// Stable cache identity for one indexed directory.
 ///
@@ -619,6 +630,9 @@ pub fn save_tree(
         .unwrap_or(0);
 
     let mut flags = FLAG_NUL_SEPARATED | FLAG_TREE;
+    if index.observed() {
+        flags |= FLAG_TREE_OBSERVED;
+    }
     if index.complete() {
         flags |= FLAG_TREE_COMPLETE;
     }
@@ -1325,7 +1339,8 @@ fn finish_tree(d: DecodedTree, files: Arenas, dirs: Arenas) -> Result<LoadedTree
     let index = TreeIndex::empty(&root)
         .appended(Arc::new(segment))
         .with_metadata(h.captured_at, h.volume_serial)
-        .with_complete(h.flags & FLAG_TREE_COMPLETE != 0);
+        .with_complete(h.flags & FLAG_TREE_COMPLETE != 0)
+        .with_observed(h.flags & FLAG_TREE_OBSERVED != 0);
 
     let coverage = TreeCoverage {
         dirs: index.dir_count(),
@@ -2030,6 +2045,39 @@ mod tree_tests {
         let dir = tempfile::tempdir().unwrap();
         save_tree(dir.path(), tree_key(), index, coverage).unwrap();
         dir
+    }
+
+    /// FORMAT_VERSION 5 exists for this one bit. Lose it across a restart and
+    /// a handful of remembered names load back as if they were a listing -
+    /// after which "no matches" starts meaning something it has never been
+    /// allowed to mean here.
+    #[test]
+    fn an_observed_tree_is_still_observed_after_a_round_trip() {
+        let original = TreeIndex::empty(r"R:\")
+            .with_observed_files(&[("p12345".to_string(), vec!["a.pdf".to_string()])])
+            .expect("something was new")
+            .with_metadata(std::time::SystemTime::UNIX_EPOCH, 0xABCD_1234);
+        assert!(original.observed());
+
+        let dir = save_fixture(&original, None);
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(Some(0xABCD_1234))).unwrap();
+
+        assert!(loaded.index.observed(), "the observed bit was lost");
+        assert!(!loaded.index.complete());
+        assert_eq!(paths(&loaded.index), paths(&original));
+    }
+
+    /// The dual, and the one that would fail silently: a walked tree must not
+    /// come back claiming it was only ever searched.
+    #[test]
+    fn a_walked_tree_is_not_observed_after_a_round_trip() {
+        let original = fixture();
+        assert!(!original.observed());
+
+        let dir = save_fixture(&original, None);
+        let loaded = load_tree(dir.path(), tree_key(), tree_expect(None)).unwrap();
+
+        assert!(!loaded.index.observed());
     }
 
     #[test]
