@@ -69,7 +69,6 @@ parking_lot = "0.12"
 
 arc-swap = "1.7"
 crossbeam-channel = "0.5"
-thiserror = "2"
 memmap2 = "0.9"
 bytemuck = { version = "1", default-features = false }
 smallvec = "1"
