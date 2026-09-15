@@ -687,6 +687,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "cgl"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ced0551234e87afee12411d535648dd89d2e7f34c78b753395567aff3d447ff"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1083,6 +1092,10 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "egui_glow",
+ "glow",
+ "glutin",
+ "glutin-winit",
  "image",
  "js-sys",
  "log",
@@ -1162,6 +1175,19 @@ dependencies = [
  "smithay-clipboard",
  "web-time",
  "winit",
+]
+
+[[package]]
+name = "egui_glow"
+version = "0.36.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "606ed4167daf341e5753d703285c4c1d562324b2c07aa8f405cd7d066fe58f3b"
+dependencies = [
+ "bytemuck",
+ "egui",
+ "glow",
+ "log",
+ "profiling",
 ]
 
 [[package]]
@@ -1367,7 +1393,6 @@ dependencies = [
  "memchr",
  "memmap2",
  "muda",
- "nucleo",
  "parking_lot",
  "proptest",
  "raw-window-handle",
@@ -1587,6 +1612,50 @@ dependencies = [
  "slotmap",
  "wasm-bindgen",
  "web-sys",
+]
+
+[[package]]
+name = "glutin"
+version = "0.32.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12124de845cacfebedff80e877bb37b5b75c34c5a4c89e47e1cdd67fb6041325"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg_aliases",
+ "cgl",
+ "dispatch2",
+ "glutin_egl_sys",
+ "glutin_wgl_sys",
+ "libloading",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "once_cell",
+ "raw-window-handle",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "glutin-winit"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85edca7075f8fc728f28cb8fbb111a96c3b89e930574369e3e9c27eb75d3788f"
+dependencies = [
+ "cfg_aliases",
+ "glutin",
+ "raw-window-handle",
+ "winit",
+]
+
+[[package]]
+name = "glutin_egl_sys"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c4680ba6195f424febdc3ba46e7a42a0e58743f2edb115297b86d7f8ecc02d2"
+dependencies = [
+ "gl_generator",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2220,27 +2289,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "nucleo"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5262af4c94921c2646c5ac6ff7900c2af9cbb08dc26a797e18130a7019c039d4"
-dependencies = [
- "nucleo-matcher",
- "parking_lot",
- "rayon",
-]
-
-[[package]]
-name = "nucleo-matcher"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
-dependencies = [
- "memchr",
- "unicode-segmentation",
 ]
 
 [[package]]

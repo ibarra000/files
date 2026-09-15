@@ -29,7 +29,7 @@ mod model;
 mod overlay;
 pub mod pointer;
 
-pub use model::{EmptyReason, QueryPhase, Severity, TOAST_LIFETIME, Toast};
+pub use model::{EmptyReason, LiveProgress, QueryPhase, Severity, TOAST_LIFETIME, Toast, Urgency};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -38,13 +38,14 @@ use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Respo
 use super::input::{self, Input};
 use crate::config::COUNTDOWN_TICK;
 use crate::config::{
-    ANIMATION_TICK, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
-    VISIBLE_ROWS, ViewerKind,
+    ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, SEARCH_DEBOUNCE, Settings,
+    VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS, ViewerKind,
 };
 use crate::history::History;
 use crate::index::store::{IndexOverview, IndexStatus};
 use crate::paths::MappingId;
 use crate::search::matcher::{Hit, QueryReject};
+use crate::search::query::Query;
 use crate::search::verify::{AuditVerdict, SkipReason, VerifyOutcome};
 
 /// The right-click menu.
@@ -88,6 +89,9 @@ pub struct AppState {
     pub matched: u32,
     pub total: u32,
     pub phase: QueryPhase,
+    /// What the live shares are doing about this query, when any are
+    /// configured. See [`LiveProgress`].
+    pub live: Option<LiveProgress>,
     pub empty_reason: Option<EmptyReason>,
     /// One status per configured mapping, indexed by `MappingId`.
     ///
@@ -138,7 +142,31 @@ pub struct AppState {
     pub viewer: ViewerKind,
 
     query_epoch: u64,
+    /// When the code on the line becomes worth matching against the index.
+    ///
+    /// A third clock, separate for the same reason the other two are: this one
+    /// is paced by what a *reader* can use. The match is free; drawing its
+    /// answer is not, because the panel is the window.
+    search_due_at: Option<Instant>,
+    /// Enter was pressed while the match for the code on the line was still
+    /// pending.
+    ///
+    /// The rows on screen answer the *previous* code, so opening one would open
+    /// the wrong file - silently, which is the one failure this program must
+    /// not have. Enter therefore asks the matcher at once and takes its row
+    /// from the answer. Cleared by any edit, by the answer, and by the watchdog.
+    enter_pending: bool,
+    /// And the backstop, so a wedged matcher cannot leave Enter dead.
+    enter_watchdog_at: Option<Instant>,
     verify_due_at: Option<Instant>,
+    /// When the live shares may be asked.
+    ///
+    /// A clock of its own rather than a share of `verify_due_at`, because the
+    /// two are paced by different things: a verification is a courtesy check
+    /// nobody is waiting on, while a live answer *is* the results, and the
+    /// live one has to be slower because it costs somebody else's file server
+    /// real work on every settled keystroke.
+    live_due_at: Option<Instant>,
     /// When the code on the line becomes worth remembering.
     ///
     /// A clock of its own rather than a share of `verify_due_at`, because the
@@ -157,7 +185,17 @@ pub struct AppState {
     /// The state still reads no clock: this arrives as a parameter from the
     /// renderer, exactly as `Instant` already does on every `update`.
     last_frame_wall: SystemTime,
-    last_verified_query: Option<String>,
+    /// The line, taken apart.
+    ///
+    /// Cached at the one place the text can change rather than re-parsed at
+    /// each of the six sites that dispatch a search, for the reason
+    /// `IndexOverview` is cached beside the statuses it summarises: a second
+    /// derivation is a second opinion waiting to disagree. It also puts the
+    /// term - as opposed to the line - in reach of the renderer, which needs
+    /// it to underline the right characters, and of `OpenRequest`, which needs
+    /// it to gather a drawing set.
+    query: Query,
+    last_verified_query: Option<Query>,
     /// Which result the pointer is over, if any.
     ///
     /// Never the same thing as `selected_path`: `Enter` opens the selection,
@@ -196,6 +234,7 @@ impl AppState {
             matched: 0,
             total: 0,
             phase: QueryPhase::Idle,
+            live: None,
             empty_reason: Some(EmptyReason::NoQuery),
             statuses,
             shares_cursor: 0,
@@ -209,7 +248,11 @@ impl AppState {
             avwin_missing: false,
             viewer,
             query_epoch: 0,
+            search_due_at: None,
+            enter_pending: false,
+            enter_watchdog_at: None,
             verify_due_at: None,
+            live_due_at: None,
             remember_due_at: None,
             verify_watchdog_at: None,
             toast_expires_at: None,
@@ -218,10 +261,19 @@ impl AppState {
             // reads it before then: `next_text_change` needs a published
             // index, which needs an actor to have answered.
             last_frame_wall: SystemTime::UNIX_EPOCH,
+            query: Query::default(),
             last_verified_query: None,
             help_scroll: 0,
             hovered: None,
         }
+    }
+
+    /// The line, taken apart.
+    ///
+    /// What the renderer underlines and what a page set is gathered by are
+    /// both the *term*, not the line, so both read it from here.
+    pub fn query(&self) -> &Query {
+        &self.query
     }
 
     pub fn query_epoch(&self) -> u64 {
@@ -249,6 +301,11 @@ impl AppState {
     ///
     /// Exposed so the debounce can be asserted directly rather than by
     /// poking at private state.
+    /// When the local match is due, if one is pending. For the tests.
+    pub fn search_due_at(&self) -> Option<Instant> {
+        self.search_due_at
+    }
+
     pub fn verify_due_at(&self) -> Option<Instant> {
         self.verify_due_at
     }
@@ -273,12 +330,23 @@ impl AppState {
         self.selected_row().map(|i| &self.hits[i])
     }
 
-    /// True while something is in flight and the spinner should advance.
+    /// True while something this program started has not finished.
     ///
     /// Derived from state rather than stored: a sticky flag is exactly how a
-    /// UI ends up spinning forever after the work has finished.
-    pub fn wants_animation(&self) -> bool {
-        self.phase.is_verifying() || self.index.is_busy()
+    /// UI ends up reporting work that ended long ago.
+    ///
+    /// It used to drive the spinner, and with the spinner gone it no longer
+    /// asks for frames: nothing on the panel is a function of *elapsed time*
+    /// while busy. The words come from `view::status` and change when a worker
+    /// reports, which wakes the loop by itself; the mark beside them is a
+    /// static glyph. What is left is a question the status line asks.
+    pub fn is_busy(&self) -> bool {
+        if self.live.as_ref().is_some_and(|l| l.is_asking()) {
+            return true;
+        }
+        matches!(self.phase, QueryPhase::LocalPending)
+            || self.phase.is_verifying()
+            || self.index.is_busy()
     }
 
     pub fn note_frame(&mut self, now: Instant, wall: SystemTime) {
@@ -347,12 +415,13 @@ impl AppState {
     /// indefinitely.
     pub fn next_deadline(&self) -> Option<Instant> {
         [
+            self.search_due_at,
+            self.enter_watchdog_at,
             self.verify_due_at,
+            self.live_due_at,
             self.remember_due_at,
             self.verify_watchdog_at,
             self.toast_expires_at,
-            self.wants_animation()
-                .then(|| self.last_frame + ANIMATION_TICK),
             // Without this the loop parks in an unbounded receive whenever
             // nothing else is pending, so the age on screen froze until a
             // keystroke happened to arrive and then jumped.
@@ -379,8 +448,9 @@ impl AppState {
             AppEvent::Intent(intent) => self.on_intent(intent, now),
             AppEvent::Paste(text) => self.on_paste(&text, now),
             AppEvent::Tick => self.on_tick(now),
-            AppEvent::Search(msg) => self.on_search(msg),
+            AppEvent::Search(msg) => self.on_search(msg, now),
             AppEvent::Verify(msg) => self.on_verify(msg, now),
+            AppEvent::Live(msg) => self.on_live(msg, now),
             AppEvent::Index(msg) => self.on_index(msg, now),
             AppEvent::Open(msg) => self.on_open(msg, now),
             AppEvent::Clipboard(msg) => self.on_clipboard(msg, now),
@@ -388,7 +458,9 @@ impl AppState {
             AppEvent::ActorDied { actor, detail } => {
                 self.clear_verifying();
                 self.set_toast(
-                    format!("{actor} stopped unexpectedly: {detail}"),
+                    // The actor's own name, uncapitalised: it is an internal
+                    // name that appears verbatim in the log beside this.
+                    format!("{actor} stopped unexpectedly \u{b7} {detail}"),
                     Severity::Error,
                     now,
                 );
@@ -418,7 +490,7 @@ impl AppState {
         }
         self.leave_history();
         self.input.insert_str(&cleaned);
-        self.on_input_changed(now)
+        self.on_input_changed(now, Urgency::Complete)
     }
 
     fn on_clipboard(&mut self, msg: ClipboardMsg, now: Instant) -> Response {
@@ -431,21 +503,21 @@ impl AppState {
                 } else {
                     "characters"
                 };
-                self.set_toast(format!("copied {chars} {unit}"), Severity::Info, now);
+                self.set_toast(format!("Copied {chars} {unit}"), Severity::Info, now);
                 Response::redraw()
             }
             ClipboardMsg::Read { text } => {
                 let cleaned = input::sanitize(&text);
                 if cleaned.is_empty() {
-                    self.set_toast("the clipboard holds no text".into(), Severity::Info, now);
+                    self.set_toast("The clipboard holds no text".into(), Severity::Info, now);
                     return Response::redraw();
                 }
                 self.leave_history();
                 self.input.insert_str(&cleaned);
-                self.on_input_changed(now)
+                self.on_input_changed(now, Urgency::Complete)
             }
             ClipboardMsg::Failed { detail } => {
-                self.set_toast(format!("clipboard: {detail}"), Severity::Warn, now);
+                self.set_toast(format!("Clipboard \u{b7} {detail}"), Severity::Warn, now);
                 Response::redraw()
             }
         }
@@ -483,7 +555,7 @@ impl AppState {
         self.selected_path = None;
     }
 
-    fn on_input_changed(&mut self, now: Instant) -> Response {
+    fn on_input_changed(&mut self, now: Instant, urgency: Urgency) -> Response {
         // Editing the code accepts whatever was being previewed: the text in
         // the field is now something the user typed rather than something they
         // were looking at. This is the one place it happens, so no key handler
@@ -498,33 +570,40 @@ impl AppState {
         self.verify_watchdog_at = None;
         self.last_verified_query = None;
 
-        let chars = self.input.chars().count();
-        if chars == 0 {
+        self.query = Query::parse(self.input.text());
+
+        if self.input.text().trim().is_empty() {
             self.phase = QueryPhase::Idle;
             self.empty_reason = Some(EmptyReason::NoQuery);
-            self.verify_due_at = None;
-            self.remember_due_at = None;
+            self.stand_down();
             self.clear_results();
             return Response::redraw();
         }
-        if chars < MIN_QUERY_LEN {
-            self.phase = QueryPhase::TooShort {
-                need: MIN_QUERY_LEN,
+        // Judged on the *term*, not the line: `ab ext:pdf` is a ten-character
+        // line and a two-character sweep across every name on the share, which
+        // is the work the minimum exists to prevent.
+        if let Err(reject) = self.query.check() {
+            self.phase = match reject {
+                QueryReject::TooShort { need } => QueryPhase::TooShort { need },
+                _ => QueryPhase::BadQuery {
+                    detail: reject.detail(),
+                },
             };
-            self.empty_reason = Some(EmptyReason::QueryTooShort {
-                need: MIN_QUERY_LEN,
+            self.empty_reason = Some(match reject {
+                QueryReject::TooShort { need } => EmptyReason::QueryTooShort { need },
+                _ => EmptyReason::BadQuery {
+                    detail: reject.detail(),
+                },
             });
-            self.verify_due_at = None;
-            self.remember_due_at = None;
+            self.stand_down();
             self.clear_results();
             return Response::redraw();
         }
 
-        if !self.settings.routes.any_indexed() {
+        if !self.settings.routes.any_searchable() {
             self.phase = QueryPhase::NoShares;
             self.empty_reason = Some(EmptyReason::NoSharesConfigured);
-            self.verify_due_at = None;
-            self.remember_due_at = None;
+            self.stand_down();
             self.clear_results();
             return Response::redraw();
         }
@@ -544,18 +623,57 @@ impl AppState {
         self.phase = QueryPhase::LocalPending;
         self.empty_reason = Some(EmptyReason::NotSearchedYet);
 
-        // The local match is sub-millisecond, so it runs on every keystroke
-        // with no debounce at all. Only the network-bound work is delayed.
-        let mut response = Response::redraw().with(Cmd::Search {
-            query: self.input.text().to_string(),
-            epoch: self.query_epoch,
-        });
+        // A code typed a character at a time waits out the pause; one that
+        // arrived whole does not. Nobody pastes half a job number, and making
+        // a paste sit for 300ms is 300ms of a panel that looks broken.
+        let mut response = Response::redraw();
+        self.enter_pending = false;
+        self.enter_watchdog_at = None;
+        match urgency {
+            Urgency::Complete => {
+                self.search_due_at = None;
+                response = response.with(Cmd::Search {
+                    query: self.query.clone(),
+                    epoch: self.query_epoch,
+                });
+            }
+            Urgency::Typed => self.search_due_at = Some(now + SEARCH_DEBOUNCE),
+        }
 
         self.verify_due_at = Some(now + VERIFY_DEBOUNCE);
+        // Deliberately armed even for `Urgency::Complete`. A paste skips the
+        // local debounce because the match is free; this one is not free, and
+        // 600 ms of showing the local results first costs nobody anything they
+        // can perceive.
+        if !self.settings.routes.live().next().is_none() {
+            self.live_due_at = Some(now + LIVE_DEBOUNCE);
+        }
         self.remember_due_at = Some(now + REMEMBER_DEBOUNCE);
 
         response.redraw = Redraw::Yes;
         response
+    }
+
+    /// Retires every clock a live query owns.
+    ///
+    /// One place, because they have to go together. A `Cmd::Search` left armed
+    /// on a field that has since been cleared is *not* caught by the epoch
+    /// guard in `on_search`: `on_input_changed` bumped the epoch on its way
+    /// past, so the late dispatch carries the current one and its answer is
+    /// accepted. The symptom is the previous code's results reappearing under
+    /// an empty search box.
+    fn stand_down(&mut self) {
+        self.search_due_at = None;
+        self.verify_due_at = None;
+        // Retired here too. A `Cmd::Live` armed on a field that has since been
+        // cleared is *not* caught by the epoch guard - the epoch was already
+        // bumped on the way past - so the previous code's results would arrive
+        // under an empty search box.
+        self.live_due_at = None;
+        self.live = None;
+        self.remember_due_at = None;
+        self.enter_pending = false;
+        self.enter_watchdog_at = None;
     }
 
     fn on_enter(&mut self, now: Instant) -> Response {
@@ -567,6 +685,26 @@ impl AppState {
             return self.accept_recall(now);
         }
 
+        // Unless the match for what is on the line has not run yet, in which
+        // case the row you are on answers the code *before* this one. Opening
+        // it would open the wrong file without saying so, which is the one
+        // failure this program must not have. So ask the matcher now and open
+        // whatever the answer brings back - see `on_search`.
+        if self.search_due_at.take().is_some() {
+            self.enter_pending = true;
+            self.enter_watchdog_at = Some(now + ENTER_WATCHDOG);
+            return Response::redraw().with(Cmd::Search {
+                query: self.query.clone(),
+                epoch: self.query_epoch,
+            });
+        }
+
+        self.open_selection(now)
+    }
+
+    /// Opens the row the selection is on. The second half of [`Self::on_enter`],
+    /// split out because a deferred Enter re-enters it from `on_search`.
+    fn open_selection(&mut self, now: Instant) -> Response {
         // Never blocks on the network: if the file turns out to be gone, that
         // is reported afterwards.
         let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
@@ -582,7 +720,7 @@ impl AppState {
                 if let Some(cmd) = self.remember_if_settled() {
                     response = response.with(cmd);
                 }
-                self.set_toast("nothing to open".into(), Severity::Info, now);
+                self.set_toast("Nothing to open".into(), Severity::Info, now);
                 return response;
             }
             return Response::none();
@@ -593,7 +731,14 @@ impl AppState {
         // the one meant, so it is remembered here rather than waiting out the
         // quiet period - someone who opens a result the moment it appears must
         // not lose the code.
-        let code = self.input.text().to_string();
+        // The term, not the line. `pages::collect` matches by equality -
+        // `code + marker? + ".pdf"` - so handed `11-D-0704 ext:pdf` it would
+        // find no pages at all, and a thirteen-page drawing set would open as
+        // a single page with nothing on screen to say so.
+        let code = self.query.term().to_string();
+        // Decided before the path is moved into the request, and kept, because
+        // the answer is wanted again below.
+        let route = crate::open::route_of(self.viewer, &path);
         let request = crate::open::OpenRequest {
             path,
             // The typed code, not the selected row: the page set is rebuilt
@@ -605,12 +750,17 @@ impl AppState {
         };
         let mut response = Response::none().with(Cmd::Open(request));
 
-        // Assembling a document means reading every page off the share, which
-        // is not instant. Enter used to return silently because handing one
-        // path to one program was; saying nothing for a second or more now
-        // would read as the keypress having been ignored.
-        if self.viewer == ViewerKind::Pdf {
-            self.set_toast("opening...".into(), Severity::Info, now);
+        // Assembling a document means reading every page off the share, and
+        // converting a drawing means waiting for another program; neither is
+        // instant. Enter used to return silently because handing one path to
+        // one program was; saying nothing for a second or more now would read
+        // as the keypress having been ignored.
+        //
+        // Asked of the *route* rather than the mode: under `Auto` a spreadsheet
+        // goes straight to avwin and needs no notice, while a drawing needs one
+        // more than a document does.
+        if route != crate::open::Route::Avwin {
+            self.set_toast("Opening\u{2026}".into(), Severity::Info, now);
             response.redraw = Redraw::Yes;
         }
 
@@ -633,9 +783,10 @@ impl AppState {
 
     /// Moves the selection by `delta` ranks.
     ///
-    /// Every relative move goes through here - Down, the wheel, Left and Right
-    /// by a column, PageUp and PageDown by a screen - so the ends of the list
-    /// behave the same way whichever of them was pressed. They did not before:
+    /// Every relative move goes through here - Up and Down, PageUp and PageDown
+    /// by a screen, and a clicked arrow chip - so the ends of the list behave
+    /// the same way whichever of them was pressed. The wheel used to be on that
+    /// list, and columns before that; both are gone. They did not before:
     /// a step by one wrapped while a step by a column clamped, because the two
     /// were separate copies of the same arithmetic.
     ///
@@ -695,6 +846,25 @@ impl AppState {
         start..(start + VISIBLE_ROWS).min(self.hits.len())
     }
 
+    /// The remembered codes on screen while recall is up.
+    ///
+    /// Derived, never stored - the opposite of [`Self::scroll_top`], and for a
+    /// reason that is a property of the data rather than a preference: the list
+    /// cannot change while it is being browsed, because `History::record` drops
+    /// the cursor. There is no update this could fall out of step with, so
+    /// there is nothing for a stored offset to be wrong about.
+    ///
+    /// The cursor rides the last row once it walks past the window, which is
+    /// the rule [`Self::scroll_into_view`] applies downwards - and browsing only
+    /// ever moves one entry at a time from the newest, so that is the only
+    /// direction there is.
+    pub fn recent_rows(&self) -> std::ops::Range<usize> {
+        let len = self.history.len();
+        let cursor = self.history.cursor().unwrap_or(0);
+        let start = (cursor + 1).saturating_sub(VISIBLE_ROWS).min(len);
+        start..(start + VISIBLE_ROWS).min(len)
+    }
+
     /// Moves the window as little as it takes to contain the selected row.
     ///
     /// The **only** place `scroll_top` moves, called from the only two places
@@ -730,7 +900,7 @@ impl AppState {
 
     // --- results ----------------------------------------------------------
 
-    fn on_search(&mut self, msg: super::event::SearchMsg) -> Response {
+    fn on_search(&mut self, msg: super::event::SearchMsg, now: Instant) -> Response {
         if msg.epoch != self.query_epoch {
             return Response::none(); // superseded
         }
@@ -742,12 +912,40 @@ impl AppState {
                 self.apply_hits(outcome.hits);
                 self.matched = outcome.matched;
                 self.total = outcome.total;
-                self.phase = QueryPhase::Local;
+                // Only ever forwards. The verification may already have spoken
+                // for this query - both fall due on the same tick - and a local
+                // answer is never news about the server.
+                if !self.phase.server_has_spoken() {
+                    self.phase = QueryPhase::Local;
+                }
                 self.empty_reason = if self.hits.is_empty() {
                     Some(self.no_match_reason(outcome.total))
                 } else {
                     None
                 };
+                // The answer to the code on the line has arrived, so there is
+                // nothing left to wait for. Reached by `SnapshotChanged`
+                // re-running the match under a live query, by F5, and by every
+                // test that delivers a result by hand - `tests/panel.rs`'s
+                // `toasted` depends on it, because Enter there must raise
+                // "nothing to open" rather than defer.
+                self.search_due_at = None;
+
+                let mut response = Response::redraw();
+                if std::mem::take(&mut self.enter_pending) {
+                    self.enter_watchdog_at = None;
+                    response.merge(self.open_selection(now));
+                }
+                response
+            }
+            Err(QueryReject::Syntax(problem)) => {
+                self.phase = QueryPhase::BadQuery {
+                    detail: problem.detail().into(),
+                };
+                self.empty_reason = Some(EmptyReason::BadQuery {
+                    detail: problem.detail().into(),
+                });
+                self.clear_results();
                 Response::redraw()
             }
             Err(QueryReject::TooShort { need }) => {
@@ -756,7 +954,9 @@ impl AppState {
                 Response::redraw()
             }
             Err(QueryReject::ContainsNul) => {
-                self.phase = QueryPhase::Local;
+                if !self.phase.server_has_spoken() {
+                    self.phase = QueryPhase::Local;
+                }
                 self.empty_reason = Some(EmptyReason::NoMatches {
                     searched: self.total,
                 });
@@ -765,8 +965,122 @@ impl AppState {
         }
     }
 
+    /// Folds one live share's answer into what is already on screen.
+    ///
+    /// Not `apply_hits`, which replaces. A live share answers a second after
+    /// the indexes do, and replacing would empty the list and refill it - the
+    /// three-hundred-row body change, with the footer reflowing around it,
+    /// that `on_input_changed` has a paragraph about avoiding, except arriving
+    /// a second after the typing stopped rather than during it.
+    fn on_live(&mut self, msg: super::event::LiveMsg, _now: Instant) -> Response {
+        if msg.epoch != self.query_epoch {
+            return Response::none(); // superseded
+        }
+        let Some(progress) = self.live.as_mut() else {
+            // The field was cleared while this was in flight, which means the
+            // query it answers is no longer on the line.
+            return Response::none();
+        };
+        progress.outstanding = progress.outstanding.saturating_sub(1);
+
+        let extra = match *msg.outcome {
+            crate::search::live::LiveOutcome::Answered {
+                hits,
+                matched,
+                coverage,
+            } => {
+                progress.reached.push((msg.mapping, coverage));
+                self.matched = self.matched.saturating_add(matched);
+                hits
+            }
+            crate::search::live::LiveOutcome::Skipped(skip) => {
+                progress.skipped.push((msg.mapping, skip));
+                Vec::new()
+            }
+            crate::search::live::LiveOutcome::Failed(err) => {
+                let label = self.settings.routes.path_label(msg.mapping);
+                progress.failed.push((msg.mapping, err.describe(&label)));
+                Vec::new()
+            }
+        };
+
+        let changed = self.merge_hits(extra);
+        // Whether the list grew or not, the *reason* an empty list is empty
+        // may just have changed - a share that could not be asked turns "no
+        // matches" into "not searched".
+        if self.hits.is_empty() {
+            self.empty_reason = Some(self.no_match_reason(self.total));
+        }
+        let _ = changed;
+        Response::redraw()
+    }
+
+    /// Adds rows to the list already on screen, keeping it ranked.
+    ///
+    /// The union is re-ranked rather than appended: which share a file came
+    /// from is shown on its row and must not decide where it sits, which is
+    /// the same rule `matcher::merge_all` follows.
+    fn merge_hits(&mut self, extra: Vec<Hit>) -> bool {
+        if extra.is_empty() {
+            return false;
+        }
+        let mut merged = std::mem::take(&mut self.hits);
+        merged.extend(extra);
+        // By the same key the matcher ranks with, then by path so that two
+        // shares offering equally good matches order predictably rather than
+        // by which answered first.
+        merged.sort_by(|a, b| {
+            a.is_inherited()
+                .cmp(&b.is_inherited())
+                .then(a.match_pos.cmp(&b.match_pos))
+                .then(a.name.len().cmp(&b.name.len()))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        merged.dedup_by(|a, b| a.path.eq_ignore_ascii_case(&b.path));
+        merged.truncate(crate::config::MAX_RESULTS);
+
+        if merged == self.hits {
+            self.hits = merged;
+            return false;
+        }
+        // `place_selection` keeps the selection by *path*, so a row arriving
+        // above the cursor moves the cursor's rank without moving the file it
+        // is on.
+        self.apply_hits(merged);
+        true
+    }
+
     /// Chooses the honest explanation for an empty list.
     fn no_match_reason(&self, searched: u32) -> EmptyReason {
+        // A live share that could not be asked, or could not be asked about
+        // everything, outranks every other explanation: it is the only one
+        // where "nothing matched" would be a claim about folders nobody
+        // looked in. Checked before the unreachable-index case for the same
+        // reason that one is checked before `NoMatches`.
+        if let Some(live) = &self.live
+            && !live.is_asking()
+            && !live.complete()
+        {
+            if let Some((id, detail)) = live.failed.first() {
+                return EmptyReason::LiveUnavailable {
+                    name: self.settings.routes.label(*id).to_string(),
+                    detail: detail.clone(),
+                };
+            }
+            if let Some((id, skip)) = live.skipped.first() {
+                return EmptyReason::LiveUnavailable {
+                    name: self.settings.routes.label(*id).to_string(),
+                    detail: skip.label(),
+                };
+            }
+            if let Some((id, coverage)) = live.worst() {
+                return EmptyReason::LiveIncomplete {
+                    name: self.settings.routes.label(id).to_string(),
+                    searched: coverage.dirs_queried,
+                    skipped: coverage.dirs_skipped,
+                };
+            }
+        }
         match self.index.unreachable() {
             Some((id, crate::index::Health::Unreachable { err, .. })) if searched == 0 => {
                 EmptyReason::IndexUnavailable {
@@ -940,17 +1254,16 @@ impl AppState {
                 };
                 if capped {
                     self.set_toast(
-                        "too many matches to count exactly".into(),
+                        "Too many matches to count exactly".into(),
                         Severity::Info,
                         now,
                     );
                 }
                 if let AuditVerdict::ServerUnderReturned { missing } = audit {
+                    let n = missing.len();
+                    let unit = if n == 1 { "file" } else { "files" };
                     self.set_toast(
-                        format!(
-                            "server filter missed {} file(s); falling back to the local index",
-                            missing.len()
-                        ),
+                        format!("Server filter missed {n} {unit} \u{b7} using the local index"),
                         Severity::Warn,
                         now,
                     );
@@ -979,7 +1292,9 @@ impl AppState {
                     .flat()
                     .next()
                     .map(|m| self.settings.routes.path_label(m.id))
-                    .unwrap_or_else(|| "the share".into());
+                    // "Drive", because this reaches a status line. The code
+                    // says share and the screen says drive.
+                    .unwrap_or_else(|| "the drive".into());
                 self.phase = QueryPhase::VerifyFailed {
                     detail: err.describe(&target),
                 };
@@ -1014,10 +1329,9 @@ impl AppState {
                 // Re-run the local match so the display agrees with the
                 // index. Deliberately does NOT re-arm the verify debounce -
                 // that cycle would be a livelock.
-                if self.input.chars().count() >= MIN_QUERY_LEN && self.settings.routes.any_indexed()
-                {
+                if self.query.is_searchable() && self.settings.routes.any_searchable() {
                     return Response::redraw().with(Cmd::Search {
-                        query: self.input.text().to_string(),
+                        query: self.query.clone(),
                         epoch: self.query_epoch,
                     });
                 }
@@ -1034,13 +1348,13 @@ impl AppState {
                     // to go and fix, and a chosen name does not say which
                     // drive letter is missing.
                     Some(err) => format!(
-                        "refresh failed: {}",
+                        "Refresh failed \u{b7} {}",
                         err.describe(&self.settings.routes.path_label(id))
                     ),
                     // The name, because this is scope rather than failure and
                     // the path would add nothing.
                     None => format!(
-                        "refreshed {} · {} files in {}",
+                        "Refreshed {} \u{b7} {} files \u{b7} {}",
                         self.settings.routes.label(id),
                         crate::util::humanize::count(entries),
                         crate::util::humanize::elapsed(elapsed)
@@ -1081,13 +1395,13 @@ impl AppState {
                 // outcome this path can produce, because nothing on screen
                 // would ever reveal it.
                 let mut text = if truncated {
-                    format!("opened the first {pages} pages; the set is longer")
+                    format!("Opened the first {pages} pages \u{b7} the set is longer")
                 } else {
                     let total = pages + skipped.len();
-                    format!("opened {pages} of {total} pages")
+                    format!("Opened {pages} of {total} pages")
                 };
                 if !skipped.is_empty() {
-                    text.push_str("; skipped ");
+                    text.push_str(" \u{b7} skipped ");
                     text.push_str(&skipped.join(", "));
                 }
                 self.set_toast(text, Severity::Warn, now);
@@ -1096,21 +1410,23 @@ impl AppState {
             OpenMsg::Failed { path, detail } => {
                 let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
                 self.set_toast(
-                    format!("could not open {name}: {detail}"),
+                    format!("Could not open {name} \u{b7} {detail}"),
                     Severity::Error,
                     now,
                 );
                 Response::redraw()
             }
             OpenMsg::ViewerSaved { viewer } => {
-                self.set_toast(format!("viewer: {}", viewer.name()), Severity::Info, now);
+                // `display`, not `name`: the latter is the config spelling
+                // and is round-tripped through the file.
+                self.set_toast(format!("Viewer: {}", viewer.display()), Severity::Info, now);
                 Response::redraw()
             }
             // Not fatal, and not silent: the toggle still applies to this
             // session, so the message says what did and did not happen.
             OpenMsg::ViewerSaveFailed { detail } => {
                 self.set_toast(
-                    format!("viewer changed for this session only: {detail}"),
+                    format!("Viewer changed for this session only \u{b7} {detail}"),
                     Severity::Warn,
                     now,
                 );
@@ -1124,6 +1440,47 @@ impl AppState {
     fn on_tick(&mut self, now: Instant) -> Response {
         let mut response = Response::none();
 
+        // The local match, first. It is the cheap half of the same pause, and
+        // the answer it produces is what the verification below gets checked
+        // against - so when both fall due on one tick, the matcher is asked
+        // first and the phase ends up where `on_verify` wants it.
+        if let Some(due) = self.search_due_at
+            && now >= due
+        {
+            self.search_due_at = None;
+            if self.query.is_searchable() && self.settings.routes.any_searchable() {
+                response.merge(Response::redraw().with(Cmd::Search {
+                    query: self.query.clone(),
+                    epoch: self.query_epoch,
+                }));
+            }
+        }
+
+        // A matcher that never answered an Enter. Hands the keystroke back
+        // rather than leaving it dead.
+        if let Some(due) = self.enter_watchdog_at
+            && now >= due
+        {
+            self.enter_watchdog_at = None;
+            self.enter_pending = false;
+            self.set_toast("The search did not answer".into(), Severity::Warn, now);
+            response.merge(Response::redraw());
+        }
+
+        if let Some(due) = self.live_due_at
+            && now >= due
+        {
+            self.live_due_at = None;
+            if self.query.is_searchable() {
+                let outstanding = self.settings.routes.live().count();
+                self.live = Some(LiveProgress::asking(now, outstanding));
+                response.merge(Response::redraw().with(Cmd::Live {
+                    query: self.query.clone(),
+                    epoch: self.query_epoch,
+                }));
+            }
+        }
+
         if let Some(due) = self.verify_due_at
             && now >= due
         {
@@ -1132,7 +1489,7 @@ impl AppState {
                 self.phase = QueryPhase::Verifying { since: now };
                 self.verify_watchdog_at = Some(now + VERIFY_WATCHDOG);
                 response.merge(Response::redraw().with(Cmd::Verify {
-                    query: self.input.text().to_string(),
+                    query: self.query.clone(),
                     epoch: self.query_epoch,
                 }));
             }
@@ -1169,10 +1526,6 @@ impl AppState {
         {
             self.toast_expires_at = None;
             self.toast = None;
-            response.merge(Response::redraw());
-        }
-
-        if self.wants_animation() && now >= self.last_frame + ANIMATION_TICK {
             response.merge(Response::redraw());
         }
 

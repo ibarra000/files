@@ -52,6 +52,17 @@ pub enum Intent {
     Caret { byte: usize, extend: bool },
     /// A key hint in the footer was clicked, so do what the key does.
     Hint(Action),
+    /// A remembered code was clicked: take that one.
+    ///
+    /// Its own variant rather than a reuse of [`Intent::Activate`], which
+    /// indexes the result list. Making that one mean two things depending on
+    /// which body is up would put a "which body is on screen" decision back
+    /// inside the state machine, which is what `Intent` exists to keep out.
+    ///
+    /// The rank is the thing that matters and the thing the old
+    /// `Hint(Action::Recall)` threw away - a click on the fifth code used to
+    /// step one entry *older*, because the only tool it had was the Up arrow.
+    Recall(usize),
 }
 
 impl AppState {
@@ -77,7 +88,24 @@ impl AppState {
                 Response::redraw()
             }
             Intent::Hint(action) => self.run_hint(action, now),
+            Intent::Recall(rank) => self.recall_row(rank, now),
         }
+    }
+
+    /// One click on a remembered code uses it, exactly as Enter on it does.
+    ///
+    /// One click and not two: a remembered code is a shortcut, and asking for a
+    /// double-click to use a shortcut defeats the point of having one.
+    ///
+    /// A rank past the end is not an error worth reporting, for the reason
+    /// [`Self::select_row`] gives: the list can be replaced between the frame
+    /// that was clicked and the event arriving.
+    fn recall_row(&mut self, rank: usize, now: Instant) -> Response {
+        let Some(entry) = self.history.select(rank).map(str::to_string) else {
+            return Response::none();
+        };
+        self.input.set_text(entry);
+        self.accept_recall(now)
     }
 
     /// A key hint in the footer, clicked rather than pressed.
@@ -272,5 +300,37 @@ mod tests {
         pressed.on_key(KeyEvent::new(Key::Down, Mods::NONE), now);
 
         assert_eq!(clicked.selected_row(), pressed.selected_row());
+    }
+
+    /// A click takes the code that was clicked, not the one next to it.
+    ///
+    /// This used to push `Intent::Hint(Action::Recall)`, which is the Up arrow
+    /// with the rank thrown away - so clicking the fifth remembered code
+    /// stepped one entry older than wherever the cursor already was.
+    #[test]
+    fn clicking_a_remembered_code_takes_that_one() {
+        let now = Instant::now();
+        let mut state = AppState::new(Settings::default(), now);
+        state.seed_history(vec!["a".into(), "b".into(), "c".into()]);
+        state.on_key(crate::app::key::KeyEvent::new(Key::Up, Mods::NONE), now);
+        assert_eq!(state.input.text(), "a", "the fixture is not browsing");
+
+        state.on_intent(Intent::Recall(2), now);
+        assert_eq!(state.input.text(), "c", "it took a neighbour instead");
+        assert!(
+            !state.history.is_browsing(),
+            "a click uses the code, it does not preview it"
+        );
+    }
+
+    /// A rank past the end of a list that has been replaced underneath the
+    /// click does nothing, rather than indexing past it.
+    #[test]
+    fn clicking_a_remembered_code_that_is_gone_does_nothing() {
+        let now = Instant::now();
+        let mut state = AppState::new(Settings::default(), now);
+        state.seed_history(vec!["a".into()]);
+        assert!(state.on_intent(Intent::Recall(9), now).cmds.is_empty());
+        assert_eq!(state.input.text(), "");
     }
 }

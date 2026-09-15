@@ -24,6 +24,7 @@ use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 use files::view::hints;
 
 /// Where the panel is when a key is pressed.
@@ -94,6 +95,12 @@ fn table() -> Vec<Binding> {
         b(Key::Char('w'), CTRL, Searching, "delete the previous field"),
         anymod(Key::F(1), Searching, "show or hide the shortcuts window"),
         anymod(Key::F(2), Searching, "switch viewer"),
+        anymod(
+            Key::F(3),
+            Searching,
+            "narrow to the start or the end of the name",
+        ),
+        anymod(Key::F(4), Searching, "narrow to one kind of file"),
         anymod(Key::F(5), Searching, "choose a drive to update"),
         // The drive picker, which is the one thing that borrows the body.
         anymod(Key::F(5), Picking, "close the drive list"),
@@ -142,7 +149,7 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
     s.update(
         AppEvent::Search(SearchMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_micros(200),
             result: Ok(SearchOutcome {
                 hits,
@@ -556,6 +563,8 @@ fn help_name(binding: &Binding) -> Option<&'static str> {
         Key::Char('a') => "A",
         Key::F(1) => "F1",
         Key::F(2) => "F2",
+        Key::F(3) => "F3",
+        Key::F(4) => "F4",
         Key::F(5) => "F5",
         Key::Enter => "Enter",
         Key::Esc => "Esc",
@@ -616,6 +625,8 @@ fn key_of(name: &str) -> Option<Key> {
         "Enter" => Some(Key::Enter),
         "Esc" => Some(Key::Esc),
         "F1" => Some(Key::F(1)),
+        "F3" => Some(Key::F(3)),
+        "F4" => Some(Key::F(4)),
         "F2" => Some(Key::F(2)),
         "F5" => Some(Key::F(5)),
         "Ctrl+Q" => Some(Key::Char('q')),

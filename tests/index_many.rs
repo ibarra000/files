@@ -28,6 +28,7 @@ fn routes(n: u16) -> Routes {
             kind: MappingKind::Tree,
             enabled: true,
             refresh: Default::default(),
+            depth: files::config::DEFAULT_LIVE_DEPTH,
         })
         .collect();
     Routes::new(mappings, ConfigSource::BuiltIn)

@@ -101,6 +101,80 @@ pub const MIN_COLUMN_WIDTH: u16 = 24;
 const _: () = assert!(MAX_RESULTS.is_multiple_of(GRID_COLUMNS));
 
 /// Upper bound on a query we are willing to hand to the server as a wildcard.
+/// Folders below the root a live query descends, unless the mapping says
+/// otherwise.
+///
+/// One: the share's own folder, answered by a single filtered round trip that
+/// returns both the matching files and the matching *folder* names - which is
+/// the common case, because a job code names a folder at least as often as it
+/// names a file.
+///
+/// Deeper is not one more round trip, it is one per folder on the way down: a
+/// filtered query cannot reveal a folder whose name does not match, so the
+/// level above has to be listed in full first. Depth two against a root
+/// holding two hundred folders is two hundred round trips for one keystroke,
+/// which is a decision somebody should have to write down.
+pub const DEFAULT_LIVE_DEPTH: u16 = 1;
+
+/// Deepest a configuration may ask a live query to go.
+///
+/// Four. With a branching factor of eight, depth four is already 512
+/// directories against a round-trip budget of 64 - so past this the number
+/// stops describing anything that will actually happen, and a number in a
+/// configuration file that will not be honoured is worse than no key at all.
+pub const MAX_LIVE_DEPTH: u16 = 4;
+
+/// Round trips one live pass may spend.
+///
+/// Sixty-four is the root's filtered query plus sixty-three folders expanded
+/// or listed. On a LAN, where a `FindFirstFileExW` round trip is well under a
+/// millisecond, that is under 60 ms - so the budget is not what bounds the
+/// latency, it is what bounds the *server*. Over the VPN this is also run
+/// across, where a round trip is 30-80 ms, sixty-four of them is four seconds,
+/// which is why there is a deadline as well.
+pub const LIVE_ROUND_TRIP_BUDGET: u32 = 64;
+
+/// Where a live pass stops, whatever it has reached by then.
+///
+/// Shorter than [`REMEMBER_DEBOUNCE`] on purpose: that one decides when the
+/// code on the line is a code somebody meant, and a live answer landing after
+/// it would leave the recall list and the result list disagreeing about which
+/// query was the finished one. Longer than any local answer by three orders of
+/// magnitude, so the two phases are never mistaken for one.
+pub const LIVE_DEADLINE: Duration = Duration::from_millis(1_200);
+
+/// Quiet period after the last keystroke before a live share is asked.
+///
+/// Twice [`SEARCH_DEBOUNCE`], and the doubling is the justification. That one
+/// is paced by what a *reader* can use, because the match itself is free. This
+/// one is paced by what somebody else's file server can afford: a leading `*`
+/// defeats the NTFS index, so the server walks its own directory to answer and
+/// the answer costs it real CPU rather than a seek.
+///
+/// Somebody reading a code off a drawing pauses about 200-300 ms between
+/// groups, which is what 300 ms was chosen to sit just past. Six hundred
+/// clears the pause between a code and the modifier after it as well, so
+/// `11-D-0704` costs one query rather than the two that 300 ms lets through -
+/// halving the load across the fleet for 300 ms nobody notices, because the
+/// local results are already on screen by then.
+pub const LIVE_DEBOUNCE: Duration = Duration::from_millis(600);
+
+/// Floor between two queries of the same share, whatever asks for them.
+///
+/// One second. The debounce above bounds what *typing* can cause; this bounds
+/// everything else - a held key, a paste loop, a burst of index updates each
+/// re-running the match. One client can therefore cost a share at most one
+/// query per second however pathological its input.
+pub const LIVE_MIN_SPACING: Duration = Duration::from_secs(1);
+
+/// Refusals to filter before a live share is switched off for the process.
+///
+/// Three, matching [`SERVER_FILTER_MISS_LIMIT`]. A source that will not push
+/// the filter down would answer every query with a full enumeration wearing a
+/// filter, which is precisely the cost configuring the share this way was
+/// meant to avoid - so the honest response is to stop and say so.
+pub const LIVE_FAILURE_LIMIT: u32 = 3;
+
 pub const MAX_SERVER_QUERY_LEN: usize = 64;
 
 /// Stop a server-side wildcard enumeration past this many hits and report the
@@ -452,13 +526,13 @@ impl MatcherKind {
 /// destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerKind {
-    /// Whatever suits the file: documents assembled, drawings converted,
-    /// everything else handed to `avwin.exe`.
+    /// Whatever suits the file: documents assembled, everything else - a
+    /// drawing included - handed to `avwin.exe`.
     #[default]
     Auto,
     /// Every page of the code, merged into one PDF, opened with the system's
-    /// `.pdf` handler. A drawing is converted first, so this always produces a
-    /// PDF or an error.
+    /// `.pdf` handler. A drawing is the one thing this cannot assemble - there
+    /// is no Rust that reads DWG - so a drawing still goes to `avwin.exe`.
     Pdf,
     /// The single selected file, handed to `avwin.exe`. The behaviour this
     /// program had before there was a choice, and still the way to see a `.pdf`
@@ -515,18 +589,6 @@ impl ThemeChoice {
             Self::System => system_is_dark,
         }
     }
-}
-
-/// Fills in the implied arguments when a converter is named by program alone.
-///
-/// One place, so `dwg_converter = 'x.exe'` and `FILES_DWG_CONVERTER=x.exe` mean
-/// the same thing rather than nearly the same thing.
-pub fn expand_converter(argv: Vec<String>) -> Vec<String> {
-    if argv.len() == 1 {
-        let prog = argv.into_iter().next().unwrap_or_default();
-        return vec![prog, "{in}".into(), "{out}".into()];
-    }
-    argv
 }
 
 impl ViewerKind {
@@ -697,22 +759,6 @@ pub struct Settings {
     /// surfaced as a toast instead.
     pub pdf_viewer: Option<PathBuf>,
 
-    /// How to turn a `.dwg` into a PDF, as a command and its arguments.
-    ///
-    /// `{in}` and `{out}` are replaced *within* an argument, so `--out={out}`
-    /// works and nothing has to be quoted or escaped - the argument vector
-    /// never becomes a command line to be re-parsed. A bare program name is
-    /// taken to mean `[prog, "{in}", "{out}"]`.
-    ///
-    /// `None` - the shipped default - means drawings go to `avwin.exe`, which
-    /// opens them natively. There is no Rust that can read a DWG: it is a
-    /// closed format, and every route to a PDF is somebody else's program.
-    ///
-    /// Not validated at load, for the reason [`Self::pdf_viewer`] gives: this
-    /// file roams to laptops where the converter legitimately is not installed,
-    /// and refusing to start there would be a regression. `--doctor` reports
-    /// it, and the first drawing that needs it says so on the status line.
-    pub dwg_converter: Option<Vec<String>>,
     /// Whether an F2 toggle can be written back to the configuration file.
     ///
     /// False when the environment or the command line set the viewer, because
@@ -763,7 +809,6 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             pdf_viewer: None,
-            dwg_converter: None,
             // Assume not, and let `load` say otherwise once it knows there is
             // a file and that nothing outranks it. Defaulting the other way
             // would make every test fixture and every `--no-config` session
@@ -915,11 +960,6 @@ impl Settings {
         {
             self.pdf_viewer = Some(v.clone());
         }
-        if env_str("FILES_DWG_CONVERTER").is_none()
-            && let Some(v) = &f.dwg_converter
-        {
-            self.dwg_converter = Some(v.clone());
-        }
         if env_str("FILES_THEME").is_none()
             && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
         {
@@ -1003,14 +1043,6 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_PDF_VIEWER") {
             s.pdf_viewer = Some(PathBuf::from(v));
-        }
-        // Split on whitespace, which is all an environment variable can carry.
-        // A path with spaces in it belongs in the configuration file, where it
-        // can be written as an array.
-        if let Some(v) = env_str("FILES_DWG_CONVERTER") {
-            s.dwg_converter = Some(expand_converter(
-                v.split_whitespace().map(str::to_string).collect(),
-            ));
         }
         // Commas as well as spaces, because `db,js,lnk` is how anybody would
         // write this one. An empty value means "hide nothing", which is the

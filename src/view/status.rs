@@ -13,7 +13,6 @@ use std::ops::Range;
 use std::time::{Instant, SystemTime};
 
 use crate::app::state::{AppState, QueryPhase, Severity};
-use crate::config::ViewerKind;
 use crate::index::store::{Activity, Health};
 use crate::util::humanize;
 
@@ -104,9 +103,9 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     //
     // `F2` is named rather than described: it is one press, it is reversible,
     // and it is the whole fix.
-    if state.avwin_missing && state.viewer == ViewerKind::Avwin {
+    if state.avwin_missing && state.viewer.may_use_avwin() {
         return StatusLine {
-            text: "avwin.exe is not on PATH, so Enter cannot open anything ·                    F2 switches to the built-in viewer"
+            text: "Enter cannot open anything \u{b7} avwin.exe is not on PATH \u{b7} F2 uses the built-in viewer"
                 .into(),
             tone: Tone::Warn,
         };
@@ -114,12 +113,17 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
 
     // Browsing the codes used before. Carries the position, so stepping
     // through a long list does not feel bottomless - which is what the
-    // terminal build's " History (2 of 3) " title said, and what nothing has
-    // said since it became the empty state.
+    // terminal build's " History (2 of 3) " title said.
+    //
+    // The position and nothing else. This used to add "Enter to use it, Esc to
+    // go back", which the hint bar says two inches to the right in the chips
+    // that are the actual keys - and saying it twice cost exactly the room the
+    // position needs, so the one thing only this line can say was the thing
+    // that got truncated away.
     if let Some(cursor) = state.history.cursor() {
         return StatusLine {
             text: format!(
-                "Codes you used before · {} of {} · Enter to use it, Esc to go back",
+                "Codes you used before · {} of {}",
                 cursor + 1,
                 state.history.len()
             ),
@@ -137,7 +141,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         };
         return StatusLine {
             text: format!(
-                "Building the file list{}{why} - {} files so far",
+                "Building the list{}{why} \u{b7} {} files",
                 busy_where(state),
                 humanize::count(seen)
             ),
@@ -150,7 +154,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         // unexplained wait the other states here exist to replace.
         return StatusLine {
             text: format!(
-                "{} waiting for a turn to be read...",
+                "{} waiting to be read\u{2026}",
                 shares_phrase(state.index.busy)
             ),
             tone: Tone::Busy,
@@ -168,7 +172,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         // progress and an unexplained wait.
         return StatusLine {
             text: format!(
-                "Reading folders{} - {} read, {} to go, {} files",
+                "Reading folders{} \u{b7} {} read \u{b7} {} to go \u{b7} {} files",
                 busy_where(state),
                 humanize::count(dirs),
                 humanize::count(queued),
@@ -179,7 +183,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     }
     if state.index.activity == Activity::LoadingDisk {
         return StatusLine {
-            text: "Loading the saved file list...".into(),
+            text: "Loading the list\u{2026}".into(),
             tone: Tone::Busy,
         };
     }
@@ -187,7 +191,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         // Busy, and previously unlabelled: it drives the animation tick, so
         // the screen spun with nothing on it to explain why.
         return StatusLine {
-            text: "Saving the file list...".into(),
+            text: "Saving the list\u{2026}".into(),
             tone: Tone::Busy,
         };
     }
@@ -202,7 +206,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     // list shifted", and until now read by nothing outside that test.
     if state.selection_lost {
         return StatusLine {
-            text: "The list changed - check the highlighted file before opening it".into(),
+            text: "The list changed \u{b7} check the highlighted file before opening it".into(),
             tone: Tone::Warn,
         };
     }
@@ -214,22 +218,77 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     // transient or something the user has to do about, and outranks an ambient
     // note about the index - "Keep typing" while a code is half-entered is
     // more use than "no file list yet", even when both are true.
+    // Above the phase, because a partial live answer outranks a confirmed
+    // local one: the phase can only say the indexes are current, and the live
+    // share is the part of the answer that may be missing.
+    if let Some(live) = &state.live {
+        if live.is_asking() {
+            let n = live.outstanding;
+            let text = match n {
+                1 => match state.settings.routes.live().next() {
+                    Some(m) => format!("Asking {}\u{2026}", m.name),
+                    None => "Asking the drive\u{2026}".into(),
+                },
+                _ => format!("Asking {} drives\u{2026}", n),
+            };
+            return StatusLine {
+                text,
+                tone: Tone::Busy,
+            };
+        }
+        if let Some((id, detail)) = live.failed.first() {
+            return StatusLine {
+                text: format!(
+                    "{} did not answer \u{b7} {}",
+                    state.settings.routes.label(*id),
+                    detail
+                ),
+                tone: Tone::Warn,
+            };
+        }
+        if let Some((id, skip)) = live.skipped.first() {
+            return StatusLine {
+                text: format!(
+                    "{} was not searched \u{b7} {}",
+                    state.settings.routes.label(*id),
+                    skip.label()
+                ),
+                tone: Tone::Warn,
+            };
+        }
+        if let Some((id, coverage)) = live.worst() {
+            let reached = coverage.dirs_queried;
+            let total = coverage.dirs_queried + coverage.dirs_skipped;
+            return StatusLine {
+                text: format!(
+                    "Searched {reached} of {total} folders on {}",
+                    state.settings.routes.label(id)
+                ),
+                tone: Tone::Warn,
+            };
+        }
+    }
+
     let phase = match &state.phase {
         QueryPhase::Idle | QueryPhase::Local => None,
         QueryPhase::TooShort { need } => Some(StatusLine {
-            text: format!("Keep typing - a code needs at least {need} characters"),
+            text: format!("Keep typing \u{b7} a code needs {need} characters"),
             tone: Tone::Normal,
         }),
+        QueryPhase::BadQuery { detail } => Some(StatusLine {
+            text: crate::view::sentence(detail),
+            tone: Tone::Warn,
+        }),
         QueryPhase::NoShares => Some(StatusLine {
-            text: "No shares are set up - run files --check-config".into(),
+            text: "No drives are set up \u{b7} run files --check-config".into(),
             tone: Tone::Warn,
         }),
         QueryPhase::LocalPending => Some(StatusLine {
-            text: "Searching...".into(),
+            text: "Searching\u{2026}".into(),
             tone: Tone::Busy,
         }),
         QueryPhase::Verifying { .. } => Some(StatusLine {
-            text: "Checking the drive...".into(),
+            text: "Checking the drive\u{2026}".into(),
             tone: Tone::Busy,
         }),
         // Short, and without the match count or the round-trip time it used to
@@ -247,7 +306,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
             tone: Tone::Good,
         }),
         QueryPhase::VerifyFailed { detail } => Some(StatusLine {
-            text: format!("Showing the saved list - {detail}"),
+            text: format!("Showing the saved list \u{b7} {detail}"),
             tone: Tone::Warn,
         }),
     };
@@ -289,16 +348,20 @@ fn busy_where(state: &AppState) -> String {
     }
     match state.index.busy_only {
         Some(id) => format!(" {}", state.settings.routes.label(id)),
-        None if state.index.busy > 1 => format!(" {} shares", state.index.busy),
+        None if state.index.busy > 1 => format!(" {} drives", state.index.busy),
         None => String::new(),
     }
 }
 
+/// How many drives, for the status line.
+///
+/// "Drive", not "share": the code calls `R:\` a share because that is what SMB
+/// calls it, and nobody outside this repository does.
 fn shares_phrase(n: usize) -> String {
     if n == 1 {
-        "1 share".to_string()
+        "1 drive".to_string()
     } else {
-        format!("{n} shares")
+        format!("{n} drives")
     }
 }
 
@@ -331,13 +394,19 @@ fn busy_scan_reason(state: &AppState) -> Option<crate::index::schedule::ScanReas
 fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
     let status = &state.index;
     if status.origin.is_none() {
-        return Some("no file list yet".into());
+        return Some("No file list yet".into());
     }
 
     // Named, because a degraded share is one somebody has to go and look at.
     // A name only when there are several: "jobs: no live updates" is useful
     // and "custompro: no live updates" when custompro is the only share is a
     // word nobody needed.
+    //
+    // The name is not capitalised and the fragment after it is not either: a
+    // drive is called whatever the configuration calls it, and a line that
+    // leads with `Jobs` names a drive that does not exist. Where no name
+    // leads, `view::sentence` capitalises the fragment instead - which is the
+    // whole reason those fragments are written lowercase.
     let named = |id| {
         if status.configured > 1 {
             format!("{}: ", state.settings.routes.label(id))
@@ -345,9 +414,13 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
             String::new()
         }
     };
+    let lead = |id, rest: &str| match named(id) {
+        name if name.is_empty() => crate::view::sentence(rest),
+        name => format!("{name}{rest}"),
+    };
 
     if let Some((id, reason)) = status.degraded() {
-        return Some(format!("{}{}", named(id), reason.label()));
+        return Some(lead(id, reason.label()));
     }
 
     // Which share to refresh, and why - not merely that something is stale.
@@ -356,7 +429,7 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
     if state.settings.stale_notices
         && let Some((id, reason)) = status.stale_at(wall)
     {
-        return Some(format!("{}{} · F5", named(id), reason.label()));
+        return Some(format!("{} \u{b7} F5", lead(id, reason.label())));
     }
 
     None
@@ -494,7 +567,7 @@ mod tests {
         s.update(
             AppEvent::Search(crate::app::event::SearchMsg {
                 epoch: s.query_epoch(),
-                query: s.input.text().to_string(),
+                query: crate::search::query::Query::parse(s.input.text()),
                 elapsed: Duration::from_micros(300),
                 result: Ok(crate::search::matcher::SearchOutcome {
                     hits,
@@ -550,7 +623,7 @@ mod tests {
         );
         assert_eq!(
             render(&s, now, EPOCH).text,
-            "Keep typing - a code needs at least 3 characters"
+            "Keep typing \u{b7} a code needs 3 characters"
         );
     }
 
@@ -599,7 +672,10 @@ mod tests {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
         let line = render(&s, now, EPOCH);
-        assert_eq!(line.text, "No shares are set up - run files --check-config");
+        assert_eq!(
+            line.text,
+            "No drives are set up \u{b7} run files --check-config"
+        );
         assert_eq!(line.tone, Tone::Warn);
     }
 
@@ -703,7 +779,7 @@ mod tests {
             st.activity = Activity::Scanning { seen: 812_000 }
         });
         let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("Building the file list"));
+        assert!(line.text.contains("Building the list"), "{}", line.text);
         assert!(line.text.contains("812,000"));
         assert_eq!(line.tone, Tone::Busy);
     }
@@ -720,8 +796,7 @@ mod tests {
         });
         let line = render(&s, now, EPOCH);
         assert!(
-            line.text
-                .contains("Building the file list (directory changed)"),
+            line.text.contains("Building the list (directory changed)"),
             "{}",
             line.text
         );
@@ -736,11 +811,7 @@ mod tests {
             st.last_scan_reason = None;
         });
         let line = render(&s, now, EPOCH);
-        assert!(
-            line.text.contains("Building the file list"),
-            "{}",
-            line.text
-        );
+        assert!(line.text.contains("Building the list"), "{}", line.text);
         assert!(
             !line.text.contains("()"),
             "no empty parentheses: {}",
@@ -755,18 +826,23 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, |st| st.activity = Activity::Persisting);
-        assert_eq!(render(&s, now, EPOCH).text, "Saving the file list...");
+        assert_eq!(render(&s, now, EPOCH).text, "Saving the list\u{2026}");
     }
 
+    /// A healthy index says nothing at all.
+    ///
+    /// This used to assert that the line did not contain "checked", against a
+    /// line that reads "Checked just now" - a case-sensitive negative that
+    /// passed on the capital and tested nothing for as long as it existed.
+    /// What it was reaching for is that the footer is *empty* when all is
+    /// well, which is the whole argument of `index_warning`, so it says that.
     #[test]
-    fn a_freshly_built_index_does_not_mention_the_check() {
+    fn a_freshly_built_index_says_nothing_at_all() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(10, Duration::ZERO));
-        assert!(
-            !render(&s, now, EPOCH).text.contains("checked"),
-            "the quiet case stays short"
-        );
+        let line = render(&s, now, EPOCH);
+        assert_eq!(line.text, "", "the quiet case is quiet");
     }
 
     #[test]
@@ -774,10 +850,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, |st| st.activity = Activity::LoadingDisk);
-        assert_eq!(
-            render(&s, now, EPOCH).text,
-            "Loading the saved file list..."
-        );
+        assert_eq!(render(&s, now, EPOCH).text, "Loading the list\u{2026}");
     }
 
     #[test]
@@ -807,7 +880,7 @@ mod tests {
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
                 epoch: s.query_epoch(),
-                query: s.input.text().to_string(),
+                query: crate::search::query::Query::parse(s.input.text()),
                 elapsed: Duration::from_millis(2),
                 outcome: crate::search::verify::VerifyOutcome::IndexAuthoritative { stamp: None },
             }),
@@ -828,7 +901,7 @@ mod tests {
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
                 epoch: s.query_epoch(),
-                query: s.input.text().to_string(),
+                query: crate::search::query::Query::parse(s.input.text()),
                 elapsed: Duration::from_millis(42),
                 outcome: crate::search::verify::VerifyOutcome::Server {
                     hits: vec![hit("a.pdf")],
@@ -864,7 +937,7 @@ mod tests {
 
         let line = render(&s, now, EPOCH);
         assert!(
-            line.text.contains("server filter disabled"),
+            line.text.contains("Server filter disabled"),
             "{}",
             line.text
         );
@@ -878,7 +951,7 @@ mod tests {
     fn a_missing_index_is_described_rather_than_faked() {
         let now = Instant::now();
         let s = state_at(now);
-        assert!(render(&s, now, EPOCH).text.contains("no file list yet"));
+        assert!(render(&s, now, EPOCH).text.contains("No file list yet"));
     }
     // --- naming the share that actually failed --------------------------
     //
@@ -1001,7 +1074,7 @@ mod tests {
         });
         let line = render(&s, now, EPOCH);
         assert!(
-            line.text.contains("waiting for a turn to be read"),
+            line.text.contains("waiting to be read"),
             "a queued share must not look idle: {}",
             line.text
         );
@@ -1058,7 +1131,7 @@ mod tests {
         // Old enough that age alone would also have fired.
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
         let line = render(&s, now, wall);
-        assert!(line.text.contains("changes were missed"), "{}", line.text);
+        assert!(line.text.contains("Changes were missed"), "{}", line.text);
         assert!(
             !line.text.contains("not refreshed recently"),
             "the weaker reason should not be shown as well: {}",
@@ -1077,11 +1150,15 @@ mod tests {
         typed_with_results(&mut s, now, 10);
 
         let fresh = render(&s, now, EPOCH + Duration::from_secs(60));
-        assert!(!fresh.text.contains("not refreshed"), "{}", fresh.text);
+        assert!(
+            !fresh.text.to_lowercase().contains("not refreshed"),
+            "{}",
+            fresh.text
+        );
 
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
         let old = render(&s, now, wall);
-        assert!(old.text.contains("not refreshed recently"), "{}", old.text);
+        assert!(old.text.contains("Not refreshed recently"), "{}", old.text);
     }
 
     /// Silent mode, for somebody handed the tool who does not need current
@@ -1109,5 +1186,211 @@ mod tests {
         // The ages are still one keypress away, which is the whole bargain:
         // not shown, not hidden. See `view::shares`, which F5 opens.
         assert!(s.index.age(wall).is_some());
+    }
+
+    // --- the house style --------------------------------------------------
+
+    /// Every line this function can produce, held to the house style.
+    ///
+    /// A battery rather than a check bolted onto each test above, because the
+    /// thing being guarded is that they are consistent *with each other* - and
+    /// no test of one line can see that. This footer once alternated between
+    /// `Searching...`, `Building the file list - 812,000 files so far` and
+    /// `nothing to open` within a few seconds of each other, each of them
+    /// perfectly reasonable on its own.
+    ///
+    /// A line that this cannot reach is a line nothing here is checking, so a
+    /// new branch in `render` belongs in this list.
+    fn every_line() -> Vec<String> {
+        let now = Instant::now();
+        let wall_old = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
+        let mut out = Vec::new();
+        let mut say = |s: &AppState, wall| out.push(render(s, now, wall).text);
+
+        // Nothing happening, and nothing wrong.
+        let mut quiet = state_at(now);
+        with_index(&mut quiet, now, healthy_status(10, Duration::ZERO));
+        say(&quiet, EPOCH);
+
+        // A drive that cannot be reached, which outranks everything.
+        let mut down = state_at(now);
+        with_index(&mut down, now, unreachable(EnumError::Transient(53)));
+        say(&down, EPOCH);
+
+        // The viewer that cannot be launched.
+        let mut no_viewer = state_at(now);
+        no_viewer.avwin_missing = true;
+        no_viewer.viewer = crate::config::ViewerKind::Avwin;
+        say(&no_viewer, EPOCH);
+
+        // Every activity, on one drive and on several.
+        for several in [false, true] {
+            for activity in [
+                Activity::Scanning { seen: 812_000 },
+                Activity::Queued,
+                Activity::Walking {
+                    dirs: 9_000,
+                    queued: 400,
+                    files: 812_000,
+                },
+                Activity::LoadingDisk,
+                Activity::Persisting,
+            ] {
+                let mut s = if several {
+                    state_with_two_shares(now)
+                } else {
+                    state_at(now)
+                };
+                let reason = Some(ScanReason::StampMoved);
+                publish(&mut s, MappingId(0), now, |st| {
+                    st.activity = activity;
+                    st.last_scan_reason = reason;
+                });
+                say(&s, EPOCH);
+            }
+        }
+
+        // The list moved under the selection.
+        let mut shifted = state_at(now);
+        with_index(&mut shifted, now, healthy_status(10, Duration::ZERO));
+        shifted.selection_lost = true;
+        say(&shifted, EPOCH);
+
+        // Half a code typed, and a code with nowhere to look.
+        let mut short = state_at(now);
+        short.update(
+            AppEvent::Key(KeyEvent::new(Key::Char('1'), Mods::NONE)),
+            now,
+        );
+        say(&short, EPOCH);
+
+        let routes = crate::paths::Routes::new(Vec::new(), crate::paths::ConfigSource::BuiltIn);
+        let mut none = AppState::new(
+            Settings::with_routes(std::sync::Arc::new(routes), |s| s),
+            now,
+        );
+        type_code(&mut none, now);
+        say(&none, EPOCH);
+
+        // Every phase the search goes through.
+        let mut searching = state_at(now);
+        with_index(&mut searching, now, healthy_status(10, Duration::ZERO));
+        type_code(&mut searching, now);
+        for phase in [
+            QueryPhase::LocalPending,
+            QueryPhase::Verifying { since: now },
+            QueryPhase::Verified {
+                took: Duration::from_millis(12),
+                by_stamp: true,
+            },
+            QueryPhase::Verified {
+                took: Duration::from_millis(12),
+                by_stamp: false,
+            },
+            QueryPhase::VerifyFailed {
+                detail: "the drive stopped answering".into(),
+            },
+        ] {
+            searching.phase = phase;
+            say(&searching, EPOCH);
+        }
+
+        // The codes used before. Opening is what commits a code to the list,
+        // so the code is opened, the notice that raised is cleared - it would
+        // otherwise outrank the line being asked for - and then Up.
+        let mut recalling = state_at(now);
+        with_index(&mut recalling, now, healthy_status(10, Duration::ZERO));
+        typed_with_results(&mut recalling, now, 10);
+        recalling.update(AppEvent::Key(KeyEvent::new(Key::Enter, Mods::NONE)), now);
+        recalling.update(AppEvent::Key(KeyEvent::new(Key::Esc, Mods::NONE)), now);
+        recalling.toast = None;
+        recalling.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
+        assert!(
+            recalling.history.cursor().is_some(),
+            "the recall line was never reached, so nothing here checks it"
+        );
+        say(&recalling, EPOCH);
+
+        // Nothing to report but the index itself: no list, degraded, stale -
+        // each with one drive, where the fragment is capitalised, and with
+        // several, where the drive's own name leads instead.
+        let bare = state_at(now);
+        say(&bare, EPOCH);
+
+        for several in [false, true] {
+            for reason in [
+                DegradeReason::LiveUpdatesUnavailable,
+                DegradeReason::PartiallyUnreadable,
+            ] {
+                let mut s = if several {
+                    state_with_two_shares(now)
+                } else {
+                    state_at(now)
+                };
+                publish(&mut s, MappingId(0), now, move |st| {
+                    ready(10)(st);
+                    st.health = Health::Degraded { reason, since: now };
+                });
+                typed_with_results(&mut s, now, 10);
+                say(&s, EPOCH);
+            }
+            for stale in [
+                StaleReason::EventsLost,
+                StaleReason::NoLiveUpdates,
+                StaleReason::Age,
+            ] {
+                let mut s = if several {
+                    state_with_two_shares(now)
+                } else {
+                    state_at(now)
+                };
+                publish(&mut s, MappingId(0), now, move |st| {
+                    ready(10)(st);
+                    st.stale = Some(stale);
+                });
+                typed_with_results(&mut s, now, 10);
+                say(&s, wall_old);
+            }
+        }
+
+        out
+    }
+
+    #[test]
+    fn every_status_line_keeps_the_house_style() {
+        let lines = every_line();
+        crate::view::style::check_all(
+            "the status line",
+            lines.iter().map(String::as_str),
+            crate::view::style::Slot::Status,
+        );
+    }
+
+    /// A line starts the way a line starts.
+    ///
+    /// Except where a drive's own name leads it: a drive is called whatever
+    /// the configuration calls it, and `Jobs: no live updates` names a drive
+    /// nobody configured. So the rule is applied to the lines this module
+    /// writes end to end, and the named ones are checked for the shape they
+    /// do have.
+    #[test]
+    fn every_status_line_starts_the_way_a_line_should() {
+        for line in every_line() {
+            if let Some((name, rest)) = line.split_once(": ") {
+                // A name leading the line, which happens only with several
+                // drives configured. Everything after it stays lowercase.
+                if !name.contains(' ') {
+                    assert!(
+                        !rest.is_empty(),
+                        "{line:?} names a drive and then says nothing"
+                    );
+                    continue;
+                }
+            }
+            assert!(
+                crate::view::style::starts_capitalised(&line),
+                "{line:?} does not start a sentence"
+            );
+        }
     }
 }

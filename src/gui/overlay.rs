@@ -5,7 +5,7 @@
 //! panel *says* comes from [`crate::view`]; everything about how it *moves*
 //! comes from [`crate::gui::anim`]. What is left here is arrangement.
 //!
-//! # One list, one field, no modes
+//! # One list, one field, one way in
 //!
 //! The terminal build had a five-way focus, because a terminal has one pane and
 //! everything had to take turns in it. A window does not, so:
@@ -13,15 +13,20 @@
 //! * the text field always has the keyboard, and Left/Right always move the
 //!   caret;
 //! * Up/Down always move the selection, and Enter always takes the row it is
-//!   on;
-//! * with nothing typed, the list *is* your recent codes - recall stops being a
-//!   mode and becomes the empty state.
+//!   on.
+//!
+//! The recent codes are the one thing that is still a mode, deliberately. They
+//! used to be what an empty field showed, which meant every summon of an empty
+//! panel opened onto a list of somebody's job codes with nobody having asked
+//! for it. The Up arrow is the only way in now, Escape is the way out, and
+//! [`body_of`] reads `history.is_browsing()` rather than deciding for itself -
+//! it and `showing_recent` used to be two answers to that question and they
+//! disagreed.
 //!
 //! The list therefore holds two kinds of row, and Enter means the obvious thing
 //! for each: on a remembered code it fills the field, on a file it opens it.
-//! That is one rule - *Enter takes the row you are on* - rather than a mode
-//! anybody has to keep track of, and the two kinds look different enough that
-//! nobody has to be told.
+//! That is one rule - *Enter takes the row you are on* - and the two kinds look
+//! different enough that nobody has to be told.
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align2, Color32, Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -29,7 +34,7 @@ use std::time::{Instant, SystemTime};
 
 use crate::app::state::pointer::Intent;
 use crate::app::state::{AppState, EmptyReason};
-use crate::gui::anim::{Bar, Content, Visual};
+use crate::gui::anim::{Content, Visual};
 use crate::gui::theme::{self, Theme, Weight};
 use crate::gui::{row, window::Backdrop};
 use crate::view::{self, Emphasis, Run};
@@ -63,7 +68,7 @@ pub fn measure(state: &AppState) -> Measured {
     let content = body_of(state);
     let rows = match content {
         Content::Shares => state.share_ids().len(),
-        Content::Recent => state.history.entries().len(),
+        Content::Recent => state.recent_rows().len(),
         Content::Results => state.hits.len(),
         Content::Empty => empty_lines(state),
     };
@@ -81,10 +86,23 @@ pub fn measure(state: &AppState) -> Measured {
     // for every rank past it - so with three hundred results the arrows walked
     // the whole list while the panel drew the same eight rows and the same
     // frozen band, and Enter opened a file that was not on screen.
-    let selection_y = matches!(content, Content::Results)
-        .then(|| state.selected_row())
-        .flatten()
-        .map(|rank| rank.saturating_sub(state.scroll_top()) as f32 * theme::ROW_H);
+    let selection_y = match content {
+        Content::Results => state
+            .selected_row()
+            .map(|rank| rank.saturating_sub(state.scroll_top()) as f32 * theme::ROW_H),
+        // The recall cursor is the same kind of thing in a different list. It
+        // used to have no band at all, so stepping through codes changed the
+        // field with nothing on screen to say which row it had come from - and
+        // past the twelfth entry nothing moved at all.
+        Content::Recent => {
+            let window = state.recent_rows();
+            state
+                .history
+                .cursor()
+                .map(|c| c.saturating_sub(window.start) as f32 * theme::ROW_H)
+        }
+        Content::Empty | Content::Shares => None,
+    };
 
     Measured {
         content,
@@ -99,15 +117,23 @@ fn body_of(state: &AppState) -> Content {
     if state.picking_share {
         return Content::Shares;
     }
+    // Asked before anything looks at the field, because browsing puts a code
+    // *in* the field: a rule that looked at emptiness first would drop the list
+    // the moment it was stepped onto.
+    //
+    // Through `showing_recent` rather than by re-deriving it. This function and
+    // that one used to be two independent answers to one question, and they
+    // already disagreed - which is how the list came to be drawn from an empty
+    // field nobody had pressed Up on.
+    if state.showing_recent() {
+        return Content::Recent;
+    }
     if state.input.text().is_empty() {
-        // With nothing typed the list is your recent codes - unless there are
-        // none, which is the first screen after a fresh install and wants the
-        // onboarding block instead.
-        return if state.history.is_empty() {
-            Content::Empty
-        } else {
-            Content::Recent
-        };
+        // Nothing typed and nothing asked for: the onboarding block, which says
+        // what to type, shows one, and points at the Up arrow and F1. It used
+        // to be reachable only on a fresh install; it is the standard empty
+        // state now.
+        return Content::Empty;
     }
     if state.hits.is_empty() {
         Content::Empty
@@ -143,43 +169,28 @@ pub fn show(
     let mut intents = Vec::new();
     let rect = panel_rect(ui, visual, backdrop);
 
-    paint_surface(ui, theme, rect, backdrop, visual.alpha);
+    paint_surface(ui, theme, rect, backdrop);
 
     let mut cursor = rect.shrink2(vec2(0.0, theme::PAD_Y));
     let field = take(&mut cursor, theme::FIELD_H);
-    intents.extend(draw_field(ui, state, theme, field, visual));
+    intents.extend(draw_field(ui, state, theme, field));
 
     let footer = take_bottom(&mut cursor, theme::FOOTER_H);
-    rule(ui, theme, footer.top(), rect, visual.alpha);
-    intents.extend(draw_footer(
+    rule(ui, theme, footer.top(), rect);
+    intents.extend(draw_footer(ui, state, theme, footer, now, wall));
+
+    // One pass. The body used to be drawn twice while one cross-faded into the
+    // other - which is why everything below took an alpha, and why the outgoing
+    // pass had to be told not to accept clicks.
+    intents.extend(draw_body(
         ui,
         state,
         theme,
-        footer,
-        visual.alpha,
-        now,
+        cursor,
+        visual.content,
+        visual,
         wall,
     ));
-
-    // The body is cross-faded, so it is drawn twice while one is replacing the
-    // other - the outgoing one first, so the incoming draws over it. They never
-    // overlap in opacity (see `anim::Cross`), so this is two passes rather than
-    // a smear.
-    if let (Some(leaving), true) = (visual.content.leaving, visual.content.leaving_alpha > 0.0) {
-        draw_body(ui, state, theme, cursor, leaving, visual, false, wall);
-    }
-    if visual.content.showing_alpha > 0.0 {
-        intents.extend(draw_body(
-            ui,
-            state,
-            theme,
-            cursor,
-            visual.content.showing,
-            visual,
-            true,
-            wall,
-        ));
-    }
 
     intents
 }
@@ -245,11 +256,11 @@ fn panel_rect(ui: &Ui, visual: &Visual, backdrop: Option<Backdrop>) -> Rect {
 /// a backdrop is painting over it. On the fallback path this fill *is* the
 /// depth, so it is drawn - and it fades with everything else, which acrylic
 /// cannot do.
-fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>, alpha: f32) {
+fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>) {
     let painter = ui.painter();
     let radius = theme::radius(theme::PANEL_RADIUS);
     if backdrop != Some(Backdrop::Acrylic) {
-        painter.rect_filled(rect, radius, theme::faded(theme.surface, alpha));
+        painter.rect_filled(rect, radius, theme.surface);
     }
     // The hairline stays on both paths: Windows draws its own border around a
     // rounded window, and without one of ours the panel's edge is whatever
@@ -257,7 +268,7 @@ fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>,
     painter.rect_stroke(
         rect,
         radius,
-        Stroke::new(1.0, theme::faded(theme.edge, alpha)),
+        Stroke::new(1.0, theme.edge),
         StrokeKind::Inside,
     );
 }
@@ -281,27 +292,20 @@ fn take_bottom(cursor: &mut Rect, height: f32) -> Rect {
     taken
 }
 
-fn rule(ui: &Ui, theme: &Theme, y: f32, rect: Rect, alpha: f32) {
+fn rule(ui: &Ui, theme: &Theme, y: f32, rect: Rect) {
     ui.painter().hline(
         (rect.left() + theme::PAD_X)..=(rect.right() - theme::PAD_X),
         y,
-        Stroke::new(1.0, theme::faded(theme.edge, alpha)),
+        Stroke::new(1.0, theme.edge),
     );
 }
 
 // -- the field --------------------------------------------------------------
 
-fn draw_field(
-    ui: &mut Ui,
-    state: &AppState,
-    theme: &Theme,
-    rect: Rect,
-    visual: &Visual,
-) -> Vec<Intent> {
+fn draw_field(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<Intent> {
     let painter = ui.painter().clone();
-    let alpha = visual.alpha;
-    let fade = |c: Color32| theme::faded(c, alpha);
-    let font = theme::font(theme::SIZE_INPUT, Weight::Light);
+    let fade = |c: Color32| c;
+    let font = theme::font(theme::SIZE_INPUT, Weight::Regular);
 
     // The field reads as pressed into the panel rather than drawn on it: a
     // trough is what a search box looks like in this idiom, and it is the one
@@ -310,7 +314,7 @@ fn draw_field(
         pos2(rect.left() + theme::PAD_X - 4.0, rect.top() + 4.0),
         pos2(rect.right() - theme::PAD_X + 4.0, rect.bottom() - 4.0),
     );
-    theme::press(&painter, theme, well, theme::ROW_RADIUS, alpha);
+    theme::press(&painter, theme, well, theme::ROW_RADIUS);
 
     // A magnifier, which is what every search field on this operating system
     // has, so nobody has to be told what the box is for.
@@ -413,10 +417,6 @@ fn draw_field(
         Stroke::new(2.0, fade(theme.caret)),
     );
 
-    if let Some(bar) = visual.loading {
-        draw_bar(ui, theme, rect, bar, alpha);
-    }
-
     click_to_caret(ui, rect, origin, text)
 }
 
@@ -442,7 +442,7 @@ fn click_to_caret(ui: &mut Ui, rect: Rect, text_left: f32, text: &str) -> Vec<In
         return Vec::new();
     }
 
-    let font = theme::font(theme::SIZE_INPUT, Weight::Light);
+    let font = theme::font(theme::SIZE_INPUT, Weight::Regular);
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font, Color32::WHITE);
@@ -462,35 +462,8 @@ fn click_to_caret(ui: &mut Ui, rect: Rect, text_left: f32, text: &str) -> Vec<In
     }]
 }
 
-/// The indeterminate progress bar, hairline-thin under the field.
-fn draw_bar(ui: &Ui, theme: &Theme, field: Rect, bar: Bar, alpha: f32) {
-    let track = Rect::from_min_size(
-        pos2(field.left() + theme::PAD_X, field.bottom() - theme::BAR_H),
-        vec2(field.width() - theme::PAD_X * 2.0, theme::BAR_H),
-    );
-    let width = track.width() * 0.25;
-    // Out one side and in the other, rather than wrapping: a bar that
-    // reappears at the left the instant it leaves at the right reads as two
-    // bars.
-    let travel = (track.width() + width) * bar.sweep - width;
-    let head = Rect::from_min_size(
-        pos2(track.left() + travel, track.top()),
-        vec2(width, theme::BAR_H),
-    )
-    .intersect(track);
-
-    let painter = ui.painter();
-    painter.rect_filled(track, theme::radius(1), theme::faded(theme.edge, alpha));
-    painter.rect_filled(
-        head,
-        theme::radius(1),
-        theme::faded(theme.accent, alpha * bar.alpha),
-    );
-}
-
 // -- the body ---------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn draw_body(
     ui: &mut Ui,
     state: &AppState,
@@ -498,31 +471,22 @@ fn draw_body(
     rect: Rect,
     content: Content,
     visual: &Visual,
-    incoming: bool,
     wall: SystemTime,
 ) -> Vec<Intent> {
-    let alpha = visual.alpha
-        * if incoming {
-            visual.content.showing_alpha
-        } else {
-            visual.content.leaving_alpha
-        };
-
     match content {
-        Content::Results => draw_results(ui, state, theme, rect, visual, alpha, incoming),
-        Content::Recent => draw_recent(ui, state, theme, rect, alpha, incoming),
+        Content::Results => draw_results(ui, state, theme, rect, visual),
+        Content::Recent => draw_recent(ui, state, theme, rect),
         Content::Empty => {
             draw_blocks(
                 ui,
                 theme,
                 rect,
                 &view::empty::view(&empty_reason(state), state.input.text()),
-                alpha,
             );
             Vec::new()
         }
         Content::Shares => {
-            draw_shares(ui, state, theme, rect, alpha, wall);
+            draw_shares(ui, state, theme, rect, wall);
             Vec::new()
         }
     }
@@ -534,13 +498,12 @@ fn draw_results(
     theme: &Theme,
     rect: Rect,
     visual: &Visual,
-    alpha: f32,
-    interactive: bool,
 ) -> Vec<Intent> {
     let mut intents = Vec::new();
 
-    // The highlight, drawn before the rows and at the animator's position
-    // rather than at any row's - which is what lets it slide between them.
+    // The highlight, drawn before the rows so they sit on top of it. Taken
+    // from the measurement rather than from any row's rectangle, because it is
+    // the same number and one place to be wrong is better than two.
     if let Some(y) = visual.selection_y {
         let row_rect = Rect::from_min_size(
             pos2(rect.left() + theme::PAD_X, rect.top() + y),
@@ -549,16 +512,17 @@ fn draw_results(
         // Raised, then washed. The shading is what says "this one", and the
         // wash is what says which one - the pair is legible where either alone
         // would not be, which is the point of shading a monochrome panel.
-        theme::raise(ui.painter(), theme, row_rect, theme::ROW_RADIUS, alpha);
-        ui.painter().rect_filled(
-            row_rect,
-            theme::radius(theme::ROW_RADIUS),
-            theme::faded(theme.selection, alpha),
-        );
-        row::marker(ui, theme, row_rect, alpha);
+        theme::raise(ui.painter(), theme, row_rect, theme::ROW_RADIUS);
+        ui.painter()
+            .rect_filled(row_rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+        row::marker(ui, theme, row_rect);
     }
 
-    let query_len = state.input.text().len();
+    // The term, not the line: `report ext:pdf` is fourteen bytes and the
+    // match is six. `view::row::highlight` answers an out-of-range length by
+    // returning a plain name, so the symptom would be an underline quietly
+    // never appearing rather than anything louder.
+    let query_len = state.query().term().len();
     let selected = state.selected_row();
     let mut hovered = None;
 
@@ -588,17 +552,7 @@ fn draw_results(
         .enumerate()
         .map(|(i, hit)| (window.start + i, hit))
     {
-        let response = row::show(
-            &mut child,
-            theme,
-            hit,
-            query_len,
-            selected == Some(rank),
-            alpha,
-        );
-        if !interactive {
-            continue;
-        }
+        let response = row::show(&mut child, theme, hit, query_len, selected == Some(rank));
         if response.hovered() {
             hovered = Some(rank);
         }
@@ -609,7 +563,7 @@ fn draw_results(
         }
     }
 
-    if interactive && hovered != state.hovered() {
+    if hovered != state.hovered() {
         intents.push(Intent::Hover(hovered));
     }
     intents
@@ -620,29 +574,24 @@ fn draw_results(
 /// Drawn deliberately unlike a result - no folder column, no extension, and the
 /// accent colour a code is typed in - so that "Enter takes the row you are on"
 /// needs no explanation of which kind of row this is.
-fn draw_recent(
-    ui: &mut Ui,
-    state: &AppState,
-    theme: &Theme,
-    rect: Rect,
-    alpha: f32,
-    interactive: bool,
-) -> Vec<Intent> {
+fn draw_recent(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<Intent> {
     let mut intents = Vec::new();
     let painter = ui.painter().clone();
-    let font = theme::font(theme::SIZE_ROW, Weight::Regular);
 
-    for (rank, entry) in state
-        .history
-        .entries()
+    // Absolute ranks, not positions in the drawn window: the click below names
+    // an entry in `history.entries()`, so the offset is added here, at the one
+    // place the two numberings meet.
+    let window = state.recent_rows();
+    let cursor = state.history.cursor();
+    for (rank, entry) in state.history.entries()[window.clone()]
         .iter()
-        .take(theme::MAX_ROWS)
         .enumerate()
+        .map(|(i, entry)| (window.start + i, entry))
     {
         let row_rect = Rect::from_min_size(
             pos2(
                 rect.left() + theme::PAD_X,
-                rect.top() + rank as f32 * theme::ROW_H,
+                rect.top() + (rank - window.start) as f32 * theme::ROW_H,
             ),
             vec2(rect.width() - theme::PAD_X * 2.0, theme::ROW_H),
         );
@@ -650,30 +599,34 @@ fn draw_recent(
         response.widget_info(|| {
             eframe::egui::WidgetInfo::labeled(eframe::egui::WidgetType::Button, true, entry)
         });
-        if response.hovered() {
-            painter.rect_filled(
-                row_rect,
-                theme::radius(theme::ROW_RADIUS),
-                theme::faded(theme.hover, alpha),
-            );
+        // The band, drawn before the text so the text sits on it. Same
+        // treatment the result list gets, because it is the same thing: the row
+        // the field came from.
+        if cursor == Some(rank) {
+            theme::raise(&painter, theme, row_rect, theme::ROW_RADIUS);
+            painter.rect_filled(row_rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+            row::marker(ui, theme, row_rect);
+        } else if response.hovered() {
+            painter.rect_filled(row_rect, theme::radius(theme::ROW_RADIUS), theme.hover);
         }
         painter.text(
             pos2(row_rect.left() + theme::ROW_PAD_X, row_rect.center().y),
             Align2::LEFT_CENTER,
             entry,
-            font.clone(),
-            theme::faded(theme.accent, alpha),
+            theme::font(theme::SIZE_ROW, theme.weight(Emphasis::Accent)),
+            theme.accent,
         );
-        // One click, not two: a remembered code is a shortcut, and asking for
-        // a double-click to use a shortcut defeats the point of having one.
-        if interactive && response.clicked() {
-            intents.push(Intent::Hint(view::hints::Action::Recall));
+        // By rank. This used to push `Hint(Action::Recall)`, which is the Up
+        // arrow with the rank thrown away - so clicking the fifth code stepped
+        // one entry older.
+        if response.clicked() {
+            intents.push(Intent::Recall(rank));
         }
     }
     intents
 }
 
-fn draw_blocks(ui: &Ui, theme: &Theme, rect: Rect, blocks: &[view::Block], alpha: f32) {
+fn draw_blocks(ui: &Ui, theme: &Theme, rect: Rect, blocks: &[view::Block]) {
     let painter = ui.painter().clone();
     for (line, block) in blocks.iter().take(theme::MAX_ROWS).enumerate() {
         let mut job = LayoutJob::default();
@@ -682,8 +635,8 @@ fn draw_blocks(ui: &Ui, theme: &Theme, rect: Rect, blocks: &[view::Block], alpha
                 &run.text,
                 0.0,
                 TextFormat {
-                    font_id: weight_of(run),
-                    color: theme::faded(theme.emphasis(run.emphasis), alpha),
+                    font_id: weight_of(theme, run),
+                    color: theme.emphasis(run.emphasis),
                     ..Default::default()
                 },
             );
@@ -699,18 +652,25 @@ fn draw_blocks(ui: &Ui, theme: &Theme, rect: Rect, blocks: &[view::Block], alpha
             ("block", line),
             &view::plain(block),
         );
-        painter.galley(at, galley, theme::faded(theme.text, alpha));
+        painter.galley(at, galley, theme.text);
     }
 }
 
 /// Emphasis chooses a weight as well as a colour: `Strong` is the headline of
 /// an empty state, and a headline that differs from its body only in brightness
 /// is not a headline.
-fn weight_of(run: &Run) -> eframe::egui::FontId {
-    match run.emphasis {
-        Emphasis::Strong => theme::font(theme::SIZE_HEADLINE, Weight::Bold),
-        _ => theme::font(theme::SIZE_ROW, Weight::Regular),
-    }
+/// The size a run is set at, and the weight the theme asks for it.
+///
+/// Size is a property of the *block* - a headline is bigger - and weight is a
+/// property of the emphasis, which is the theme's to decide. This used to
+/// hard-code Bold for `Strong` here, which was the only place in the program
+/// that emphasis changed anything but colour.
+fn weight_of(theme: &Theme, run: &Run) -> eframe::egui::FontId {
+    let size = match run.emphasis {
+        Emphasis::Strong => theme::SIZE_HEADLINE,
+        _ => theme::SIZE_ROW,
+    };
+    theme::font(size, theme.weight(run.emphasis))
 }
 
 /// Which drive to re-read.
@@ -720,7 +680,7 @@ fn weight_of(run: &Run) -> eframe::egui::FontId {
 /// passes over a share of three hundred thousand folders and several hundred
 /// simultaneous ones. So the key asks - and asking is a list, which is the one
 /// reason anything still borrows the body.
-fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, alpha: f32, wall: SystemTime) {
+fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, wall: SystemTime) {
     let painter = ui.painter().clone();
     let font = theme::font(theme::SIZE_ROW, Weight::Regular);
     let small = theme::font(theme::SIZE_SMALL, Weight::Regular);
@@ -734,12 +694,8 @@ fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, alpha: f32,
             vec2(rect.width() - theme::PAD_X * 2.0, theme::ROW_H),
         );
         if rank == state.shares_cursor() {
-            painter.rect_filled(
-                row_rect,
-                theme::radius(theme::ROW_RADIUS),
-                theme::faded(theme.selection, alpha),
-            );
-            row::marker(ui, theme, row_rect, alpha);
+            painter.rect_filled(row_rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+            row::marker(ui, theme, row_rect);
         }
 
         let Some(share) = state.share_row(*id) else {
@@ -758,7 +714,7 @@ fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, alpha: f32,
                 Align2::LEFT_CENTER,
                 name.text.as_ref(),
                 font.clone(),
-                theme::faded(theme.emphasis(name.emphasis), alpha),
+                theme.emphasis(name.emphasis),
             );
         }
         let tail: Vec<_> = runs.collect();
@@ -767,13 +723,13 @@ fn draw_shares(ui: &Ui, state: &AppState, theme: &Theme, rect: Rect, alpha: f32,
             let galley = painter.layout_no_wrap(
                 run.text.to_string(),
                 small.clone(),
-                theme::faded(theme.emphasis(run.emphasis), alpha),
+                theme.emphasis(run.emphasis),
             );
             x -= galley.rect.width();
             painter.galley(
                 pos2(x, row_rect.center().y - galley.rect.height() / 2.0),
                 galley,
-                theme::faded(theme.dim, alpha),
+                theme.dim,
             );
             x -= 12.0;
         }
@@ -790,7 +746,6 @@ fn draw_footer(
     state: &AppState,
     theme: &Theme,
     rect: Rect,
-    alpha: f32,
     now: Instant,
     wall: SystemTime,
 ) -> Vec<Intent> {
@@ -804,8 +759,8 @@ fn draw_footer(
         pos2(rect.left() + theme::PAD_X, rect.center().y),
         Align2::LEFT_CENTER,
         theme.glyph(status.tone),
-        font.clone(),
-        theme::faded(theme.tone(status.tone), alpha),
+        theme::font(theme::SIZE_SMALL, theme.weight(Emphasis::Tone(status.tone))),
+        theme.tone(status.tone),
     );
     let mut status_left = rect.left() + theme::PAD_X + 16.0;
 
@@ -826,7 +781,7 @@ fn draw_footer(
             Align2::LEFT_CENTER,
             &range,
             font.clone(),
-            theme::faded(theme.text, alpha),
+            theme.text,
         );
         announce(
             ui,
@@ -838,14 +793,7 @@ fn draw_footer(
     }
 
     let hints = view::hints::hints(view::hints::Context::of(state));
-    let chips = draw_chips(
-        ui,
-        theme,
-        rect,
-        &hints,
-        chip_budget(rect, status_left),
-        alpha,
-    );
+    let chips = draw_chips(ui, theme, rect, &hints, chip_budget(rect, status_left));
 
     // Whatever the chips left. Truncated rather than overlapped: a status line
     // running under `Esc  close` is unreadable, and the keys are the part
@@ -855,7 +803,7 @@ fn draw_footer(
         status.text.clone(),
         TextFormat {
             font_id: font,
-            color: theme::faded(theme.dim, alpha),
+            color: theme.dim,
             ..Default::default()
         },
     );
@@ -867,7 +815,7 @@ fn draw_footer(
     painter.galley(
         pos2(status_left, rect.center().y - galley.rect.height() / 2.0),
         galley,
-        theme::faded(theme.dim, alpha),
+        theme.dim,
     );
     // The untruncated text, deliberately. What is painted may be ellipsised to
     // fit beside the chips; what is *said* has no width to fit into, and a
@@ -918,7 +866,6 @@ fn draw_chips(
     rect: Rect,
     hints: &[view::hints::Hint],
     budget: f32,
-    alpha: f32,
 ) -> (f32, Vec<Intent>) {
     let painter = ui.painter().clone();
     let key_font = theme::font(theme::SIZE_CHIP, Weight::Bold);
@@ -975,24 +922,19 @@ fn draw_chips(
                 Align2::LEFT_CENTER,
                 hint.label,
                 label_font.clone(),
-                theme::faded(theme.dim, alpha),
+                theme.dim,
             );
         }
         x -= key_w;
 
         let chip = Rect::from_min_size(pos2(x, rect.center().y - 11.0), vec2(key_w - 4.0, 22.0));
-        theme::raise(&painter, theme, chip, theme::CHIP_RADIUS, alpha);
-        painter.rect_filled(
-            chip,
-            theme::radius(theme::CHIP_RADIUS),
-            theme::faded(theme.chip_bg, alpha),
-        );
+        theme::cap(&painter, theme, chip, theme::CHIP_RADIUS);
         painter.text(
             chip.center(),
             Align2::CENTER_CENTER,
             hint.key,
             key_font.clone(),
-            theme::faded(theme.chip_fg, alpha),
+            theme.chip_fg,
         );
 
         // Only the hints that name a safe action are clickable. `Ctrl+Q` and
@@ -1034,6 +976,7 @@ impl view::hints::Measure for Points<'_> {
 mod tests {
     use super::*;
     use crate::app::event::AppEvent;
+    use crate::app::key::{Key, KeyEvent, Mods};
     use crate::app::state::pointer::Intent;
     use crate::config::{Settings, VISIBLE_ROWS};
     use crate::search::matcher::Hit;
@@ -1076,9 +1019,19 @@ mod tests {
     /// Recall stops being a mode: with nothing typed, the list *is* your
     /// recent codes.
     #[test]
-    fn an_empty_field_with_history_shows_the_recent_codes() {
+    fn the_recent_codes_appear_only_after_the_up_arrow() {
         let mut state = state();
         state.history.record("11-D-0704");
+
+        // Unasked for. These used to be what an empty field showed, so every
+        // summon of an empty panel put the job codes this person had looked up
+        // in front of whoever was standing behind them.
+        assert_eq!(measure(&state).content, Content::Empty);
+
+        state.update(
+            AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)),
+            std::time::Instant::now(),
+        );
         assert_eq!(measure(&state).content, Content::Recent);
     }
 
@@ -1180,5 +1133,38 @@ mod tests {
             None,
             "the recent list is not the result list"
         );
+    }
+
+    /// Browsing past the last visible entry moves the window with the cursor.
+    ///
+    /// The recall list used to draw `entries[0..12]` and nothing else, with no
+    /// band on any of them - so past the twelfth code the field changed and
+    /// nothing on screen moved at all. Only the status line's "20 of 200" said
+    /// otherwise.
+    #[test]
+    fn browsing_past_the_window_carries_it_along() {
+        let mut state = state();
+        for i in 0..40 {
+            state.history.record(&format!("code-{i:02}"));
+        }
+        let now = std::time::Instant::now();
+
+        for step in 1..=20 {
+            state.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
+            let window = state.recent_rows();
+            let cursor = state.history.cursor().expect("browsing");
+            assert!(
+                window.contains(&cursor),
+                "step {step}: cursor {cursor} is outside the drawn {window:?}"
+            );
+            assert_eq!(window.len(), VISIBLE_ROWS, "step {step}: short window");
+
+            // And the band is drawn inside the panel rather than below it.
+            let y = measure(&state).selection_y.expect("a highlighted row");
+            assert!(
+                (0.0..VISIBLE_ROWS as f32 * theme::ROW_H).contains(&y),
+                "step {step}: the highlight is at {y}, off the list"
+            );
+        }
     }
 }

@@ -102,9 +102,14 @@ fn indexed(src: &FakeDirSource) -> Arc<files::index::tree::TreeIndex> {
 }
 
 fn found(index: &files::index::tree::TreeIndex, code: &str) -> HashSet<String> {
-    matcher::search_tree(index, code, &Hidden::none(), &CancelToken::never())
-        .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
-        .unwrap_or_default()
+    matcher::search_tree(
+        index,
+        &files::search::query::Query::contains(code),
+        &Hidden::none(),
+        &CancelToken::never(),
+    )
+    .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
+    .unwrap_or_default()
 }
 
 /// The load-bearing assertion.

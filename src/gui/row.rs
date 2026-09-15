@@ -34,14 +34,7 @@ const FOLDER_SHARE: f32 = 0.38;
 const COLUMN_GAP: f32 = 20.0;
 
 /// Draws one result and reports what the pointer did to it.
-pub fn show(
-    ui: &mut Ui,
-    theme: &Theme,
-    hit: &Hit,
-    query_len: usize,
-    selected: bool,
-    alpha: f32,
-) -> Response {
+pub fn show(ui: &mut Ui, theme: &Theme, hit: &Hit, query_len: usize, selected: bool) -> Response {
     let (rect, response) =
         ui.allocate_exact_size(vec2(ui.available_width(), theme::ROW_H), Sense::click());
     if !ui.is_rect_visible(rect) {
@@ -51,7 +44,7 @@ pub fn show(
     // Cloned rather than borrowed: the layout calls below go through the same
     // `Ui`, and a live `&Painter` would keep it borrowed across them.
     let painter = ui.painter().clone();
-    let fade = |c: Color32| theme::faded(c, alpha);
+    let fade = |c: Color32| c;
 
     // The selection is drawn by the panel, which animates it between rows; a
     // row painting its own would fight that and win, since it draws later.
@@ -159,13 +152,13 @@ pub fn show(
 ///
 /// Drawn by the panel rather than by the row, because it slides between rows
 /// and a row only knows about itself.
-pub fn marker(ui: &Ui, theme: &Theme, row: Rect, alpha: f32) {
+pub fn marker(ui: &Ui, theme: &Theme, row: Rect) {
     let bar = Rect::from_min_size(
         pos2(row.left(), row.center().y - theme::ROW_H * 0.3),
         Vec2::new(theme::MARKER_W, theme::ROW_H * 0.6),
     );
     ui.painter()
-        .rect_filled(bar, theme::radius(2), theme::faded(theme.accent, alpha));
+        .rect_filled(bar, theme::radius(2), theme.accent);
 }
 
 /// Drops characters from the front until what is left fits, marking the cut

@@ -74,7 +74,7 @@ mod imp {
     pub struct HotkeyThread;
 
     impl HotkeyThread {
-        pub fn dismiss(&self) {}
+        pub fn dismiss(&self, _handing_over: bool) {}
         pub fn hide(&self) {}
         pub fn summon(&self) {}
         pub fn shutdown(&mut self, _budget: Duration) -> bool {

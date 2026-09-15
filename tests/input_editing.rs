@@ -73,7 +73,7 @@ fn search_and_settle(s: &mut AppState, code: &str, now: Instant) -> Response {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: code.to_string(),
+            query: files::search::query::Query::contains(code),
             elapsed: Duration::from_millis(5),
             outcome: VerifyOutcome::Server {
                 hits: vec![hit("a.pdf")],
@@ -253,6 +253,34 @@ fn the_arrows_walk_the_recent_codes_when_nothing_is_typed() {
 
     s.update(press(Key::Down), now);
     assert_eq!(s.input, "", "past the newest, the field is empty again");
+}
+
+/// Down never resurrects a field it cleared.
+///
+/// It used to call `begin_recall` exactly as Up does, so on an empty field the
+/// first Down put the code just cleared back, the second cleared it, and the
+/// third put it back - a two-state oscillator on one key.
+#[test]
+fn down_never_puts_a_cleared_code_back() {
+    let (mut s, now) = state();
+    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+
+    // Down alone, on an empty field, must not open the list at all.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.input, "", "Down opened the recall list");
+    assert!(!s.history.is_browsing(), "Down started browsing");
+
+    // And after a walk that ends by stepping past the newest, it stays empty
+    // however many times it is pressed.
+    s.update(press(Key::Up), now);
+    assert_eq!(s.input, "P12345-001", "Up did not open the list");
+    s.update(press(Key::Down), now);
+    assert_eq!(s.input, "", "past the newest, the field is empty");
+    for _ in 0..4 {
+        s.update(press(Key::Down), now);
+        assert_eq!(s.input, "", "Down put the cleared code back");
+    }
+    assert!(!s.history.is_browsing());
 }
 
 /// Something typed means the arrows belong to the results, not to recall.

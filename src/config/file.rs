@@ -158,7 +158,7 @@ impl Ctx<'_> {
 /// Keys accepted at each level. Anything else is an error: a typo like
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
-const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh"];
+const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh", "depth"];
 const SETTINGS_KEYS: &[&str] = &[
     "enum_strategy",
     "matcher",
@@ -172,7 +172,6 @@ const SETTINGS_KEYS: &[&str] = &[
     "hotkey",
     "viewer",
     "pdf_viewer",
-    "dwg_converter",
     "theme",
     "hide_extensions",
     "hide_system_files",
@@ -194,7 +193,6 @@ pub struct FileSettings {
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
-    pub dwg_converter: Option<Vec<String>>,
     pub theme: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
@@ -314,11 +312,11 @@ pub fn parse(
     // would restore whichever wrote last - and every result would appear
     // twice in one merged list.
     for (i, a) in mappings.iter().enumerate() {
-        if !a.enabled || !a.kind.is_indexed() {
+        if !a.enabled || !a.kind.is_searched() {
             continue;
         }
         for b in mappings.iter().skip(i + 1) {
-            if !b.enabled || !b.kind.is_indexed() {
+            if !b.enabled || !b.kind.is_searched() {
                 continue;
             }
             if winpath::same_dir(&a.path, &b.path) {
@@ -344,6 +342,13 @@ pub fn parse(
             // A flat parent is fine and stays legal: a flat mapping lists only
             // its own directory's entries, so a child mapping's files are not
             // in it to begin with.
+            //
+            // A *live* parent is fine too, and deliberately so - a walked tree
+            // inside a live share is the configuration somebody actually wants,
+            // because it indexes the part people work in and leaves the rest to
+            // the server. The live pass is what keeps it from returning those
+            // files a second time: it skips any directory that is the root of
+            // another enabled mapping.
             let nested = if a.kind == MappingKind::Tree && winpath::contains(&a.path, &b.path) {
                 Some((a, b))
             } else if b.kind == MappingKind::Tree && winpath::contains(&b.path, &a.path) {
@@ -457,7 +462,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                         table.get("kind").and_then(Item::span),
                         Some(&label),
                         None,
-                        format!("unknown kind {k:?} (expected \"flat\" or \"tree\")"),
+                        format!("unknown kind {k:?} (expected \"flat\", \"tree\" or \"live\")"),
                         None,
                     );
                     MappingKind::Tree
@@ -468,7 +473,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                     span.clone(),
                     Some(&label),
                     None,
-                    "missing `kind` (expected \"flat\" or \"tree\")",
+                    "missing `kind` (expected \"flat\", \"tree\" or \"live\")",
                     None,
                 );
                 MappingKind::Tree
@@ -476,6 +481,54 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         };
 
         let enabled = table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
+
+        // `depth` belongs to a live mapping and to nothing else, and `refresh`
+        // to everything else. Each is refused where it does not apply rather
+        // than ignored there, for the reason this file refuses an unknown key
+        // at all: a setting that quietly does nothing leaves somebody believing
+        // it took.
+        let depth = match table.get("depth") {
+            None => crate::config::DEFAULT_LIVE_DEPTH,
+            Some(item) if !kind.is_live() => {
+                ctx.err(
+                    item.span(),
+                    Some(&label),
+                    None,
+                    "`depth` applies only to a live mapping",
+                    None,
+                );
+                crate::config::DEFAULT_LIVE_DEPTH
+            }
+            Some(item) => match item.as_integer() {
+                Some(n) if (1..=i64::from(crate::config::MAX_LIVE_DEPTH)).contains(&n) => n as u16,
+                _ => {
+                    ctx.err(
+                        item.span(),
+                        Some(&label),
+                        None,
+                        format!(
+                            "`depth` must be a whole number from 1 to {}",
+                            crate::config::MAX_LIVE_DEPTH
+                        ),
+                        None,
+                    );
+                    crate::config::DEFAULT_LIVE_DEPTH
+                }
+            },
+        };
+
+        if kind.is_live()
+            && let Some(item) = table.get("refresh")
+        {
+            ctx.err(
+                item.span(),
+                Some(&label),
+                None,
+                "`refresh` applies only to an indexed mapping; a live share is read when it is searched and at no other time",
+                None,
+            );
+        }
+
         let refresh = match table.get("refresh") {
             None => RefreshPolicy::default_for(kind),
             Some(item) => match item.as_str().and_then(RefreshPolicy::parse) {
@@ -498,6 +551,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
             path: winpath::normalise_root(Path::new(raw_path)),
             kind,
             enabled,
+            depth,
             refresh,
         });
     }
@@ -595,46 +649,11 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 out.viewer = raw.map(str::to_string);
             }
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
-            "dwg_converter" => {
-                // A string is a program on its own; an array is the whole
-                // command. Both end up as an argument vector, because that is
-                // what never has to be quoted.
-                let argv = match value {
-                    Some(v) if v.is_str() => v
-                        .as_str()
-                        .map(|s| crate::config::expand_converter(vec![s.to_string()])),
-                    Some(v) => v.as_array().map(|a| {
-                        a.iter()
-                            .filter_map(|e| e.as_str().map(str::to_string))
-                            .collect()
-                    }),
-                    None => None,
-                };
-                // Rejected here rather than ignored later, for the same reason
-                // as `viewer` above. A template with no `{out}` produces a
-                // converter that writes nowhere, which on screen is
-                // indistinguishable from one that hangs: every drawing would
-                // sit for the whole timeout and then fail.
-                if let Some(v) = &argv {
-                    let joined = v.join(" ");
-                    if v.is_empty() || !joined.contains("{in}") || !joined.contains("{out}") {
-                        ctx.err(
-                            item.span(),
-                            None,
-                            None,
-                            "dwg_converter must name a program and contain {in} and {out}"
-                                .to_string(),
-                            None,
-                        );
-                    }
-                }
-                out.dwg_converter = argv;
-            }
             "hide_system_files" => out.hide_system_files = value.and_then(Value::as_bool),
             "hide_extensions" => {
-                // One extension may be written bare, as `dwg_converter`
-                // allows: hiding a single type is a common enough edit that
-                // making it an array of one would only be ceremony.
+                // One extension may be written bare rather than as an array
+                // of one: hiding a single type is a common enough edit that
+                // the brackets would only be ceremony.
                 let list = match value {
                     Some(v) if v.is_str() => v.as_str().map(|s| vec![s.to_string()]),
                     Some(v) => v.as_array().map(|a| {
@@ -823,6 +842,161 @@ path = 'R:\'
 kind = "tree"
 "#;
 
+    // --- live mappings ------------------------------------------------------
+
+    const LIVE: &str = r#"
+version = 2
+
+[[mapping]]
+name = "archive"
+path = '\\nas\archive'
+kind = "live"
+"#;
+
+    #[test]
+    fn a_live_mapping_is_accepted_and_is_not_indexed() {
+        let c = parse_ok(LIVE);
+        let m = &c.routes.all()[0];
+        assert_eq!(m.kind, MappingKind::Live);
+        assert!(!m.kind.is_indexed());
+        assert!(m.kind.is_searched(), "a live share is still searched");
+        assert_eq!(m.depth, crate::config::DEFAULT_LIVE_DEPTH);
+    }
+
+    #[test]
+    fn a_live_mapping_takes_a_depth() {
+        let c = parse_ok(&format!("{LIVE}depth = 3\n"));
+        assert_eq!(c.routes.all()[0].depth, 3);
+    }
+
+    /// A key quietly ignored is this file's stated failure mode: it leaves
+    /// somebody believing a setting took.
+    #[test]
+    fn depth_on_an_indexed_mapping_is_refused_rather_than_ignored() {
+        let errs = parse_err(&format!("{MINIMAL}depth = 2\n"));
+        assert!(
+            messages(&errs).contains("`depth` applies only to a live mapping"),
+            "{}",
+            messages(&errs)
+        );
+    }
+
+    #[test]
+    fn a_depth_outside_the_range_is_refused_with_the_limit_in_the_message() {
+        for bad in ["0", "9", "\"deep\""] {
+            let errs = parse_err(&format!("{LIVE}depth = {bad}\n"));
+            assert!(
+                messages(&errs).contains("`depth` must be a whole number from 1 to"),
+                "{bad}: {}",
+                messages(&errs)
+            );
+        }
+    }
+
+    /// There is no index for a timer to refresh, so the setting would do
+    /// nothing at all.
+    #[test]
+    fn refresh_on_a_live_mapping_is_refused_because_nothing_reads_it_on_a_timer() {
+        let errs = parse_err(&format!("{LIVE}refresh = \"auto\"\n"));
+        assert!(
+            messages(&errs).contains("`refresh` applies only to an indexed mapping"),
+            "{}",
+            messages(&errs)
+        );
+    }
+
+    #[test]
+    fn a_live_mapping_defaults_to_never_refreshing() {
+        assert!(parse_ok(LIVE).routes.all()[0].refresh.is_manual());
+    }
+
+    /// Two mappings on one directory return every hit twice whichever route
+    /// each of them is searched by.
+    #[test]
+    fn two_live_mappings_on_one_directory_are_refused_like_two_indexed_ones() {
+        let errs = parse_err(
+            r#"
+version = 2
+
+[[mapping]]
+name = "a"
+path = '\\nas\archive'
+kind = "live"
+
+[[mapping]]
+name = "b"
+path = '\\nas\archive'
+kind = "live"
+"#,
+        );
+        assert!(!errs.is_empty());
+    }
+
+    /// The walk indexes those files and the live query would find them again.
+    #[test]
+    fn a_live_mapping_inside_a_walked_tree_is_refused() {
+        let errs = parse_err(
+            r#"
+version = 2
+
+[[mapping]]
+name = "jobs"
+path = 'R:\'
+kind = "tree"
+
+[[mapping]]
+name = "archive"
+path = 'R:\archive'
+kind = "live"
+"#,
+        );
+        assert!(
+            messages(&errs).contains("lies inside the walked tree"),
+            "{}",
+            messages(&errs)
+        );
+    }
+
+    /// The useful configuration, and the reason the rule is asymmetric: index
+    /// the subtree people work in, and ask the server about the rest.
+    #[test]
+    fn a_walked_tree_inside_a_live_share_is_accepted() {
+        let c = parse_ok(
+            r#"
+version = 2
+
+[[mapping]]
+name = "archive"
+path = 'R:\'
+kind = "live"
+
+[[mapping]]
+name = "current"
+path = 'R:\current'
+kind = "tree"
+"#,
+        );
+        assert_eq!(c.routes.all().len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_kind_names_all_three_it_could_have_been() {
+        let errs = parse_err(
+            r#"
+version = 2
+
+[[mapping]]
+name = "jobs"
+path = 'R:\'
+kind = "nonsense"
+"#,
+        );
+        let m = messages(&errs);
+        assert!(m.contains("\"flat\""), "{m}");
+        assert!(m.contains("\"tree\""), "{m}");
+        assert!(m.contains("\"live\""), "{m}");
+    }
+
     // --- hiding files -------------------------------------------------------
 
     #[test]
@@ -840,7 +1014,7 @@ hide_extensions = ['db', '.LNK']
     }
 
     /// Hiding one type is a common enough edit that requiring an array of one
-    /// would only be ceremony - the same shorthand `dwg_converter` allows.
+    /// would only be ceremony.
     #[test]
     fn hide_extensions_accepts_a_bare_string() {
         let c = parse_ok(&format!(
@@ -1470,34 +1644,5 @@ enable = false
     fn a_missing_explicit_file_is_an_error() {
         let errs = load_file(Path::new(r"C:\definitely-not-here-8812.toml"), true).unwrap_err();
         assert!(messages(&errs).contains("could not be read"));
-    }
-
-    /// A converter that writes nowhere looks exactly like one that hangs:
-    /// every drawing would sit for the whole timeout and then fail.
-    #[test]
-    fn a_converter_template_must_say_where_the_output_goes() {
-        let bad = format!("{MINIMAL}\n[settings]\ndwg_converter = ['x.exe', '{{in}}']\n");
-        let errs = parse_err(&bad);
-        assert!(messages(&errs).contains("{out}"), "{}", messages(&errs));
-    }
-
-    /// A bare program means the obvious thing, so the common case needs no
-    /// array.
-    #[test]
-    fn a_converter_may_be_written_as_a_bare_program() {
-        let text = format!("{MINIMAL}\n[settings]\ndwg_converter = 'C:\\t\\x.exe'\n");
-        let c = parse_ok(&text);
-        assert_eq!(
-            c.settings.dwg_converter.as_deref(),
-            Some(&[r"C:\t\x.exe".to_string(), "{in}".into(), "{out}".into()][..])
-        );
-    }
-
-    /// The roaming-laptop rule: a converter that is not installed here must not
-    /// stop the program starting.
-    #[test]
-    fn a_converter_path_is_not_checked_at_load() {
-        let text = format!("{MINIMAL}\n[settings]\ndwg_converter = 'Z:\\nope\\missing.exe'\n");
-        let _ = parse_ok(&text);
     }
 }

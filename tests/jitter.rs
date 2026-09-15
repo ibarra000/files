@@ -25,6 +25,7 @@ use files::config::Settings;
 use files::gui::anim::{Content, Phase, Visual};
 use files::gui::frame::Frame;
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 
 /// Sixty frames a second, which is what the compositor gives us.
 const FRAME: Duration = Duration::from_nanos(16_666_667);
@@ -35,6 +36,13 @@ const KEYSTROKE_GAP: Duration = Duration::from_millis(120);
 
 /// The code every test here types. Nine characters, the shape the office uses.
 const CODE: &str = "11-D-0704";
+
+/// Long enough for a typed code to be searched for and answered.
+///
+/// `SEARCH_DEBOUNCE` plus slack. Typing at `KEYSTROKE_GAP` never reaches it -
+/// 120ms between characters against a 300ms pause - which is the whole point:
+/// a burst dispatches nothing until it stops.
+const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 
 // --- the rig ---------------------------------------------------------------
 
@@ -50,15 +58,7 @@ impl Log {
     fn body_changes(&self) -> usize {
         self.visuals
             .windows(2)
-            .filter(|w| w[0].content.showing != w[1].content.showing)
-            .count()
-    }
-
-    /// How many separate cross-fades were started.
-    fn cross_fades(&self) -> usize {
-        self.visuals
-            .windows(2)
-            .filter(|w| w[0].content.leaving.is_none() && w[1].content.leaving.is_some())
+            .filter(|w| w[0].content != w[1].content)
             .count()
     }
 
@@ -66,8 +66,8 @@ impl Log {
     fn bodies(&self) -> Vec<Content> {
         let mut out: Vec<Content> = Vec::new();
         for v in &self.visuals {
-            if out.last() != Some(&v.content.showing) {
-                out.push(v.content.showing);
+            if out.last() != Some(&v.content) {
+                out.push(v.content);
             }
         }
         out
@@ -83,12 +83,11 @@ impl Log {
     fn report(&self, what: &str) {
         let (lo, hi) = self.height_span();
         println!(
-            "{what}: {} frames, {} resizes, {} body changes, {} cross-fades, \
+            "{what}: {} frames, {} resizes, {} body changes, \
              height {lo:.0}-{hi:.0}pt, bodies {:?}",
             self.visuals.len(),
             self.resizes.len(),
             self.body_changes(),
-            self.cross_fades(),
             self.bodies(),
         );
     }
@@ -103,9 +102,15 @@ struct Rig {
     /// runs on another thread, so the earliest it can land is the next frame -
     /// which is the whole reason the panel ever sees a list it is about to
     /// replace.
-    inflight: Vec<(u64, String)>,
+    inflight: Vec<(u64, Query)>,
     /// What the index holds.
     corpus: Vec<&'static str>,
+    /// How many searches have actually been dispatched.
+    ///
+    /// The headline budget. Jitter is a count, and this is the count the
+    /// debounce exists to bring down: nine characters used to be nine sweeps
+    /// over the index for eight answers nobody read.
+    searches: usize,
     log: Log,
 }
 
@@ -118,6 +123,7 @@ impl Rig {
             now,
             inflight: Vec::new(),
             corpus,
+            searches: 0,
             log: Log::default(),
         }
     }
@@ -134,14 +140,25 @@ impl Rig {
             Phase::Shown,
             "the entrance never finished"
         );
-        rig.log = Log::default();
+        rig.forget();
+        rig.searches = 0;
         rig
+    }
+
+    /// Forgets everything recorded so far, so a budget measures the burst
+    /// rather than the priming that set it up. Clears the search count with
+    /// the log, because the two are read together and forgetting one silently
+    /// inflates a budget.
+    fn forget(&mut self) {
+        self.log = Log::default();
+        self.searches = 0;
     }
 
     fn feed(&mut self, event: AppEvent) {
         let response = self.state.update(event, self.now);
         for cmd in &response.cmds {
             if let Cmd::Search { query, epoch } = cmd {
+                self.searches += 1;
                 self.inflight.push((*epoch, query.clone()));
             }
         }
@@ -149,8 +166,8 @@ impl Rig {
 
     /// Answers whatever the matcher was asked, the way the real one would:
     /// on a later frame than the one that asked.
-    fn answer(&mut self, epoch: u64, query: String) {
-        let needle = query.to_ascii_lowercase();
+    fn answer(&mut self, epoch: u64, query: Query) {
+        let needle = query.term().to_ascii_lowercase();
         let hits: Vec<Hit> = self
             .corpus
             .iter()
@@ -198,7 +215,7 @@ impl Rig {
 
         self.state.note_frame(self.now, SystemTime::now());
         let visual = self.frame.advance(&self.state, FRAME.as_secs_f32());
-        if let Some(size) = self.frame.resize(&visual, false) {
+        if let Some(size) = self.frame.resize(&visual) {
             self.log.resizes.push((size.x, size.y));
         }
         self.log.visuals.push(visual);
@@ -254,20 +271,18 @@ fn corpus() -> Vec<&'static str> {
 fn typing_a_code_never_empties_the_result_list() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
     assert!(
         !rig.state.hits.is_empty(),
         "the fixture found nothing to work with"
     );
 
-    rig.log = Log::default();
+    rig.forget();
     rig.type_code("D-0704", KEYSTROKE_GAP);
     rig.log.report("typing_a_code");
 
     assert!(
-        !rig.log
-            .visuals
-            .iter()
-            .any(|v| v.content.showing == Content::Empty),
+        !rig.log.visuals.iter().any(|v| v.content == Content::Empty),
         "the panel showed its empty state while a result set was in flight; bodies were {:?}",
         rig.log.bodies()
     );
@@ -279,7 +294,8 @@ fn typing_a_code_never_empties_the_result_list() {
 fn typing_a_code_does_not_change_the_body_at_all() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
-    rig.log = Log::default();
+    rig.run(SEARCH_SETTLE);
+    rig.forget();
     rig.type_code("D-0704", KEYSTROKE_GAP);
 
     assert_eq!(
@@ -288,27 +304,6 @@ fn typing_a_code_does_not_change_the_body_at_all() {
         "the body changed over six keystrokes: {:?}",
         rig.log.bodies()
     );
-    assert_eq!(rig.log.cross_fades(), 0, "and cross-faded to get there");
-}
-
-/// A cross-fade renders the outgoing body over the first 45% and the incoming
-/// one over the last 55%, with no overlap. Run from `Results` back to
-/// `Results` that is a list dissolving and returning for no reason, which is
-/// what `Cross::retarget` used to do on every keystroke.
-#[test]
-fn the_body_never_cross_fades_to_itself() {
-    let mut rig = Rig::summoned(corpus());
-    rig.type_code(CODE, KEYSTROKE_GAP);
-    rig.run(Duration::from_millis(600));
-
-    for (i, v) in rig.log.visuals.iter().enumerate() {
-        if let Some(leaving) = v.content.leaving {
-            assert_ne!(
-                leaving, v.content.showing,
-                "frame {i} is fading {leaving:?} into itself"
-            );
-        }
-    }
 }
 
 /// The panel is the window, so a height transition is a `SetWindowPos` and a
@@ -318,26 +313,27 @@ fn the_body_never_cross_fades_to_itself() {
 fn typing_a_code_costs_the_window_system_almost_nothing() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
-    rig.run(Duration::from_millis(300));
-    rig.log = Log::default();
+    rig.run(SEARCH_SETTLE);
+    rig.forget();
 
     rig.type_code("D-0704", KEYSTROKE_GAP);
     rig.run(Duration::from_millis(600));
     rig.log.report("window_cost");
 
-    // The result count genuinely narrows as the code gets longer, so some
-    // resizing is honest - but it is bounded by how often the count actually
-    // changes, not by the frame rate.
-    // One per genuine change in the row count, and no more: the panel eases
-    // to the new height *inside* a window that was resized once. It was
-    // thirty-one - one per frame of every transition - when the window was
-    // what moved.
+    // One. Not one per keystroke, and not one per frame of a transition.
+    //
+    // The six characters are typed 120ms apart, inside a 300ms pause, so the
+    // matcher is asked once - after the typing stops - and the row count
+    // changes once. It was thirty-one when the window eased to every new
+    // height, then six when only genuine row-count changes moved it, and it is
+    // one now that only a finished code produces a row-count change at all.
     assert!(
-        rig.log.resizes.len() <= 6,
+        rig.log.resizes.len() <= 1,
         "six keystrokes cost {} window resizes: {:?}",
         rig.log.resizes.len(),
         rig.log.resizes
     );
+    assert_eq!(rig.searches, 1, "and one sweep over the index, not six");
 }
 
 /// A selection that blinks out and back is the same defect as a list that
@@ -346,7 +342,8 @@ fn typing_a_code_costs_the_window_system_almost_nothing() {
 fn the_selection_stays_on_screen_while_typing() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
-    rig.log = Log::default();
+    rig.run(SEARCH_SETTLE);
+    rig.forget();
     rig.type_code("D-07", KEYSTROKE_GAP);
 
     assert!(
@@ -361,8 +358,8 @@ fn the_selection_stays_on_screen_while_typing() {
 fn the_panel_height_never_doubles_back() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
-    rig.run(Duration::from_millis(300));
-    rig.log = Log::default();
+    rig.run(SEARCH_SETTLE);
+    rig.forget();
 
     // Each character can only narrow this result set, so the panel can only
     // ever get shorter. A frame taller than the one before it is the panel
@@ -390,11 +387,11 @@ fn an_unchanged_result_set_moves_nothing() {
     rig.run(Duration::from_millis(600));
 
     let before = rig.last();
-    rig.log = Log::default();
+    rig.forget();
 
     // The same answer, again, as a republished snapshot would deliver it.
     let epoch = rig.state.query_epoch();
-    rig.inflight.push((epoch, CODE.to_string()));
+    rig.inflight.push((epoch, Query::contains(CODE)));
     rig.run(Duration::from_millis(400));
 
     assert_eq!(rig.log.resizes.len(), 0, "it resized the window");
@@ -420,9 +417,51 @@ fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
 
     assert!(rig.state.hits.is_empty());
     assert_eq!(
-        rig.last().content.showing,
+        rig.last().content,
         Content::Empty,
         "bodies were {:?}",
         rig.log.bodies()
     );
+}
+
+/// The budget this whole change exists for: a nine-character code is one
+/// sweep over the index, not nine.
+#[test]
+fn a_burst_of_typing_dispatches_exactly_one_search() {
+    let mut rig = Rig::summoned(corpus());
+    rig.type_code(CODE, KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+    rig.log.report("one_search");
+
+    assert_eq!(
+        rig.searches, 1,
+        "nine characters cost {} sweeps over the index",
+        rig.searches
+    );
+}
+
+/// And nothing reaches the window system at all until the typing stops.
+#[test]
+fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
+    let mut rig = Rig::summoned(corpus());
+    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+    rig.forget();
+
+    // Six characters, 720ms of typing, and deliberately no settle: this is
+    // what the panel does *while* somebody is still going.
+    rig.type_code("D-0704", KEYSTROKE_GAP);
+    rig.log.report("during_burst");
+
+    assert_eq!(
+        rig.searches, 0,
+        "the matcher was asked while the user was still typing"
+    );
+    assert_eq!(
+        rig.log.resizes.len(),
+        0,
+        "the window moved while the user was still typing: {:?}",
+        rig.log.resizes
+    );
+    assert_eq!(rig.log.body_changes(), 0, "and the body changed under them");
 }

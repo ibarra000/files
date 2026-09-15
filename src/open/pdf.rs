@@ -392,7 +392,15 @@ fn load(path: &str) -> Result<Document, SkipReason> {
         std::io::ErrorKind::NotFound => SkipReason::Gone,
         _ => SkipReason::Unreadable(e.to_string()),
     })?;
+    parse(&bytes)
+}
 
+/// Parses PDF bytes, wherever they came from.
+///
+/// Split out of [`load`] so that the header check and the parse are one step
+/// with one vocabulary of reasons: a file that is not a PDF at all and a file
+/// that is a broken one are different failures, and the report says which.
+fn parse(bytes: &[u8]) -> Result<Document, SkipReason> {
     // Checked before parsing so the report can say "not a PDF" - which names
     // the actual problem - rather than surfacing a parser error about an
     // object offset, which tells the user nothing they can act on.
@@ -400,7 +408,7 @@ fn load(path: &str) -> Result<Document, SkipReason> {
         return Err(SkipReason::NotPdf);
     }
 
-    let doc = Document::load_mem(&bytes).map_err(|_| SkipReason::Malformed)?;
+    let doc = Document::load_mem(bytes).map_err(|_| SkipReason::Malformed)?;
     if doc.is_encrypted() {
         return Err(SkipReason::Encrypted);
     }
@@ -493,6 +501,19 @@ fn cache_key(pages: &[Page]) -> u64 {
 /// renamed but empty file, which is indistinguishable from a valid cache entry
 /// and would open as a blank document forever.
 fn write_atomically(mut doc: Document, out: &Path) -> std::io::Result<()> {
+    let mut buf = Vec::new();
+    doc.save_to(&mut buf)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    write_bytes_atomically(&buf, out)
+}
+
+/// The same, for bytes that are already a PDF.
+///
+/// Kept apart from the `lopdf` path because bytes that are already a document
+/// reach the cache *verbatim*: round-tripping them through a parser and a
+/// serialiser is a fidelity risk worth taking for a merge, which has no
+/// alternative, and not worth taking for a copy.
+fn write_bytes_atomically(bytes: &[u8], out: &Path) -> std::io::Result<()> {
     let dir = out.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
         "{:x}-{:x}.tmp",
@@ -505,10 +526,7 @@ fn write_atomically(mut doc: Document, out: &Path) -> std::io::Result<()> {
 
     let result = (|| -> std::io::Result<()> {
         let mut f = File::create(&tmp)?;
-        let mut buf = Vec::new();
-        doc.save_to(&mut buf)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
-        f.write_all(&buf)?;
+        f.write_all(bytes)?;
         f.sync_all()
     })();
 

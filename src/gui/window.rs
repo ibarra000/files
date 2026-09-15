@@ -11,15 +11,31 @@
 //! know and changes nothing. So the return value *is* the version check, and
 //! there is no build-number table here to go stale.
 
-#![cfg(windows)]
+//! # Why this is not `#![cfg(windows)]`
+//!
+//! It was, and that made the whole of `gui` uncompilable anywhere else -
+//! `gui::mod` declares this module and names [`Backdrop`] unconditionally, so
+//! a file-wide gate deleted a type that the rest of the tree still referred
+//! to. That cost the panel's entire test suite on any machine that is not the
+//! target, which is the opposite of what `lib.rs` says the tests are for.
+//!
+//! So the *calls* are gated and the *vocabulary* is not. [`Backdrop`] is a
+//! two-variant enum with no Windows in it; everything below it that touches
+//! DWM is `#[cfg(windows)]`, with a stub that answers [`Backdrop::Painted`] -
+//! which is the honest answer off Windows, and the same answer a Windows too
+//! old for acrylic gives.
 
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, S_OK};
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Dwm::{
     DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
+#[cfg(windows)]
 use windows_sys::Win32::UI::Controls::MARGINS;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, SetWindowLongPtrW, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
@@ -29,6 +45,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// Not in `windows-sys`, because the header only ever shipped the later
 /// number. Both are tried, newer first; the wrong one costs an `E_INVALIDARG`
 /// and nothing else.
+#[cfg(windows)]
 const DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1: i32 = 19;
 
 /// What is behind the panel.
@@ -54,6 +71,7 @@ pub enum Backdrop {
 /// The cast on `attr` is not incidental: every `DWMWA_*` is an `i32` while the
 /// parameter is a `u32`, so without it each call site would need its own cast
 /// and one of them would eventually be wrong.
+#[cfg(windows)]
 fn set<T>(hwnd: HWND, attr: i32, value: &T) -> bool {
     // SAFETY: `value` is a live local of exactly `size_of::<T>()` bytes, read
     // and not retained; `hwnd` is this process's own window. An attribute this
@@ -73,6 +91,7 @@ fn set<T>(hwnd: HWND, attr: i32, value: &T) -> bool {
 ///
 /// `want` is what the caller would like behind the panel; the answer is what
 /// this Windows agreed to, which may be less.
+#[cfg(windows)]
 pub fn apply(hwnd_bits: isize, dark: bool, want: Backdrop) -> Backdrop {
     let hwnd = hwnd_bits as HWND;
 
@@ -145,6 +164,7 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Backdrop) -> Backdrop {
 /// window is first shown and does not read them again, so flipping them on a
 /// visible window leaves the button behind until it is hidden and shown once
 /// more.
+#[cfg(windows)]
 pub fn hide_from_taskbar(hwnd_bits: isize) {
     let hwnd = hwnd_bits as HWND;
     // SAFETY: reads and writes one window long on this process's own window.
@@ -155,7 +175,18 @@ pub fn hide_from_taskbar(hwnd_bits: isize) {
     }
 }
 
-#[cfg(test)]
+/// Off Windows there is no compositor to ask, and [`Backdrop::Painted`] is
+/// what the panel does when nothing grants it anything else.
+#[cfg(not(windows))]
+pub fn apply(_hwnd_bits: isize, _dark: bool, _want: Backdrop) -> Backdrop {
+    Backdrop::Painted
+}
+
+/// Off Windows there is no taskbar button to take away.
+#[cfg(not(windows))]
+pub fn hide_from_taskbar(_hwnd_bits: isize) {}
+
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

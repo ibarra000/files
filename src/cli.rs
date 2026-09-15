@@ -155,11 +155,14 @@ OPTIONS:
     --server-filter <on|off>
                         push the search pattern to the file server
                         (default: off until --bench confirms it is safe)
-    --viewer <KIND>     pdf | avwin                      (default: pdf)
-                        pdf gathers every page of the code into one document
-                        and opens it with the system's PDF handler; avwin
-                        opens the single selected file. F2 switches while
-                        running, but this flag pins it for the run
+    --viewer <KIND>     auto | pdf | avwin               (default: auto)
+                        auto picks per file: documents assembled, everything
+                        else - a drawing included - handed to avwin. pdf
+                        gathers every page of the code into one document and
+                        opens it with the system's PDF handler; a drawing
+                        cannot be one, so it still goes to avwin. avwin opens
+                        the single selected file whatever it is. F2 switches
+                        while running, but this flag pins it for the run
     --pdf-viewer <PATH> open merged PDFs with this program instead of
                         whatever is registered for .pdf
     --hotkey <CHORD>    the global hotkey that summons the compact quick

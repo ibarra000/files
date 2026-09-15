@@ -109,6 +109,47 @@ refresh = "manual"
 
 
 # ---------------------------------------------------------------------------
+# A share too large to index at all.
+#
+# kind = "live" is the honest answer to a share where a walk costs minutes and
+# a few hundred megabytes. Nothing is read in the background: every settled
+# search becomes one wildcard query against the share, which the file server
+# evaluates itself and answers with the matches alone - a few kilobytes,
+# whether the folder holds a thousand files or ten million.
+#
+# What you give up is completeness, and it is not a small thing. The server
+# matches within one folder at a time, so a live share can only answer for the
+# folders one query had time to reach. The panel says which ones those were:
+# an empty result on a live share never reads as "there is no such file", it
+# reads as "nothing in the folders that were searched". Believing the first
+# when the second is true is the mistake this program is built to prevent.
+#
+# depth is how far below the path a search reaches. One - the default - is the
+# share's own folder, plus any folder whose *name* matches what you typed,
+# which is how a job code usually behaves and costs a single round trip.
+# Deeper means listing every folder on the way down, because a filtered query
+# cannot reveal a folder whose name does not match: depth 2 against a root
+# holding two hundred folders is two hundred round trips for one search. The
+# maximum is 4.
+#
+# There is no `refresh` key here and nothing is cached. A live share is read
+# when you search it and at no other time, so `refresh` is refused rather than
+# accepted and ignored.
+#
+# A walked tree may sit *inside* a live share, and that is the useful
+# arrangement: index the folder people work in, and ask the server about the
+# rest. The live pass skips any folder another mapping already covers, so
+# nothing is returned twice.
+# ---------------------------------------------------------------------------
+# [[mapping]]
+# name    = "old-jobs"
+# path    = '\fileserver\archive'
+# kind    = "live"
+# depth   = 1
+# enabled = true
+
+
+# ---------------------------------------------------------------------------
 # Global options. The command line overrides the environment, which overrides
 # what is set here.
 # ---------------------------------------------------------------------------
@@ -164,34 +205,15 @@ refresh = "manual"
 # than appending a second one.
 viewer = "auto"                      # auto | pdf | avwin
 #
-# auto  picks per file: a .pdf is assembled into the whole document, a .dwg is
-#       converted to one (see dwg_converter below), and anything else is handed
-#       to avwin, which opens far more kinds of file than this program knows
-#       about. It is the default for a fresh install.
-# pdf   always produces a PDF, converting a drawing on the way.
+# auto  picks per file: a .pdf is assembled into the whole document, and
+#       anything else - a drawing included - is handed to avwin, which opens
+#       far more kinds of file than this program knows about. It is the
+#       default for a fresh install.
+# pdf   assembles a document out of anything it can. A drawing is the one
+#       thing it cannot: DWG is AutoCAD's own closed format and there is no
+#       way to read it here, so a .dwg still opens in avwin.
 # avwin always hands the one selected file to avwin, whatever it is - which is
-#       how to see a .pdf or a .dwg there rather than anywhere else.
-
-# How to turn a .dwg into a PDF, so drawings can open in the PDF viewer.
-#
-# There is no way to read a DWG in this program: it is AutoCAD's own closed
-# format, and every route to a PDF is somebody else's converter. Point this at
-# whichever one you have.
-#
-# {in} and {out} are replaced. They are substituted *inside* an argument, so
-# --out={out} works, and each argument stays one argument - a path with spaces
-# in it needs no quoting because the command line is never re-parsed.
-#
-#   dwg_converter = 'C:\Tools\dwg2pdf.exe'
-#       is short for ['C:\Tools\dwg2pdf.exe', '{in}', '{out}']
-#
-#   dwg_converter = ['C:\Tools\dwg2pdf.exe', '-i', '{in}', '-o', '{out}', '--quiet']
-#
-# Left unset, a .dwg opens in avwin.exe, which reads drawings natively. The
-# converted file is cached, so the same drawing is converted once, and the cache
-# is invalidated when either the drawing or this command changes.
-# `files --doctor` says whether the converter can be found.
-# dwg_converter = 'C:\Tools\dwg2pdf.exe'
+#       how to see a .pdf there rather than in the PDF viewer.
 
 # Files that are never offered, however well they match.
 #

@@ -17,20 +17,22 @@ use std::time::Instant;
 
 use super::matcher::{self};
 use super::verify::{SkipReason, Verifier, VerifyOutcome};
-use crate::app::event::{AppEvent, Events, SearchMsg, VerifyMsg};
+use crate::app::event::{AppEvent, Events, LiveMsg, SearchMsg, VerifyMsg};
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 use crate::index::snapshot;
 use crate::index::snapshot::Snapshot;
 use crate::index::store::{IndexStore, SlotIndex};
 use crate::paths::{MappingKind, TargetList};
+use crate::search::live::LiveShare;
+use crate::search::query::Query;
 use crate::util::cancel::Epoch;
 use crate::util::latest_slot::LatestSlot;
 
 /// A request to match `query`.
 #[derive(Debug, Clone)]
 pub struct SearchRequest {
-    pub query: String,
+    pub query: Query,
     pub epoch: u64,
 }
 
@@ -39,6 +41,12 @@ pub struct Backend {
     pub settings: Settings,
     pub store: Arc<IndexStore>,
     pub source: Arc<dyn DirSource>,
+    /// Every share searched by asking the file server, in configuration order.
+    ///
+    /// Built once, here, rather than per request: each holds the per-share
+    /// query floor and the failure count that switches it off, and both have
+    /// to outlive any one keystroke to mean anything.
+    pub live: Vec<Arc<LiveShare>>,
 }
 
 impl Backend {
@@ -180,7 +188,7 @@ fn run_search(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch
             Ok(()) => {
                 let mut parts = Vec::new();
                 let mut rejected = None;
-                for slot in backend.store.indexed() {
+                for slot in backend.store.searchable() {
                     // Checked between shares rather than only within one, so a
                     // superseded keystroke abandons the shares not yet reached
                     // instead of paying for all ten.
@@ -319,6 +327,88 @@ fn run_verify(
 /// Re-exported so callers do not need the snapshot module directly.
 pub use snapshot::Snapshot as WorkerSnapshot;
 
+/// Spawns the live-search worker.
+///
+/// A third thread rather than a share of the verifier's, and the reason is
+/// structural rather than tidiness. Each [`WorkerHandle`] is fed by a
+/// `LatestSlot` holding **one** request, so with a flat share and a live share
+/// configured together the verify and the live query fall due on the same
+/// pause and would cancel each other, non-deterministically, depending on
+/// which `put` landed second. They also have opposite budgets: a verification
+/// may take ten seconds because the results are already on screen, whereas a
+/// live answer *is* the results.
+pub fn spawn_live(
+    backend: Arc<Backend>,
+    tx: Events,
+) -> std::io::Result<WorkerHandle<SearchRequest>> {
+    let slot = Arc::new(LatestSlot::<SearchRequest>::new());
+    let epoch = Epoch::new();
+
+    let handle = {
+        let slot = Arc::clone(&slot);
+        let epoch = epoch.clone();
+        std::thread::Builder::new()
+            .name("files-live".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_live(&backend, &slot, &epoch, &tx);
+                }));
+                if let Err(payload) = result {
+                    let _ = tx.send(AppEvent::ActorDied {
+                        actor: "live",
+                        detail: crate::util::once::panic_detail(&payload),
+                    });
+                }
+            })?
+    };
+
+    Ok(WorkerHandle {
+        slot,
+        epoch,
+        handle: Some(handle),
+        name: "live",
+    })
+}
+
+fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, tx: &Events) {
+    while let Some(request) = slot.take_blocking() {
+        let cancel = epoch.token(request.epoch);
+        if cancel.is_cancelled() {
+            continue;
+        }
+        // Judged once, before any share is asked, for the reason the local
+        // search judges it once: the rejections are properties of what was
+        // typed, so asking each share would put N identical answers on the
+        // wire.
+        if request.query.check().is_err() {
+            continue;
+        }
+
+        for share in &backend.live {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let started = Instant::now();
+            let outcome = share.search(
+                &request.query,
+                &backend.settings.hidden,
+                Instant::now(),
+                &cancel,
+            );
+            // One event per share rather than one for all of them: they answer
+            // at different speeds, and holding the first until the last has
+            // arrived would make two shares slower than one for no reason.
+            let _ = tx.send(AppEvent::Live(LiveMsg {
+                epoch: request.epoch,
+                query: request.query.clone(),
+                mapping: share.id(),
+                elapsed: started.elapsed(),
+                outcome: Box::new(outcome),
+            }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,6 +426,7 @@ mod tests {
             settings,
             store: Arc::new(IndexStore::default()),
             source: Arc::new(src),
+            live: Vec::new(),
         })
     }
 
@@ -394,7 +485,7 @@ mod tests {
         let mut w = spawn_search(backend(src), tx).unwrap();
 
         w.submit(|epoch| SearchRequest {
-            query: "11-D-0704".into(),
+            query: Query::contains("11-D-0704"),
             epoch,
         });
 
@@ -428,7 +519,7 @@ mod tests {
         let tx = Events::headless(tx);
         let mut w = spawn_search(backend(src.clone()), tx).unwrap();
         w.submit(|epoch| SearchRequest {
-            query: "11-D-0704".into(),
+            query: Query::contains("11-D-0704"),
             epoch,
         });
 

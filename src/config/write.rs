@@ -293,7 +293,7 @@ mod tests {
     /// leave the program unable to start.
     #[test]
     fn every_viewer_the_writer_emits_still_reloads() {
-        for viewer in [ViewerKind::Pdf, ViewerKind::Avwin] {
+        for viewer in ViewerKind::ALL {
             let after = with_viewer(DEFAULT_CONFIG_TOML, viewer).unwrap();
             assert_eq!(
                 reload(&after).settings.viewer.as_deref(),

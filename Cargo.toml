@@ -22,33 +22,47 @@ path = "src/main.rs"
 name = "files-cli"
 path = "src/bin/files-cli.rs"
 
-[[bin]]
-name = "lens"
-path = "src/bin/lens.rs"
-
 [dependencies]
-# The desktop shell. `wgpu` rather than the default `glow`: a GL swapchain on a
-# transparent Win32 window offers no alpha mode that blends, so the panel would
-# be an opaque black rectangle. `accesskit` is on because it costs nothing and
-# is what makes the panel readable by Narrator and by a magnifier - something a
-# grid of characters never could be. `default_fonts` is the fallback stack
-# behind Segoe UI, for a glyph the system font has not got.
+# The desktop shell. `glow` rather than `wgpu`, which is the reverse of what
+# this said until 0.3 and is a correction rather than a preference.
+#
+# A transparent window on Windows gets its alpha from
+# `DwmEnableBlurBehindWindow`, which winit calls on our behalf when
+# `with_transparent` is set, and which makes DWM honour the alpha of the
+# window's *redirection bitmap*. A `wgpu` flip-model swapchain never writes to
+# that bitmap - it hands DWM a surface of its own - so the alpha winit enabled
+# applied to a surface nothing drew into. OpenGL presents through the window
+# DC, which *is* the redirection surface. That was measured on the overlay
+# first; `src/gpu.rs` recorded that the wgpu-side fix changed the colour the
+# window covered the desktop with and nothing else.
+#
+# Nothing here wants a compositor backdrop either: `gui::mod::WANT_BACKDROP` is
+# `Painted`, which asks DWM for `DWMSBT_NONE` and paints its own translucent
+# surface. So the one thing wgpu was kept for is not in use.
+#
+# `accesskit` stays: it costs nothing and is what makes the panel readable by
+# Narrator and by a magnifier - something a grid of characters never could be.
+# `default_fonts` has gone. It embedded 1.41 MB of TTFs (Hack, NotoEmoji,
+# Ubuntu-Light, emoji-icon-font) in every binary here to back a fallback that
+# `gui::fonts` now reads out of `C:\Windows\Fonts` instead, shipping no bytes
+# at all. `test-fonts` turns it back on, because a layout measured here and a
+# layout measured on a build agent have to be the same layout.
 eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
-    "default_fonts",
-    "wgpu",
+    "glow",
 ] }
+
 # Reading the panel's `HWND` back out of the toolkit, once, in `gui::hwnd_of`.
 raw-window-handle = "0.6"
 
-# `src/lens` logs through the `log` facade, which is also what `wgpu` and
-# `winit` use - so one filter covers this program and the toolkit under it.
+# The facade `eframe`, `winit` and `glutin` report through, and `src/log.rs` is
+# the forty lines that give them somewhere to report to. One filter covers this
+# program and the toolkit under it. See that module for why it is not
+# `env_logger`.
 log = "0.4"
-# Fuzzy matching is not currently wired up, but is deliberately kept available:
-# the ranking pipeline in `search::topk` is shaped so a fuzzy scorer can drop in.
-nucleo = "0.5"
-
-# Load-bearing as of 0.2: previously only present transitively via `nucleo`.
+# Direct since 0.2, and since 0.3 the only route to it: it used to arrive
+# transitively via `nucleo`, which was carried for a fuzzy matcher that was
+# never wired up and has gone.
 memchr = "2.8"
 rayon = "1.10"
 parking_lot = "0.12"
@@ -105,6 +119,9 @@ features = [
     # so when there is none.
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
+    # `OutputDebugStringW`, so the toolkit's warnings reach a debugger. The
+    # window binary has no console to print to. See `src/log.rs`.
+    "Win32_System_Diagnostics_Debug",
     # `MonitorFromWindow`, so the panel lands on the screen it was summoned on
     # rather than on the primary one.
     "Win32_Graphics_Gdi",
@@ -122,10 +139,17 @@ muda = { version = "0.20", default-features = false }
 winresource = "0.1"
 
 [features]
+# A typeface that is the same on every machine, so a layout measured here and
+# one measured on a build agent are the same layout. This is
+# `eframe/default_fonts` - 1.41 MB of embedded TTFs - which is exactly what the
+# shipping build drops, so it is behind a feature rather than in the dependency
+# line. See `gui::fonts::install_bundled`.
+test-fonts = ["eframe/default_fonts"]
 # Image snapshots need a GPU adapter to render through, which a build machine
-# may not have. The accessibility-tree half of `tests/panel.rs` needs neither
-# and runs unconditionally; the pictures are behind this.
-ui-snapshots = []
+# may not have, and the font above. The accessibility-tree half of
+# `tests/panel.rs` needs neither and runs unconditionally; the pictures are
+# behind this.
+ui-snapshots = ["test-fonts"]
 
 [dev-dependencies]
 # Drives the real `gui::overlay::show` with synthetic keys and reads back both

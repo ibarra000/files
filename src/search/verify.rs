@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::matcher::Hit;
 use super::pattern::{self, PatternReject};
+use super::query::{self, Query};
 use crate::config::hidden::Hidden;
 use crate::config::{MAX_SERVER_HITS, SERVER_FILTER_MISS_LIMIT};
 use crate::index::DirStamp;
@@ -39,6 +40,7 @@ use crate::index::errors::EnumError;
 use crate::index::snapshot::Snapshot;
 use crate::paths::Routes;
 use crate::util::cancel::CancelToken;
+use crate::util::fold;
 
 /// Why verification did not reach the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,10 +144,22 @@ pub fn audit(server_names: &[String], local_names: &[String]) -> AuditVerdict {
 }
 
 /// Names the local snapshot would return for `query`, for the audit.
-fn local_matches(snapshot: &Snapshot, query: &str) -> Vec<String> {
-    let needle = query.to_ascii_lowercase();
+///
+/// Judged by the matcher's own predicate rather than by a substring test of
+/// its own. The oracle used to be "every name containing the query", which
+/// against a correctly narrowed server answer reports every file the filter
+/// removed as *missing* - and three of those in one process switch
+/// server-side filtering off for good. The audit has to compare like with
+/// like.
+fn local_matches(snapshot: &Snapshot, query: &Query) -> Vec<String> {
+    let needle = fold::fold_query(query.term());
     (0..snapshot.len() as u32)
-        .filter(|&i| std::str::from_utf8(snapshot.name_lower(i)).is_ok_and(|n| n.contains(&needle)))
+        .filter(|&i| {
+            let name = snapshot.name_lower(i);
+            memchr::memmem::find(name, &needle).is_some_and(|pos| {
+                query::admits(name, &needle, pos as u32, query.mode(), query.types()).is_some()
+            })
+        })
         .map(|i| snapshot.display_name(i).into_owned())
         .collect()
 }
@@ -228,7 +242,7 @@ impl Verifier {
     /// Verifies `query`.
     pub fn verify(
         &self,
-        query: &str,
+        query: &Query,
         snapshot: Option<&Snapshot>,
         hidden: &Hidden,
         cancel: &CancelToken,
@@ -321,7 +335,7 @@ impl Verifier {
         &self,
         server_names: &[String],
         snapshot: Option<&Snapshot>,
-        query: &str,
+        query: &Query,
     ) -> AuditVerdict {
         let Some(snapshot) = snapshot else {
             return AuditVerdict::NotChecked;
@@ -340,14 +354,19 @@ impl Verifier {
 }
 
 /// Ranks server-returned names with the same ordering the local matcher uses.
-fn rank_server_names(dir: &Path, names: Vec<String>, query: &str) -> Vec<Hit> {
-    let needle = query.to_ascii_lowercase();
+fn rank_server_names(dir: &Path, names: Vec<String>, query: &Query) -> Vec<Hit> {
+    let needle = fold::fold_query(query.term());
     let mut scored: Vec<(u32, u32, u32, String)> = names
         .into_iter()
         .enumerate()
         .filter_map(|(i, name)| {
-            let pos = name.to_ascii_lowercase().find(&needle)? as u32;
-            Some((pos, name.len() as u32, i as u32, name))
+            // The *justifying* occurrence, not the leftmost one, so a row the
+            // server replaced ranks and underlines where the local matcher
+            // would have put it.
+            let folded = fold::fold_query(&name);
+            let pos = memchr::memmem::find(&folded, &needle)?;
+            let at = query::admits(&folded, &needle, pos as u32, query.mode(), query.types())?;
+            Some((at, name.len() as u32, i as u32, name))
         })
         .collect();
     scored.sort_unstable_by_key(|&(pos, len, i, _)| (pos, len, i));
@@ -443,7 +462,12 @@ mod tests {
         let v = verifier(src.clone());
 
         let s = snap(&["alpha.txt"], Some(DirStamp::new(5, 5)));
-        let outcome = v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never());
+        let outcome = v.verify(
+            &Query::contains("alpha"),
+            Some(&s),
+            &Hidden::none(),
+            &CancelToken::never(),
+        );
 
         assert!(matches!(outcome, VerifyOutcome::IndexAuthoritative { .. }));
         assert_eq!(
@@ -463,7 +487,12 @@ mod tests {
         let v = verifier(src);
 
         let s = snap(&["alpha.txt"], Some(DirStamp::new(5, 5)));
-        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
+        match v.verify(
+            &Query::contains("alpha"),
+            Some(&s),
+            &Hidden::none(),
+            &CancelToken::never(),
+        ) {
             VerifyOutcome::Server { matched, audit, .. } => {
                 assert_eq!(matched, 2);
                 assert_eq!(audit, AuditVerdict::Consistent);
@@ -478,7 +507,12 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
+            v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never()
+            ),
             VerifyOutcome::Server { .. }
         ));
     }
@@ -497,7 +531,7 @@ mod tests {
 
         let s = snap(&["alpha.pdf"], Some(DirStamp::new(5, 5)));
         match v.verify(
-            "alpha",
+            &Query::contains("alpha"),
             Some(&s),
             &Hidden::new(&["db"], false),
             &CancelToken::never(),
@@ -532,15 +566,19 @@ mod tests {
         let v = verifier(src);
 
         let s = snap(&["alpha.pdf"], Some(DirStamp::new(5, 5)));
-        let shown =
-            |hidden: &Hidden| match v.verify("alpha", Some(&s), hidden, &CancelToken::never()) {
-                VerifyOutcome::Server { hits, .. } => {
-                    let mut names: Vec<String> = hits.iter().map(|h| h.name.to_string()).collect();
-                    names.sort();
-                    names
-                }
-                other => panic!("expected a server answer, got {other:?}"),
-            };
+        let shown = |hidden: &Hidden| match v.verify(
+            &Query::contains("alpha"),
+            Some(&s),
+            hidden,
+            &CancelToken::never(),
+        ) {
+            VerifyOutcome::Server { hits, .. } => {
+                let mut names: Vec<String> = hits.iter().map(|h| h.name.to_string()).collect();
+                names.sort();
+                names
+            }
+            other => panic!("expected a server answer, got {other:?}"),
+        };
 
         assert_eq!(
             shown(&Hidden::new::<&str>(&[], false)),
@@ -564,7 +602,7 @@ mod tests {
         let s = snap(&["alpha.pdf", "alpha.db"], Some(DirStamp::new(5, 5)));
         for _ in 0..=SERVER_FILTER_MISS_LIMIT {
             match v.verify(
-                "alpha",
+                &Query::contains("alpha"),
                 Some(&s),
                 &Hidden::new(&["db"], false),
                 &CancelToken::never(),
@@ -593,7 +631,12 @@ mod tests {
         let s = snap(&["alpha_one.txt", "alpha_two.txt"], None);
 
         for i in 1..=SERVER_FILTER_MISS_LIMIT {
-            match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
+            match v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never(),
+            ) {
                 VerifyOutcome::Server { audit, .. } => {
                     assert!(matches!(audit, AuditVerdict::ServerUnderReturned { .. }));
                 }
@@ -604,7 +647,12 @@ mod tests {
 
         assert!(!v.is_enabled(), "the filter must switch itself off");
         assert!(matches!(
-            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
+            v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never()
+            ),
             VerifyOutcome::Skipped(SkipReason::AuditFailed { .. })
         ));
     }
@@ -615,7 +663,12 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         for _ in 0..10 {
-            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never());
+            v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never(),
+            );
         }
         assert_eq!(v.misses(), 0);
         assert!(v.is_enabled());
@@ -628,7 +681,12 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
+            v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never()
+            ),
             VerifyOutcome::Skipped(SkipReason::Unsupported)
         ));
         assert!(!v.is_enabled());
@@ -641,7 +699,12 @@ mod tests {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha.txt"]);
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
-        match v.verify("al*ha", Some(&s), &Hidden::none(), &CancelToken::never()) {
+        match v.verify(
+            &Query::contains("al*ha"),
+            Some(&s),
+            &Hidden::none(),
+            &CancelToken::never(),
+        ) {
             VerifyOutcome::Skipped(SkipReason::Pattern(PatternReject::NotLiteral('*'))) => {}
             other => panic!("expected a pattern rejection, got {other:?}"),
         }
@@ -653,7 +716,12 @@ mod tests {
         src.set_error(Some(EnumError::Transient(53)));
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
-        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
+        match v.verify(
+            &Query::contains("alpha"),
+            Some(&s),
+            &Hidden::none(),
+            &CancelToken::never(),
+        ) {
             VerifyOutcome::Failed(EnumError::Transient(53)) => {}
             other => panic!("expected a transient failure, got {other:?}"),
         }
@@ -664,7 +732,12 @@ mod tests {
         let src = FakeDirSource::new().with_dir("V:\\", &["beta.txt"]);
         let v = verifier(src);
         let s = snap(&["beta.txt"], None);
-        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
+        match v.verify(
+            &Query::contains("alpha"),
+            Some(&s),
+            &Hidden::none(),
+            &CancelToken::never(),
+        ) {
             VerifyOutcome::Server {
                 matched: 0, hits, ..
             } => assert!(hits.is_empty()),
@@ -678,7 +751,12 @@ mod tests {
         let v = Verifier::new(Arc::new(src.clone()), PathBuf::from("V:\\"), false);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
+            v.verify(
+                &Query::contains("alpha"),
+                Some(&s),
+                &Hidden::none(),
+                &CancelToken::never()
+            ),
             VerifyOutcome::Skipped(SkipReason::Disabled)
         ));
         assert_eq!(
@@ -699,7 +777,7 @@ mod tests {
             "alpha.txt".to_string(),
             "alpha_longer.txt".to_string(),
         ];
-        let hits = rank_server_names(Path::new("V:\\"), names, "alpha");
+        let hits = rank_server_names(Path::new("V:\\"), names, &Query::contains("alpha"));
         let ordered: Vec<&str> = hits.iter().map(|h| h.name.as_ref()).collect();
         // Earliest position first, then the shorter name.
         assert_eq!(
@@ -710,7 +788,11 @@ mod tests {
 
     #[test]
     fn server_hits_carry_a_usable_full_path() {
-        let hits = rank_server_names(Path::new("V:\\"), vec!["a_alpha.txt".into()], "alpha");
+        let hits = rank_server_names(
+            Path::new("V:\\"),
+            vec!["a_alpha.txt".into()],
+            &Query::contains("alpha"),
+        );
         assert_eq!(&*hits[0].path, "V:\\a_alpha.txt");
         assert_eq!(hits[0].match_pos, 2);
     }
@@ -719,14 +801,14 @@ mod tests {
     fn server_hits_are_capped_at_the_display_limit() {
         let n = crate::config::MAX_RESULTS * 2;
         let names: Vec<String> = (0..n).map(|i| format!("alpha{i:05}.txt")).collect();
-        let hits = rank_server_names(Path::new("V:\\"), names, "alpha");
+        let hits = rank_server_names(Path::new("V:\\"), names, &Query::contains("alpha"));
         assert_eq!(hits.len(), crate::config::MAX_RESULTS);
     }
 
     #[test]
     fn local_matches_finds_what_the_matcher_would() {
         let s = snap(&["Alpha.txt", "beta.txt", "ALPHA_TWO.txt"], None);
-        let mut got = local_matches(&s, "alpha");
+        let mut got = local_matches(&s, &Query::contains("alpha"));
         got.sort();
         assert_eq!(got, vec!["ALPHA_TWO.txt", "Alpha.txt"]);
     }

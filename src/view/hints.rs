@@ -114,13 +114,15 @@ pub struct Context {
 /// press without ever saying what pressing it had done - so the one key whose
 /// whole job is to change a mode gave no sign of which mode it was in.
 ///
-/// Two constants rather than a `format!` because [`Hint::label`] is
+/// Three constants rather than a `format!` because [`Hint::label`] is
 /// `&'static str`: the hint sets are built by `const fn`s and the whole module
-/// is allocation-free by construction.
+/// is allocation-free by construction. Written out rather than built from
+/// [`ViewerKind::display`] for that reason, and pinned to it by a test.
 const fn viewer_label(viewer: ViewerKind) -> &'static str {
     match viewer {
-        ViewerKind::Pdf => "viewer: pdf",
-        ViewerKind::Avwin => "viewer: avwin",
+        ViewerKind::Auto => "Viewer: Auto",
+        ViewerKind::Pdf => "Viewer: PDF",
+        ViewerKind::Avwin => "Viewer: avwin",
     }
 }
 
@@ -146,37 +148,45 @@ impl Context {
 pub fn hints(cx: Context) -> Vec<Hint> {
     // Quit is Essential in every set, and that is the invariant this module
     // exists to hold.
-    let quit = hint("Ctrl+Q", "quit", Priority::Essential);
+    let quit = hint("Ctrl+Q", "Quit", Priority::Essential);
 
     // The overlay has its own short set. Escape is Essential here and merely
     // High or Low elsewhere, because closing is the one thing somebody must be
     // able to do from a window covering their work, and because it means
     // something different here than it does anywhere else in the program.
     if cx.compact {
-        let mut v = Vec::with_capacity(5);
+        let mut v = Vec::with_capacity(6);
         if cx.has_results {
             v.push(clickable(
                 "Enter",
-                "open",
+                "Open",
                 Priority::Essential,
                 Action::Open,
             ));
         }
-        v.push(hint("Esc", "close", Priority::Essential));
+        v.push(hint("Esc", "Close", Priority::Essential));
         v.push(clickable(
             "\u{2191}",
-            "recent codes",
+            "Recent codes",
             Priority::High,
             Action::Recall,
         ));
         if cx.has_results {
             v.push(clickable(
                 "\u{2193}",
-                "results",
+                "Results",
                 Priority::High,
                 Action::Results,
             ));
         }
+        // The chip that stands for every key this bar could not fit, which is
+        // why it outranks the viewer indicator here and does not in the full
+        // set. A bar narrow enough to be dropping chips is exactly the bar
+        // whose reader most needs the window that lists all of them - and in
+        // the overlay there is nothing else on screen that could teach a key.
+        // The viewer chip names one fact; this one is the index to every fact,
+        // and F1 was reachable from the keyboard and advertised nowhere.
+        v.push(clickable("F1", "All keys", Priority::Normal, Action::Help));
         v.push(hint("F2", viewer_label(cx.viewer), Priority::Low));
         return v;
     }
@@ -188,23 +198,30 @@ pub fn hints(cx: Context) -> Vec<Hint> {
         // Choosing which drive to update. The two answers and the way out,
         // because the list above already says what each row is.
         return vec![
-            hint("Enter", "update this drive", Priority::Essential),
+            hint("Enter", "Update this drive", Priority::Essential),
             quit,
-            hint("\u{2191}\u{2193}", "choose", Priority::High),
-            hint("A", "update all", Priority::Normal),
-            hint("Esc", "back", Priority::High),
+            hint("\u{2191}\u{2193}", "Choose", Priority::High),
+            hint("A", "Update all", Priority::Normal),
+            hint("Esc", "Back", Priority::High),
         ];
     }
 
+    // No `F1` here, unlike the compact bar. This list has four keys and the bar
+    // already names all four, so the chip that stands for "every other key"
+    // would be standing for nothing - and it costs exactly the room the
+    // position readout needs, which is the one thing only the status line can
+    // say.
     if cx.showing_recent {
-        // No `Esc` of its own. It used to say "keep what you typed", because
-        // recall was a mode you could be in with a half-typed code underneath
-        // it. There is no underneath now - the list *is* what an empty field
-        // shows - so Escape simply dismisses, which `quit` already names.
+        // `Esc` of its own again, and truthfully this time. It used to say
+        // "keep what you typed", which recall could not deliver; then the list
+        // became what an empty field showed and Escape simply dismissed. It is
+        // a mode once more - the Up arrow is the only way in - so Escape leaves
+        // it, exactly as it leaves the drive picker.
         return vec![
-            clickable("Enter", "use this code", Priority::Essential, Action::Open),
+            clickable("Enter", "Use this code", Priority::Essential, Action::Open),
             quit,
-            hint("\u{2191}\u{2193}", "recent codes", Priority::High),
+            hint("\u{2191}\u{2193}", "Recent codes", Priority::High),
+            hint("Esc", "Back", Priority::High),
         ];
     }
 
@@ -214,7 +231,7 @@ pub fn hints(cx: Context) -> Vec<Hint> {
             if cx.has_results {
                 v.push(clickable(
                     "Enter",
-                    "open",
+                    "Open",
                     Priority::Essential,
                     Action::Open,
                 ));
@@ -227,13 +244,13 @@ pub fn hints(cx: Context) -> Vec<Hint> {
                 // mode that no longer exists.
                 v.push(clickable(
                     "\u{2191}\u{2193}",
-                    "move",
+                    "Move",
                     Priority::High,
                     Action::Results,
                 ));
             }
             if cx.has_text_selection {
-                v.push(hint("Ctrl+C", "copy", Priority::High));
+                v.push(hint("Ctrl+C", "Copy", Priority::High));
             }
             // Ahead of `F1 help`, and `High` rather than `Normal`. Both are
             // deliberate: `fit` drops the lowest priority first and the
@@ -246,10 +263,10 @@ pub fn hints(cx: Context) -> Vec<Hint> {
             // to", which is the question F2 leaves behind every time it is
             // pressed.
             v.push(hint("F2", viewer_label(cx.viewer), Priority::High));
-            v.push(clickable("F1", "help", Priority::Normal, Action::Help));
-            v.push(clickable("F5", "refresh", Priority::Low, Action::Refresh));
+            v.push(clickable("F1", "Help", Priority::Normal, Action::Help));
+            v.push(clickable("F5", "Refresh", Priority::Low, Action::Refresh));
             if cx.has_text {
-                v.push(hint("Esc", "clear", Priority::Low));
+                v.push(hint("Esc", "Clear", Priority::Low));
             }
         }
     }
@@ -405,6 +422,54 @@ mod tests {
         plain(kept, labelled)
     }
 
+    /// Every chip label, in every context and every viewer mode.
+    ///
+    /// A chip is a fragment and takes no stop, so it is held to the status
+    /// rules - and it starts with a capital, because a chip is the head of
+    /// what it says rather than the tail of something else. The bar used to
+    /// read `Ctrl+Q quit   F2 viewer: pdf` beside a status line reading
+    /// `Searching...`, which is three different conventions on one row.
+    #[test]
+    fn every_chip_keeps_the_house_style() {
+        let mut labels = Vec::new();
+        for viewer in ViewerKind::ALL {
+            for cx in every_context() {
+                for h in hints(Context { viewer, ..cx }) {
+                    labels.push(h.label);
+                    labels.push(h.key);
+                }
+            }
+        }
+        crate::view::style::check_all(
+            "the hint bar",
+            labels.iter().copied(),
+            crate::view::style::Slot::Status,
+        );
+        for label in labels {
+            assert!(
+                crate::view::style::starts_capitalised(label),
+                "the chip {label:?} does not start a sentence"
+            );
+        }
+    }
+
+    /// The F2 chip and the rest of the program have to name the same thing the
+    /// same way.
+    ///
+    /// The chip is written out longhand because [`Hint::label`] is
+    /// `&'static str` and this module is allocation-free by construction, so
+    /// nothing makes the two agree except this.
+    #[test]
+    fn the_viewer_chip_spells_the_viewer_the_way_everything_else_does() {
+        for viewer in ViewerKind::ALL {
+            assert_eq!(
+                viewer_label(viewer),
+                format!("Viewer: {}", viewer.display()),
+                "the chip and the toast would disagree about {viewer:?}"
+            );
+        }
+    }
+
     /// The whole reason this module exists.
     ///
     /// Ctrl+Q is the only key that leaves, and it is not guessable - Ctrl+C
@@ -423,7 +488,7 @@ mod tests {
             // that it is Essential, and that it therefore always fits.
             let exits: Vec<&Hint> = all
                 .iter()
-                .filter(|h| h.label == "quit" || h.label == "close")
+                .filter(|h| h.label == "Quit" || h.label == "Close")
                 .collect();
             assert_eq!(
                 exits.len(),
@@ -540,13 +605,16 @@ mod tests {
         let (kept, labelled) = fit_columns(&all, 120);
         let line = rendered(&kept, labelled);
 
-        assert!(line.contains("use this code"), "{line}");
-        assert!(line.contains("recent codes"), "{line}");
+        assert!(line.contains("Use this code"), "{line}");
+        assert!(line.contains("Recent codes"), "{line}");
+        // Lower-cased first, so that a label the case pass touches cannot
+        // turn a negative assertion into one that passes by spelling.
+        let folded = line.to_lowercase();
         assert!(
-            !line.contains("keep what you typed"),
+            !folded.contains("keep what you typed"),
             "the draft was retired with the mode: {line}"
         );
-        assert!(!line.contains("results"), "recall has no results: {line}");
+        assert!(!folded.contains("results"), "recall has no results: {line}");
     }
 
     /// The recent list is short, so its bar has to survive a narrow panel
@@ -580,7 +648,7 @@ mod tests {
         for cx in every_context() {
             let leaving: Vec<_> = hints(cx)
                 .into_iter()
-                .filter(|h| h.label == "quit" || h.label == "close")
+                .filter(|h| h.label == "Quit" || h.label == "Close")
                 .collect();
             assert_eq!(leaving.len(), 1, "{cx:?} advertises {leaving:?}");
 

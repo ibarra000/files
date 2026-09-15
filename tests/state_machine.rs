@@ -11,12 +11,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use files::app::event::LiveMsg;
 use files::app::event::{
     AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, RefreshTarget, Response, SearchMsg,
     VerifyMsg,
 };
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
+use files::config::LIVE_DEBOUNCE;
 use files::config::{
     ENTER_WATCHDOG, MIN_QUERY_LEN, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
     VISIBLE_ROWS, ViewerKind,
@@ -24,7 +26,9 @@ use files::config::{
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
 use files::paths::MappingId;
+use files::search::live::{LiveCoverage, LiveOutcome};
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 use files::search::verify::{AuditVerdict, VerifyOutcome};
 
 fn state() -> (AppState, Instant) {
@@ -117,7 +121,7 @@ fn typing_arms_one_search_rather_than_one_per_keystroke() {
         .cmds
         .iter()
         .filter_map(|c| match c {
-            Cmd::Search { query, .. } => Some(query.clone()),
+            Cmd::Search { query, .. } => Some(query.term().to_string()),
             _ => None,
         })
         .collect();
@@ -182,7 +186,7 @@ fn typing_bumps_the_epoch_so_stale_results_are_discarded() {
     type_in(&mut s, "11-D-07", now);
     let stale = AppEvent::Search(SearchMsg {
         epoch: s.query_epoch() - 1,
-        query: "old".into(),
+        query: Query::contains("old"),
         elapsed: Duration::ZERO,
         result: Ok(SearchOutcome {
             hits: vec![hit("ghost.txt")],
@@ -205,7 +209,7 @@ fn a_cancelled_result_changes_nothing() {
     type_in(&mut s, "11-D-0704", now);
     let ev = AppEvent::Search(SearchMsg {
         epoch: s.query_epoch(),
-        query: s.input.text().to_string(),
+        query: Query::parse(s.input.text()),
         elapsed: Duration::ZERO,
         result: Ok(SearchOutcome {
             hits: vec![],
@@ -496,7 +500,7 @@ fn enter_with_no_results_reports_rather_than_opening() {
     let r = s.update(
         AppEvent::Search(SearchMsg {
             epoch: s.query_epoch(),
-            query: "11-D-0704".into(),
+            query: Query::contains("11-D-0704"),
             elapsed: Duration::ZERO,
             result: Ok(SearchOutcome::default()),
         }),
@@ -1017,7 +1021,7 @@ fn animation_stops_when_the_work_finishes() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_millis(40),
             outcome: VerifyOutcome::IndexAuthoritative { stamp: None },
         }),
@@ -1037,7 +1041,7 @@ fn an_unchanged_directory_verifies_without_touching_the_results() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_millis(2),
             outcome: VerifyOutcome::IndexAuthoritative { stamp: None },
         }),
@@ -1059,7 +1063,7 @@ fn a_failed_verification_keeps_the_local_results_on_screen() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_millis(20),
             outcome: VerifyOutcome::Failed(EnumError::Transient(53)),
         }),
@@ -1085,7 +1089,7 @@ fn a_server_answer_replaces_rather_than_unions() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_millis(30),
             outcome: VerifyOutcome::Server {
                 hits: vec![hit("kept.pdf")],
@@ -1107,7 +1111,7 @@ fn an_audit_failure_warns_the_user() {
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: Duration::from_millis(30),
             outcome: VerifyOutcome::Server {
                 hits: vec![],
@@ -1339,7 +1343,6 @@ fn a_partial_assembly_warns_and_names_what_was_skipped() {
             pages: 12,
             skipped: vec!["11-D-0704_Page7.pdf (could not be read)".into()],
             truncated: false,
-            note: None,
         }),
         now,
     );
@@ -1358,7 +1361,6 @@ fn a_complete_assembly_says_nothing() {
             pages: 13,
             skipped: Vec::new(),
             truncated: false,
-            note: None,
         }),
         now,
     );
@@ -1376,7 +1378,6 @@ fn a_truncated_document_says_the_set_is_longer() {
             pages: 512,
             skipped: Vec::new(),
             truncated: true,
-            note: None,
         }),
         now,
     );
@@ -1484,7 +1485,7 @@ struct AppStateView {
 fn search_result(view: &AppStateView, hits: Vec<Hit>, matched: u32, total: u32) -> AppEvent {
     AppEvent::Search(SearchMsg {
         epoch: view.query_epoch,
-        query: view.input.clone(),
+        query: Query::parse(&view.input),
         elapsed: Duration::from_micros(400),
         result: Ok(SearchOutcome {
             hits,
@@ -1953,21 +1954,12 @@ fn every_toast() -> Vec<String> {
             pages: 8,
             skipped: vec!["page 3 is not a PDF".into()],
             truncated: false,
-            note: None,
         },
         OpenMsg::Launched {
             path: "R:\\11d\\a.pdf".into(),
             pages: 64,
             skipped: Vec::new(),
             truncated: true,
-            note: None,
-        },
-        OpenMsg::Launched {
-            path: "R:\\11d\\a.dwg".into(),
-            pages: 1,
-            skipped: Vec::new(),
-            truncated: false,
-            note: Some("Opened in avwin \u{b7} no dwg_converter is set".into()),
         },
         OpenMsg::Failed {
             path: "R:\\11d\\a.pdf".into(),
@@ -2096,4 +2088,357 @@ fn every_toast_starts_the_way_a_line_should() {
             "the toast {toast:?} does not start a sentence"
         );
     }
+}
+
+// --- narrowing what is already on screen ------------------------------------
+
+/// F3 and F4 edit the line rather than holding a filter beside it. That is
+/// what keeps the query in one place: recalled with the line, copied with the
+/// line, and visible without a chip anybody has to notice.
+#[test]
+fn f3_writes_the_narrowing_into_the_search_box() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    s.update(press(Key::F(3)), now);
+    assert_eq!(s.input.text(), "11-D-0704*");
+    s.update(press(Key::F(3)), now);
+    assert_eq!(s.input.text(), "*11-D-0704");
+    s.update(press(Key::F(3)), now);
+    assert_eq!(s.input.text(), "11-D-0704", "the cycle has to come back");
+}
+
+#[test]
+fn f4_steps_through_the_file_types_and_back_to_all_of_them() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    s.update(press(Key::F(4)), now);
+    assert_eq!(s.input.text(), "11-D-0704 ext:pdf");
+    s.update(press(Key::F(4)), now);
+    assert_eq!(s.input.text(), "11-D-0704 ext:dwg");
+    s.update(press(Key::F(4)), now);
+    assert_eq!(s.input.text(), "11-D-0704");
+}
+
+#[test]
+fn the_two_narrowings_compose_without_either_dropping_the_other() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    s.update(press(Key::F(4)), now);
+    s.update(press(Key::F(3)), now);
+    assert_eq!(s.input.text(), "11-D-0704* ext:pdf");
+}
+
+/// A deliberate press is not a character on the way to a longer code, so
+/// there is nothing to wait for - the same argument the paste path makes.
+#[test]
+fn narrowing_dispatches_the_search_at_once_rather_than_waiting_out_the_pause() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let response = s.update(press(Key::F(3)), now);
+    assert!(
+        response
+            .cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Search { .. })),
+        "F3 left the search sitting on the debounce"
+    );
+    assert!(s.search_due_at().is_none());
+}
+
+/// A hand-typed filter the key could not have produced cycles back to no
+/// filter. Guessing where `ext:sldprt` sits in a list that does not hold it
+/// would be inventing an answer; clearing it is the one step that is always
+/// what it looks like.
+#[test]
+fn a_hand_typed_type_the_key_does_not_know_is_cleared_rather_than_guessed_at() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704 ext:sldprt", now);
+
+    s.update(press(Key::F(4)), now);
+    assert_eq!(s.input.text(), "11-D-0704");
+}
+
+/// The line is the query, so a narrowed search is what gets remembered and
+/// what comes back on Up.
+#[test]
+fn a_narrowed_search_is_dispatched_with_its_filter_intact() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    let response = s.update(press(Key::F(4)), now);
+
+    let dispatched: Vec<Query> = response
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::Search { query, .. } => Some(query.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched.len(), 1);
+    assert_eq!(dispatched[0].term(), "11-D-0704");
+    assert_eq!(dispatched[0].types().len(), 1);
+}
+
+/// `*` cannot occur in a Windows filename, so reading it literally would be a
+/// guaranteed empty list with nothing on screen to explain it.
+#[test]
+fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D*0704", now);
+
+    assert!(
+        matches!(s.phase, QueryPhase::BadQuery { .. }),
+        "got {:?}",
+        s.phase
+    );
+    assert!(matches!(s.empty_reason, Some(EmptyReason::BadQuery { .. })));
+}
+
+/// The minimum exists to bound the arena sweep, so it is counted on the thing
+/// that is swept for. `ab ext:pdf` is a ten-character line and a
+/// two-character needle.
+#[test]
+fn the_minimum_length_is_judged_on_the_code_and_not_on_the_whole_line() {
+    let (mut s, now) = state();
+    type_in(&mut s, "ab ext:pdf", now);
+    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+}
+
+// --- shares that are asked rather than indexed -------------------------------
+
+/// A state with one indexed share and one live one.
+fn live_state() -> (AppState, Instant) {
+    use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
+    let mappings = vec![
+        Mapping {
+            id: MappingId(0),
+            name: "custompro".into(),
+            path: std::path::PathBuf::from("V:\\Documents\\custpro"),
+            kind: MappingKind::Flat,
+            enabled: true,
+            refresh: RefreshPolicy::Auto,
+            depth: files::config::DEFAULT_LIVE_DEPTH,
+        },
+        Mapping {
+            id: MappingId(1),
+            name: "archive".into(),
+            path: std::path::PathBuf::from("\\\\nas\\archive"),
+            kind: MappingKind::Live,
+            enabled: true,
+            refresh: RefreshPolicy::Manual,
+            depth: 1,
+        },
+    ];
+    let routes = Routes::new(mappings, ConfigSource::BuiltIn);
+    let settings = Settings::with_routes(Arc::new(routes), |s| s);
+    let now = Instant::now();
+    (AppState::new(settings, now), now)
+}
+
+fn live_hit(name: &str) -> Hit {
+    Hit {
+        path: Arc::from(format!("\\\\nas\\archive\\{name}").as_str()),
+        name: Arc::from(name),
+        match_pos: 0,
+        index: 0,
+    }
+}
+
+fn answered(hits: Vec<Hit>, skipped: u32) -> LiveOutcome {
+    let matched = hits.len() as u32;
+    LiveOutcome::Answered {
+        hits,
+        matched,
+        coverage: LiveCoverage {
+            dirs_queried: 1,
+            dirs_skipped: skipped,
+            round_trips: 1,
+            ..LiveCoverage::default()
+        },
+    }
+}
+
+fn live_msg(s: &AppState, outcome: LiveOutcome) -> AppEvent {
+    AppEvent::Live(LiveMsg {
+        epoch: s.query_epoch(),
+        query: Query::parse(s.input.text()),
+        mapping: MappingId(1),
+        elapsed: Duration::ZERO,
+        outcome: Box::new(outcome),
+    })
+}
+
+fn local_answer(s: &AppState, hits: Vec<Hit>) -> AppEvent {
+    let matched = hits.len() as u32;
+    AppEvent::Search(SearchMsg {
+        epoch: s.query_epoch(),
+        query: Query::parse(s.input.text()),
+        elapsed: Duration::ZERO,
+        result: Ok(SearchOutcome {
+            hits,
+            matched,
+            total: 10,
+            cancelled: false,
+            unicode_fallback: false,
+        }),
+    })
+}
+
+/// Typing must not put a round trip on somebody elses file server per
+/// keystroke, so the live shares wait longer than the local sweep does.
+#[test]
+fn the_live_shares_are_asked_only_after_a_longer_pause_than_the_indexes() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let early = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
+    assert!(
+        !early.cmds.iter().any(|c| matches!(c, Cmd::Live { .. })),
+        "the drive was asked on the local debounce"
+    );
+
+    let later = s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
+    assert!(
+        later.cmds.iter().any(|c| matches!(c, Cmd::Live { .. })),
+        "the drive was never asked"
+    );
+    assert!(s.live.as_ref().is_some_and(|l| l.is_asking()));
+}
+
+/// Phase two arrives a second after phase one. Replacing the list would empty
+/// it and refill it, which is the flinch `on_input_changed` avoids during
+/// typing, except this one lands after the typing stopped.
+#[test]
+fn a_live_answer_merges_into_the_local_results_rather_than_replacing_them() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
+
+    let local = local_answer(&s, vec![hit("11-D-0704.pdf")]);
+    s.update(local, now);
+    assert_eq!(s.hits.len(), 1);
+
+    let msg = live_msg(&s, answered(vec![live_hit("11-D-0704-rev.pdf")], 0));
+    s.update(msg, now);
+
+    assert_eq!(s.hits.len(), 2, "the local row was dropped");
+    assert_eq!(s.matched, 2);
+    assert!(s.live.as_ref().is_some_and(|l| !l.is_asking()));
+}
+
+/// The keystroke that superseded it already bumped the epoch, so a late answer
+/// has to be dropped rather than folded into a different querys results.
+#[test]
+fn a_live_answer_for_a_superseded_keystroke_is_dropped() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
+
+    let stale = AppEvent::Live(LiveMsg {
+        epoch: s.query_epoch().saturating_sub(1),
+        query: Query::contains("old"),
+        mapping: MappingId(1),
+        elapsed: Duration::ZERO,
+        outcome: Box::new(answered(vec![live_hit("old.pdf")], 0)),
+    });
+    s.update(stale, now);
+    assert!(s.hits.is_empty(), "a superseded answer reached the list");
+}
+
+/// The note on `stand_down`: a command armed on a field that has since been
+/// cleared is not caught by the epoch guard, because the epoch was already
+/// bumped on the way past.
+#[test]
+fn clearing_the_field_retires_the_live_deadline_too() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(ctrl(Key::Char('u')), now);
+
+    let after = s.update(AppEvent::Tick, now + LIVE_DEBOUNCE * 2);
+    assert!(
+        !after.cmds.iter().any(|c| matches!(c, Cmd::Live { .. })),
+        "a cleared field still asked the drive"
+    );
+    assert!(s.live.is_none());
+}
+
+/// The claim this program exists not to let somebody act on by mistake. A live
+/// share answers for the folders one query reached, so an empty list is only
+/// honestly "no matches" when everything was reached.
+#[test]
+fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
+
+    let local = local_answer(&s, Vec::new());
+    s.update(local, now);
+    assert!(matches!(
+        s.empty_reason,
+        Some(EmptyReason::NoMatches { .. })
+    ));
+
+    // One folder reached, three not.
+    let msg = live_msg(&s, answered(Vec::new(), 3));
+    s.update(msg, now);
+
+    match &s.empty_reason {
+        Some(EmptyReason::LiveIncomplete { name, skipped, .. }) => {
+            assert_eq!(name, "archive");
+            assert_eq!(*skipped, 3);
+        }
+        other => panic!("expected an incomplete-coverage reason, got {other:?}"),
+    }
+}
+
+/// A share that could not be asked at all is a different sentence again, and
+/// the one most likely to be acted on wrongly.
+#[test]
+fn a_share_that_could_not_be_asked_says_so_rather_than_reporting_nothing() {
+    let (mut s, now) = live_state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
+
+    let msg = live_msg(
+        &s,
+        LiveOutcome::Skipped(files::search::live::LiveSkip::Unsupported),
+    );
+    s.update(msg, now);
+
+    match &s.empty_reason {
+        Some(EmptyReason::LiveUnavailable { name, .. }) => assert_eq!(name, "archive"),
+        other => panic!("expected an unavailable reason, got {other:?}"),
+    }
+}
+
+/// A configuration holding nothing but live shares is searchable, and the gate
+/// that decides whether to dispatch at all has to agree.
+#[test]
+fn a_configuration_of_only_live_shares_still_accepts_a_query() {
+    use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
+    let routes = Routes::new(
+        vec![Mapping {
+            id: MappingId(0),
+            name: "archive".into(),
+            path: std::path::PathBuf::from("\\\\nas\\archive"),
+            kind: MappingKind::Live,
+            enabled: true,
+            refresh: RefreshPolicy::Manual,
+            depth: 1,
+        }],
+        ConfigSource::BuiltIn,
+    );
+    let settings = Settings::with_routes(Arc::new(routes), |s| s);
+    let now = Instant::now();
+    let mut s = AppState::new(settings, now);
+
+    type_in(&mut s, "11-D-0704", now);
+    assert!(
+        !matches!(s.phase, QueryPhase::NoShares),
+        "a live-only configuration was treated as having no drives"
+    );
 }

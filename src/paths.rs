@@ -47,6 +47,17 @@ pub enum MappingKind {
     /// background walk and a few hundred megabytes; buys never silently
     /// missing a file.
     Tree,
+    /// Never read in full. Every search is put to the file server as a
+    /// wildcard query against the share itself.
+    ///
+    /// The answer to a share a walk cannot pay for. Some are large enough that
+    /// one pass costs minutes and a few hundred megabytes, and the honest
+    /// options are to leave them out of the search altogether or to ask the
+    /// server per query. This is the second. It costs a round trip on every
+    /// settled keystroke, and it can only ever report on the folders one query
+    /// had time to reach - which is why everything downstream of it is built to
+    /// say how much that was.
+    Live,
 }
 
 impl MappingKind {
@@ -54,6 +65,7 @@ impl MappingKind {
         match s.trim().to_ascii_lowercase().as_str() {
             "flat" => Some(Self::Flat),
             "tree" | "recursive" => Some(Self::Tree),
+            "live" | "on-demand" => Some(Self::Live),
             _ => None,
         }
     }
@@ -62,16 +74,33 @@ impl MappingKind {
         match self {
             Self::Flat => "flat",
             Self::Tree => "tree",
+            Self::Live => "live",
         }
     }
 
-    /// True when this mapping is indexed in the background.
+    /// True when a background actor reads this share and holds the result in
+    /// memory, so a search is a sweep over bytes this process already owns.
     ///
-    /// Every kind is, now that job folders are gone. Kept because it names the
-    /// property the search actually depends on, and a third kind that is not
-    /// indexed is a plausible thing to add.
+    /// The note this replaces said a third kind that is not indexed was "a
+    /// plausible thing to add". [`Self::Live`] is it.
     pub fn is_indexed(self) -> bool {
         matches!(self, Self::Flat | Self::Tree)
+    }
+
+    /// True when a search asks the file server about this share directly.
+    pub fn is_live(self) -> bool {
+        matches!(self, Self::Live)
+    }
+
+    /// True when a query is put to this share at all, by either route.
+    ///
+    /// Separate from [`Self::is_indexed`] because the two answer different
+    /// questions, and every call site that treated them as one was answering
+    /// whichever it happened to be named after. "Is it searched" governs the
+    /// query; "is it indexed" governs the actor, the cache, the refresh
+    /// schedule and the drive list.
+    pub fn is_searched(self) -> bool {
+        self.is_indexed() || self.is_live()
     }
 }
 
@@ -85,6 +114,12 @@ pub struct Mapping {
     pub enabled: bool,
     /// Whether a timer may re-read this share. See [`RefreshPolicy`].
     pub refresh: RefreshPolicy,
+    /// How far below the root a live query descends.
+    ///
+    /// Meaningless on an indexed mapping, and refused there by the
+    /// configuration parser rather than ignored: a key that silently does
+    /// nothing leaves somebody believing a setting took.
+    pub depth: u16,
 }
 
 /// When a share is re-read in full, as opposed to patched from whatever the
@@ -139,7 +174,12 @@ impl RefreshPolicy {
     pub fn default_for(kind: MappingKind) -> Self {
         match kind {
             MappingKind::Flat => Self::Auto,
-            MappingKind::Tree => Self::Manual,
+            // Nothing to re-read on a timer in either case, though for
+            // different reasons: a tree is too expensive to sweep on a
+            // schedule, and a live share holds no index for a sweep to
+            // refresh. The configuration refuses `refresh` on a live mapping
+            // rather than accepting a setting that would do nothing.
+            MappingKind::Tree | MappingKind::Live => Self::Manual,
         }
     }
 
@@ -219,6 +259,7 @@ impl Routes {
                 kind,
                 enabled: true,
                 refresh: RefreshPolicy::default_for(kind),
+                depth: crate::config::DEFAULT_LIVE_DEPTH,
             }],
             ConfigSource::BuiltIn,
         )
@@ -309,7 +350,7 @@ impl Routes {
     /// was typed.
     pub fn targets(&self) -> TargetList {
         self.enabled()
-            .filter(|m| m.kind.is_indexed())
+            .filter(|m| m.kind.is_searched())
             .map(|m| Target {
                 mapping: m.id,
                 kind: m.kind,
@@ -318,8 +359,18 @@ impl Routes {
             .collect()
     }
 
-    /// Whether anything is searchable at all.
-    pub fn any_indexed(&self) -> bool {
-        self.enabled().any(|m| m.kind.is_indexed())
+    /// Whether anything is searchable at all, by either route.
+    ///
+    /// Renamed from `any_indexed` rather than kept alongside it: every caller
+    /// gates a *query* on this, and a configuration holding nothing but live
+    /// shares is searchable. Leaving both names would make picking the wrong
+    /// one a silent mistake.
+    pub fn any_searchable(&self) -> bool {
+        self.enabled().any(|m| m.kind.is_searched())
+    }
+
+    /// Every enabled live mapping, in configuration order.
+    pub fn live(&self) -> impl Iterator<Item = &Mapping> {
+        self.enabled().filter(|m| m.kind == MappingKind::Live)
     }
 }

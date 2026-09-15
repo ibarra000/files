@@ -22,6 +22,7 @@ use files::config::hidden::Hidden;
 use files::index::builder::SnapshotBuilder;
 use files::index::snapshot::Snapshot;
 use files::search::matcher::{self, SearchOutcome};
+use files::search::query::Query;
 use files::util::cancel::CancelToken;
 use proptest::prelude::*;
 
@@ -90,7 +91,7 @@ fn snapshot(names: &[String]) -> Snapshot {
 fn run(names: &[String], query: &str, kind: MatcherKind) -> SearchOutcome {
     matcher::search(
         &snapshot(names),
-        query,
+        &Query::contains(query),
         kind,
         &Hidden::none(),
         &CancelToken::never(),

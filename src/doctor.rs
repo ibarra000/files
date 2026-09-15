@@ -47,18 +47,27 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  {:<3} {:<14} {:<11} {:<8} {:<8} path",
-        "#", "mapping", "kind", "enabled", "refresh"
+        "  {:<3} {:<14} {:<11} {:<8} {:<10} path",
+        "#", "mapping", "kind", "enabled", "read"
     );
     for m in routes.all() {
+        // One column, two things, because they are the same question asked of
+        // the two kinds of share: when is this read? An indexed one answers
+        // with its refresh policy; a live one is read only when it is
+        // searched, and how far down is the only part of that worth a column.
+        let read = if m.kind.is_live() {
+            format!("depth {}", m.depth)
+        } else {
+            m.refresh.label().to_string()
+        };
         let _ = writeln!(
             out,
-            "  {:<3} {:<14} {:<11} {:<8} {:<8} {}",
+            "  {:<3} {:<14} {:<11} {:<8} {:<10} {}",
             m.id.index(),
             m.name,
             m.kind.label(),
             if m.enabled { "yes" } else { "no" },
-            m.refresh.label(),
+            read,
             m.path.display(),
         );
     }
@@ -78,10 +87,15 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
             for t in &targets {
                 let _ = writeln!(
                     out,
-                    "  {:<14} {:<11} {}",
+                    "  {:<14} {:<11} {:<24} {}",
                     routes.label(t.mapping),
                     t.kind.label(),
-                    t.dir.display()
+                    t.dir.display(),
+                    if t.kind.is_live() {
+                        "asked per search"
+                    } else {
+                        "indexed"
+                    }
                 );
             }
         }
@@ -546,31 +560,6 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         }
     );
 
-    let _ = writeln!(
-        out,
-        "  dwg converter       {}",
-        match &settings.dwg_converter {
-            None => ".dwg files open in avwin.exe (no dwg_converter set)".to_string(),
-            Some(argv) => {
-                let prog = argv.first().map(String::as_str).unwrap_or_default();
-                // Checked here and nowhere else, on purpose: this file roams to
-                // laptops where the converter is legitimately absent, so a
-                // missing one must not stop the program starting.
-                let found = std::path::Path::new(prog).is_file()
-                    || crate::open::launch::program_on_path(prog);
-                format!(
-                    "{}{}",
-                    argv.join(" "),
-                    if found {
-                        ""
-                    } else {
-                        "\n                      NOT FOUND - .dwg files will open in avwin.exe"
-                    }
-                )
-            }
-        }
-    );
-
     // Merged documents live here, and they are the one thing this program
     // writes that a viewer keeps open afterwards.
     let _ = writeln!(
@@ -951,7 +940,8 @@ pub fn bench(
 
 fn bench_server_filter(source: &dyn DirSource, dir: &Path, query: &str, out: &mut dyn Write) {
     let _ = writeln!(out, "SERVER-SIDE FILTER  (query: {query})");
-    let wildcard = match pattern::wildcard_for(query) {
+    let parsed = crate::search::query::Query::parse(query);
+    let wildcard = match pattern::wildcard_for(&parsed) {
         Ok(w) => w,
         Err(reject) => {
             let _ = writeln!(out, "  not applicable: {}", reject.label());
@@ -970,7 +960,7 @@ fn bench_server_filter(source: &dyn DirSource, dir: &Path, query: &str, out: &mu
             let confirmed: Vec<String> = sink
                 .names
                 .iter()
-                .filter(|n| pattern::confirms(n, query))
+                .filter(|n| pattern::confirms(n, &parsed))
                 .cloned()
                 .collect();
             let false_positives = sink.names.len() - confirmed.len();

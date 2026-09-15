@@ -104,11 +104,57 @@ pub struct OpenContext<'a> {
     pub pdf_viewer: Option<&'a Path>,
 }
 
+/// Where one open actually goes, once the mode and the file are both known.
+///
+/// [`ViewerKind`] is what the user chose; this is what that means for the file
+/// under the cursor. They are separate types because `Auto` is not reducible to
+/// either of the others - a drawing goes somewhere neither `Pdf` nor `Avwin`
+/// has ever gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// Every page of the code, merged.
+    Document,
+    /// One file, handed to `avwin.exe`.
+    Avwin,
+}
+
+/// Which of the two a mode and a file name add up to.
+///
+/// Pure, total and filesystem-free, which is the point: the whole routing table
+/// is testable with no share, no viewer and no disk, and it is asked twice - by
+/// [`open`] below and by the worker deciding whether it needs a listing - so
+/// the two can no longer drift apart.
+pub fn route_of(viewer: ViewerKind, path: &str) -> Route {
+    let ext = Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+
+    match viewer {
+        // Forced: everything, including documents and drawings, goes to avwin.
+        ViewerKind::Avwin => Route::Avwin,
+        // Forced the other way: `pdf` means "always give me a PDF". A drawing
+        // is the one thing that cannot be made into one - there is no Rust that
+        // reads DWG, and every route to a PDF is somebody else's program - so
+        // it goes to avwin, which reads it natively. That is the only thing
+        // this program can honestly do with a drawing.
+        ViewerKind::Pdf => match ext.as_deref() {
+            Some("dwg") => Route::Avwin,
+            _ => Route::Document,
+        },
+        // By type. Everything that is not a document is something this program
+        // has no opinion about, and avwin opens far more than it can.
+        ViewerKind::Auto => match ext.as_deref() {
+            Some("pdf") => Route::Document,
+            _ => Route::Avwin,
+        },
+    }
+}
+
 /// Opens what `request` asked for.
 pub fn open(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
-    match request.viewer {
-        ViewerKind::Avwin => open_one_with_avwin(&request.path),
-        ViewerKind::Pdf => open_as_document(request, cx),
+    match route_of(request.viewer, &request.path) {
+        Route::Avwin => open_one_with_avwin(&request.path),
+        Route::Document => open_as_document(request, cx),
     }
 }
 
@@ -487,5 +533,46 @@ mod tests {
         let mut buf = Vec::new();
         doc.save_to(&mut buf).unwrap();
         buf
+    }
+
+    /// The whole routing table, which is pure and therefore checkable with no
+    /// share, no viewer and no disk.
+    #[test]
+    fn route_of_sends_each_kind_of_file_to_the_right_place() {
+        use ViewerKind::{Auto, Avwin, Pdf};
+
+        for (viewer, path, want) in [
+            // Auto picks per file.
+            (Auto, r"R:\11d\11-D-0704.pdf", Route::Document),
+            (Auto, r"R:\11d\11-D-0704.DWG", Route::Avwin),
+            (Auto, r"R:\11d\notes.docx", Route::Avwin),
+            (Auto, r"R:\11d\scan.tif", Route::Avwin),
+            (Auto, r"R:\11d\README", Route::Avwin),
+            // Forced: pdf assembles a document out of anything it can. A
+            // drawing is the one thing it cannot, so that still goes to avwin.
+            (Pdf, r"R:\11d\11-D-0704.pdf", Route::Document),
+            (Pdf, r"R:\11d\11-D-0704.dwg", Route::Avwin),
+            (Pdf, r"R:\11d\notes.docx", Route::Document),
+            // Forced the other way: everything goes to avwin, including the
+            // one kind this program has an opinion about.
+            (Avwin, r"R:\11d\11-D-0704.pdf", Route::Avwin),
+            (Avwin, r"R:\11d\11-D-0704.dwg", Route::Avwin),
+            (Avwin, r"R:\11d\notes.docx", Route::Avwin),
+        ] {
+            assert_eq!(route_of(viewer, path), want, "{viewer:?} {path}");
+        }
+    }
+
+    /// Case comes off a share and is nobody's to rely on.
+    ///
+    /// Spelled with `pdf` rather than `dwg`, because `pdf` is now the only
+    /// extension the routing table names: asking about `dwg` would pass
+    /// whether the fold was applied or not, and so prove nothing.
+    #[test]
+    fn the_extension_is_matched_however_it_is_spelled() {
+        for spelling in ["pdf", "PDF", "Pdf", "pDf"] {
+            let path = format!(r"R:\11d\11-D-0704.{spelling}");
+            assert_eq!(route_of(ViewerKind::Auto, &path), Route::Document);
+        }
     }
 }

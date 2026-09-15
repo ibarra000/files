@@ -20,6 +20,7 @@ use crate::index::store::IndexStatus;
 use crate::open::OpenRequest;
 use crate::paths::MappingId;
 use crate::search::matcher::{QueryReject, SearchOutcome};
+use crate::search::query::Query;
 use crate::search::verify::VerifyOutcome;
 
 /// Something happened.
@@ -32,6 +33,8 @@ pub enum AppEvent {
     Paste(String),
     Search(SearchMsg),
     Verify(VerifyMsg),
+    /// One live share answered. Sent once per share, not once per search.
+    Live(LiveMsg),
     Index(IndexMsg),
     Open(OpenMsg),
     Clipboard(ClipboardMsg),
@@ -73,15 +76,35 @@ pub enum HotkeyMsg {
 #[derive(Debug, Clone)]
 pub struct SearchMsg {
     pub epoch: u64,
-    pub query: String,
+    pub query: Query,
     pub elapsed: Duration,
     pub result: Result<SearchOutcome, QueryReject>,
+}
+
+/// What one live share had to say about one query.
+#[derive(Debug, Clone)]
+pub struct LiveMsg {
+    pub epoch: u64,
+    pub query: Query,
+    /// Which share answered.
+    ///
+    /// Carried because several may be configured and each answers for itself.
+    /// A single unkeyed field would describe whichever spoke last, which is
+    /// the bug `IndexMsg::Status` was re-keyed to fix.
+    pub mapping: MappingId,
+    pub elapsed: Duration,
+    /// Boxed, not inline. `AppEvent` is one enum for every message in the
+    /// program and travels through a bounded channel they all share, so its
+    /// size is set by its largest variant and paid for by every event -
+    /// including the ones carrying nothing at all. One allocation per share
+    /// per settled search is not a cost worth measuring against that.
+    pub outcome: Box<crate::search::live::LiveOutcome>,
 }
 
 #[derive(Debug, Clone)]
 pub struct VerifyMsg {
     pub epoch: u64,
-    pub query: String,
+    pub query: Query,
     pub elapsed: Duration,
     pub outcome: VerifyOutcome,
 }
@@ -132,9 +155,6 @@ pub enum OpenMsg {
         /// The code has more pages than the ceiling allows, so the document
         /// stops short of the end.
         truncated: bool,
-        /// Something worth saying about *how* it opened, when it did not open
-        /// the way the viewer setting asked for.
-        note: Option<String>,
     },
     Failed {
         path: Arc<str>,
@@ -183,11 +203,18 @@ impl Redraw {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
     Search {
-        query: String,
+        query: Query,
         epoch: u64,
     },
     Verify {
-        query: String,
+        query: Query,
+        epoch: u64,
+    },
+    /// Ask the live shares. Paced separately from [`Self::Search`]: that one
+    /// sweeps memory this process owns, this one is a round trip on somebody
+    /// else's file server.
+    Live {
+        query: Query,
         epoch: u64,
     },
     RefreshIndex {

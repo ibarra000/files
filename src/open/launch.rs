@@ -86,12 +86,51 @@ fn is_pdf(path: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
-/// Runs a program with one argument, detached.
+/// Runs a program with one argument, detached and maximized.
 ///
 /// Stdio is nulled so a chatty viewer cannot write over the terminal this
 /// program is drawing in, and the child handle is dropped rather than waited
 /// on - the viewer outliving the search is the point.
+///
+/// # Why the show state is set here and cannot be set later
+///
+/// A viewer came up *minimized* if that is how it was last closed. Nothing
+/// here had any say in it: `Command` sets `STARTF_USESTDHANDLES` and nothing
+/// else, so `wShowWindow` is ignored by `CreateProcessW` and the child's first
+/// `ShowWindow(SW_SHOWDEFAULT)` falls back to whatever placement it restored
+/// for itself.
+///
+/// `show_window` is what sets `STARTF_USESHOWWINDOW`, and it is the only hook
+/// that reaches that *first* call. Afterwards there is nothing to do it to: the
+/// window belongs to another process, finding its handle is a race against its
+/// own startup, and `ShowWindow` from outside would fight whatever the viewer
+/// was in the middle of doing.
 fn spawn(program: &str, path: &str) -> Result<(), LaunchError> {
+    #[cfg(windows)]
+    {
+        // Through the shell rather than `Command`, for one reason:
+        // `CreateProcessW` ignores `wShowWindow` unless `STARTF_USESHOWWINDOW`
+        // is set, and `std`'s only hook for that - `CommandExt::show_window` -
+        // is still unstable. `ShellExecuteW` takes the show state as an
+        // argument, resolves a bare program name against `PATH` and the App
+        // Paths registry exactly as `Command` does, and is already the way
+        // every other launch here goes out.
+        //
+        // The argument is quoted, which is safe rather than hopeful: this is
+        // the one place a path becomes text to be re-parsed, and a Windows
+        // file name cannot contain a double quote, so wrapping it in quotes
+        // cannot be defeated by any name the share can hold.
+        let quoted = format!("\"{path}\"");
+        shell_execute(program, Some(&quoted)).map_err(|e| match e {
+            // The shell says "file not found" about the *program* here.
+            LaunchError::Io(_) if !Path::new(program).is_file() => {
+                LaunchError::ViewerNotFound(program.to_string())
+            }
+            other => other,
+        })
+    }
+
+    #[cfg(not(windows))]
     Command::new(program)
         .arg(path)
         .stdin(Stdio::null())
@@ -105,6 +144,31 @@ fn spawn(program: &str, path: &str) -> Result<(), LaunchError> {
         })
 }
 
+/// Lets the program we are about to start take the foreground from us.
+///
+/// Windows refuses a foreground change from a process that does not already
+/// own the foreground, which is why a viewer launched from here came up
+/// *behind* everything with its taskbar button flashing. This is the documented
+/// way to hand that right over, and it only works while the caller still has
+/// it - so it has to happen on the thread that owns the panel, before the panel
+/// is dismissed, rather than on the worker that eventually does the launching.
+///
+/// `ASFW_ANY` rather than a process id: the id is not known until the child
+/// exists, and for the shell path there is no child of ours at all - the
+/// association is opened by a process that may already be running.
+#[cfg(windows)]
+pub fn allow_foreground_handover() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+    // SAFETY: no pointers, no handles. Fails harmlessly - returning zero - when
+    // this process is not the foreground one, which is exactly the case where
+    // there is nothing to hand over.
+    unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+}
+
+/// Off Windows there is no foreground lock to negotiate with.
+#[cfg(not(windows))]
+pub fn allow_foreground_handover() {}
+
 /// Opens a file with whatever is registered for its type.
 ///
 /// Public because the settings window opens the configuration file with it,
@@ -112,11 +176,21 @@ fn spawn(program: &str, path: &str) -> Result<(), LaunchError> {
 /// that kind of file, rather than an editor this program picked for them.
 #[cfg(windows)]
 pub fn shell_open(path: &str) -> Result<(), LaunchError> {
+    shell_execute(path, None)
+}
+
+/// `ShellExecuteW`, with an optional command line for the thing being run.
+///
+/// `params` is `None` when `file` is a document to be opened with whatever is
+/// registered for it, and `Some` when `file` is a program and `params` is what
+/// to hand it.
+#[cfg(windows)]
+fn shell_execute(path: &str, params: Option<&str>) -> Result<(), LaunchError> {
     use windows_sys::Win32::System::Com::{
         COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
     };
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
-    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWMAXIMIZED;
 
     /// `ShellExecuteW` returns a fake `HINSTANCE`. Anything above this is
     /// success; at or below it the value is an error code. A genuinely
@@ -128,6 +202,8 @@ pub fn shell_open(path: &str) -> Result<(), LaunchError> {
 
     let file = crate::index::win_util::wide_path(Path::new(path), false);
     let verb: [u16; 5] = [b'o' as u16, b'p' as u16, b'e' as u16, b'n' as u16, 0];
+    let args: Option<Vec<u16>> = params.map(|p| p.encode_utf16().chain(Some(0)).collect());
+    let args_ptr = args.as_ref().map_or(std::ptr::null(), |a| a.as_ptr());
 
     // The shell wants COM on the calling thread. This runs on the dedicated
     // open worker, which does nothing else, so initialising it here is both
@@ -143,17 +219,25 @@ pub fn shell_open(path: &str) -> Result<(), LaunchError> {
         );
     }
 
-    // SAFETY: `file` and `verb` are NUL-terminated UTF-16 buffers that outlive
-    // the call; the remaining pointers are null, which the API documents as
-    // "no parameters", "no working directory" and "no owner window".
+    // SAFETY: `file`, `verb` and `args` are NUL-terminated UTF-16 buffers that
+    // outlive the call; the remaining pointers are null, which the API
+    // documents as "no working directory" and "no owner window".
     let result = unsafe {
         ShellExecuteW(
             std::ptr::null_mut(),
             verb.as_ptr(),
             file.as_ptr(),
+            args_ptr,
             std::ptr::null(),
-            std::ptr::null(),
-            SW_SHOWNORMAL,
+            // Maximized, not `SW_SHOWNORMAL`. That one means "restore it to
+            // the size and position it had", which is a positive instruction
+            // *not* to fill the screen - and a drawing is the one thing
+            // somebody opens precisely in order to look at closely.
+            //
+            // A hint only: a viewer that is already running takes the file
+            // through DDE or COM and uses whatever window state it already
+            // has. There is nothing on this side that can change that.
+            SW_SHOWMAXIMIZED,
         )
     } as isize;
 
@@ -179,13 +263,22 @@ fn shell_open(path: &str) -> Result<(), LaunchError> {
 /// Asks `where` rather than spawning the viewer: the point is to warn someone
 /// before they need it, not to open a window they did not ask for.
 pub fn avwin_available() -> bool {
+    program_on_path(AVWIN)
+}
+
+/// Whether a bare program name resolves, for the startup warning and
+/// `--doctor`.
+///
+/// Asks `where` rather than running the program: the point is to say so before
+/// anybody needs it, not to open a window they did not ask for.
+pub fn program_on_path(program: &str) -> bool {
     #[cfg(windows)]
     let mut probe = Command::new("where");
     #[cfg(not(windows))]
     let mut probe = Command::new("which");
 
     probe
-        .arg(AVWIN)
+        .arg(program)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

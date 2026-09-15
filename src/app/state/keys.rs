@@ -187,6 +187,9 @@ impl AppState {
 
             Key::F(2) => self.toggle_viewer(now),
 
+            Key::F(3) => self.cycle_match_mode(now),
+            Key::F(4) => self.cycle_file_type(now),
+
             Key::F(5) => self.open_shares(),
             _ => Response::none(),
         };
@@ -229,6 +232,40 @@ impl AppState {
             );
             Response::redraw()
         }
+    }
+
+    // --- narrowing what is already on screen -------------------------------
+
+    /// Steps the match mode, and rewrites the line to say so.
+    ///
+    /// The line is edited rather than a filter being held beside it, and that
+    /// is the whole design: the query lives in exactly one place, so it is
+    /// recalled with the line, copied with the line, and visible without a
+    /// chip anybody has to notice. What will run is always what is on screen.
+    ///
+    /// `Urgency::Complete`, not `Typed`: this is a deliberate press rather
+    /// than a character on the way to a longer code, so there is nothing to
+    /// wait for. The same argument the paste path makes.
+    fn cycle_match_mode(&mut self, now: Instant) -> Response {
+        let next = self.query.with_mode(self.query.mode().next());
+        self.retype(next.to_line(), now)
+    }
+
+    /// Steps the type filter, and rewrites the line to say so.
+    fn cycle_file_type(&mut self, now: Instant) -> Response {
+        let next = self.query.with_types(self.query.next_types());
+        self.retype(next.to_line(), now)
+    }
+
+    /// Replaces the line with one this program composed.
+    ///
+    /// Not a no-op guard on an unchanged line: `next_types` can legitimately
+    /// return what is already there when the line was hand-typed, and a key
+    /// that silently does nothing is worse than one that re-runs a search
+    /// costing a millisecond.
+    fn retype(&mut self, line: String, now: Instant) -> Response {
+        self.input.set_text(line);
+        self.on_input_changed(now, Urgency::Complete)
     }
 
     // --- arrows -----------------------------------------------------------
@@ -303,7 +340,7 @@ impl AppState {
             self.search_due_at = None;
             self.verify_due_at = Some(self.last_frame);
             r = r.with(Cmd::Search {
-                query: self.input.text().to_string(),
+                query: self.query.clone(),
                 epoch: self.query_epoch,
             });
         }

@@ -17,6 +17,8 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
+use files::search::query::Query;
+
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -53,7 +55,7 @@ fn simd_versus_naive(c: &mut Criterion) {
             b.iter(|| {
                 matcher::search(
                     &snap,
-                    "job_0012345",
+                    &Query::contains("job_0012345"),
                     kind,
                     &Hidden::none(),
                     &CancelToken::never(),
@@ -78,7 +80,7 @@ fn scaling(c: &mut Criterion) {
             b.iter(|| {
                 matcher::search(
                     snap,
-                    "_0042_",
+                    &Query::contains("_0042_"),
                     MatcherKind::Simd,
                     &Hidden::none(),
                     &CancelToken::never(),
@@ -110,7 +112,7 @@ fn query_shape(c: &mut Criterion) {
             b.iter(|| {
                 matcher::search(
                     &snap,
-                    query,
+                    &Query::contains(query),
                     MatcherKind::Simd,
                     &Hidden::none(),
                     &CancelToken::never(),
@@ -139,8 +141,14 @@ fn cancellation_latency(c: &mut Criterion) {
                 // fixed cost of noticing.
                 epoch.bump();
                 let started = Instant::now();
-                let _ = matcher::search(&snap, "job", MatcherKind::Simd, &Hidden::none(), &token)
-                    .unwrap();
+                let _ = matcher::search(
+                    &snap,
+                    &Query::contains("job"),
+                    MatcherKind::Simd,
+                    &Hidden::none(),
+                    &token,
+                )
+                .unwrap();
                 total += started.elapsed();
             }
             total
@@ -249,8 +257,13 @@ fn tree_scaling(c: &mut Criterion) {
             &index,
             |b, index| {
                 b.iter(|| {
-                    matcher::search_tree(index, "123456-07", &Hidden::none(), &CancelToken::never())
-                        .unwrap()
+                    matcher::search_tree(
+                        index,
+                        &Query::contains("123456-07"),
+                        &Hidden::none(),
+                        &CancelToken::never(),
+                    )
+                    .unwrap()
                 });
             },
         );
@@ -264,7 +277,7 @@ fn tree_scaling(c: &mut Criterion) {
                 b.iter(|| {
                     matcher::search_tree(
                         index,
-                        "job_012345",
+                        &Query::contains("job_012345"),
                         &Hidden::none(),
                         &CancelToken::never(),
                     )

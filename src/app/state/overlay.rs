@@ -82,11 +82,13 @@ impl AppState {
     ///
     /// This is the filter that keeps the prefixes typed on the way to a code
     /// out of the recall list, and it is deliberately **not** "a search came
-    /// back". The local match has no debounce at all - it runs on every
-    /// keystroke and answers in well under a millisecond - so `inv` is already
-    /// in [`QueryPhase::Local`] before the `o` of `invoice` is pressed. Gating
-    /// on a resolved search would remember every prefix, which is precisely the
-    /// bug this exists to prevent.
+    /// back". The local match waits out [`crate::config::SEARCH_DEBOUNCE`],
+    /// which is 300ms - an ordinary pause between syllables - so `inv` reaches
+    /// [`QueryPhase::Local`] while somebody is still reading the rest of the
+    /// code off a drawing. Gating on a resolved search would remember every
+    /// prefix, which is precisely the bug this exists to prevent. That clock is
+    /// five times shorter than [`crate::config::REMEMBER_DEBOUNCE`], and the
+    /// gap between them is the whole of what separates a prefix from a code.
     ///
     /// Nor can `Local` simply be excluded. `run_verify` skips the server
     /// entirely when there is no single flat share to ask - the shipped

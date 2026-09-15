@@ -138,8 +138,8 @@ impl HotkeyThread {
     /// when this returns, and stays there until the transition has played and
     /// [`Self::hide`] is called. A window that vanished on the keystroke would
     /// have no exit transition, however carefully one was written.
-    pub fn dismiss(&self) {
-        self.post(WM_APP_DISMISS, 0, 0);
+    pub fn dismiss(&self, handing_over: bool) {
+        self.post(WM_APP_DISMISS, usize::from(handing_over), 0);
     }
 
     /// The exit transition has finished; take the window off the screen.
@@ -227,7 +227,7 @@ pub fn spawn(
         }
         Err(_) => {
             let _ = events.send(AppEvent::Hotkey(HotkeyMsg::Unavailable {
-                reason: "the hotkey listener did not start".into(),
+                reason: "The hotkey listener did not start".into(),
             }));
             Ok(None)
         }
@@ -243,9 +243,8 @@ fn registration_detail(hk: Hotkey, code: u32) -> String {
         // as it is right, and a wrong guess sends somebody hunting for a
         // process that was never running.
         format!(
-            "{chord} is already claimed, either by Windows itself or by another program \
-             (a second copy of this one would do it). Set `hotkey` in config.toml to a \
-             different combination, or to \"off\"."
+            "{chord} is already claimed \u{b7} set hotkey in config.toml to another \
+             combination, or to \"off\""
         )
     } else {
         format!("{chord} could not be registered (error {code})")
@@ -292,7 +291,7 @@ fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
         match msg.message {
             WM_HOTKEY if msg.wParam as i32 == HOTKEY_ID => summoner.toggle(tx, panel),
-            WM_APP_DISMISS => summoner.dismiss(tx),
+            WM_APP_DISMISS => summoner.dismiss(tx, msg.wParam != 0),
             WM_APP_HIDE => summoner.hide(panel),
             WM_APP_SUMMON if !summoner.shown => summoner.summon(tx, panel),
             _ => {}
@@ -315,12 +314,20 @@ struct Summoner {
     /// An `isize` rather than an `HWND` only because the field would otherwise
     /// make this struct un-`Send` for no reason; it never leaves this thread.
     prev: isize,
+    /// The panel is going away so a viewer can come up, rather than because
+    /// somebody pressed Escape.
+    ///
+    /// Set when the dismissal is asked for and read when the window is
+    /// actually hidden, which are two messages apart. See [`Self::hide`].
+    handing_over: bool,
 }
 
 impl Summoner {
     fn toggle(&mut self, tx: &Events, panel: &Panel) {
         if self.shown {
-            self.dismiss(tx);
+            // The hotkey pressed again, which is a dismissal like Escape: no
+            // viewer is coming, so the foreground goes back where it was.
+            self.dismiss(tx, false);
         } else {
             self.summon(tx, panel);
         }
@@ -331,11 +338,14 @@ impl Summoner {
     /// The drawing thread plays the exit transition and asks for
     /// `WM_APP_HIDE` when it has finished. Idempotent, because Escape followed
     /// by the hotkey is an ordinary sequence.
-    fn dismiss(&mut self, tx: &Events) {
+    fn dismiss(&mut self, tx: &Events, handing_over: bool) {
         if !self.shown {
             return;
         }
         self.shown = false;
+        // Remembered here because `hide` is posted later, by the shell, and
+        // has no way of knowing why the panel is going away.
+        self.handing_over = handing_over;
         let _ = tx.send(AppEvent::Hotkey(HotkeyMsg::Dismissed));
     }
 
@@ -400,12 +410,21 @@ impl Summoner {
             // does this by itself, but "usually" means the case it misses is
             // the one where somebody typed a code, dismissed the panel, and
             // found their keystrokes going to the desktop.
+            //
+            // Except when a viewer is on its way up. Then the window that was
+            // in front before is precisely the wrong answer: handing it the
+            // foreground is a race against the viewer, and it is a race the
+            // viewer loses, because it is still starting. That is most of why
+            // a drawing used to open *behind* the window somebody opened it
+            // from. Leaving the foreground alone lets the viewer take it with
+            // the right this process granted in `dispatch`.
             let prev = self.prev as HWND;
-            if !prev.is_null() && IsWindow(prev) != 0 {
+            if !self.handing_over && !prev.is_null() && IsWindow(prev) != 0 {
                 SetForegroundWindow(prev);
             }
         }
         self.prev = 0;
+        self.handing_over = false;
     }
 
     /// Takes the foreground, including from a window belonging to somebody

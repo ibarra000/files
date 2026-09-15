@@ -22,6 +22,7 @@ use files::app::state::AppState;
 use files::app::state::pointer::Intent;
 use files::config::{Settings, VISIBLE_ROWS};
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 use proptest::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -131,7 +132,7 @@ fn apply(s: &mut AppState, step: &Step, clock: &mut Instant) -> Response {
             s.update(
                 AppEvent::Search(SearchMsg {
                     epoch: s.query_epoch(),
-                    query: s.input.text().to_string(),
+                    query: Query::parse(s.input.text()),
                     elapsed: Duration::from_micros(200),
                     result: Ok(SearchOutcome {
                         hits,
@@ -317,7 +318,7 @@ proptest! {
             s.update(
                 AppEvent::Search(SearchMsg {
                     epoch: s.query_epoch(),
-                    query: s.input.text().to_string(),
+                    query: Query::parse(s.input.text()),
                     elapsed: Duration::from_micros(200),
                     result: Ok(SearchOutcome {
                         hits,

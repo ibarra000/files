@@ -34,6 +34,13 @@ use files::config::file as configfile;
 use files::index::enumerate::DirSource;
 
 fn main() -> io::Result<()> {
+    // First, and before anything opens a window. `eframe` and `winit`
+    // report through the `log` facade, and with nothing installed they
+    // report into nothing - which is how `lens` came to ship opaque while
+    // the graphics stack said so on every run. This window is the one that
+    // asks for per-pixel alpha now. See `files::log`.
+    files::log::install();
+
     let args = match cli::parse_env() {
         Ok(args) => args,
         Err(err) => {

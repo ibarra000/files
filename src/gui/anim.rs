@@ -1,53 +1,32 @@
-//! Transitions, as a pure function of elapsed time.
+//! The one thing on the panel that still takes time, and it is not decoration.
 //!
 //! Nothing here reads a clock, opens a window or knows the toolkit exists.
 //! [`Motion::advance`] takes the seconds since the last frame and returns what
 //! to draw - the same bargain [`crate::app::state::AppState::update`] makes
-//! with `Instant`, and for the same reason: a transition that can only be
-//! checked by watching it is a transition nobody checks.
+//! with `Instant`, and for the same reason: behaviour that can only be checked
+//! by watching it is behaviour nobody checks.
 //!
-//! # One scalar, eased at the point of reading
+//! # Why there is almost nothing here now
 //!
-//! Presence is a single value moving linearly between 0 and 1, and every
-//! curve below is a function of *that* rather than of a per-phase timer. Two
-//! things fall out of it for free, and both are the difference between a
-//! transition and a flicker:
+//! This file used to carry the panel's whole entrance: a presence scalar eased
+//! at the point of reading, a height tween, a cross-fade between bodies, a
+//! sliding selection, and an indeterminate progress bar. All of it worked, and
+//! all of it was a claim about nothing anybody had asked to be told.
 //!
-//! * a dismissal interrupting a summon leaves from where the panel actually
-//!   is, rather than snapping to fully-present and then leaving;
-//! * it leaves *proportionally* - from 0.4 it takes 0.4 of a dismissal - so a
-//!   panel barely arrived does not linger on its way out.
+//! The cost was not the curves, it was what drove them. The panel *is* the
+//! window - [`crate::gui::overlay::show`] paints into `ui.max_rect()` - so
+//! every frame of a height transition was a `SetWindowPos` and a swapchain
+//! reconfigure. Sixty a second, to move a list by forty points.
 //!
-//! The entrance curve run backwards is also the correct exit: read forwards it
-//! decelerates into place, read backwards it accelerates away.
-
-/// How long the panel takes to arrive.
-pub const SUMMON: f32 = 0.140;
-/// And to leave. Shorter, because going away should not be something you wait
-/// for.
-pub const DISMISS: f32 = 0.090;
-/// How long the panel takes to settle at a new height.
-pub const HEIGHT: f32 = 0.160;
-/// A cross-fade between two bodies.
-pub const CROSS: f32 = 0.110;
-/// The selection sliding from one row to the next.
-pub const SLIDE: f32 = 0.090;
-
-/// How long something must be busy before it is worth saying so.
-pub const LOAD_DELAY: f32 = 0.250;
-/// And how long the bar stays once it has appeared.
-///
-/// Without this, work finishing at 260ms shows a bar for ten milliseconds -
-/// which is the flash the delay exists to prevent, arriving one frame later
-/// and one frame smaller.
-pub const LOAD_MIN_VISIBLE: f32 = 0.400;
-/// One pass of the indeterminate sweep.
-pub const LOAD_SWEEP: f32 = 1.100;
-
-/// How far the panel rises as it arrives, in points.
-pub const RISE: f32 = 8.0;
-/// And how much smaller it starts.
-pub const SCALE_FROM: f32 = 0.985;
+//! So the summon and the dismissal are instant, the height snaps, the body
+//! changes in one pass, the selection appears where it belongs, and a search
+//! in flight says so in words rather than by moving.
+//!
+//! What survives is [`Hold`]: a body that is empty for one frame on its way to
+//! a perfectly good list must not be drawn as empty, and that is the only
+//! reason this panel ever asks for a frame it was not given an event for.
+//!
+//! The curves are in this repository's history.
 
 /// How long the body must go on wanting to be empty before it is allowed to.
 ///
@@ -55,8 +34,14 @@ pub const SCALE_FROM: f32 = 0.985;
 /// another thread, so the frame that asks the question is drawn before the
 /// answer arrives. Anything that empties the result list therefore empties it
 /// on the way to a perfectly good result set - and an empty body is not a
-/// shorter list, it is a *different* body: three hundred points shorter,
-/// reached through a cross-fade, with the footer chips re-flowing around it.
+/// shorter list, it is a *different* body: three hundred points shorter, with
+/// the footer chips re-flowing around it.
+///
+/// This matters more now, not less. The cross-fade used to dissolve a
+/// transient empty over a hundred and ten milliseconds and dissolve it back;
+/// without it the same frame is an instant snap from four hundred points to a
+/// hundred and sixty and back again. The one thing this guards against is the
+/// thing that got louder.
 ///
 /// `on_input_changed` no longer clears the list, so this is the backstop
 /// rather than the fix. It exists because there is more than one way to end up
@@ -64,49 +49,23 @@ pub const SCALE_FROM: f32 = 0.985;
 /// verification replacing the list - and none of them should be able to make
 /// the panel flinch.
 ///
-/// Seven frames at sixty. It delays a genuine "nothing matched" by less than
-/// the cross-fade that then plays it in, which is to say by nothing anybody
-/// can see.
+/// Seven frames at sixty: long enough to swallow a transient, far too short to
+/// delay a genuine "nothing matched" by anything anybody can see.
 pub const EMPTY_HOLD: f32 = 0.120;
 
 /// The most time one frame may claim.
 ///
 /// The first frame after an hour in the notification area reports the hour.
-/// Without a ceiling every transition is over before the monitor has drawn it
-/// once, which looks exactly like having no transitions at all.
+/// Without a ceiling that one frame runs out [`EMPTY_HOLD`] before the body has
+/// been drawn once - so the one thing this file still does would be skipped by
+/// the frame that was meant to start it.
 pub const MAX_DT: f32 = 0.100;
-
-#[inline]
-pub fn ease_out_cubic(t: f32) -> f32 {
-    let u = 1.0 - t;
-    1.0 - u * u * u
-}
-
-#[inline]
-pub fn ease_out_quint(t: f32) -> f32 {
-    let u = 1.0 - t;
-    1.0 - u * u * u * u * u
-}
-
-#[inline]
-pub fn ease_in_out_cubic(t: f32) -> f32 {
-    if t < 0.5 {
-        4.0 * t * t * t
-    } else {
-        let u = -2.0 * t + 2.0;
-        1.0 - u * u * u / 2.0
-    }
-}
-
-#[inline]
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
-}
 
 /// Which body the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Content {
-    /// Nothing typed: recent codes, or the first-run block if there are none.
+    /// The codes used before, while the Up arrow is browsing them. Never on
+    /// screen otherwise.
     Recent,
     Results,
     /// A reason there are none.
@@ -117,281 +76,22 @@ pub enum Content {
 }
 
 /// Where the panel is in its life.
+///
+/// Two states, where there were four. `Summoning` and `Dismissing` were the
+/// entrance and the exit; both are now instant, so there is no longer any
+/// moment at which the panel is partly present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Phase {
     #[default]
     Hidden,
-    Summoning,
     Shown,
-    Dismissing,
-}
-
-/// A value on its way to another value.
-#[derive(Debug, Clone, Copy)]
-pub struct Tween {
-    from: f32,
-    to: f32,
-    cur: f32,
-    t: f32,
-    dur: f32,
-    eps: f32,
-}
-
-impl Tween {
-    pub fn new(value: f32, dur: f32, eps: f32) -> Self {
-        Self {
-            from: value,
-            to: value,
-            cur: value,
-            t: 1.0,
-            dur,
-            eps,
-        }
-    }
-
-    pub fn retarget(&mut self, to: f32) {
-        // `eps` is what stops half a point of layout jitter restarting the
-        // animation every frame and pinning the repaint request on for ever.
-        if (to - self.to).abs() <= self.eps {
-            return;
-        }
-        // From where it *is*, not from where it was aimed. Restarting from
-        // `from` is how a panel already halfway to 300 points snaps back to
-        // 200 before setting off for 400.
-        self.from = self.cur;
-        self.to = to;
-        self.t = 0.0;
-    }
-
-    pub fn advance(&mut self, dt: f32) {
-        if self.t >= 1.0 {
-            return;
-        }
-        self.t = (self.t + dt / self.dur).min(1.0);
-        self.cur = lerp(self.from, self.to, ease_in_out_cubic(self.t));
-    }
-
-    pub fn snap(&mut self) {
-        self.cur = self.to;
-        self.from = self.to;
-        self.t = 1.0;
-    }
-
-    pub fn value(self) -> f32 {
-        self.cur
-    }
-
-    pub fn target(self) -> f32 {
-        self.to
-    }
-
-    pub fn running(self) -> bool {
-        self.t < 1.0
-    }
-}
-
-/// The selection highlight: a tween that knows the difference between moving
-/// and appearing.
-#[derive(Debug, Clone, Copy)]
-struct Slide {
-    inner: Tween,
-    armed: bool,
-}
-
-impl Slide {
-    fn new() -> Self {
-        Self {
-            inner: Tween::new(0.0, SLIDE, 0.25),
-            armed: false,
-        }
-    }
-
-    fn retarget(&mut self, to: Option<f32>) {
-        match to {
-            None => self.armed = false,
-            Some(y) if !self.armed => {
-                // The first selection since there was none has to *appear*
-                // where it belongs. A plain tween would fly it in from the top
-                // of the list every time a search returned.
-                self.armed = true;
-                self.inner = Tween::new(y, SLIDE, 0.25);
-            }
-            Some(y) => self.inner.retarget(y),
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-
-    fn advance(&mut self, dt: f32) {
-        if self.armed {
-            self.inner.advance(dt);
-        }
-    }
-
-    fn value(self) -> Option<f32> {
-        self.armed.then(|| self.inner.value())
-    }
-
-    fn running(self) -> bool {
-        self.armed && self.inner.running()
-    }
-}
-
-/// What the two bodies look like mid-change.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ContentFade {
-    pub leaving: Option<Content>,
-    pub leaving_alpha: f32,
-    pub showing: Content,
-    pub showing_alpha: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Cross {
-    showing: Content,
-    leaving: Option<Content>,
-    t: f32,
-}
-
-impl Cross {
-    fn retarget(&mut self, next: Content) {
-        if next == self.showing {
-            return;
-        }
-        // Changing back to the thing that is still fading out. There is
-        // nothing to cross-fade: what is on screen already *is* `next`, so the
-        // honest answer is to cancel the fade rather than start a second one.
-        //
-        // Without this the result list dissolved into itself on every
-        // keystroke. The body flipped to `Empty` for the one frame between the
-        // matcher being asked and answering, and flipped straight back - which
-        // left `leaving == showing == Results` with `t` mid-flight, and
-        // `visual` below duly faded the list out over 45% of the duration and
-        // back in over the remaining 55%, with no overlap. A hundred and ten
-        // milliseconds of a list disappearing and returning, per character,
-        // with nothing about it having changed.
-        if self.leaving == Some(next) {
-            self.leaving = None;
-            self.t = 1.0;
-            self.showing = next;
-            return;
-        }
-        // Mid-flight the thing actually on screen is `leaving`; `showing` has
-        // barely begun to appear. Promoting it would cross-fade *from*
-        // something nobody has seen, which reads as a flicker rather than as a
-        // change. Past halfway that is no longer true.
-        if self.leaving.is_none() || self.t >= 0.5 {
-            self.leaving = Some(self.showing);
-            self.t = 0.0;
-        }
-        self.showing = next;
-    }
-
-    fn advance(&mut self, dt: f32) {
-        if self.leaving.is_none() {
-            return;
-        }
-        self.t = (self.t + dt / CROSS).min(1.0);
-        if self.t >= 1.0 {
-            self.leaving = None;
-        }
-    }
-
-    fn visual(self) -> ContentFade {
-        match self.leaving {
-            None => ContentFade {
-                leaving: None,
-                leaving_alpha: 0.0,
-                showing: self.showing,
-                showing_alpha: 1.0,
-            },
-            // Out over the first 45%, in over the last 55%, with no overlap.
-            // Text dissolving through text is unreadable: help and results at
-            // half opacity each is a smear, not a transition.
-            Some(prev) => ContentFade {
-                leaving: Some(prev),
-                leaving_alpha: (1.0 - self.t / 0.45).clamp(0.0, 1.0),
-                showing: self.showing,
-                showing_alpha: ((self.t - 0.45) / 0.55).clamp(0.0, 1.0),
-            },
-        }
-    }
-
-    fn running(self) -> bool {
-        self.leaving.is_some()
-    }
-}
-
-/// The indeterminate progress bar.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Bar {
-    pub alpha: f32,
-    /// Where the sweep has got to, 0 to 1.
-    pub sweep: f32,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Loading {
-    busy_for: f32,
-    shown_for: f32,
-    latched: bool,
-    sweep: f32,
-    alpha: Tween,
-}
-
-impl Loading {
-    fn new() -> Self {
-        Self {
-            busy_for: 0.0,
-            shown_for: 0.0,
-            latched: false,
-            sweep: 0.0,
-            alpha: Tween::new(0.0, 0.12, 0.001),
-        }
-    }
-
-    fn advance(&mut self, dt: f32, busy: bool) {
-        if busy {
-            self.busy_for += dt;
-        } else {
-            self.busy_for = 0.0;
-        }
-
-        if !self.latched && self.busy_for >= LOAD_DELAY {
-            self.latched = true;
-            self.shown_for = 0.0;
-        }
-        if self.latched {
-            self.shown_for += dt;
-            self.sweep = (self.sweep + dt / LOAD_SWEEP).fract();
-            if !busy && self.shown_for >= LOAD_MIN_VISIBLE {
-                self.latched = false;
-            }
-        }
-        self.alpha.retarget(if self.latched { 1.0 } else { 0.0 });
-        self.alpha.advance(dt);
-    }
-
-    fn visual(self) -> Option<Bar> {
-        (self.alpha.value() > 0.001).then(|| Bar {
-            alpha: self.alpha.value(),
-            sweep: self.sweep,
-        })
-    }
-
-    fn running(self) -> bool {
-        self.latched || self.alpha.running()
-    }
 }
 
 /// Refuses to let the body go empty until it has meant it for a moment.
 ///
-/// Sits between [`Motion::retarget`] and the tweens, so every one of them is
-/// spared the transient. Only the *body* is held: whether something is busy is
-/// a claim about the program, not about what is on screen, and holding it back
-/// would delay the progress bar for no reason.
+/// Sits between [`Motion::retarget`] and what is drawn, so the transient never
+/// reaches the screen. The last thing in this file that takes time, and the
+/// only reason the panel still asks for a frame it was not given an event for.
 #[derive(Debug, Clone, Copy)]
 struct Hold {
     granted: Target,
@@ -420,10 +120,7 @@ impl Hold {
             self.granted = want;
             return want;
         }
-        Target {
-            busy: want.busy,
-            ..self.granted
-        }
+        self.granted
     }
 
     /// Whether a decision is still pending, and therefore whether another
@@ -442,34 +139,21 @@ pub struct Target {
     /// Top of the selected row, in points from the top of the list, or `None`
     /// when nothing is selected.
     pub selection_y: Option<f32>,
-    pub busy: bool,
 }
 
 /// What to draw. Pure data: no toolkit type appears here, so a test can assert
 /// on it with no window, no context and no GPU.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Visual {
-    pub alpha: f32,
-    /// Points of downward displacement from rest. Zero is home.
-    pub dy: f32,
-    pub scale: f32,
     pub height: f32,
-    pub content: ContentFade,
+    pub content: Content,
     pub selection_y: Option<f32>,
-    pub loading: Option<Bar>,
 }
 
-/// The panel's motion.
+/// The panel's motion, such as it is.
 #[derive(Debug, Clone, Copy)]
 pub struct Motion {
     phase: Phase,
-    /// Presence, linear in time. See the module note.
-    a: f32,
-    height: Tween,
-    cross: Cross,
-    sel: Slide,
-    load: Loading,
-    busy: bool,
     /// What the view last asked for, and the gate it has to get through.
     want: Target,
     hold: Hold,
@@ -487,20 +171,9 @@ impl Motion {
             height: 0.0,
             content: Content::Recent,
             selection_y: None,
-            busy: false,
         };
         Self {
             phase: Phase::Hidden,
-            a: 0.0,
-            height: Tween::new(0.0, HEIGHT, 0.5),
-            cross: Cross {
-                showing: Content::Recent,
-                leaving: None,
-                t: 1.0,
-            },
-            sel: Slide::new(),
-            load: Loading::new(),
-            busy: false,
             want: start,
             hold: Hold::new(start),
         }
@@ -509,18 +182,17 @@ impl Motion {
     /// Told what the world looks like, before being told how much time passed.
     ///
     /// One retarget point and one advance point, so the order cannot vary
-    /// between call sites. Recorded rather than applied, because the gate on
-    /// an empty body needs to know how long one has been asked for before it
-    /// can decide whether to grant it, and only `advance` is told about time.
+    /// between call sites. Recorded rather than applied, because the gate on an
+    /// empty body needs to know how long one has been asked for before it can
+    /// decide whether to grant it, and only `advance` is told about time.
     pub fn retarget(&mut self, target: Target) {
         self.want = target;
     }
 
     pub fn advance(&mut self, dt: f32) -> Visual {
-        // A non-finite `dt` would poison every accumulator in here permanently
-        // - a panel stuck half-arrived, with no frame able to unstick it. The
-        // toolkit should never hand one over; the cost of not depending on
-        // that is one comparison.
+        // A non-finite `dt` would poison the gate permanently - a body waiting
+        // to go empty with no frame able to let it. The toolkit should never
+        // hand one over; the cost of not depending on that is one comparison.
         let dt = if dt.is_finite() {
             dt.clamp(0.0, MAX_DT)
         } else {
@@ -528,97 +200,33 @@ impl Motion {
         };
 
         let target = self.hold.admit(self.want, dt);
-        self.height.retarget(target.height);
-        self.cross.retarget(target.content);
-        self.sel.retarget(target.selection_y);
-        self.busy = target.busy;
 
-        match self.phase {
-            Phase::Summoning => {
-                self.a = (self.a + dt / SUMMON).min(1.0);
-                if self.a >= 1.0 {
-                    self.phase = Phase::Shown;
-                }
-            }
-            Phase::Dismissing => {
-                self.a = (self.a - dt / DISMISS).max(0.0);
-                if self.a <= 0.0 {
-                    self.phase = Phase::Hidden;
-                }
-            }
-            Phase::Hidden | Phase::Shown => {}
-        }
-
-        // The panel does not grow while it is arriving. The entrance already
-        // carries the motion, and something that rises *and* grows reads as
-        // two things happening to one object rather than one thing happening.
-        if self.phase == Phase::Shown {
-            self.height.advance(dt);
-        } else {
-            self.height.snap();
-        }
-
-        self.cross.advance(dt);
-        self.sel.advance(dt);
-        self.load.advance(dt, self.busy);
-
-        let motion = ease_out_cubic(self.a);
         Visual {
-            // Ahead of the motion, deliberately: the panel should be legible
-            // before it has finished moving, rather than arriving and only
-            // then appearing.
-            alpha: ease_out_quint(self.a),
-            dy: RISE * (1.0 - motion),
-            scale: lerp(SCALE_FROM, 1.0, motion),
-            height: self.height.value(),
-            content: self.cross.visual(),
-            selection_y: self.sel.value(),
-            loading: self.load.visual(),
+            height: target.height,
+            content: target.content,
+            selection_y: target.selection_y,
         }
     }
 
-    /// From wherever it is.
+    /// Immediate.
     ///
-    /// A hotkey pressed forty milliseconds into a dismissal resumes from where
-    /// the panel actually is; it does not restart, and it does not flash.
+    /// The panel is the window, and the hotkey thread has already put the
+    /// window on screen by the time this is called - so there was never
+    /// anything here but a curve to run alongside that.
     pub fn summon(&mut self) {
-        // Arriving is an entrance, not a resize: whatever height the content
-        // wants, start there, with nothing left over from last time.
-        //
-        // Only from hidden, though. A hotkey pressed while the panel is
-        // already up must not snap a height mid-flight or blink the selection
-        // out - from there it is not an arrival at all.
+        // Nothing is inherited from the last time the panel was up: a held body
+        // from a previous session would be a hundred and twenty milliseconds of
+        // somebody else's search. Only from hidden, though - a hotkey pressed
+        // while the panel is already up is not an arrival at all, and must not
+        // reset the gate under a live query.
         if self.phase == Phase::Hidden {
-            self.height.snap();
-            self.sel.disarm();
+            self.hold = Hold::new(self.want);
         }
-        self.phase = if self.a >= 1.0 {
-            Phase::Shown
-        } else {
-            Phase::Summoning
-        };
+        self.phase = Phase::Shown;
     }
 
     pub fn dismiss(&mut self) {
-        self.phase = if self.a <= 0.0 {
-            Phase::Hidden
-        } else {
-            Phase::Dismissing
-        };
-    }
-
-    /// The height the panel is heading for, which is not the height it is at.
-    ///
-    /// The window is sized from this rather than from the current value, so a
-    /// transition costs one resize instead of one per frame. See
-    /// [`crate::gui::frame::Frame::resize`].
-    pub fn height_target(self) -> f32 {
-        self.height.target()
-    }
-
-    /// Whether the height has arrived.
-    pub fn height_settled(self) -> bool {
-        !self.height.running()
+        self.phase = Phase::Hidden;
     }
 
     pub fn phase(self) -> Phase {
@@ -632,20 +240,14 @@ impl Motion {
     /// Whether another frame is owed.
     ///
     /// The single guard on "idle costs nothing": the shell asks for a repaint
-    /// if and only if this is true, so a transition that forgets to finish is
-    /// a process that renders at sixty frames a second in the notification
-    /// area for ever.
+    /// if and only if this is true, so anything in here that forgets to finish
+    /// is a process that renders in the notification area for ever. With the
+    /// transitions gone there are exactly two things that can still owe a
+    /// frame, and it is a body waiting to be allowed to go empty.
     pub fn is_animating(self) -> bool {
         match self.phase {
             Phase::Hidden => false,
-            Phase::Summoning | Phase::Dismissing => true,
-            Phase::Shown => {
-                self.height.running()
-                    || self.cross.running()
-                    || self.sel.running()
-                    || self.load.running()
-                    || self.hold.waiting()
-            }
+            Phase::Shown => self.hold.waiting(),
         }
     }
 }

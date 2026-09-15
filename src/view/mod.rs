@@ -15,8 +15,38 @@
 //!
 //! So it lives here, where both renderers can reach it, and the tests that pin
 //! it come with it.
+//!
+//! # House style
+//!
+//! One rule set, written down once, checked by [`style::violations`] and
+//! applied by tests in every module below. It exists because the panel used to
+//! break all of these at once - a footer that read `Searching...` one second
+//! and `nothing to open` the next, with `Building the file list - 812,000
+//! files so far` in between.
+//!
+//! * **Sentence case.** Not Title Case and not SHOUTING. Key names, program
+//!   names, acronyms and anything read out of the configuration keep their own
+//!   spelling: `Enter`, `avwin.exe`, `PDF`, and a drive called `jobs`.
+//! * **Fragments or sentences by slot, not by module.** The status slot - the
+//!   status line and the toasts that share its 13 pt run - takes no full stop.
+//!   The body pane takes whole sentences and keeps them.
+//! * **`…` (U+2026), never `...`.** Three periods are three glyphs that kern
+//!   badly and read as a pause rather than as work in progress.
+//! * **` · ` joins independent facts.** ` - ` as a sentence connector is
+//!   banned: at the width the footer actually gets it is indistinguishable
+//!   from the hyphen inside `11-D-0704`.
+//! * **Only the first `·`-joined clause is capitalised.** That is what lets
+//!   the shared `label()` fragments in [`crate::index::store`] stay lowercase
+//!   and be capitalised at the point of use by [`sentence`].
+//! * **No run of two spaces.** Spacing is the renderer's business. A line that
+//!   pads itself is a line that has been laid out twice, and the padding is
+//!   what gets ellipsised and what a screen reader reads out.
+//! * **Say "drive" on screen and "share" in the code.** Nobody outside this
+//!   repository calls `R:\` a share.
 
 use std::borrow::Cow;
+
+pub mod style;
 
 pub mod empty;
 pub mod help;
@@ -101,4 +131,47 @@ pub type Block = Vec<Run>;
 /// no styling to apply.
 pub fn plain(block: &Block) -> String {
     block.iter().map(|r| r.text.as_ref()).collect()
+}
+
+/// Capitalises a shared fragment for the head of a line.
+///
+/// The `label()` fragments are written lowercase because most of their uses
+/// are the second clause of a ` · ` join, where a capital would read as a new
+/// sentence. This is for the uses that are not.
+///
+/// First character only, and only where it is alphabetic: a fragment that
+/// begins with a path, a key name or a drive name read out of the
+/// configuration keeps the spelling it was given.
+pub fn sentence(fragment: &str) -> String {
+    let mut chars = fragment.chars();
+    match chars.next() {
+        Some(first) if first.is_lowercase() => {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
+        _ => fragment.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fragment_is_capitalised_for_the_head_of_a_line() {
+        assert_eq!(sentence("no live updates"), "No live updates");
+    }
+
+    /// A fragment that does not begin with a lowercase letter is left exactly
+    /// as it was written: a switch, a code, an acronym.
+    ///
+    /// This is a floor and not a spell-checker. `avwin.exe` begins with a
+    /// lowercase letter like any other word, so the only thing that keeps it
+    /// spelled correctly is not calling this on it - which is why the two
+    /// places that would are written out longhand.
+    #[test]
+    fn a_fragment_that_does_not_start_with_a_word_keeps_its_spelling() {
+        for text in ["--check-config", "11-D-0704", "PDF is in use", ""] {
+            assert_eq!(sentence(text), text, "{text} was rewritten");
+        }
+    }
 }

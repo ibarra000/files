@@ -72,26 +72,12 @@ pub fn row(share: &Row<'_>, now: SystemTime) -> Block {
     out
 }
 
-/// Title for the panel, saying how many shares and how many want attention.
-pub fn title(shares: &[Row<'_>]) -> String {
-    let stale = shares.iter().filter(|r| r.stale.is_some()).count();
-    if stale == 0 {
-        return format!(" Update a drive ({}) ", shares.len());
-    }
-    format!(
-        " Update a drive ({} of {} out of date) ",
-        stale,
-        shares.len()
-    )
-}
-
-/// Shown when there is nothing to choose between.
-///
-/// Reachable only with every share disabled, which is a configuration nobody
-/// arrives at by accident - so it points at the file rather than apologising.
-pub fn empty_message() -> &'static str {
-    "  No shares are set up. Run `files --check-config` to see why."
-}
+// `title` and `empty_message` used to live here. Both described a bordered
+// pane in a terminal: a caption inside the border, padded with a leading and a
+// trailing space, and a message indented by two more. The drive list is drawn
+// into the panel's body now, with no border and no caption - so both had no
+// caller at all, and `empty_message` was two house-style violations (a leading
+// pad and a backtick-quoted command) in a string nothing rendered.
 
 #[cfg(test)]
 mod tests {
@@ -110,6 +96,7 @@ mod tests {
             kind: MappingKind::Tree,
             enabled: true,
             refresh: RefreshPolicy::Manual,
+            depth: crate::config::DEFAULT_LIVE_DEPTH,
         }
     }
 
@@ -196,25 +183,16 @@ mod tests {
         assert!(!row.contains("1,284,551"), "{row}");
     }
 
+    /// Every row this module can produce, held to the house style.
+    ///
+    /// The drive name and the age come from the configuration and the clock,
+    /// so what is being checked here is the shape of the line around them -
+    /// which is the part this module writes.
     #[test]
-    fn the_title_counts_the_shares_that_want_attention() {
+    fn every_row_keeps_the_house_style() {
         let (a, b) = (mapping("jobs"), mapping("archive"));
-        let (sa, sb) = (status(10, Some(EPOCH)), status(20, Some(EPOCH)));
-        let quiet = vec![
-            Row {
-                mapping: &a,
-                status: &sa,
-                stale: None,
-            },
-            Row {
-                mapping: &b,
-                status: &sb,
-                stale: None,
-            },
-        ];
-        assert_eq!(title(&quiet), " Update a drive (2) ");
-
-        let noisy = vec![
+        let (sa, sb) = (status(10, Some(EPOCH)), status(20, None));
+        let rows = [
             Row {
                 mapping: &a,
                 status: &sa,
@@ -226,10 +204,17 @@ mod tests {
                 stale: None,
             },
         ];
-        assert!(
-            title(&noisy).contains("1 of 2 out of date"),
-            "{}",
-            title(&noisy)
+        // Each run on its own, not the joined block: these three are drawn
+        // as columns, so there is no one line here to check.
+        let lines: Vec<String> = rows
+            .iter()
+            .flat_map(|r| row(r, EPOCH + Duration::from_secs(9_000)))
+            .map(|run| run.text.into_owned())
+            .collect();
+        crate::view::style::check_all(
+            "the drive list",
+            lines.iter().map(String::as_str),
+            crate::view::style::Slot::Body,
         );
     }
 }

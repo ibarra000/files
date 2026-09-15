@@ -13,7 +13,7 @@
 
   # What this installs, and what it deliberately does not
 
-  Three executables into Program Files, one Start-menu shortcut, and - only if
+  Two executables into Program Files, one Start-menu shortcut, and - only if
   asked - a registry value that starts the program at sign-in. It does not add
   anything to `PATH`: `files` is a windowed program summoned by a shortcut, and
   `files-cli` is for the rare support call, so a machine-wide `PATH` entry would

@@ -38,8 +38,6 @@ pub const FIELD_H: f32 = 64.0;
 pub const ROW_H: f32 = 40.0;
 /// The status and key hints.
 pub const FOOTER_H: f32 = 44.0;
-/// The indeterminate progress bar under the field.
-pub const BAR_H: f32 = 2.0;
 
 /// The most rows shown at once.
 ///
@@ -68,14 +66,47 @@ pub const PANEL_MAX_H: f32 = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_
 
 // -- type -------------------------------------------------------------------
 
-/// The system's own typeface, in the three weights this draws with.
+/// The system's own typeface, in the two weights this draws with.
 ///
 /// Loaded from disk rather than bundled: shipping Segoe UI would be a licence
 /// violation, and a Windows without it is a Windows that cannot boot.
-pub const FONT_FILES: [(&str, &str); 3] = [
+pub const FONT_FILES: [(&str, &str); 2] = [
     ("segoe", r"C:\Windows\Fonts\segoeui.ttf"),
     ("segoe-bold", r"C:\Windows\Fonts\segoeuib.ttf"),
-    ("segoe-light", r"C:\Windows\Fonts\segoeuisl.ttf"),
+];
+
+/// Preferred over [`FONT_FILES`] where the machine has them.
+///
+/// Segoe UI Variable is Windows 11's redraw of Segoe, cut specifically to stay
+/// crisp across sizes: `Display` for large text, `Text` for small, where the
+/// original has one set of outlines doing both jobs. Tried first and skipped in
+/// silence on Windows 10, which has neither file.
+///
+/// Same two names, so nothing downstream knows which of the two files it got.
+pub const VARIABLE_FONT_FILES: [(&str, &str); 2] = [
+    ("segoe", r"C:\Windows\Fonts\SegUIVar.ttf"),
+    ("segoe-bold", r"C:\Windows\Fonts\SegUIVarB.ttf"),
+];
+
+/// The tail of every family: the glyphs Segoe UI has not got.
+///
+/// Read from `C:\Windows\Fonts` for the same reason and by the same rule as
+/// [`FONT_FILES`] above - these are fonts the machine already has, and shipping
+/// a copy would be both a licence violation and a megabyte.
+///
+/// That megabyte is what this replaces. `eframe`'s `default_fonts` embedded
+/// Hack, NotoEmoji, Ubuntu-Light and emoji-icon-font - 1.41 MB - in every
+/// binary in this crate, and the only thing the panel ever used them for was
+/// this tail: so that an emoji in a filename came out as a character rather
+/// than as a box. The system fonts buy the same thing for nothing.
+///
+/// Symbol before emoji, deliberately. `seguisym` covers arrows, box-drawing,
+/// mathematical operators and the dingbats that turn up in a filename;
+/// `seguiemj` covers the pictographs. A character in both should be drawn as a
+/// glyph rather than as a picture.
+pub const FALLBACK_FILES: [(&str, &str); 2] = [
+    ("segoe-symbol", r"C:\Windows\Fonts\seguisym.ttf"),
+    ("segoe-emoji", r"C:\Windows\Fonts\seguiemj.ttf"),
 ];
 
 /// What the user is typing: the biggest thing on screen, because it is the
@@ -188,44 +219,45 @@ impl Theme {
     /// two read as one program rather than two, and it is lifted well off
     /// black so the surface has somewhere to put a highlight.
     pub fn dark() -> Self {
-        let text = rgb(0xE8E2D6);
-        let strong = rgb(0xF9F5ED);
-        let dim = rgb(0xAAA192);
+        let text = rgb(0xDCDCDC);
+        let strong = rgb(0xFFFFFF);
+        let dim = rgb(0xA6A6A6);
         // Rules and borders. Must clear 3:1 - WCAG 1.4.11 asks it of a
         // boundary you are meant to be able to see - and must still be
         // fainter than `dim`, or a separator competes with a label.
-        let faint = rgb(0x7E7666);
-        let accent = rgb(0xA6C88F);
+        let faint = rgb(0x828282);
+        let accent = rgb(0xF0F0F0);
         Self {
             dark: true,
-            surface: tint(0x232019, 0xF0),
-            edge: tint(0xC8BFA8, 0x3D),
+            surface: tint(0x1E1E1E, 0xF0),
+            edge: tint(0xC8C8C8, 0x3D),
             text,
             strong,
             dim,
             faint,
             accent,
-            input: rgb(0xF4EFE4),
+            input: rgb(0xFAFAFA),
             caret: accent,
-            selection: tint(0xA6C88F, 0x33),
+            selection: tint(0xFFFFFF, 0x26),
             hover: tint(0xFFFFFF, 0x14),
-            text_selection: tint(0xA6C88F, 0x50),
-            match_run: rgb(0xF2C46E),
+            text_selection: tint(0xFFFFFF, 0x3A),
+            // Brightest and bold, rather than a hue of its own. `row::show`
+            // already draws a matched run in `Weight::Bold`.
+            match_run: strong,
             // Weaker than the light theme's pair. On a low ground the eye has
             // far less headroom above the surface, so the same strength reads
             // as a glow rather than as a shape.
-            well: tint(0x1A1813, 0xF4),
+            well: tint(0x141414, 0xF4),
             lit: tint(0xFFFFFF, 0x10),
             shade: tint(0x000000, 0x2E),
-            chip_bg: tint(0xFFFFFF, 0x1A),
-            chip_fg: rgb(0xEDE6D8),
-            tones: [
-                text,
-                rgb(0x7FD0E0),
-                rgb(0x8ED9A2),
-                rgb(0xEFC05A),
-                rgb(0xF09184),
-            ],
+            // Opaque, unlike every other background here. A key cap is the one
+            // element that is *not* meant to track its ground.
+            chip_bg: rgb(0x3C3C3C),
+            chip_fg: rgb(0xF0F0F0),
+            // Busy and Good give up their hues to `TONE_GLYPH`; Warn and Bad
+            // keep theirs, because a failure has to be unmissable and they are
+            // now the only colour on the panel.
+            tones: [text, dim, strong, rgb(0xEFC05A), rgb(0xF09184)],
         }
     }
 
@@ -249,42 +281,43 @@ impl Theme {
     /// open - so the shading carries the style and the contrast stays where it
     /// was. Where the two disagree, the lever is the surface, never the text.
     pub fn light() -> Self {
-        let text = rgb(0x332F28);
-        let strong = rgb(0x1A1712);
-        let dim = rgb(0x5F594E);
-        let faint = rgb(0x7E7769);
-        let accent = rgb(0x3F5E33);
+        let text = rgb(0x333333);
+        let strong = rgb(0x0D0D0D);
+        let dim = rgb(0x565656);
+        let faint = rgb(0x787878);
+        let accent = rgb(0x1F1F1F);
         Self {
             dark: false,
-            surface: tint(0xEFEBE3, 0xF0),
-            edge: tint(0x4A4238, 0x33),
+            surface: tint(0xF0F0F0, 0xF0),
+            edge: tint(0x3C3C3C, 0x33),
             text,
             strong,
             dim,
             faint,
             accent,
-            input: rgb(0x241F19),
+            input: rgb(0x141414),
             caret: accent,
-            selection: tint(0x3F5E33, 0x2A),
-            hover: tint(0x4A4238, 0x12),
-            text_selection: tint(0x3F5E33, 0x45),
-            // Darker than the amber the dark theme uses, and darker than the
-            // warn tone it is derived from: a matched run is most often read
-            // on the *selected* row, and the light theme's selection is a pale
-            // wash that a mid-amber all but disappears into.
-            match_run: rgb(0x6B4100),
-            well: tint(0xE6E1D6, 0xF6),
+            selection: tint(0x000000, 0x24),
+            hover: tint(0x000000, 0x12),
+            text_selection: tint(0x000000, 0x32),
+            // Darkest and bold, rather than a hue of its own. `row::show`
+            // already draws a matched run in `Weight::Bold`.
+            match_run: strong,
+            // Genuinely darker than the panel on both grounds. The warm pair
+            // this replaces resolved *brighter* than the surface over black,
+            // and passed only because `contrast` is direction-agnostic - so
+            // `press`'s "a trough a shade darker than the panel" is true now.
+            well: tint(0xD9D9D9, 0xF6),
             lit: tint(0xFFFFFF, 0x9A),
-            shade: tint(0xC2B8A6, 0x76),
-            chip_bg: tint(0x4A4238, 0x22),
-            chip_fg: rgb(0x2A251E),
-            tones: [
-                text,
-                rgb(0x1F5A66),
-                rgb(0x2E6B3A),
-                rgb(0x8A4B00),
-                rgb(0xA32820),
-            ],
+            shade: tint(0xB4B4B4, 0x76),
+            // Opaque, unlike every other background here. A key cap is the one
+            // element that is *not* meant to track its ground.
+            chip_bg: rgb(0xFFFFFF),
+            chip_fg: rgb(0x2A2A2A),
+            // Busy and Good give up their hues to `TONE_GLYPH`; Warn and Bad
+            // keep theirs, because a failure has to be unmissable and they are
+            // now the only colour on the panel.
+            tones: [text, dim, strong, rgb(0x8A4B00), rgb(0xA32820)],
         }
     }
 
@@ -312,6 +345,24 @@ impl Theme {
             Emphasis::Strong => self.strong,
             Emphasis::Accent => self.accent,
             Emphasis::Tone(tone) => self.tone(tone),
+        }
+    }
+
+    /// And what weight it is drawn in.
+    ///
+    /// The other half of the same contract, and load-bearing since the palette
+    /// went grey: brightness alone carries about three steps before two of them
+    /// are the same step to anybody not looking for the difference. `Accent` in
+    /// particular is one shade off `text` now, and would mean nothing at all
+    /// without this.
+    pub const fn weight(self, emphasis: Emphasis) -> Weight {
+        match emphasis {
+            Emphasis::Body | Emphasis::Dim => Weight::Regular,
+            Emphasis::Strong | Emphasis::Accent => Weight::Bold,
+            // The two lines that have to land, in the one place where a glyph
+            // and a colour were already not quite enough.
+            Emphasis::Tone(Tone::Warn | Tone::Bad) => Weight::Bold,
+            Emphasis::Tone(_) => Weight::Regular,
         }
     }
 }
@@ -344,20 +395,14 @@ pub const BLUR: f32 = 6.0;
 /// `Shadow::as_shape` fills the rectangle as well as feathering around it, so
 /// both callers below paint a surface over the top afterwards. Without that the
 /// two stack into a muddy patch and whatever wash goes on it reads as dirt.
-fn shadows(
-    painter: &eframe::egui::Painter,
-    rect: Rect,
-    r: u8,
-    alpha: f32,
-    pairs: [(f32, Color32); 2],
-) {
+fn shadows(painter: &eframe::egui::Painter, rect: Rect, r: u8, pairs: [(f32, Color32); 2]) {
     for (offset, colour) in pairs {
         painter.add(
             Shadow {
                 offset: [offset as i8, offset as i8],
                 blur: BLUR as u8,
                 spread: 0,
-                color: faded(colour, alpha),
+                color: colour,
             }
             .as_shape(rect, radius(r)),
         );
@@ -371,17 +416,12 @@ fn shadows(
 /// colour as its ground and is legible only by the shading at its edges. Take
 /// either shadow away and it stops reading as a thing and becomes a smudge.
 ///
-/// `alpha` is the panel's entrance fade, so the shading arrives with everything
-/// else rather than appearing once the panel has landed.
-pub fn raise(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8, alpha: f32) {
-    shadows(
-        painter,
-        rect,
-        r,
-        alpha,
-        [(-LIFT, theme.lit), (LIFT, theme.shade)],
-    );
-    painter.rect_filled(rect, radius(r), faded(theme.surface, alpha));
+/// This used to take the panel's entrance fade, so the shading arrived with
+/// everything else rather than appearing once the panel had landed. There is
+/// no entrance now, so there is nothing to arrive with.
+pub fn raise(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
+    shadows(painter, rect, r, [(-LIFT, theme.lit), (LIFT, theme.shade)]);
+    painter.rect_filled(rect, radius(r), theme.surface);
 }
 
 /// And `rect` as a surface pressed *into* it: the same pair, swapped, over a
@@ -391,29 +431,34 @@ pub fn raise(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8, 
 /// form, so the shading alone would put the light on the wrong side of an
 /// element that is otherwise identical to its ground - and a trough that is a
 /// shade darker than the panel is what says "put something here" anyway.
-pub fn press(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8, alpha: f32) {
-    shadows(
-        painter,
-        rect,
-        r,
-        alpha,
-        [(LIFT, theme.lit), (-LIFT, theme.shade)],
-    );
-    painter.rect_filled(rect, radius(r), faded(theme.well, alpha));
+/// A key cap: [`raise`]'s shading over a fill of its own.
+///
+/// `raise` paints the panel's *own* colour, because a soft-UI surface is the
+/// colour of its ground and is legible only by the shading at its edges. A key
+/// cap is the one element here that is not - a key on a keyboard is a different
+/// piece of plastic from the case - and with the palette down to greys a
+/// tenth-alpha wash over the panel is not a piece of plastic, it is a stain.
+pub fn cap(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
+    shadows(painter, rect, r, [(-LIFT, theme.lit), (LIFT, theme.shade)]);
+    painter.rect_filled(rect, radius(r), theme.chip_bg);
+}
+
+pub fn press(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
+    shadows(painter, rect, r, [(LIFT, theme.lit), (-LIFT, theme.shade)]);
+    painter.rect_filled(rect, radius(r), theme.well);
 }
 
 pub fn radius(r: u8) -> CornerRadius {
     CornerRadius::same(r)
 }
 
-/// The three weights, by role.
+/// The two weights, by role.
 pub fn font(size: f32, weight: Weight) -> FontId {
     FontId::new(size, eframe::egui::FontFamily::Name(weight.family().into()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Weight {
-    Light,
     Regular,
     Bold,
 }
@@ -421,7 +466,6 @@ pub enum Weight {
 impl Weight {
     pub const fn family(self) -> &'static str {
         match self {
-            Self::Light => "segoe-light",
             Self::Regular => "segoe",
             Self::Bold => "segoe-bold",
         }
@@ -677,21 +721,36 @@ mod tests {
     /// The mapping from meaning to colour is total, which is what lets
     /// `src/view/` name emphasis without naming a palette.
     #[test]
-    fn every_emphasis_has_a_colour() {
+    fn every_emphasis_has_a_distinct_appearance() {
         for (name, theme) in both() {
-            let mut colours = vec![
-                theme.emphasis(Emphasis::Body),
-                theme.emphasis(Emphasis::Dim),
-                theme.emphasis(Emphasis::Strong),
-                theme.emphasis(Emphasis::Accent),
-            ];
-            colours.sort_by_key(|c| c.to_array());
+            // Appearance, not colour. In greyscale two emphases can sit a
+            // couple of values apart and satisfy a colour-only check while
+            // being the same thing to anybody not looking for the difference,
+            // so the weight is half the identity.
+            let mut looks = vec![];
+            for emphasis in [
+                Emphasis::Body,
+                Emphasis::Dim,
+                Emphasis::Strong,
+                Emphasis::Accent,
+            ] {
+                looks.push((
+                    theme.emphasis(emphasis).to_array(),
+                    theme.weight(emphasis) as u8,
+                ));
+            }
+            let mut colours: Vec<_> = looks.iter().map(|(c, _)| *c).collect();
+            colours.sort();
             colours.dedup();
             assert_eq!(
                 colours.len(),
                 4,
-                "{name}: two emphases are drawn identically, so one says nothing"
+                "{name}: two emphases are the same colour, so one says nothing"
             );
+
+            looks.sort();
+            looks.dedup();
+            assert_eq!(looks.len(), 4, "{name}: two emphases are drawn identically");
             assert_eq!(
                 theme.emphasis(Emphasis::Tone(Tone::Bad)),
                 theme.tone(Tone::Bad)

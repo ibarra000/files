@@ -38,6 +38,7 @@ use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Theme};
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 
 /// One frame at sixty a second.
 const DT: f32 = 1.0 / 60.0;
@@ -71,7 +72,7 @@ fn with_results(state: &mut AppState, code: &str, hits: Vec<Hit>, matched: u32, 
     state.update(
         AppEvent::Search(SearchMsg {
             epoch,
-            query: code.to_string(),
+            query: Query::contains(code),
             elapsed: Duration::ZERO,
             result: Ok(SearchOutcome {
                 hits,
@@ -159,7 +160,7 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
                     return;
                 }
                 let visual = panel.frame.advance(&panel.state, DT);
-                panel.frame.resize(&visual, false);
+                panel.frame.resize(&visual);
                 files::gui::overlay::show(
                     ui,
                     &panel.state,
@@ -221,7 +222,7 @@ fn a_toast_is_actually_on_screen() {
     let h = harness(toasted(Instant::now()));
     let screen = on_screen(&h);
     assert!(
-        screen.contains("nothing to open"),
+        screen.contains("Nothing to open"),
         "the toast was computed and thrown away:\n{screen}"
     );
 }
@@ -237,7 +238,7 @@ fn a_toast_gives_the_line_back_when_it_expires() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        !screen.contains("nothing to open"),
+        !screen.contains("Nothing to open"),
         "the toast outlived its lifetime:\n{screen}"
     );
 }
@@ -270,7 +271,7 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     );
     // The viewer is still there: it is a fact about the program rather than
     // about the list, so it does not come and go with one.
-    assert!(screen.contains("viewer: pdf"), "{screen}");
+    assert!(screen.contains("Viewer: Auto"), "{screen}");
 }
 
 /// F2 changes what Enter does. With the confirming toast drawn nowhere and no
@@ -281,13 +282,19 @@ fn the_footer_names_the_viewer_enter_will_use() {
     with_results(&mut s, "11-D-0704", many(3), 3, now);
 
     let h = harness(s);
-    assert!(on_screen(&h).contains("viewer: pdf"), "{}", on_screen(&h));
+    assert!(on_screen(&h).contains("Viewer: Auto"), "{}", on_screen(&h));
 
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
-    s.viewer = ViewerKind::Avwin;
-    let h = harness(s);
-    assert!(on_screen(&h).contains("viewer: avwin"), "{}", on_screen(&h));
+    // Every mode, so one that the footer cannot name is a failure here.
+    for (viewer, label) in [
+        (ViewerKind::Pdf, "Viewer: PDF"),
+        (ViewerKind::Avwin, "Viewer: avwin"),
+    ] {
+        let (mut s, now) = state();
+        with_results(&mut s, "11-D-0704", many(3), 3, now);
+        s.viewer = viewer;
+        let h = harness(s);
+        assert!(on_screen(&h).contains(label), "{}", on_screen(&h));
+    }
 }
 
 /// Choosing the viewer that is not installed used to fail silently, at the
@@ -374,7 +381,7 @@ fn a_keystroke_does_not_blank_the_result_list() {
         "the list went away while the next one was in flight:\n{during}"
     );
     assert!(
-        !during.contains("Searching\u{2026}"),
+        !during.contains("Looking for it\u{2026}"),
         "and the empty state took its place:\n{during}"
     );
 }
@@ -487,8 +494,13 @@ snapshot!(looks_right_when_empty, || {
 snapshot!(looks_right_with_a_toast, || toasted(Instant::now()));
 
 snapshot!(looks_right_showing_recent_codes, || {
-    let (mut s, _) = state();
+    let (mut s, now) = state();
     s.seed_history(vec!["11-D-0704".into(), "P12345-001".into()]);
+    // Pressed, not merely seeded. The list used to be what an empty field
+    // showed, so this fixture photographed it without touching a key - which
+    // now photographs the first-run block and duplicates the picture above.
+    s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
+    assert!(s.history.is_browsing(), "the fixture is not browsing");
     s
 });
 

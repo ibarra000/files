@@ -17,6 +17,7 @@ use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, QueryPhase};
 use files::config::{REMEMBER_DEBOUNCE, Settings, VERIFY_DEBOUNCE};
 use files::search::matcher::{Hit, SearchOutcome};
+use files::search::query::Query;
 use files::search::verify::{SkipReason, VerifyOutcome};
 
 const CODE: &str = "11-D-0704";
@@ -71,7 +72,7 @@ fn deliver_hits(s: &mut AppState, hits: Vec<Hit>, now: Instant) {
     s.update(
         AppEvent::Search(SearchMsg {
             epoch: s.query_epoch(),
-            query: s.input.text().to_string(),
+            query: Query::parse(s.input.text()),
             elapsed: std::time::Duration::ZERO,
             result: Ok(SearchOutcome {
                 hits,
@@ -453,7 +454,7 @@ fn a_settled_code_is_written_once_however_many_triggers_fire() {
     let verify = s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: CODE.to_string(),
+            query: Query::contains(CODE),
             elapsed: std::time::Duration::ZERO,
             outcome: VerifyOutcome::Skipped(SkipReason::SeveralShares),
         }),

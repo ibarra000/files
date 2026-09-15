@@ -618,13 +618,27 @@ impl MappingSlot {
         self.kind == MappingKind::Tree
     }
 
-    /// Whether anything should index or search this mapping at all.
+    /// Whether a background actor should read this mapping and hold it.
     ///
     /// The empty path is checked rather than assumed away. An empty `PathBuf`
     /// standing in for "absent" is exactly what pinned a permanent
     /// `os error 3` on an actor spawned for a mapping nobody configured.
-    pub fn is_searchable(&self) -> bool {
+    pub fn is_indexed(&self) -> bool {
         self.enabled && self.kind.is_indexed() && !self.dir.as_os_str().is_empty()
+    }
+
+    /// Whether a search visits this mapping at all, by either route.
+    ///
+    /// Split from [`Self::is_indexed`] because a live share is searched and
+    /// never read: one predicate answering both questions meant every caller
+    /// got whichever answer it was named after.
+    pub fn is_searchable(&self) -> bool {
+        self.enabled && self.kind.is_searched() && !self.dir.as_os_str().is_empty()
+    }
+
+    /// Whether a search asks the file server about this mapping directly.
+    pub fn is_live(&self) -> bool {
+        self.enabled && self.kind.is_live() && !self.dir.as_os_str().is_empty()
     }
 
     // --- reads, lock-free --------------------------------------------------
@@ -938,9 +952,26 @@ impl IndexStore {
         &self.slots
     }
 
-    /// Every mapping a search should visit, in configuration order.
+    /// Every mapping a background actor reads, in configuration order.
+    ///
+    /// What gets an actor, a persisted index and a refresh schedule. **Not**
+    /// what a search visits - see [`Self::searchable`]. The distinction is
+    /// load-bearing: a live share reaching this iterator would be handed an
+    /// index actor, whose first wake is a full walk of the share somebody
+    /// configured precisely so it would never be walked.
     pub fn indexed(&self) -> impl Iterator<Item = &MappingSlot> {
+        self.slots.iter().filter(|s| s.is_indexed())
+    }
+
+    /// Every mapping a search visits, in configuration order.
+    pub fn searchable(&self) -> impl Iterator<Item = &MappingSlot> {
         self.slots.iter().filter(|s| s.is_searchable())
+    }
+
+    /// Every mapping a search asks the file server about, in configuration
+    /// order.
+    pub fn live(&self) -> impl Iterator<Item = &MappingSlot> {
+        self.slots.iter().filter(|s| s.is_live())
     }
 
     /// Total entries across every mapping holding data.

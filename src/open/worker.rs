@@ -31,7 +31,6 @@ use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 
 use super::{OpenContext, OpenRequest};
 use crate::app::event::{AppEvent, Events, OpenMsg};
-use crate::config::ViewerKind;
 use crate::search::worker::Backend;
 
 /// Queued opens.
@@ -160,9 +159,10 @@ fn run(backend: &Backend, rx: &Receiver<OpenRequest>, events: &Events) {
 fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
     // Only the PDF route needs a listing, and a failure to get one is not a
     // failure to open: it degrades to the single selected file.
-    let snapshot = match request.viewer {
-        ViewerKind::Pdf => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
-        ViewerKind::Avwin => None,
+    let snapshot = match super::route_of(request.viewer, &request.path) {
+        super::Route::Document => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
+        // avwin is handed one file, so it has no use for a listing.
+        super::Route::Avwin => None,
     };
 
     let cx = OpenContext {
@@ -192,7 +192,7 @@ fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::Settings;
+    use crate::config::{Settings, ViewerKind};
     use crate::index::fake_source::FakeDirSource;
     use crate::index::store::IndexStore;
 
@@ -204,6 +204,7 @@ mod tests {
             },
             store: Arc::new(IndexStore::default()),
             source: Arc::new(FakeDirSource::new()),
+            live: Vec::new(),
         })
     }
 

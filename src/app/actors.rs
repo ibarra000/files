@@ -43,6 +43,9 @@ pub struct Actors {
     pub verifier: Arc<Verifier>,
     search: WorkerHandle<SearchRequest>,
     verify: WorkerHandle<SearchRequest>,
+    /// Asks the shares that are never indexed. See [`worker::spawn_live`] for
+    /// why it is not the verifier's thread.
+    live: WorkerHandle<SearchRequest>,
     /// One per enabled, indexed mapping, in configuration order.
     ///
     /// Was a fixed `index` plus an optional `tree_index`, which is why a
@@ -124,10 +127,34 @@ impl Actors {
             crate::index::persist::gc_orphans(cache_dir, &live);
         }
 
+        // A live share skips any folder another enabled mapping already
+        // covers, which is what makes a walked tree *inside* a live share a
+        // legal configuration rather than a way to see every file twice.
+        let live: Vec<Arc<crate::search::live::LiveShare>> = settings
+            .routes
+            .live()
+            .map(|m| {
+                let excluded: Vec<std::path::PathBuf> = settings
+                    .routes
+                    .enabled()
+                    .filter(|o| o.id != m.id && o.kind.is_indexed())
+                    .map(|o| o.path.clone())
+                    .collect();
+                Arc::new(crate::search::live::LiveShare::new(
+                    m.id,
+                    m.path.clone(),
+                    m.depth,
+                    excluded,
+                    Arc::clone(&source),
+                ))
+            })
+            .collect();
+
         let backend = Arc::new(Backend {
             settings: settings.clone(),
             store: Arc::clone(&store),
             source: Arc::clone(&source),
+            live,
         });
 
         let verifier = Arc::new(Verifier::for_routes(
@@ -138,6 +165,7 @@ impl Actors {
 
         let search = worker::spawn_search(Arc::clone(&backend), tx.clone())?;
         let verify = worker::spawn_verify(Arc::clone(&backend), Arc::clone(&verifier), tx.clone())?;
+        let live = worker::spawn_live(Arc::clone(&backend), tx.clone())?;
         // One actor per enabled, indexed mapping. One thread each rather than
         // one for several: a walk runs for minutes, and sharing would mean one
         // share's freshness queued behind another - or a five-minute backoff
@@ -203,6 +231,7 @@ impl Actors {
                 verifier,
                 search,
                 verify,
+                live,
                 indexes,
                 opener,
                 history,
@@ -262,6 +291,10 @@ impl Actors {
                 }
                 Cmd::Verify { query, epoch } => {
                     self.verify
+                        .submit_generation(epoch, SearchRequest { query, epoch });
+                }
+                Cmd::Live { query, epoch } => {
+                    self.live
                         .submit_generation(epoch, SearchRequest { query, epoch });
                 }
                 Cmd::RefreshIndex { target, force } => {
@@ -339,6 +372,7 @@ impl Actors {
         }
         clean &= self.search.shutdown(budget);
         clean &= self.verify.shutdown(budget);
+        clean &= self.live.shutdown(budget);
         // Every index actor is told to stop before any of them is waited on,
         // and they share one deadline. Signalling and joining one at a time
         // would make the budget per-thread, so quitting with ten shares
@@ -525,6 +559,7 @@ mod tests {
                 kind: crate::paths::MappingKind::Tree,
                 enabled: true,
                 refresh: Default::default(),
+                depth: crate::config::DEFAULT_LIVE_DEPTH,
             });
         }
         let routes = crate::paths::Routes::new(mappings, crate::paths::ConfigSource::BuiltIn);
@@ -562,7 +597,7 @@ mod tests {
 
         let mut cmds = CmdList::new();
         cmds.push(Cmd::Search {
-            query: "11-D-0704".into(),
+            query: crate::search::query::Query::contains("11-D-0704"),
             epoch: 1,
         });
         actors.dispatch(cmds);
@@ -588,7 +623,7 @@ mod tests {
         let (actors, rx) = start();
         let mut cmds = CmdList::new();
         cmds.push(Cmd::Search {
-            query: "11-D-0704".into(),
+            query: crate::search::query::Query::contains("11-D-0704"),
             epoch: 42,
         });
         actors.dispatch(cmds);

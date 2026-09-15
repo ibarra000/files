@@ -2,7 +2,7 @@
 //!
 //! This is the first screen anybody sees, and for somebody whose code found
 //! nothing it is the only screen that can say what to do next. It gets the
-//! whole pane rather than the top corner of it: a sixteen-row box holding one
+//! whole pane rather than the top corner of it: a twelve-row box holding one
 //! grey sentence reads as a program that has broken.
 //!
 //! Every variant has the same three-part shape - what happened, a fact about
@@ -47,9 +47,43 @@ pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
         EmptyReason::NoQuery => vec![
             say("Type a job code to see its files."),
             blank(),
-            vec![Run::dim("For example:   "), Run::accent("11-D-0704")],
+            vec![Run::dim("For example: "), Run::accent("11-D-0704")],
             blank(),
             aside("Press \u{2191} for codes you used before, or F1 for every key."),
+        ],
+
+        EmptyReason::LiveIncomplete {
+            name,
+            searched,
+            skipped,
+        } => vec![
+            say(format!(
+                "Nothing matched \u{201c}{query}\u{201d} on {name} yet."
+            )),
+            blank(),
+            aside(format!(
+                "{} of {} folders were searched \u{b7} there may be more",
+                humanize::count(*searched as usize),
+                humanize::count((*searched + *skipped) as usize)
+            )),
+            blank(),
+            aside("Press F5 to look again, or narrow the code."),
+        ],
+
+        EmptyReason::LiveUnavailable { name, detail: why } => vec![
+            say(format!("{name} could not be searched.")),
+            blank(),
+            detail(crate::view::sentence(why)),
+            blank(),
+            aside("Anything found on the other drives is shown above."),
+        ],
+
+        EmptyReason::BadQuery { detail } => vec![
+            say("That is not something this can look for."),
+            blank(),
+            aside(crate::view::sentence(detail)),
+            blank(),
+            aside("A * goes at the start or the end of a code, and ext:pdf narrows by type."),
         ],
 
         EmptyReason::QueryTooShort { .. } => vec![
@@ -61,11 +95,18 @@ pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
         ],
 
         EmptyReason::NoSharesConfigured => vec![
-            say("No file shares are set up yet."),
+            say("No drives are set up yet."),
             blank(),
-            // The command is kept exactly as it is typed: it is the next thing
-            // whoever installed this has to run.
-            aside("Run  files --check-config  in a command prompt to see why."),
+            // The command is kept exactly as it is typed: it is the next
+            // thing whoever installed this has to run. In its own run rather
+            // than set off by extra spaces - padding a string is the
+            // renderer's job done in the wrong place, and it is what gets
+            // ellipsised and read out by a screen reader.
+            vec![
+                Run::dim("Run "),
+                Run::accent("files --check-config"),
+                Run::dim(" in a command prompt to see why."),
+            ],
         ],
 
         EmptyReason::NoMatches { searched } => vec![
@@ -104,8 +145,13 @@ pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
             aside("Ask IT for access to it."),
         ],
 
+        // Not "Searching…", which is what the status line says at the same
+        // moment. Two places on one screen saying the same word is how a
+        // reader learns to stop reading one of them - and it is also why a
+        // test asserting the pane had *not* taken over could be satisfied by
+        // the footer instead.
         EmptyReason::NotSearchedYet => {
-            vec![vec![Run::toned("Searching\u{2026}", Tone::Busy)]]
+            vec![vec![Run::toned("Looking for it\u{2026}", Tone::Busy)]]
         }
     }
 }
@@ -157,6 +203,34 @@ mod tests {
             },
             EmptyReason::NotSearchedYet,
         ]
+    }
+
+    /// Every line of every block, held to the house style.
+    ///
+    /// The body slot, so these keep their full stops - they are whole
+    /// sentences with room to be. What they may not do is pad themselves,
+    /// which two of them did: a "For example:" set off with three trailing
+    /// spaces and a command set off with two on either side, both of which
+    /// are the renderer's job done in the wrong layer.
+    #[test]
+    fn every_block_keeps_the_house_style() {
+        // The joined block, not each run: a block is one line on screen, and
+        // its runs carry the spaces between them. "Run " followed by
+        // "files --check-config" is one clean line and two runs that would
+        // each look like they had a stray space on the end.
+        let mut lines = Vec::new();
+        for reason in every_reason() {
+            for query in ["", "11-D-0704"] {
+                for block in view(&reason, query) {
+                    lines.push(crate::view::plain(&block));
+                }
+            }
+        }
+        crate::view::style::check_all(
+            "the empty-state blocks",
+            lines.iter().map(String::as_str),
+            crate::view::style::Slot::Body,
+        );
     }
 
     /// A blank pane with no explanation is the state this whole type exists to
@@ -224,11 +298,16 @@ mod tests {
         assert!(t.contains("files --check-config"), "{t}");
     }
 
-    /// Every variant is short enough to fit the pane an eighty-by-twenty-four
-    /// terminal gives it, which is the smallest anybody actually runs.
+    /// Every variant is short enough to fit the pane it is drawn into.
+    ///
+    /// [`crate::config::VISIBLE_ROWS`], not the sixteen a terminal used to
+    /// give it: `gui::overlay` draws these blocks into the same body the
+    /// result rows use and stops at the bottom of it, so a block past that
+    /// count is not scrolled to, it is *dropped* - and the lines these drop
+    /// first are the ones saying what to do about it.
     #[test]
-    fn every_message_fits_the_smallest_terminal_people_use() {
-        let rows = 16u16;
+    fn every_message_fits_the_pane_it_is_drawn_into() {
+        let rows = crate::config::VISIBLE_ROWS as u16;
         for reason in every_reason() {
             assert!(
                 fits(&reason, "11-D-0704", rows),

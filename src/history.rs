@@ -46,14 +46,17 @@ const MAX_ENTRY_LEN: usize = 512;
 
 /// Previously used codes, newest first, plus the browsing cursor.
 ///
-/// `draft` holds whatever was half-typed when browsing started, so Esc can put
-/// it back. Without it, reaching for history would silently destroy the code
-/// someone was in the middle of entering.
+/// The cursor is the whole of "the user asked for this list": it is `Some` from
+/// the Up arrow that starts browsing until something ends it, and nothing else
+/// on screen may show these codes while it is `None`.
+///
+/// There used to be a `draft` beside it, holding whatever was half-typed when
+/// browsing started so Esc could put it back. Browsing can only start from an
+/// empty field, so what it held was always the empty string.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
     entries: Vec<String>,
     cursor: Option<usize>,
-    draft: Option<String>,
 }
 
 impl History {
@@ -100,10 +103,6 @@ impl History {
         self.cursor.is_some()
     }
 
-    pub fn draft(&self) -> Option<&str> {
-        self.draft.as_deref()
-    }
-
     /// Remembers a code. Returns whether the list changed.
     ///
     /// Matching is case-insensitive because the shares are: `11-D-0704` and
@@ -141,7 +140,6 @@ impl History {
         if self.supersedes_head(entry) {
             self.entries[0] = entry.to_string();
             self.cursor = None;
-            self.draft = None;
             return true;
         }
 
@@ -152,7 +150,6 @@ impl History {
         // A list that just moved under the cursor would leave the highlight
         // pointing at a different code than the one being looked at.
         self.cursor = None;
-        self.draft = None;
         true
     }
 
@@ -168,15 +165,14 @@ impl History {
             && entry.as_bytes()[..head.len()].eq_ignore_ascii_case(head.as_bytes())
     }
 
-    /// Starts browsing, remembering `draft` so Esc can restore it.
+    /// Starts browsing at the newest code, which is what the first Up does.
     ///
     /// Returns the entry to show, or `None` when there is no history at all.
-    pub fn begin(&mut self, draft: &str) -> Option<&str> {
+    /// There is nothing to remember on the way in: browsing only ever starts
+    /// from an empty field, which is what retired the `draft` this used to take.
+    pub fn begin(&mut self) -> Option<&str> {
         if self.entries.is_empty() {
             return None;
-        }
-        if self.cursor.is_none() {
-            self.draft = Some(draft.to_string());
         }
         self.cursor = Some(0);
         self.entries.first().map(String::as_str)
@@ -195,7 +191,8 @@ impl History {
     /// Steps one entry towards the newest.
     ///
     /// Past the newest it returns `None` and stops browsing, which the caller
-    /// turns into "put the draft back" - the same thing a shell does.
+    /// turns into leaving the list with an empty field - the same thing a shell
+    /// does.
     pub fn newer(&mut self) -> Option<&str> {
         let cursor = self.cursor?;
         if cursor == 0 {
@@ -222,15 +219,13 @@ impl History {
     }
 
     /// Stops browsing, keeping whatever was recalled.
+    ///
+    /// The only way out. There used to be a `cancel` beside this that handed
+    /// back the half-typed code; with no draft to hand back it was this
+    /// function under a second name, and two names for one transition is how a
+    /// caller comes to believe they differ.
     pub fn accept(&mut self) {
         self.cursor = None;
-        self.draft = None;
-    }
-
-    /// Stops browsing and hands back the half-typed code to restore.
-    pub fn cancel(&mut self) -> Option<String> {
-        self.cursor = None;
-        self.draft.take()
     }
 
     /// A copy for the writer thread. Cheap: a few hundred short strings, built
@@ -514,16 +509,16 @@ mod tests {
     #[test]
     fn browsing_walks_from_newest_to_oldest_and_stops() {
         let mut h = history(&["c", "b", "a"]);
-        assert_eq!(h.begin("draft"), Some("c"));
+        assert_eq!(h.begin(), Some("c"));
         assert_eq!(h.older(), Some("b"));
         assert_eq!(h.older(), Some("a"));
         assert_eq!(h.older(), Some("a"), "stops at the oldest, never wraps");
     }
 
     #[test]
-    fn stepping_past_the_newest_ends_browsing_so_the_draft_comes_back() {
+    fn stepping_past_the_newest_ends_browsing() {
         let mut h = history(&["b", "a"]);
-        h.begin("11-D");
+        h.begin();
         h.older();
         assert_eq!(h.newer(), Some("b"));
         assert_eq!(h.newer(), None, "past the newest");
@@ -531,27 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn cancelling_hands_back_what_was_being_typed() {
+    fn accepting_keeps_the_recalled_code() {
         let mut h = history(&["a"]);
-        h.begin("11-D");
-        h.older();
-        assert_eq!(h.cancel(), Some("11-D".to_string()));
-        assert!(!h.is_browsing());
-    }
-
-    #[test]
-    fn accepting_keeps_the_recalled_code_and_forgets_the_draft() {
-        let mut h = history(&["a"]);
-        h.begin("11-D");
+        h.begin();
         h.accept();
         assert!(!h.is_browsing());
-        assert_eq!(h.draft(), None);
     }
 
     #[test]
     fn an_entry_can_be_jumped_to_directly() {
         let mut h = history(&["c", "b", "a"]);
-        h.begin("draft");
+        h.begin();
         assert_eq!(h.select(2), Some("a"));
         assert_eq!(h.cursor(), Some(2));
         assert_eq!(h.select(9), None, "out of range changes nothing");
@@ -561,7 +546,7 @@ mod tests {
     #[test]
     fn browsing_an_empty_history_does_nothing() {
         let mut h = History::new();
-        assert_eq!(h.begin("11-D"), None);
+        assert_eq!(h.begin(), None);
         assert!(!h.is_browsing());
         assert_eq!(h.older(), None);
         assert_eq!(h.newer(), None);
@@ -572,7 +557,7 @@ mod tests {
         // The list is about to shift underneath it, so a kept cursor would
         // point at a different code than the one on screen.
         let mut h = history(&["b", "a"]);
-        h.begin("draft");
+        h.begin();
         h.record("new");
         assert!(!h.is_browsing());
     }

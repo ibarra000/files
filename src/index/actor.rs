@@ -234,6 +234,13 @@ impl IndexContext {
         let cadence = match kind {
             MappingKind::Tree => Cadence::tree(),
             MappingKind::Flat => Cadence::shipped(),
+            // Unreachable while `Actors::start` spawns actors for indexed
+            // mappings only, and spelled out rather than folded into the flat
+            // arm so that it stays unreachable by accident rather than by
+            // luck: a live share given the flat cadence would walk itself on
+            // its first wake, which is the one thing configuring it that way
+            // was meant to prevent.
+            MappingKind::Live => Cadence::tree(),
         };
         let settings_max_scans = settings.max_concurrent_scans;
         Self {

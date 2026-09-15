@@ -44,9 +44,10 @@ use memchr::memmem;
 use rayon::prelude::*;
 
 use crate::config::hidden::Hidden;
-use crate::config::{MATCH_CHUNK_ENTRIES, MAX_FILES_PER_FOLDER, MIN_QUERY_LEN, MatcherKind};
+use crate::config::{MATCH_CHUNK_ENTRIES, MAX_FILES_PER_FOLDER, MatcherKind};
 use crate::index::snapshot::Snapshot;
 use crate::index::tree::{TreeIndex, TreeSegment};
+use crate::search::query::{Query, Sieve};
 use crate::search::topk::{self, Key, TopK};
 use crate::util::cancel::CancelToken;
 use crate::util::fold;
@@ -92,35 +93,23 @@ pub struct SearchOutcome {
 }
 
 /// Why a query was not run at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryReject {
-    /// Below [`MIN_QUERY_LEN`].
-    TooShort { need: usize },
-    /// Contains a NUL byte.
-    ///
-    /// Rejected rather than stripped: stripping would let `a\0bc` match `abc`,
-    /// which is silently wrong. This check is also what upholds the guarantee
-    /// that a match can never span two arena entries.
-    ContainsNul,
-}
+///
+/// Defined beside the parser that decides it rather than here, because every
+/// variant is a property of what was typed rather than of any index. Re-exported
+/// so the call sites that have always imported it from the matcher still can.
+pub use crate::search::query::QueryReject;
 
 /// Runs a query against a snapshot.
 pub fn search(
     snap: &Snapshot,
-    query: &str,
+    query: &Query,
     kind: MatcherKind,
     hidden: &Hidden,
     cancel: &CancelToken,
 ) -> Result<SearchOutcome, QueryReject> {
-    if query.chars().count() < MIN_QUERY_LEN {
-        return Err(QueryReject::TooShort {
-            need: MIN_QUERY_LEN,
-        });
-    }
-    let needle = fold::fold_query(query);
-    if needle.contains(&0) {
-        return Err(QueryReject::ContainsNul);
-    }
+    query.check()?;
+    let needle = fold::fold_query(query.term());
+    let sieve = Sieve::new(hidden, &needle, query);
 
     let total = snap.len() as u32;
 
@@ -134,16 +123,16 @@ pub fn search(
     }
 
     let (top, matched, cancelled) = match kind {
-        MatcherKind::Simd => sweep(snap, &needle, 0, hidden, cancel),
-        MatcherKind::Naive => naive(snap, &needle, hidden, cancel),
+        MatcherKind::Simd => sweep(snap, &needle, 0, &sieve, cancel),
+        MatcherKind::Naive => naive(snap, &needle, &sieve, cancel),
     };
 
     // A non-ASCII query may have been folded conservatively (see
     // `util::fold`), so a zero-result fast path might be a false negative
     // rather than a real absence. Only then is the slow, fully Unicode-correct
     // comparison worth its cost.
-    if matched == 0 && !cancelled && fold::needs_unicode_fallback(query) {
-        let (top, matched) = unicode_fallback(snap, query, hidden, cancel);
+    if matched == 0 && !cancelled && fold::needs_unicode_fallback(query.term()) {
+        let (top, matched) = unicode_fallback(snap, query, &sieve, cancel);
         return Ok(SearchOutcome {
             hits: materialise(snap, &top.into_sorted()),
             matched,
@@ -175,19 +164,13 @@ pub fn search(
 /// folder; see [`topk`]'s key layout.
 pub fn search_tree(
     index: &TreeIndex,
-    query: &str,
+    query: &Query,
     hidden: &Hidden,
     cancel: &CancelToken,
 ) -> Result<SearchOutcome, QueryReject> {
-    if query.chars().count() < MIN_QUERY_LEN {
-        return Err(QueryReject::TooShort {
-            need: MIN_QUERY_LEN,
-        });
-    }
-    let needle = fold::fold_query(query);
-    if needle.contains(&0) {
-        return Err(QueryReject::ContainsNul);
-    }
+    query.check()?;
+    let needle = fold::fold_query(query.term());
+    let sieve = Sieve::new(hidden, &needle, query);
 
     let total = index.len() as u32;
     if total == 0 {
@@ -205,12 +188,12 @@ pub fn search_tree(
         }
         let base = index.base(s);
 
-        let (names, n, stopped) = sweep(segment.files(), &needle, base, hidden, cancel);
+        let (names, n, stopped) = sweep(segment.files(), &needle, base, &sieve, cancel);
         top.merge(names);
         matched = matched.saturating_add(n);
         cancelled |= stopped;
 
-        let (folders, f) = sweep_folders(segment, &needle, base, hidden);
+        let (folders, f) = sweep_folders(segment, &needle, base, &sieve);
         top.merge(folders);
         matched = matched.saturating_add(f);
     }
@@ -240,16 +223,8 @@ pub fn search_tree(
 /// copies of the same answer, and with nothing indexed yet it would give none
 /// at all - a two-character query would come back "no matches" instead of
 /// "type at least 3 characters".
-pub fn check_query(query: &str) -> Result<(), QueryReject> {
-    if query.chars().count() < MIN_QUERY_LEN {
-        return Err(QueryReject::TooShort {
-            need: MIN_QUERY_LEN,
-        });
-    }
-    if fold::fold_query(query).contains(&0) {
-        return Err(QueryReject::ContainsNul);
-    }
-    Ok(())
+pub fn check_query(query: &Query) -> Result<(), QueryReject> {
+    query.check()
 }
 
 /// Folds every share's results into one ranked list.
@@ -325,7 +300,7 @@ pub fn merge(flat: SearchOutcome, tree: SearchOutcome) -> SearchOutcome {
 ///
 /// Not chunked across rayon: the folder arena is around a fiftieth the size of
 /// the filename arena, so the fan-out would cost more than the scan.
-fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, hidden: &Hidden) -> (TopK, u32) {
+fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve) -> (TopK, u32) {
     let mut top = TopK::new();
     let mut matched = 0u32;
 
@@ -346,27 +321,49 @@ fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, hidden: &Hidde
 
         let start = offsets[dir];
         let end = offsets[dir + 1];
-        let pos = abs - start;
         let name_len = end - start - 1;
+
+        // The mode is judged against the folder, because the folder is what
+        // matched. A folder the mode refuses contributes nothing, and the
+        // cursor still has to move past it below.
+        let Some(pos) = sieve.admits_folder(&arena[start as usize..end as usize - 1], abs - start)
+        else {
+            cursor = end as usize;
+            dir += 1;
+            if cursor >= arena.len() || dir >= dirs.len() {
+                break;
+            }
+            continue;
+        };
 
         // Every file in the folder, which is what someone typing a job code is
         // asking for - but bounded, because one enormous folder filling all
         // three hundred slots would hide every other folder that matched, and
         // that is the original "files are missing" bug wearing a new hat.
         let files = segment.files_of(dir as u32);
-        let shown = (files.len() as u32).min(MAX_FILES_PER_FOLDER as u32);
-        for i in files.start..files.start + shown {
-            if hidden.hides_folded(segment.files().name_lower(i)) {
+        let mut shown = 0u32;
+        let mut admitted = 0u32;
+        // The cap counts the files that were *admitted*, not the ones that
+        // were looked at. Capping first would mean a folder holding five
+        // thousand drawings and ten PDFs contributed none of the PDFs under
+        // `ext:pdf`, because the cap would be spent before the tenth one was
+        // reached - the same "files are missing" bug the cap itself exists to
+        // prevent, arriving from the other side.
+        for i in files.start..files.end {
+            if !sieve.admits_inherited(segment.files().name_lower(i)) {
                 continue;
             }
-            top.push(topk::key_inherited(pos, name_len, base + i));
+            admitted += 1;
+            if shown < MAX_FILES_PER_FOLDER as u32 {
+                top.push(topk::key_inherited(pos, name_len, base + i));
+                shown += 1;
+            }
         }
-        // Deliberately the whole folder, not what survived the filter above.
-        // This already counts files the loop never looks at, because `shown`
-        // caps it - so it has always been "how many files are in the folders
-        // that matched" rather than a count of rows, and narrowing it here
-        // would make it a third thing that is neither.
-        matched = matched.saturating_add(files.len() as u32);
+        // The files in the folders that matched, after the sieve. Counting
+        // the whole folder instead would promise rows a type filter has
+        // already removed, and the footer renders this number as "1-12 of
+        // {matched}" - a count somebody scrolls looking for the rest of.
+        matched = matched.saturating_add(admitted);
 
         cursor = end as usize;
         dir += 1;
@@ -425,7 +422,7 @@ fn sweep(
     snap: &Snapshot,
     needle: &[u8],
     base: u32,
-    hidden: &Hidden,
+    sieve: &Sieve,
     cancel: &CancelToken,
 ) -> (TopK, u32, bool) {
     let offsets = snap.offsets();
@@ -436,7 +433,7 @@ fn sweep(
     // Below a chunk's worth of entries the rayon fan-out costs more than the
     // scan it parallelises.
     if chunks <= 1 {
-        let (top, matched) = scan_chunk(arena, offsets, needle, 0, n, base, hidden);
+        let (top, matched) = scan_chunk(arena, offsets, needle, 0, n, base, sieve);
         return (top, matched, cancel.is_cancelled());
     }
 
@@ -452,7 +449,7 @@ fn sweep(
             }
             let lo = c * MATCH_CHUNK_ENTRIES;
             let hi = ((c + 1) * MATCH_CHUNK_ENTRIES).min(n);
-            let (top, matched) = scan_chunk(arena, offsets, &finder_needle, lo, hi, base, hidden);
+            let (top, matched) = scan_chunk(arena, offsets, &finder_needle, lo, hi, base, sieve);
             (top, matched, false)
         })
         .reduce(
@@ -478,7 +475,7 @@ fn scan_chunk(
     lo: usize,
     hi: usize,
     base: u32,
-    hidden: &Hidden,
+    sieve: &Sieve,
 ) -> (TopK, u32) {
     let mut top = TopK::new();
     let mut matched = 0u32;
@@ -509,8 +506,15 @@ fn scan_chunk(
         // Judged on the folded bytes, which is the same answer as the
         // original name would give - see `Hidden::hides_folded`. Skipping
         // `matched` as well as the push is what keeps "12 of 400" honest.
-        if !hidden.hides_folded(&arena[start as usize..end as usize - 1]) {
-            top.push(topk::key(pos, name_len, base + entry as u32));
+        //
+        // A row the sieve refuses never reaches `TopK`, so it never occupies
+        // one of the three hundred slots and never becomes the admission
+        // threshold a better row would have had to beat. Filtering after
+        // selection would answer "the PDFs among the best three hundred",
+        // which for a broad query is a handful of rows presented as the whole
+        // answer.
+        if let Some(at) = sieve.admits(&arena[start as usize..end as usize - 1], pos) {
+            top.push(topk::key(at, name_len, base + entry as u32));
             matched += 1;
         }
 
@@ -550,12 +554,7 @@ fn advance_to(offsets: &[u32], entry: usize, abs: u32) -> usize {
 
 /// Straightforward per-entry search, retained so a field regression in the
 /// SIMD path is a flag flip rather than a rebuild.
-fn naive(
-    snap: &Snapshot,
-    needle: &[u8],
-    hidden: &Hidden,
-    cancel: &CancelToken,
-) -> (TopK, u32, bool) {
+fn naive(snap: &Snapshot, needle: &[u8], sieve: &Sieve, cancel: &CancelToken) -> (TopK, u32, bool) {
     let mut top = TopK::new();
     let mut matched = 0u32;
     for i in 0..snap.len() as u32 {
@@ -563,11 +562,10 @@ fn naive(
             return (top, matched, true);
         }
         let name = snap.name_lower(i);
-        if hidden.hides_folded(name) {
-            continue;
-        }
-        if let Some(pos) = memmem::find(name, needle) {
-            top.push(topk::key(pos as u32, name.len() as u32, i));
+        if let Some(pos) = memmem::find(name, needle)
+            && let Some(at) = sieve.admits(name, pos as u32)
+        {
+            top.push(topk::key(at, name.len() as u32, i));
             matched += 1;
         }
     }
@@ -578,23 +576,23 @@ fn naive(
 /// fold cannot represent.
 fn unicode_fallback(
     snap: &Snapshot,
-    query: &str,
-    hidden: &Hidden,
+    query: &Query,
+    sieve: &Sieve,
     cancel: &CancelToken,
 ) -> (TopK, u32) {
     let mut top = TopK::new();
     let mut matched = 0u32;
-    let needle = query.to_lowercase();
+    let needle = query.term().to_lowercase();
     for i in 0..snap.len() as u32 {
         if i % 4096 == 0 && cancel.is_cancelled() {
             break;
         }
         let name = String::from_utf8_lossy(snap.name_orig(i));
-        if hidden.hides(&name) {
-            continue;
-        }
-        if let Some(pos) = name.to_lowercase().find(&needle) {
-            top.push(topk::key(pos as u32, name.len() as u32, i));
+        let lower = name.to_lowercase();
+        if let Some(pos) = lower.find(&needle)
+            && let Some(at) = sieve.admits_lossy(&name, &lower, &needle, pos as u32)
+        {
+            top.push(topk::key(at, name.len() as u32, i));
             matched += 1;
         }
     }
@@ -637,7 +635,7 @@ mod tests {
     fn run(s: &Snapshot, q: &str) -> SearchOutcome {
         search(
             s,
-            q,
+            &Query::contains(q),
             MatcherKind::Simd,
             &Hidden::none(),
             &CancelToken::never(),
@@ -654,7 +652,132 @@ mod tests {
     }
 
     fn run_hiding(s: &Snapshot, q: &str, hidden: &Hidden) -> SearchOutcome {
-        search(s, q, MatcherKind::Simd, hidden, &CancelToken::never()).unwrap()
+        search(
+            s,
+            &Query::contains(q),
+            MatcherKind::Simd,
+            hidden,
+            &CancelToken::never(),
+        )
+        .unwrap()
+    }
+
+    // --- narrowing the query ------------------------------------------------
+
+    fn ask(s: &Snapshot, line: &str) -> SearchOutcome {
+        search(
+            s,
+            &Query::parse(line),
+            MatcherKind::Simd,
+            &Hidden::none(),
+            &CancelToken::never(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_trailing_star_keeps_only_the_names_that_start_with_the_code() {
+        let s = snap(&["0704-plan.pdf", "job-0704.pdf", "0704.pdf"]);
+        assert_eq!(names(&ask(&s, "0704*")), ["0704.pdf", "0704-plan.pdf"]);
+    }
+
+    /// The sweep records only the leftmost occurrence per entry. Judging the
+    /// trailing form against that hit would drop a file whose stem does end in
+    /// the code, and there is nothing on screen to show it happened.
+    #[test]
+    fn a_leading_star_finds_a_name_whose_first_occurrence_is_not_the_last() {
+        let s = snap(&["0704-rev-0704.pdf", "0704-plan.pdf"]);
+        assert_eq!(names(&ask(&s, "*0704")), ["0704-rev-0704.pdf"]);
+    }
+
+    #[test]
+    fn a_type_filter_keeps_only_that_type() {
+        let s = snap(&["11-D-0704.pdf", "11-D-0704.dwg", "11-D-0704.docx"]);
+        assert_eq!(names(&ask(&s, "11-D-0704 ext:pdf")), ["11-D-0704.pdf"]);
+        let both = ask(&s, "11-D-0704 ext:dwg,pdf");
+        assert_eq!(both.matched, 2);
+    }
+
+    /// Build four hundred names the filter refuses that all outrank the ones
+    /// it keeps. Filtering *after* the selection would answer "the PDFs among
+    /// the best three hundred", which for a broad code is a handful of rows
+    /// presented as the whole answer.
+    #[test]
+    fn a_refused_row_never_occupies_a_slot_in_the_selection() {
+        let mut names_in: Vec<String> = (0..400).map(|i| format!("0704-{i:04}.dwg")).collect();
+        names_in.extend((0..400).map(|i| format!("zz-0704-{i:04}.pdf")));
+        let refs: Vec<&str> = names_in.iter().map(String::as_str).collect();
+        let s = snap(&refs);
+
+        let out = ask(&s, "0704 ext:pdf");
+        assert_eq!(out.matched, 400, "every PDF matched");
+        assert_eq!(out.hits.len(), crate::config::MAX_RESULTS);
+        assert!(
+            out.hits.iter().all(|h| h.name.ends_with(".pdf")),
+            "a refused row reached the selection"
+        );
+    }
+
+    /// `visible_range` renders this as "1-12 of {matched}". A count taken
+    /// before the filter would promise rows that do not exist, and somebody
+    /// would scroll looking for them.
+    #[test]
+    fn the_match_count_counts_what_survived_the_filter() {
+        let s = snap(&["a-0704.pdf", "b-0704.dwg", "c-0704.dwg"]);
+        assert_eq!(ask(&s, "0704").matched, 3);
+        assert_eq!(ask(&s, "0704 ext:pdf").matched, 1);
+    }
+
+    /// The haystack did not get smaller. `view::empty` renders this as
+    /// "Searched N files", which is about the index rather than the query.
+    #[test]
+    fn the_total_is_the_whole_index_whatever_the_filter() {
+        let s = snap(&["a-0704.pdf", "b-0704.dwg", "unrelated.txt"]);
+        assert_eq!(ask(&s, "0704 ext:pdf").total, 3);
+    }
+
+    #[test]
+    fn a_narrowed_query_still_honours_the_hidden_list() {
+        let s = snap(&["0704.pdf", "0704.db"]);
+        let out = search(
+            &s,
+            &Query::parse("0704*"),
+            MatcherKind::Simd,
+            &hiding(&["db"]),
+            &CancelToken::never(),
+        )
+        .unwrap();
+        assert_eq!(names(&out), ["0704.pdf"]);
+    }
+
+    #[test]
+    fn the_two_matchers_agree_under_every_mode_and_filter() {
+        let s = snap(&[
+            "0704.pdf",
+            "0704-plan.dwg",
+            "plan-0704.pdf",
+            "0704-rev-0704.dwg",
+        ]);
+        for line in ["0704", "0704*", "*0704", "0704 ext:pdf", "*0704 ext:dwg"] {
+            let q = Query::parse(line);
+            let simd = search(
+                &s,
+                &q,
+                MatcherKind::Simd,
+                &Hidden::none(),
+                &CancelToken::never(),
+            )
+            .unwrap();
+            let naive = search(
+                &s,
+                &q,
+                MatcherKind::Naive,
+                &Hidden::none(),
+                &CancelToken::never(),
+            )
+            .unwrap();
+            assert_eq!(simd, naive, "{line:?}");
+        }
     }
 
     // --- hidden files -------------------------------------------------------
@@ -713,7 +836,7 @@ mod tests {
         let hidden = hiding(&["db"]);
         let simd = search(
             &s,
-            "11-D",
+            &Query::contains("11-D"),
             MatcherKind::Simd,
             &hidden,
             &CancelToken::never(),
@@ -721,7 +844,7 @@ mod tests {
         .unwrap();
         let naive = search(
             &s,
-            "11-D",
+            &Query::contains("11-D"),
             MatcherKind::Naive,
             &hidden,
             &CancelToken::never(),
@@ -826,13 +949,13 @@ mod tests {
         assert_eq!(
             search(
                 &s,
-                "ab",
+                &Query::contains("ab"),
                 MatcherKind::Simd,
                 &Hidden::none(),
                 &CancelToken::never()
             ),
             Err(QueryReject::TooShort {
-                need: MIN_QUERY_LEN
+                need: crate::config::MIN_QUERY_LEN
             })
         );
     }
@@ -843,7 +966,7 @@ mod tests {
         assert_eq!(
             search(
                 &s,
-                "ab\0cd",
+                &Query::contains("ab\0cd"),
                 MatcherKind::Simd,
                 &Hidden::none(),
                 &CancelToken::never()
@@ -884,7 +1007,7 @@ mod tests {
         for q in ["job", "report", "_012", "0999", "zzz", ".pdf"] {
             let a = search(
                 &s,
-                q,
+                &Query::contains(q),
                 MatcherKind::Simd,
                 &Hidden::none(),
                 &CancelToken::never(),
@@ -892,7 +1015,7 @@ mod tests {
             .unwrap();
             let b = search(
                 &s,
-                q,
+                &Query::contains(q),
                 MatcherKind::Naive,
                 &Hidden::none(),
                 &CancelToken::never(),
@@ -914,7 +1037,7 @@ mod tests {
         let o = run(&s, "f000");
         let naive_o = search(
             &s,
-            "f000",
+            &Query::contains("f000"),
             MatcherKind::Naive,
             &Hidden::none(),
             &CancelToken::never(),
@@ -936,7 +1059,14 @@ mod tests {
         let token = epoch.token(epoch.current());
         epoch.bump(); // supersede before the sweep starts
 
-        let o = search(&s, "f00", MatcherKind::Simd, &Hidden::none(), &token).unwrap();
+        let o = search(
+            &s,
+            &Query::contains("f00"),
+            MatcherKind::Simd,
+            &Hidden::none(),
+            &token,
+        )
+        .unwrap();
         assert!(o.cancelled);
     }
 
@@ -1021,7 +1151,13 @@ mod tree_tests {
     }
 
     fn run(index: &TreeIndex, q: &str) -> SearchOutcome {
-        search_tree(index, q, &Hidden::none(), &CancelToken::never()).unwrap()
+        search_tree(
+            index,
+            &Query::contains(q),
+            &Hidden::none(),
+            &CancelToken::never(),
+        )
+        .unwrap()
     }
 
     fn paths(o: &SearchOutcome) -> Vec<String> {
@@ -1029,7 +1165,83 @@ mod tree_tests {
     }
 
     fn run_hiding(index: &TreeIndex, q: &str, exts: &[&str]) -> SearchOutcome {
-        search_tree(index, q, &Hidden::new(exts, false), &CancelToken::never()).unwrap()
+        search_tree(
+            index,
+            &Query::contains(q),
+            &Hidden::new(exts, false),
+            &CancelToken::never(),
+        )
+        .unwrap()
+    }
+
+    // --- narrowing the query ------------------------------------------------
+
+    fn ask(index: &TreeIndex, line: &str) -> SearchOutcome {
+        search_tree(
+            index,
+            &Query::parse(line),
+            &Hidden::none(),
+            &CancelToken::never(),
+        )
+        .unwrap()
+    }
+
+    /// A folder of five thousand drawings and ten PDFs has to contribute all
+    /// ten under `ext:pdf`. Capping before the filter would spend the whole
+    /// allowance on drawings and contribute none of them, which is the
+    /// "files are missing" bug the cap itself exists to prevent, arriving from
+    /// the other side.
+    #[test]
+    fn the_folder_cap_counts_the_files_it_admitted_not_the_ones_it_looked_at() {
+        let mut files: Vec<String> = (0..MAX_FILES_PER_FOLDER + 20)
+            .map(|i| format!("drawing-{i:03}.dwg"))
+            .collect();
+        files.push("the-one.pdf".into());
+        let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+        let ix = index(&[("job-0704", &refs)]);
+
+        let out = ask(&ix, "0704 ext:pdf");
+        assert_eq!(
+            paths(&out),
+            ["R:\\job-0704\\the-one.pdf"],
+            "the PDF was crowded out by drawings the filter had already refused"
+        );
+        assert_eq!(out.matched, 1);
+    }
+
+    /// The file's own name did not match; the folder did. Judging the file
+    /// against the mode would empty the folder that is the whole reason the
+    /// rows are there.
+    #[test]
+    fn a_mode_applies_to_the_folder_that_matched_and_not_to_its_files() {
+        let ix = index(&[("0704-job", &["anything at all.pdf"])]);
+        assert_eq!(paths(&ask(&ix, "0704*")).len(), 1);
+        // The same folder, asked for as a trailing match, is not a match.
+        assert!(paths(&ask(&ix, "*0704")).is_empty());
+    }
+
+    #[test]
+    fn a_folder_match_still_honours_the_type_filter_on_what_it_brings_in() {
+        let ix = index(&[("job-0704", &["a.pdf", "b.dwg", "c.pdf"])]);
+        let out = ask(&ix, "0704 ext:pdf");
+        assert_eq!(paths(&out), ["R:\\job-0704\\a.pdf", "R:\\job-0704\\c.pdf"]);
+        assert_eq!(out.matched, 2);
+    }
+
+    #[test]
+    fn a_folder_holding_nothing_of_the_asked_for_type_contributes_nothing() {
+        let ix = index(&[("job-0704", &["a.dwg", "b.dwg"])]);
+        let out = ask(&ix, "0704 ext:pdf");
+        assert!(paths(&out).is_empty());
+        assert_eq!(out.matched, 0);
+    }
+
+    /// A folder has no extension, so the whole of its name is its stem.
+    /// Splitting `11.5 revisions` on its dot would be nonsense.
+    #[test]
+    fn a_folder_name_is_never_split_on_its_dots() {
+        let ix = index(&[("11.5 revisions", &["plan.pdf"])]);
+        assert_eq!(paths(&ask(&ix, "*revisions")).len(), 1);
     }
 
     #[test]
@@ -1187,7 +1399,12 @@ mod tree_tests {
     fn a_short_query_is_rejected_rather_than_run() {
         let ix = index(&[("a", &["one.pdf"])]);
         assert!(matches!(
-            search_tree(&ix, "ab", &Hidden::none(), &CancelToken::never()),
+            search_tree(
+                &ix,
+                &Query::contains("ab"),
+                &Hidden::none(),
+                &CancelToken::never()
+            ),
             Err(QueryReject::TooShort { .. })
         ));
     }
@@ -1299,10 +1516,10 @@ mod tree_tests {
     #[test]
     fn check_query_rejects_a_short_query_before_any_index_is_consulted() {
         assert!(matches!(
-            check_query("ab"),
+            check_query(&Query::contains("ab")),
             Err(QueryReject::TooShort { .. })
         ));
-        assert!(check_query("abc").is_ok());
+        assert!(check_query(&Query::contains("abc")).is_ok());
     }
 
     /// With nothing indexed yet, asking each share would give no answer at
@@ -1310,7 +1527,7 @@ mod tree_tests {
     /// at least 3 characters".
     #[test]
     fn a_short_query_is_rejected_even_with_no_shares_indexed() {
-        assert!(check_query("ab").is_err());
+        assert!(check_query(&Query::contains("ab")).is_err());
         assert_eq!(merge_all(Vec::new()).hits.len(), 0);
     }
 }

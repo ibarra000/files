@@ -65,6 +65,7 @@ fn mixed_store() -> Arc<IndexStore> {
                     kind: MappingKind::Flat,
                     enabled: true,
                     refresh: Default::default(),
+                    depth: files::config::DEFAULT_LIVE_DEPTH,
                 },
                 files::paths::Mapping {
                     id: MappingId(1),
@@ -73,6 +74,7 @@ fn mixed_store() -> Arc<IndexStore> {
                     kind: MappingKind::Tree,
                     enabled: true,
                     refresh: Default::default(),
+                    depth: files::config::DEFAULT_LIVE_DEPTH,
                 },
             ],
             files::paths::ConfigSource::BuiltIn,
@@ -124,9 +126,14 @@ fn found(store: &IndexStore, query: &str) -> Vec<String> {
     let Some(tree) = store.first_tree_slot().as_tree() else {
         return Vec::new();
     };
-    matcher::search_tree(&tree, query, &Hidden::none(), &CancelToken::never())
-        .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
-        .unwrap_or_default()
+    matcher::search_tree(
+        &tree,
+        &files::search::query::Query::contains(query),
+        &Hidden::none(),
+        &CancelToken::never(),
+    )
+    .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
+    .unwrap_or_default()
 }
 
 /// The headline. A file whose folder no rule would have guessed is walked by

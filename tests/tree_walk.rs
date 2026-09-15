@@ -385,12 +385,17 @@ fn indexed(src: &FakeDirSource, opts: &WalkOpts) -> (files::index::tree::TreeInd
 }
 
 fn found(index: &files::index::tree::TreeIndex, query: &str) -> Vec<String> {
-    matcher::search_tree(index, query, &Hidden::none(), &CancelToken::never())
-        .unwrap()
-        .hits
-        .iter()
-        .map(|h| h.path.to_string())
-        .collect()
+    matcher::search_tree(
+        index,
+        &files::search::query::Query::contains(query),
+        &Hidden::none(),
+        &CancelToken::never(),
+    )
+    .unwrap()
+    .hits
+    .iter()
+    .map(|h| h.path.to_string())
+    .collect()
 }
 
 /// The whole project, in one assertion: a file whose folder no routing rule
@@ -474,8 +479,13 @@ fn segmenting_does_not_change_what_is_found() {
     assert!(report.complete());
     assert_eq!(index.len(), 300);
 
-    let hits =
-        matcher::search_tree(&index, "file123", &Hidden::none(), &CancelToken::never()).unwrap();
+    let hits = matcher::search_tree(
+        &index,
+        &files::search::query::Query::contains("file123"),
+        &Hidden::none(),
+        &CancelToken::never(),
+    )
+    .unwrap();
     assert_eq!(
         hits.hits
             .iter()
