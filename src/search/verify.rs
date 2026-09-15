@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use super::matcher::Hit;
 use super::pattern::{self, PatternReject};
+use crate::config::hidden::Hidden;
 use crate::config::{MAX_SERVER_HITS, SERVER_FILTER_MISS_LIMIT};
 use crate::index::DirStamp;
 use crate::index::enumerate::{DirSource, ListOpts, VecSink};
@@ -229,6 +230,7 @@ impl Verifier {
         &self,
         query: &str,
         snapshot: Option<&Snapshot>,
+        hidden: &Hidden,
         cancel: &CancelToken,
     ) -> VerifyOutcome {
         // Step 1: the cheap proof. An unchanged stamp makes everything below
@@ -256,7 +258,15 @@ impl Verifier {
 
         // Step 2: one round trip, matches only.
         let mut sink = VecSink::default();
-        let opts = ListOpts::default().with_max_entries(MAX_SERVER_HITS);
+        // `hiding_system` as well as the extension filter below, and both are
+        // needed. This is a second route into the results list, and it fires
+        // exactly when a share has been written to recently - so without this
+        // a hidden file with an ordinary extension appeared or not depending
+        // on how lately somebody had saved something, which is the hardest
+        // kind of bug for a user to report.
+        let opts = ListOpts::default()
+            .with_max_entries(MAX_SERVER_HITS)
+            .hiding_system(hidden.hides_system());
         let stats = match self
             .source
             .query(self.dir(), &wildcard, &mut sink, &opts, cancel)
@@ -288,8 +298,16 @@ impl Verifier {
             .collect();
 
         let verdict = self.run_audit(&confirmed, snapshot, query);
-        let matched = confirmed.len() as u32;
-        let hits = rank_server_names(self.dir(), confirmed, query);
+
+        // Audited first, then filtered. The audit is a claim about the
+        // *server's* pattern matching, and judging it against a list this
+        // program had already trimmed would report our own hidden files as the
+        // server dropping results - which after
+        // `SERVER_FILTER_MISS_LIMIT` of them would disable the whole mechanism
+        // for the rest of the session.
+        let shown: Vec<String> = confirmed.into_iter().filter(|n| !hidden.hides(n)).collect();
+        let matched = shown.len() as u32;
+        let hits = rank_server_names(self.dir(), shown, query);
 
         VerifyOutcome::Server {
             hits,
@@ -425,7 +443,7 @@ mod tests {
         let v = verifier(src.clone());
 
         let s = snap(&["alpha.txt"], Some(DirStamp::new(5, 5)));
-        let outcome = v.verify("alpha", Some(&s), &CancelToken::never());
+        let outcome = v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never());
 
         assert!(matches!(outcome, VerifyOutcome::IndexAuthoritative { .. }));
         assert_eq!(
@@ -445,7 +463,7 @@ mod tests {
         let v = verifier(src);
 
         let s = snap(&["alpha.txt"], Some(DirStamp::new(5, 5)));
-        match v.verify("alpha", Some(&s), &CancelToken::never()) {
+        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
             VerifyOutcome::Server { matched, audit, .. } => {
                 assert_eq!(matched, 2);
                 assert_eq!(audit, AuditVerdict::Consistent);
@@ -460,9 +478,107 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &CancelToken::never()),
+            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
             VerifyOutcome::Server { .. }
         ));
+    }
+
+    // --- hidden files ------------------------------------------------------
+
+    /// The server is a second route into the results list, and a filter that
+    /// only covered the local matcher would mean the same query returned
+    /// `Thumbs.db` or not depending on whether a drive had been touched
+    /// recently - which is the hardest kind of bug to be told about.
+    #[test]
+    fn a_hidden_file_the_server_returned_is_not_shown() {
+        let src = FakeDirSource::new().with_dir("V:\\", &["alpha.pdf", "alpha.db"]);
+        src.set_stamp(Some(DirStamp::new(9, 9)));
+        let v = verifier(src);
+
+        let s = snap(&["alpha.pdf"], Some(DirStamp::new(5, 5)));
+        match v.verify(
+            "alpha",
+            Some(&s),
+            &Hidden::new(&["db"], false),
+            &CancelToken::never(),
+        ) {
+            VerifyOutcome::Server { hits, matched, .. } => {
+                let names: Vec<&str> = hits.iter().map(|h| h.name.as_ref()).collect();
+                assert_eq!(names, vec!["alpha.pdf"]);
+                assert_eq!(matched, 1, "the count has to match the list");
+            }
+            other => panic!("expected a server answer, got {other:?}"),
+        }
+    }
+
+    /// The attribute half of the filter, on the route that nearly missed it.
+    ///
+    /// The server query is a second way into the results list and fires
+    /// exactly when a share has been written to lately, so a marked file with
+    /// an ordinary extension used to appear or not depending on how recently
+    /// somebody had saved something.
+    #[test]
+    fn a_marked_file_the_server_returned_is_not_shown_either() {
+        use crate::index::fake_source::FakeEntry;
+        let src = FakeDirSource::new().with_entries(
+            "V:\\",
+            vec![
+                FakeEntry::file("alpha.pdf"),
+                // No hidden extension, so only the attribute can catch it.
+                FakeEntry::hidden_file("~$alpha.docx"),
+            ],
+        );
+        src.set_stamp(Some(DirStamp::new(9, 9)));
+        let v = verifier(src);
+
+        let s = snap(&["alpha.pdf"], Some(DirStamp::new(5, 5)));
+        let shown =
+            |hidden: &Hidden| match v.verify("alpha", Some(&s), hidden, &CancelToken::never()) {
+                VerifyOutcome::Server { hits, .. } => {
+                    let mut names: Vec<String> = hits.iter().map(|h| h.name.to_string()).collect();
+                    names.sort();
+                    names
+                }
+                other => panic!("expected a server answer, got {other:?}"),
+            };
+
+        assert_eq!(
+            shown(&Hidden::new::<&str>(&[], false)),
+            vec!["alpha.pdf", "~$alpha.docx"],
+            "nothing was asked for, so nothing should have been dropped"
+        );
+        assert_eq!(shown(&Hidden::new::<&str>(&[], true)), vec!["alpha.pdf"]);
+    }
+
+    /// The audit is a claim about the *server's* pattern matching, so it is
+    /// run before the filter. Judging it against a list this program had
+    /// already trimmed would report our own hidden files as the server
+    /// dropping results - and after `SERVER_FILTER_MISS_LIMIT` of those it
+    /// would switch the whole mechanism off for the rest of the session.
+    #[test]
+    fn hiding_a_file_does_not_make_the_server_look_wrong() {
+        let src = FakeDirSource::new().with_dir("V:\\", &["alpha.pdf", "alpha.db"]);
+        src.set_stamp(Some(DirStamp::new(9, 9)));
+        let v = verifier(src);
+
+        let s = snap(&["alpha.pdf", "alpha.db"], Some(DirStamp::new(5, 5)));
+        for _ in 0..=SERVER_FILTER_MISS_LIMIT {
+            match v.verify(
+                "alpha",
+                Some(&s),
+                &Hidden::new(&["db"], false),
+                &CancelToken::never(),
+            ) {
+                VerifyOutcome::Server { audit, .. } => {
+                    assert_eq!(audit, AuditVerdict::Consistent, "our filter was blamed");
+                }
+                other => panic!("expected a server answer, got {other:?}"),
+            }
+        }
+        assert!(
+            v.is_enabled(),
+            "the filter switched itself off over our own"
+        );
     }
 
     // --- the audit in situ -------------------------------------------------
@@ -477,7 +593,7 @@ mod tests {
         let s = snap(&["alpha_one.txt", "alpha_two.txt"], None);
 
         for i in 1..=SERVER_FILTER_MISS_LIMIT {
-            match v.verify("alpha", Some(&s), &CancelToken::never()) {
+            match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
                 VerifyOutcome::Server { audit, .. } => {
                     assert!(matches!(audit, AuditVerdict::ServerUnderReturned { .. }));
                 }
@@ -488,7 +604,7 @@ mod tests {
 
         assert!(!v.is_enabled(), "the filter must switch itself off");
         assert!(matches!(
-            v.verify("alpha", Some(&s), &CancelToken::never()),
+            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
             VerifyOutcome::Skipped(SkipReason::AuditFailed { .. })
         ));
     }
@@ -499,7 +615,7 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         for _ in 0..10 {
-            v.verify("alpha", Some(&s), &CancelToken::never());
+            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never());
         }
         assert_eq!(v.misses(), 0);
         assert!(v.is_enabled());
@@ -512,7 +628,7 @@ mod tests {
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &CancelToken::never()),
+            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
             VerifyOutcome::Skipped(SkipReason::Unsupported)
         ));
         assert!(!v.is_enabled());
@@ -525,7 +641,7 @@ mod tests {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha.txt"]);
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
-        match v.verify("al*ha", Some(&s), &CancelToken::never()) {
+        match v.verify("al*ha", Some(&s), &Hidden::none(), &CancelToken::never()) {
             VerifyOutcome::Skipped(SkipReason::Pattern(PatternReject::NotLiteral('*'))) => {}
             other => panic!("expected a pattern rejection, got {other:?}"),
         }
@@ -537,7 +653,7 @@ mod tests {
         src.set_error(Some(EnumError::Transient(53)));
         let v = verifier(src);
         let s = snap(&["alpha.txt"], None);
-        match v.verify("alpha", Some(&s), &CancelToken::never()) {
+        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
             VerifyOutcome::Failed(EnumError::Transient(53)) => {}
             other => panic!("expected a transient failure, got {other:?}"),
         }
@@ -548,7 +664,7 @@ mod tests {
         let src = FakeDirSource::new().with_dir("V:\\", &["beta.txt"]);
         let v = verifier(src);
         let s = snap(&["beta.txt"], None);
-        match v.verify("alpha", Some(&s), &CancelToken::never()) {
+        match v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()) {
             VerifyOutcome::Server {
                 matched: 0, hits, ..
             } => assert!(hits.is_empty()),
@@ -562,7 +678,7 @@ mod tests {
         let v = Verifier::new(Arc::new(src.clone()), PathBuf::from("V:\\"), false);
         let s = snap(&["alpha.txt"], None);
         assert!(matches!(
-            v.verify("alpha", Some(&s), &CancelToken::never()),
+            v.verify("alpha", Some(&s), &Hidden::none(), &CancelToken::never()),
             VerifyOutcome::Skipped(SkipReason::Disabled)
         ));
         assert_eq!(

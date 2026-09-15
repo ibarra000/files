@@ -40,7 +40,8 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex};
 
 use super::enumerate::{
-    DirSource, EntryMeta, EntrySink, ListOpts, is_listable_file, is_walkable_dir,
+    DirSource, EntryMeta, EntrySink, ListOpts, is_listable_file, is_listable_file_with,
+    is_walkable_dir,
 };
 use super::errors::EnumError;
 use crate::config::{WALK_CONCURRENCY, WALK_DIR_BUFFER_BYTES};
@@ -70,6 +71,9 @@ pub struct WalkOpts {
     /// Off by default. See [`is_walkable_dir`].
     pub follow_reparse: bool,
     pub buffer_bytes: usize,
+    /// Drop files Windows marks hidden or system. Never folders - see
+    /// [`crate::index::enumerate::is_listable_file_with`] for why.
+    pub hide_system: bool,
 }
 
 impl Default for WalkOpts {
@@ -81,6 +85,7 @@ impl Default for WalkOpts {
             max_entries: 8_000_000,
             follow_reparse: false,
             buffer_bytes: WALK_DIR_BUFFER_BYTES,
+            hide_system: false,
         }
     }
 }
@@ -329,6 +334,7 @@ struct DirEntries {
     /// Descend into junctions as well. Still counted, so the report says how
     /// many were crossed either way.
     follow_reparse: bool,
+    hide_system: bool,
 }
 
 impl DirEntries {
@@ -346,7 +352,13 @@ impl EntrySink for DirEntries {
 
     fn push_str(&mut self, name: &str, meta: EntryMeta) -> bool {
         if is_listable_file(meta.attributes) {
-            self.files.push(name.to_string());
+            // Tested inside the file arm rather than as its condition: a
+            // hidden file is still a file, and letting it fall through would
+            // reach the junction arm below and report it as a skipped subtree.
+            // It is dropped here and counted as nothing.
+            if is_listable_file_with(meta.attributes, self.hide_system) {
+                self.files.push(name.to_string());
+            }
         } else if is_walkable_dir(meta.attributes) {
             self.subdirs.push(name.to_string());
         } else {
@@ -514,9 +526,13 @@ fn worker(
         max_entries: usize::MAX,
         deadline: None,
         force: None,
+        // The walk asks for everything and sorts it out in `DirEntries`,
+        // which has to see a hidden *directory* in order to descend into it.
+        hide_system: false,
     };
     let mut entries = DirEntries {
         follow_reparse: opts.follow_reparse,
+        hide_system: opts.hide_system,
         ..Default::default()
     };
 
@@ -612,5 +628,74 @@ fn worker(
             frontier.close();
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: u32 = 0x0080;
+    const DIRECTORY: u32 = 0x0010;
+    const REPARSE: u32 = 0x0400;
+    const HIDDEN: u32 = 0x0002;
+    const SYSTEM: u32 = 0x0004;
+
+    fn sorted(hide_system: bool, entries: &[(&str, u32)]) -> (Vec<String>, Vec<String>, u32) {
+        let mut sink = DirEntries {
+            hide_system,
+            ..Default::default()
+        };
+        for (name, attributes) in entries {
+            assert!(sink.push_str(
+                name,
+                EntryMeta {
+                    attributes: *attributes
+                }
+            ));
+        }
+        (sink.files.clone(), sink.subdirs.clone(), sink.reparse)
+    }
+
+    #[test]
+    fn a_marked_file_is_kept_until_the_walk_is_asked_to_drop_it() {
+        let entries = [("sheet.pdf", FILE), ("Thumbs.db", FILE | HIDDEN)];
+        let (files, _, _) = sorted(false, &entries);
+        assert_eq!(files, vec!["sheet.pdf", "Thumbs.db"]);
+
+        let (files, _, _) = sorted(true, &entries);
+        assert_eq!(files, vec!["sheet.pdf"]);
+    }
+
+    /// A dropped file is dropped, not reclassified. The junction counter feeds
+    /// `WalkReport::skipped_reparse`, which is how the program says a subtree
+    /// was left unsearched - so counting hidden files there would report
+    /// missing folders that do not exist.
+    #[test]
+    fn a_dropped_file_is_not_counted_as_a_skipped_subtree() {
+        let (files, subdirs, reparse) = sorted(
+            true,
+            &[
+                ("desktop.ini", FILE | SYSTEM),
+                ("junction", DIRECTORY | REPARSE),
+            ],
+        );
+        assert!(files.is_empty());
+        assert!(subdirs.is_empty());
+        assert_eq!(reparse, 1, "the hidden file was counted as a junction");
+    }
+
+    /// The one thing this must never do. A server that marks a whole share
+    /// system would otherwise make the share disappear.
+    #[test]
+    fn a_marked_folder_is_still_descended_into() {
+        let (_, subdirs, _) = sorted(
+            true,
+            &[
+                ("archive", DIRECTORY | SYSTEM),
+                ("private", DIRECTORY | HIDDEN),
+            ],
+        );
+        assert_eq!(subdirs, vec!["archive", "private"]);
     }
 }

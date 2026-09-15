@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use files::config::hidden::Hidden;
 use files::index::errors::EnumError;
 use files::index::fake_source::FakeDirSource;
 use files::index::walk::{TreeSink, WalkOpts, WalkReport, walk_tree};
@@ -384,7 +385,7 @@ fn indexed(src: &FakeDirSource, opts: &WalkOpts) -> (files::index::tree::TreeInd
 }
 
 fn found(index: &files::index::tree::TreeIndex, query: &str) -> Vec<String> {
-    matcher::search_tree(index, query, &CancelToken::never())
+    matcher::search_tree(index, query, &Hidden::none(), &CancelToken::never())
         .unwrap()
         .hits
         .iter()
@@ -473,7 +474,8 @@ fn segmenting_does_not_change_what_is_found() {
     assert!(report.complete());
     assert_eq!(index.len(), 300);
 
-    let hits = matcher::search_tree(&index, "file123", &CancelToken::never()).unwrap();
+    let hits =
+        matcher::search_tree(&index, "file123", &Hidden::none(), &CancelToken::never()).unwrap();
     assert_eq!(
         hits.hits
             .iter()

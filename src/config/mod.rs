@@ -11,6 +11,7 @@
 //! I/O in this crate can be exercised on the machine it is written on.
 
 pub mod file;
+pub mod hidden;
 pub mod write;
 
 use std::path::PathBuf;
@@ -121,6 +122,19 @@ pub const JOB_CACHE_TTL: Duration = Duration::from_secs(20);
 /// map the previous implementation grew for the life of a session.
 pub const JOB_CACHE_CAPACITY: usize = 64;
 
+/// Quiet period after the last keystroke before the local match runs.
+///
+/// The match itself is sub-millisecond and touches no network, so this is not
+/// about what the machine can afford - it is about what the screen should say.
+/// Somebody reading a code off a drawing does not want the list for `11`, then
+/// `11-`, then `11-D`; they want the list for the code they finished typing.
+/// Answering every prefix meant a result set, a body change and a window resize
+/// per character, for answers nobody reads.
+///
+/// Equal to [`VERIFY_DEBOUNCE`] deliberately: one pause, one answer, one server
+/// check. `AppState::on_tick` fires them in that order and relies on it.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+
 /// Quiet period after the last keystroke before the authoritative server-side
 /// verification runs. A leading `*` defeats the NTFS index, so this costs real
 /// server CPU and must not fire per keystroke.
@@ -154,6 +168,17 @@ pub const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 /// If a verify has not reported back by now, transition out of the spinner
 /// regardless. Guards against a wedged or panicked worker.
 pub const VERIFY_WATCHDOG: Duration = Duration::from_secs(10);
+
+/// If the matcher has not answered an Enter by now, give the keystroke back.
+///
+/// Enter typed inside [`SEARCH_DEBOUNCE`] cannot open the row on screen - that
+/// row answers the *previous* code - so it asks the matcher and opens whatever
+/// comes back. This is the backstop for an answer that never does.
+///
+/// Far shorter than [`VERIFY_WATCHDOG`]: that one waits on somebody else's file
+/// server, this one waits on a sweep over bytes this process already holds. A
+/// second is a hundred times longer than it has ever taken.
+pub const ENTER_WATCHDOG: Duration = Duration::from_secs(1);
 
 /// How often to ask the server whether `V:\` changed. This is a ~3 round-trip
 /// metadata probe, not an enumeration.
@@ -415,20 +440,29 @@ impl MatcherKind {
 
 /// Which application a chosen result is handed to.
 ///
-/// The two differ in more than which executable is spawned. `Avwin` opens the
-/// one file the cursor is on, which is all it can do: the pages of a drawing
-/// set are separate files on the share, and a viewer given one of them shows
-/// one page. `Pdf` treats the code as naming a *document*, gathers every page
-/// of it and hands over a single assembled PDF - which is what someone asking
-/// for `11-D-0704` almost always meant.
+/// They differ in more than which executable is spawned. `Avwin` opens the one
+/// file the cursor is on, which is all it can do: the pages of a drawing set
+/// are separate files on the share, and a viewer given one of them shows one
+/// page. `Pdf` treats the code as naming a *document*, gathers every page of it
+/// and hands over a single assembled PDF - which is what someone asking for
+/// `11-D-0704` almost always meant.
+///
+/// `Auto` is neither, and picks between them per file. See
+/// [`crate::open::route_of`], which is where a mode and a file name become a
+/// destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerKind {
-    /// Every page of the code, merged into one PDF, opened with the system's
-    /// `.pdf` handler.
+    /// Whatever suits the file: documents assembled, drawings converted,
+    /// everything else handed to `avwin.exe`.
     #[default]
+    Auto,
+    /// Every page of the code, merged into one PDF, opened with the system's
+    /// `.pdf` handler. A drawing is converted first, so this always produces a
+    /// PDF or an error.
     Pdf,
     /// The single selected file, handed to `avwin.exe`. The behaviour this
-    /// program had before there was a choice.
+    /// program had before there was a choice, and still the way to see a `.pdf`
+    /// or a `.dwg` in avwin rather than anywhere else.
     Avwin,
 }
 
@@ -483,13 +517,43 @@ impl ThemeChoice {
     }
 }
 
+/// Fills in the implied arguments when a converter is named by program alone.
+///
+/// One place, so `dwg_converter = 'x.exe'` and `FILES_DWG_CONVERTER=x.exe` mean
+/// the same thing rather than nearly the same thing.
+pub fn expand_converter(argv: Vec<String>) -> Vec<String> {
+    if argv.len() == 1 {
+        let prog = argv.into_iter().next().unwrap_or_default();
+        return vec![prog, "{in}".into(), "{out}".into()];
+    }
+    argv
+}
+
 impl ViewerKind {
+    /// Every mode, for the tests that must cover all of them.
+    ///
+    /// A constant rather than a literal at each site: four test arrays used to
+    /// spell `[Pdf, Avwin]` out, which means a new mode makes them quietly stop
+    /// covering it instead of failing.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Pdf, Self::Avwin];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
+            "auto" | "by-extension" => Some(Self::Auto),
             "pdf" | "merge" | "merged" => Some(Self::Pdf),
             "avwin" | "av" | "avwin.exe" => Some(Self::Avwin),
             _ => None,
         }
+    }
+
+    /// Whether `avwin.exe` can be reached from this mode.
+    ///
+    /// Not `== Avwin`, and the difference matters: under `Auto` avwin opens
+    /// everything that is neither a drawing nor a document, so reporting it as
+    /// "not in use" would hide the one fact somebody chasing a dead Enter key
+    /// needs.
+    pub fn may_use_avwin(self) -> bool {
+        matches!(self, Self::Avwin | Self::Auto)
     }
 
     /// The spelling written to the config file, so it must be one `parse`
@@ -497,7 +561,22 @@ impl ViewerKind {
     /// that, because an unknown value is a hard startup error.
     pub fn name(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Pdf => "pdf",
+            Self::Avwin => "avwin",
+        }
+    }
+
+    /// How the mode is spelled on screen.
+    ///
+    /// Separate from [`Self::name`], which is the configuration file's spelling
+    /// and is round-tripped through [`Self::parse`]. Using a serialisation
+    /// identifier as a label is how the footer came to say `viewer: pdf` in a
+    /// panel where every other word is capitalised.
+    pub fn display(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Pdf => "PDF",
             Self::Avwin => "avwin",
         }
     }
@@ -507,7 +586,8 @@ impl ViewerKind {
     pub fn next(self) -> Self {
         match self {
             Self::Pdf => Self::Avwin,
-            Self::Avwin => Self::Pdf,
+            Self::Avwin => Self::Auto,
+            Self::Auto => Self::Pdf,
         }
     }
 }
@@ -616,6 +696,23 @@ pub struct Settings {
     /// there would be a regression, so this is reported by `--doctor` and
     /// surfaced as a toast instead.
     pub pdf_viewer: Option<PathBuf>,
+
+    /// How to turn a `.dwg` into a PDF, as a command and its arguments.
+    ///
+    /// `{in}` and `{out}` are replaced *within* an argument, so `--out={out}`
+    /// works and nothing has to be quoted or escaped - the argument vector
+    /// never becomes a command line to be re-parsed. A bare program name is
+    /// taken to mean `[prog, "{in}", "{out}"]`.
+    ///
+    /// `None` - the shipped default - means drawings go to `avwin.exe`, which
+    /// opens them natively. There is no Rust that can read a DWG: it is a
+    /// closed format, and every route to a PDF is somebody else's program.
+    ///
+    /// Not validated at load, for the reason [`Self::pdf_viewer`] gives: this
+    /// file roams to laptops where the converter legitimately is not installed,
+    /// and refusing to start there would be a regression. `--doctor` reports
+    /// it, and the first drawing that needs it says so on the status line.
+    pub dwg_converter: Option<Vec<String>>,
     /// Whether an F2 toggle can be written back to the configuration file.
     ///
     /// False when the environment or the command line set the viewer, because
@@ -625,6 +722,13 @@ pub struct Settings {
     /// the state machine can say "this session only" instead of reporting a
     /// save that changes nothing.
     pub viewer_persistable: bool,
+    /// The files that are never shown, however well they match.
+    ///
+    /// One derived value rather than the two settings it is built from, so
+    /// that nothing downstream can consult the list while disagreeing about
+    /// the flag. `Arc` for the same reason as [`Self::routes`]: it is shared
+    /// by every worker and read in the matcher's inner loop.
+    pub hidden: Arc<hidden::Hidden>,
 }
 
 impl Default for Settings {
@@ -659,12 +763,42 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             pdf_viewer: None,
+            dwg_converter: None,
             // Assume not, and let `load` say otherwise once it knows there is
             // a file and that nothing outranks it. Defaulting the other way
             // would make every test fixture and every `--no-config` session
             // claim it could save.
             viewer_persistable: false,
+            // Set here and not only in the shipped TOML, because
+            // `write_default_if_absent` never rewrites a file that exists:
+            // everybody who already has a `config.toml` gets this value and
+            // never sees the block the asset file documents it with.
+            hidden: Arc::new(hidden::Hidden::new(
+                hidden::DEFAULT_HIDE_EXTENSIONS,
+                hidden::DEFAULT_HIDE_SYSTEM_FILES,
+            )),
         })
+    }
+
+    /// Replaces whichever half of [`Self::hidden`] was specified.
+    ///
+    /// One setter rather than two assignments, because `Hidden` is a single
+    /// value derived from two settings that arrive by different routes - the
+    /// list from the file, the flag possibly only from the environment. Left
+    /// to write into it separately they would each rebuild it from the other's
+    /// default and the last one would win.
+    fn set_hidden(&mut self, extensions: Option<Vec<String>>, system: Option<bool>) {
+        if extensions.is_none() && system.is_none() {
+            return;
+        }
+        // Round-trips through the dotted form `Hidden` stores, which its
+        // constructor strips again - so "keep what is already there" needs no
+        // second copy of the list hanging off `Settings`.
+        let keep: Vec<String> = self.hidden.suffixes().map(str::to_string).collect();
+        self.hidden = Arc::new(hidden::Hidden::new(
+            &extensions.unwrap_or(keep),
+            system.unwrap_or(self.hidden.hides_system()),
+        ));
     }
 
     /// Settings over a single mapping, for tests and diagnostics.
@@ -781,11 +915,31 @@ impl Settings {
         {
             self.pdf_viewer = Some(v.clone());
         }
+        if env_str("FILES_DWG_CONVERTER").is_none()
+            && let Some(v) = &f.dwg_converter
+        {
+            self.dwg_converter = Some(v.clone());
+        }
         if env_str("FILES_THEME").is_none()
             && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
         {
             self.theme = v;
         }
+        self.set_hidden(
+            // `env_str` rather than `var` everywhere else, but not here: it
+            // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
+            // the deliberate way to say "hide nothing for this run". Asked the
+            // usual way, that request would look unset and the file would
+            // quietly win.
+            std::env::var("FILES_HIDE_EXTENSIONS")
+                .is_err()
+                .then(|| f.hide_extensions.clone())
+                .flatten(),
+            env_bool("FILES_HIDE_SYSTEM_FILES")
+                .is_none()
+                .then_some(f.hide_system_files)
+                .flatten(),
+        );
     }
 
     /// As [`Settings::from_env`], but over a supplied routing table.
@@ -850,6 +1004,28 @@ impl Settings {
         if let Some(v) = env_str("FILES_PDF_VIEWER") {
             s.pdf_viewer = Some(PathBuf::from(v));
         }
+        // Split on whitespace, which is all an environment variable can carry.
+        // A path with spaces in it belongs in the configuration file, where it
+        // can be written as an array.
+        if let Some(v) = env_str("FILES_DWG_CONVERTER") {
+            s.dwg_converter = Some(expand_converter(
+                v.split_whitespace().map(str::to_string).collect(),
+            ));
+        }
+        // Commas as well as spaces, because `db,js,lnk` is how anybody would
+        // write this one. An empty value means "hide nothing", which is the
+        // one-variable way to ask whether the filter is what is hiding a file
+        // - the same job `--no-config` does for the file as a whole.
+        s.set_hidden(
+            std::env::var("FILES_HIDE_EXTENSIONS").ok().map(|v| {
+                v.split([',', ' ', '\t', ';'])
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }),
+            env_bool("FILES_HIDE_SYSTEM_FILES"),
+        );
         s
     }
 }
@@ -925,6 +1101,131 @@ mod tests {
         assert_eq!(EnumStrategy::parse("nonsense"), None);
     }
 
+    // --- hiding files -------------------------------------------------------
+
+    /// Serialises everything below, because `apply_file_settings` reads the
+    /// environment and one of these tests writes to it. Modelled on the same
+    /// guard in `crate::log`, and needed for the same reason: `cargo test`
+    /// runs these in parallel against one process-wide environment.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        // A poisoned lock means another of these tests panicked mid-assertion.
+        // That is a failure to report, not a reason to stop taking the lock.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn applied(f: file::FileSettings) -> Settings {
+        let _guard = lock();
+        let mut s = Settings::default();
+        s.apply_file_settings(&f);
+        s
+    }
+
+    /// An empty `FILES_HIDE_EXTENSIONS` is the deliberate one-variable way to
+    /// ask "is the filter what is hiding my file?", so it has to outrank the
+    /// configuration file like every other override.
+    ///
+    /// It did not. The precedence guard used `env_str`, which discards an
+    /// empty value, so the request looked unset and the file quietly won -
+    /// leaving the one diagnostic for this feature silently doing nothing.
+    #[test]
+    fn an_empty_override_still_outranks_the_configuration_file() {
+        const ENV: &str = "FILES_HIDE_EXTENSIONS";
+        let _guard = lock();
+
+        // SAFETY: `set_var` and `remove_var` are unsafe because another thread
+        // reading the environment at the same instant is a data race. The lock
+        // above is what makes that impossible: every read of this variable in
+        // this binary goes through `apply_file_settings`, which the other
+        // tests in this module reach only via `applied`, which takes the same
+        // lock - and both calls below happen before the guard is dropped.
+        unsafe { std::env::set_var(ENV, "") };
+
+        // The two steps `load` performs, in its order: the environment over
+        // the built-in defaults, then the file yielding to the environment.
+        // Testing only the second would prove nothing - the override is
+        // applied in the first.
+        let mut s = Settings::from_env_with(default_routes());
+        s.apply_file_settings(&file::FileSettings {
+            hide_extensions: Some(vec!["db".into()]),
+            ..Default::default()
+        });
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(ENV) };
+
+        assert!(
+            s.hidden.is_empty(),
+            "the file overrode an override: {:?}",
+            s.hidden.suffixes().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_built_in_default_hides_the_files_that_prompted_it() {
+        let s = Settings::default();
+        assert!(s.hidden.hides("Thumbs.db"));
+        assert!(s.hidden.hides("shortcut.lnk"));
+        assert!(!s.hidden.hides("11-D-0704.pdf"));
+        assert!(s.hidden.hides_system());
+    }
+
+    #[test]
+    fn a_file_setting_replaces_the_built_in_list() {
+        let s = applied(file::FileSettings {
+            hide_extensions: Some(vec!["xyz".into()]),
+            ..Default::default()
+        });
+        assert!(s.hidden.hides("a.xyz"));
+        assert!(
+            !s.hidden.hides("Thumbs.db"),
+            "the default list was merged in"
+        );
+    }
+
+    /// An empty list is a real answer - "hide nothing" - and the quickest way
+    /// to find out whether this is why an expected file is missing. It must
+    /// not read as "unset" and fall back to the shipped list.
+    #[test]
+    fn an_empty_list_hides_nothing() {
+        let s = applied(file::FileSettings {
+            hide_extensions: Some(Vec::new()),
+            ..Default::default()
+        });
+        assert!(s.hidden.is_empty());
+        assert!(!s.hidden.hides("Thumbs.db"));
+    }
+
+    /// The reason the two settings go through one setter. Each arrives by its
+    /// own route, and written separately the second would rebuild `Hidden`
+    /// from the first's default and discard it.
+    #[test]
+    fn setting_one_half_leaves_the_other_alone() {
+        let flag_only = applied(file::FileSettings {
+            hide_system_files: Some(false),
+            ..Default::default()
+        });
+        assert!(!flag_only.hidden.hides_system());
+        assert!(
+            flag_only.hidden.hides("Thumbs.db"),
+            "the extension list was lost"
+        );
+
+        let list_only = applied(file::FileSettings {
+            hide_extensions: Some(vec!["xyz".into()]),
+            ..Default::default()
+        });
+        assert!(list_only.hidden.hides_system(), "the system flag was lost");
+        assert!(list_only.hidden.hides("a.xyz"));
+    }
+
+    #[test]
+    fn a_file_that_says_nothing_changes_nothing() {
+        let s = applied(file::FileSettings::default());
+        assert_eq!(s.hidden, Settings::default().hidden);
+    }
+
     #[test]
     fn parses_matcher_kinds() {
         assert_eq!(MatcherKind::parse("simd"), Some(MatcherKind::Simd));
@@ -934,6 +1235,9 @@ mod tests {
 
     #[test]
     fn parses_every_viewer_spelling() {
+        assert_eq!(ViewerKind::parse("auto"), Some(ViewerKind::Auto));
+        assert_eq!(ViewerKind::parse(" AUTO "), Some(ViewerKind::Auto));
+        assert_eq!(ViewerKind::parse("by-extension"), Some(ViewerKind::Auto));
         assert_eq!(ViewerKind::parse("pdf"), Some(ViewerKind::Pdf));
         assert_eq!(ViewerKind::parse("  MERGE "), Some(ViewerKind::Pdf));
         assert_eq!(ViewerKind::parse("avwin"), Some(ViewerKind::Avwin));
@@ -944,15 +1248,25 @@ mod tests {
     /// Assembling the whole document is what someone typing a code almost
     /// always meant; opening one page of it is the special case.
     #[test]
-    fn the_pdf_viewer_is_the_default() {
-        assert_eq!(Settings::default().viewer, ViewerKind::Pdf);
+    fn opening_by_file_type_is_the_default() {
+        // Only for a fresh install. Every config.toml this program has ever
+        // written names a viewer explicitly, so nobody's behaviour changes
+        // without them editing the file.
+        assert_eq!(Settings::default().viewer, ViewerKind::Auto);
     }
 
     #[test]
-    fn toggling_the_viewer_returns_to_where_it_started() {
-        for v in [ViewerKind::Pdf, ViewerKind::Avwin] {
-            assert_eq!(v.next().next(), v);
-            assert_ne!(v.next(), v);
+    fn the_viewer_cycles_through_every_mode_and_closes() {
+        for start in ViewerKind::ALL {
+            let mut seen = vec![start];
+            let mut v = start;
+            for _ in 1..ViewerKind::ALL.len() {
+                v = v.next();
+                assert!(!seen.contains(&v), "{v:?} came round twice");
+                seen.push(v);
+            }
+            assert_eq!(v.next(), start, "the cycle does not close");
+            assert_ne!(start.next(), start, "F2 must always change something");
         }
     }
 
@@ -960,7 +1274,7 @@ mod tests {
     /// or F2 would write a value that stops the program at the next start.
     #[test]
     fn every_name_the_writer_emits_parses_back() {
-        for v in [ViewerKind::Pdf, ViewerKind::Avwin] {
+        for v in ViewerKind::ALL {
             assert_eq!(ViewerKind::parse(v.name()), Some(v));
         }
     }

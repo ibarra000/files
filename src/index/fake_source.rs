@@ -136,6 +136,25 @@ impl FakeEntry {
     pub const FILE: u32 = 0x0000_0080;
     pub const DIRECTORY: u32 = 0x0000_0010;
     pub const REPARSE_POINT: u32 = 0x0000_0400;
+    pub const HIDDEN: u32 = 0x0000_0002;
+    pub const SYSTEM: u32 = 0x0000_0004;
+
+    /// A file Windows marks hidden - `Thumbs.db`, a `~$` Office lock file.
+    pub fn hidden_file(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: Self::FILE | Self::HIDDEN,
+        }
+    }
+
+    /// A folder a file server marked system. Listed and walked regardless,
+    /// which is the behaviour worth holding the walker to.
+    pub fn system_dir(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: Self::DIRECTORY | Self::SYSTEM,
+        }
+    }
 
     pub fn file(name: impl Into<String>) -> Self {
         Self {
@@ -193,6 +212,16 @@ impl FakeDirSource {
             dir.into(),
             names.iter().map(|s| FakeEntry::file(*s)).collect(),
         );
+        self
+    }
+
+    /// Registers a directory whose entries carry attributes of their own.
+    ///
+    /// [`Self::with_dir`] makes every name an ordinary file, which is what
+    /// almost every test wants. This is for the ones about what an attribute
+    /// means - hidden, system, a junction.
+    pub fn with_entries(self, dir: impl Into<PathBuf>, entries: Vec<FakeEntry>) -> Self {
+        self.dirs.lock().insert(dir.into(), entries);
         self
     }
 
@@ -535,7 +564,9 @@ impl DirSource for FakeDirSource {
             // The real enumerators filter on attributes before the sink sees
             // anything; a fake that skipped this would let a walker pass here
             // and miss every subdirectory against a real share.
-            if opts.files_only && !super::enumerate::is_listable_file(entry.attributes) {
+            if opts.files_only
+                && !super::enumerate::is_listable_file_with(entry.attributes, opts.hide_system)
+            {
                 continue;
             }
             if entries >= opts.max_entries {
@@ -590,7 +621,9 @@ impl DirSource for FakeDirSource {
             // A server-side wildcard returns directories too; the caller
             // filters. Matching the real thing keeps `--bench`'s completeness
             // oracle honest about what it is comparing against.
-            if opts.files_only && !super::enumerate::is_listable_file(entry.attributes) {
+            if opts.files_only
+                && !super::enumerate::is_listable_file_with(entry.attributes, opts.hide_system)
+            {
                 continue;
             }
             if !wildcard_matches(wildcard, &entry.name) {
@@ -677,6 +710,37 @@ mod tests {
             ),
             Err(EnumError::PathNotFound(_))
         ));
+    }
+
+    /// The fake has to filter exactly as the real enumerators do, or a walker
+    /// proved correct against it has been proved nothing - which is the same
+    /// reason it filters on the directory bit.
+    #[test]
+    fn marked_files_are_listed_only_when_the_caller_allows_them() {
+        let s = FakeDirSource::new().with_entries(
+            "V:\\",
+            vec![
+                FakeEntry::file("sheet.pdf"),
+                FakeEntry::hidden_file("Thumbs.db"),
+                FakeEntry::system_dir("archive"),
+            ],
+        );
+
+        let listed = |hide_system: bool| {
+            let mut sink = VecSink::default();
+            s.list(
+                Path::new("V:\\"),
+                &mut sink,
+                &ListOpts::default().hiding_system(hide_system),
+                &CancelToken::never(),
+            )
+            .unwrap();
+            sink.names.sort();
+            sink.names
+        };
+
+        assert_eq!(listed(false), vec!["Thumbs.db", "sheet.pdf"]);
+        assert_eq!(listed(true), vec!["sheet.pdf"]);
     }
 
     #[test]

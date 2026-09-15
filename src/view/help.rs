@@ -22,57 +22,54 @@ pub enum Row {
     Blank,
 }
 
-/// How wide the key column is. Wide enough for `Double-click`, which is the
-/// longest thing named here, so the descriptions line up in one rule.
-pub const KEY_WIDTH: usize = 14;
-
 pub fn rows(viewer: ViewerKind) -> Vec<Row> {
     let opens = match viewer {
+        ViewerKind::Auto => "open it in whichever program suits the file",
         ViewerKind::Pdf => "open every page of that code as one document",
         ViewerKind::Avwin => "open the selected file in avwin",
     };
     vec![
         Row::Blank,
-        Row::Heading("TYPING A CODE"),
+        Row::Heading("Typing a code"),
         Row::Entry("", "Just type. For example: 11-D-0704"),
         Row::Entry("Left Right", "move the cursor along the code"),
         Row::Entry("Home End", "jump to the start or the end of it"),
         Row::Entry("Ctrl+A", "select the whole code"),
         Row::Entry("Ctrl+V", "paste a code"),
         Row::Entry("Ctrl+C", "copy what you have selected"),
+        Row::Entry("Ctrl+X", "cut what you have selected"),
         Row::Entry("Backspace", "delete the character before the cursor"),
         Row::Entry("Ctrl+W", "delete back to the previous dash"),
         Row::Entry("Ctrl+U", "delete the whole code"),
         Row::Entry("Esc", "clear what you have typed"),
         Row::Blank,
-        Row::Heading("FINDING YOUR FILE"),
+        Row::Heading("Finding your file"),
         Row::Entry("Down", "step into the list of results"),
         Row::Entry("Up Down", "move through the list, scrolling it"),
         Row::Entry("PgUp PgDn", "move a screenful at a time"),
         Row::Entry("", "The bottom left of the box says which of the matches"),
-        Row::Entry("", "you are looking at - 13-24 of 300 - so a long list is"),
+        Row::Entry("", "you are looking at (13-24 of 300), so a long list is"),
         Row::Entry("", "something you can get to the end of."),
         Row::Entry("Esc", "go back to typing"),
         Row::Blank,
-        Row::Heading("OPENING IT"),
+        Row::Heading("Opening it"),
         Row::Entry("Enter", opens),
-        Row::Entry("F2", "switch between the two ways of opening"),
+        Row::Entry("F2", "switch between the ways of opening"),
         Row::Entry("", "The key itself, at the bottom right, names the one in"),
         Row::Entry("", "use."),
         Row::Blank,
-        Row::Heading("USING THE MOUSE"),
+        Row::Heading("Using the mouse"),
         Row::Entry("Click", "pick a result, or put the caret in the code"),
         Row::Entry("Double-click", "open that result"),
-        Row::Entry("Wheel", "move through the results"),
         Row::Entry("Drag", "select part of the code, to copy it"),
         Row::Entry("Shift+drag", "select anything on screen, as usual"),
         Row::Blank,
-        Row::Heading("CODES YOU USED BEFORE"),
+        Row::Heading("Codes you used before"),
         Row::Entry("Up", "from an empty line, list them"),
         Row::Entry("Enter", "use the one you picked"),
         Row::Entry("Esc", "go back to what you were typing"),
         Row::Blank,
-        Row::Heading("IF SOMETHING LOOKS WRONG"),
+        Row::Heading("If something looks wrong"),
         Row::Entry("F5", "list the drives and how old each one is"),
         Row::Entry("Enter", "update the drive you picked"),
         Row::Entry("A", "update every drive"),
@@ -83,7 +80,7 @@ pub fn rows(viewer: ViewerKind) -> Vec<Row> {
         Row::Entry("", "Drives update themselves as files change, so this is"),
         Row::Entry("", "only needed when something looks missing."),
         Row::Blank,
-        Row::Heading("LEAVING"),
+        Row::Heading("Leaving"),
         Row::Entry("F1", "show or hide this list of keys"),
         Row::Entry("Ctrl+Q", "quit. Esc does not quit, and Ctrl+C copies"),
         Row::Blank,
@@ -130,12 +127,61 @@ mod tests {
         }
     }
 
+    /// Every heading and every description, held to the house style.
+    ///
+    /// The headings are the reason this is here. They were written in
+    /// capitals (`TYPING A CODE`), which is styling smuggled into the text
+    /// while the renderer was already drawing them bold, dim and spaced: two
+    /// ways of saying "this is a heading", one of which the wording layer is
+    /// not allowed to have an opinion about.
+    #[test]
+    fn every_row_keeps_the_house_style() {
+        let mut lines = Vec::new();
+        for viewer in ViewerKind::ALL {
+            for entry in rows(viewer) {
+                match entry {
+                    Row::Blank => {}
+                    Row::Heading(text) => lines.push(text),
+                    Row::Entry(key, what) => {
+                        lines.push(key);
+                        lines.push(what);
+                    }
+                }
+            }
+        }
+        crate::view::style::check_all(
+            "the shortcuts window",
+            lines.iter().copied(),
+            crate::view::style::Slot::Body,
+        );
+    }
+
+    /// A heading names a section; it does not shout one.
+    #[test]
+    fn no_heading_is_written_in_capitals() {
+        for viewer in ViewerKind::ALL {
+            for entry in rows(viewer) {
+                if let Row::Heading(text) = entry {
+                    assert_ne!(
+                        text,
+                        text.to_uppercase(),
+                        "{text:?} is styling written into the words"
+                    );
+                    assert!(
+                        crate::view::style::starts_capitalised(text),
+                        "{text:?} does not start a sentence"
+                    );
+                }
+            }
+        }
+    }
+
     /// The mouse works, and until this panel existed the program said so
     /// nowhere at all.
     #[test]
     fn the_mouse_is_documented() {
         let t = text(ViewerKind::Pdf);
-        for gesture in ["Click", "Double-click", "Wheel", "Drag", "Shift+drag"] {
+        for gesture in ["Click", "Double-click", "Drag", "Shift+drag"] {
             assert!(t.contains(gesture), "{gesture} is undocumented:\n{t}");
         }
     }

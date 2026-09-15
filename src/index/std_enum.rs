@@ -14,11 +14,39 @@ use std::time::Instant;
 
 use super::DirStamp;
 use super::enumerate::{
-    DirSource, EntryMeta, EntrySink, ListOpts, ListStats, is_dot_entry, is_listable_file,
+    DirSource, EntryMeta, EntrySink, ListOpts, ListStats, is_dot_entry, is_listable_file_with,
 };
 use super::errors::EnumError;
 use crate::config::EnumStrategy;
 use crate::util::cancel::CancelToken;
+
+/// The hidden and system bits, and nothing else.
+///
+/// Read separately from the directory bit above because that one is a
+/// restatement of `file_type()` while these are a genuine question about the
+/// entry. `DirEntry::metadata` is free on Windows for the same reason
+/// `file_type` is - the directory scan already returned the whole
+/// `WIN32_FIND_DATA` - so this costs no extra round trip on a share.
+///
+/// Nothing off Windows, where the attributes do not exist. The dotfile
+/// convention is deliberately not treated as a stand-in: this enumerator is
+/// the fallback for a Windows share, and giving it a second meaning here would
+/// make the two paths disagree about which files exist.
+#[cfg(windows)]
+fn marked(entry: &std::fs::DirEntry) -> u32 {
+    use std::os::windows::fs::MetadataExt;
+    const HIDDEN: u32 = 0x0000_0002;
+    const SYSTEM: u32 = 0x0000_0004;
+    entry
+        .metadata()
+        .map(|m| m.file_attributes() & (HIDDEN | SYSTEM))
+        .unwrap_or(0)
+}
+
+#[cfg(not(windows))]
+fn marked(_entry: &std::fs::DirEntry) -> u32 {
+    0
+}
 
 /// Directory listings via the standard library.
 #[derive(Debug, Default, Clone, Copy)]
@@ -79,8 +107,8 @@ impl DirSource for StdDirSource {
                 continue;
             }
 
-            let attributes = if ft.is_dir() { 0x0010 } else { 0x0080 };
-            if opts.files_only && !is_listable_file(attributes) {
+            let attributes = if ft.is_dir() { 0x0010 } else { 0x0080 } | marked(&entry);
+            if opts.files_only && !is_listable_file_with(attributes, opts.hide_system) {
                 continue;
             }
 
@@ -123,6 +151,57 @@ mod tests {
             std::fs::write(dir.path().join(n), b"x").unwrap();
         }
         dir
+    }
+
+    /// Marks a real file hidden, so the filter is tested against Windows
+    /// rather than against a fixture that agrees with it by construction.
+    #[cfg(windows)]
+    fn mark_hidden(path: &Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_HIDDEN, SetFileAttributesW};
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: a NUL-terminated wide path to a file that exists; the call
+        // reads the buffer and returns a success flag, which is checked.
+        let ok = unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+        assert_ne!(ok, 0, "could not mark {} hidden", path.display());
+    }
+
+    /// The end-to-end shape of the attribute half: a file the operating system
+    /// says is hidden, read back through the real enumerator.
+    ///
+    /// Also the test that `marked` reads the attribute at all. Before it, this
+    /// enumerator synthesised its attributes from `file_type()` alone, so it
+    /// could not have seen a hidden file however it was configured.
+    #[test]
+    #[cfg(windows)]
+    fn a_file_windows_marks_hidden_is_dropped_only_when_asked() {
+        let dir = temp_dir_with(&["sheet.pdf", "Thumbs.db"]);
+        mark_hidden(&dir.path().join("Thumbs.db"));
+
+        let listed = |hide_system: bool| {
+            let mut sink = VecSink::default();
+            StdDirSource
+                .list(
+                    dir.path(),
+                    &mut sink,
+                    &ListOpts::default().hiding_system(hide_system),
+                    &CancelToken::never(),
+                )
+                .unwrap();
+            sink.names.sort();
+            sink.names
+        };
+
+        assert_eq!(
+            listed(false),
+            vec!["Thumbs.db", "sheet.pdf"],
+            "the default must enumerate the directory as it is"
+        );
+        assert_eq!(listed(true), vec!["sheet.pdf"]);
     }
 
     #[test]

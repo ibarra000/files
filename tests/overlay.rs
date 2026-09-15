@@ -264,23 +264,40 @@ fn escape_in_the_overlay_closes_from_the_results_too() {
     assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
 }
 
-/// ...and from the recent codes, which used to be the one place it did not.
+/// ...except out of the recent codes, which peel first.
 ///
-/// Recall promised that Escape restored the half-typed code underneath, and
-/// made that promise in its own key hints. There is no underneath now - the
-/// list is what an empty field shows - so Escape means what it means
-/// everywhere else, and the hint that promised otherwise went with the mode.
+/// The exception the drive picker already has, and for the reason `on_escape`
+/// gives for it: a list that cannot be shut without taking the panel with it is
+/// a trap. The status line has always said "Esc to go back"; now something
+/// keeps the promise.
+///
+/// The list only exists because the Up arrow opened it, so leaving it is a
+/// thing the user can mean - which was not true while it was simply what an
+/// empty field showed.
 #[test]
-fn escape_while_browsing_the_recent_codes_still_closes_the_overlay() {
+fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
     let (mut s, now) = state();
     s.seed_history(vec!["older".into()]);
     summon(&mut s, now);
     s.update(press(Key::Up), now);
     assert!(s.history.is_browsing());
 
-    let r = s.update(press(Key::Esc), now);
+    let first = s.update(press(Key::Esc), now);
+    assert!(
+        !has(&first, &Cmd::DismissOverlay),
+        "the first Escape took the panel with it: {:?}",
+        first.cmds
+    );
+    assert!(!s.history.is_browsing(), "it did not leave the list");
+    assert_eq!(s.input.text(), "", "and it did not put the field back");
 
-    assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
+    // The second one closes, exactly as it does from anywhere else.
+    let second = s.update(press(Key::Esc), now);
+    assert!(
+        has(&second, &Cmd::DismissOverlay),
+        "no dismiss: {:?}",
+        second.cmds
+    );
 }
 
 #[test]
@@ -342,10 +359,11 @@ fn ctrl_q_still_quits_from_inside_the_overlay() {
 
 /// The headline case, and the one a phase-only gate gets wrong.
 ///
-/// The local matcher has no debounce at all: it answers in well under a
-/// millisecond, so `inv` is in `QueryPhase::Local` almost immediately. Gating
-/// on "a search resolved" would therefore remember every prefix typed on the
-/// way to a code, which is the entire thing this feature was asked not to do.
+/// The local matcher waits out `SEARCH_DEBOUNCE`, which is 300ms - an ordinary
+/// pause between syllables - so `inv` reaches `QueryPhase::Local` while
+/// somebody is still reading the rest of the code off a drawing. Gating on "a
+/// search resolved" would therefore remember every prefix typed on the way to a
+/// code, which is the entire thing this feature was asked not to do.
 #[test]
 fn a_code_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
     let (mut s, now) = state();
@@ -632,13 +650,13 @@ fn a_key_release_in_the_overlay_does_nothing() {
 /// could not be shut without taking the search box with it would have been a
 /// trap. A real window has a title bar, so none of that has to be arranged.
 #[test]
-fn f1_asks_for_the_shortcuts_window_without_disturbing_the_panel() {
+fn f1_asks_to_show_or_hide_the_shortcuts_window_without_disturbing_the_panel() {
     let (mut s, now) = state();
     summon(&mut s, now);
 
     let opened = s.update(press(Key::F(1)), now);
     assert!(
-        has(&opened, &Cmd::OpenHelp),
+        has(&opened, &Cmd::ToggleHelp),
         "F1 should ask for the shortcuts window: {:?}",
         opened.cmds
     );

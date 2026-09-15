@@ -189,10 +189,19 @@ fn run_search(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch
                     }
                     let Some(index) = slot.index() else { continue };
                     let part = match &*index {
-                        SlotIndex::Flat(s) => {
-                            matcher::search(s, &request.query, backend.settings.matcher, &cancel)
-                        }
-                        SlotIndex::Tree(t) => matcher::search_tree(t, &request.query, &cancel),
+                        SlotIndex::Flat(s) => matcher::search(
+                            s,
+                            &request.query,
+                            backend.settings.matcher,
+                            &backend.settings.hidden,
+                            &cancel,
+                        ),
+                        SlotIndex::Tree(t) => matcher::search_tree(
+                            t,
+                            &request.query,
+                            &backend.settings.hidden,
+                            &cancel,
+                        ),
                     };
                     match part {
                         Ok(part) => parts.push(part),
@@ -290,7 +299,12 @@ fn run_verify(
                 .indexed()
                 .find(|s| s.kind() == MappingKind::Flat)
                 .and_then(|s| s.as_flat());
-            verifier.verify(&request.query, snapshot.as_deref(), &cancel)
+            verifier.verify(
+                &request.query,
+                snapshot.as_deref(),
+                &backend.settings.hidden,
+                &cancel,
+            )
         };
 
         let _ = tx.send(AppEvent::Verify(VerifyMsg {

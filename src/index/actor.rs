@@ -1091,9 +1091,12 @@ fn full_scan(
     ctx.set_activity(Activity::Scanning { seen: 0 });
     publish_status(ctx, events);
 
-    let result = ctx
-        .source
-        .list(&dir, &mut progress, &ListOpts::default(), cancel);
+    let result = ctx.source.list(
+        &dir,
+        &mut progress,
+        &ListOpts::default().hiding_system(ctx.settings.hidden.hides_system()),
+        cancel,
+    );
     match result {
         Ok(_) | Err(EnumError::Empty) => {}
         Err(err) => {
@@ -1257,7 +1260,14 @@ fn walk_and_publish(
     });
     publish_status(ctx, events);
 
-    let opts = walk::WalkOpts::default();
+    let opts = walk::WalkOpts {
+        // The one setting here that comes from configuration. Read at scan
+        // time because the attribute is never stored, which is why turning it
+        // on only shows up once a drive has been re-read - see
+        // `config::hidden`.
+        hide_system: ctx.settings.hidden.hides_system(),
+        ..walk::WalkOpts::default()
+    };
     let report = walk::walk_tree(ctx.source.as_ref(), &root, &opts, &sink, cancel);
     ctx.slot().set_activity(Activity::Idle);
 
@@ -1481,7 +1491,14 @@ fn apply_changes(
     publish_status(ctx, events);
 
     let sink = tree::SegmentSink::new(&root.to_string_lossy());
-    let opts = walk::WalkOpts::default();
+    let opts = walk::WalkOpts {
+        // The one setting here that comes from configuration. Read at scan
+        // time because the attribute is never stored, which is why turning it
+        // on only shows up once a drive has been re-read - see
+        // `config::hidden`.
+        hide_system: ctx.settings.hidden.hides_system(),
+        ..walk::WalkOpts::default()
+    };
     let report = walk::walk_subtrees(
         ctx.source.as_ref(),
         &root,

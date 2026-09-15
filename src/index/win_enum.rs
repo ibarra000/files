@@ -60,7 +60,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use super::DirStamp;
 use super::enumerate::{
-    DirSource, EntryMeta, EntrySink, ListOpts, ListStats, is_dot_entry_wide, is_listable_file,
+    DirSource, EntryMeta, EntrySink, ListOpts, ListStats, is_dot_entry_wide, is_listable_file_with,
 };
 use super::errors::{EnumError, code};
 use super::win_util::{AlignedBuf, FindHandle, OwnedHandle, last_error, wide_path, wide_pattern};
@@ -234,8 +234,8 @@ fn list_handle_dirinfo(
             };
 
             let attributes = header.FileAttributes;
-            let keep =
-                !is_dot_entry_wide(name) && (!opts.files_only || is_listable_file(attributes));
+            let keep = !is_dot_entry_wide(name)
+                && (!opts.files_only || is_listable_file_with(attributes, opts.hide_system));
 
             if keep {
                 if entries >= opts.max_entries {
@@ -386,7 +386,9 @@ fn list_find_first(
 
         let name = find_name(&data);
         let attributes = data.dwFileAttributes;
-        if !is_dot_entry_wide(name) && (!opts.files_only || is_listable_file(attributes)) {
+        if !is_dot_entry_wide(name)
+            && (!opts.files_only || is_listable_file_with(attributes, opts.hide_system))
+        {
             if entries >= opts.max_entries || opts.expired() {
                 complete = false;
                 break;

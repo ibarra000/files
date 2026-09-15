@@ -18,6 +18,7 @@
 use std::path::Path;
 
 use files::config::MatcherKind;
+use files::config::hidden::Hidden;
 use files::index::builder::SnapshotBuilder;
 use files::index::snapshot::Snapshot;
 use files::search::matcher::{self, SearchOutcome};
@@ -87,8 +88,14 @@ fn snapshot(names: &[String]) -> Snapshot {
 }
 
 fn run(names: &[String], query: &str, kind: MatcherKind) -> SearchOutcome {
-    matcher::search(&snapshot(names), query, kind, &CancelToken::never())
-        .expect("query should be acceptable")
+    matcher::search(
+        &snapshot(names),
+        query,
+        kind,
+        &Hidden::none(),
+        &CancelToken::never(),
+    )
+    .expect("query should be acceptable")
 }
 
 /// Asserts both implementations agree, in every field.

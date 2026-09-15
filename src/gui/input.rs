@@ -8,6 +8,32 @@
 //! failure the terminal build's press/release guard exists for, arriving from
 //! the other direction.
 //!
+//! That is a rule about *letters*, and [`binding`] holds only the keys which
+//! are never letters. The letters that survive as bindings live in [`chord`],
+//! which is consulted only when Ctrl is actually held - and there are four of
+//! them rather than the seven that used to double, because the clipboard three
+//! never arrive as keys at all. The next section is why. The first windowed
+//! build merged the two tables and consulted them unconditionally, on the
+//! strength of a comment asserting that "a letter only reaches this arm when
+//! the toolkit withheld its text". It does not: `egui-winit` pushes an
+//! `Event::Key` for every press and withholds `Event::Text` only when a
+//! modifier is down, so `a c l q u v w` were each typed twice, and a shifted
+//! one arrived as `aA`.
+//!
+//! # The clipboard chords never arrive as keys
+//!
+//! `egui-winit` recognises Ctrl+C, Ctrl+X and Ctrl+V itself - along with
+//! Ctrl+Insert and Shift+Delete, which mean the same three things on Windows -
+//! and turns each into `Event::Copy`, `Event::Cut` or `Event::Paste` *instead
+//! of* a key event, returning before it can emit one. So a `Char('c')` with
+//! Ctrl cannot be produced by the key arm at all, and the state machine's
+//! Ctrl+C binding was unreachable in the shipped window: the keystroke was
+//! dropped here and copying did nothing.
+//!
+//! The three events are translated back into the chords the state machine
+//! already binds, and `C`, `V` and `X` are deliberately absent from [`chord`]
+//! so that exactly one of the two routes can ever fire.
+//!
 //! # AltGr, for the second time
 //!
 //! The terminal build had a bug where a German, Polish or French layout lost
@@ -47,6 +73,14 @@ pub fn translate(input: &egui::InputState) -> Vec<AppEvent> {
                 }
             }
             egui::Event::Paste(text) => out.push(AppEvent::Paste(text.clone())),
+            // The toolkit ate these keystrokes before they could become keys,
+            // so hand back the chord each one stood for. See the module note.
+            egui::Event::Copy => {
+                out.push(AppEvent::Key(KeyEvent::new(Key::Char('c'), Mods::CTRL)));
+            }
+            egui::Event::Cut => {
+                out.push(AppEvent::Key(KeyEvent::new(Key::Char('x'), Mods::CTRL)));
+            }
             egui::Event::Key {
                 key,
                 pressed: true,
@@ -70,54 +104,32 @@ pub fn translate(input: &egui::InputState) -> Vec<AppEvent> {
                     out.push(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::ALTGR)));
                     continue;
                 }
-                if let Some(mapped) = binding(*key) {
+                // A letter is a binding only while Ctrl is held, which is
+                // exactly when the toolkit withholds its text. Consulting
+                // `chord` unconditionally is what typed every `a` twice.
+                let mapped = binding(*key).or_else(|| mods.ctrl.then(|| chord(*key)).flatten());
+                if let Some(mapped) = mapped {
                     out.push(AppEvent::Key(KeyEvent::new(mapped, mods)));
                 }
             }
-            // The wheel walks the list. It has been in the help panel since
-            // the help panel existed and has never once worked: this arm did
-            // not exist, so every wheel event fell through to the catch-all
-            // below.
-            //
-            // Emitted as arrow keys rather than as a scroll of its own, so
-            // there is one way to move through results and the selection
-            // cannot be left behind by the view. A notch is `unit`-dependent -
-            // lines on a mouse, points on a trackpad - so it is the *sign*
-            // that is read here and the count of notches that is honoured.
-            egui::Event::MouseWheel { delta, .. } => {
-                let notches = wheel_notches(delta.y);
-                let key = if delta.y > 0.0 { Key::Up } else { Key::Down };
-                for _ in 0..notches {
-                    out.push(AppEvent::Key(KeyEvent::new(key, Mods::NONE)));
-                }
-            }
+            // No arm for the wheel. It used to be translated into arrow keys,
+            // which made a hand resting on a mouse walk the selection - and
+            // with recall now behind the Up arrow, leaning on one could open
+            // somebody's search history. There is nothing to replace it with
+            // because nothing is missing: the arrows already move the list, and
+            // they move the window with it.
             _ => {}
         }
     }
     out
 }
 
-/// How many rows one wheel event moves.
-///
-/// A mouse reports whole notches and a trackpad reports a stream of small
-/// fractions, so a bare `delta.y as usize` would move nothing at all on a
-/// trackpad. Anything non-zero is at least one row, and a fast flick is
-/// capped: a wheel that could throw the selection a hundred rows down the list
-/// is a wheel that loses somebody's place.
-fn wheel_notches(dy: f32) -> usize {
-    const MAX_PER_EVENT: usize = 4;
-    if dy == 0.0 || !dy.is_finite() {
-        return 0;
-    }
-    (dy.abs().round() as usize).clamp(1, MAX_PER_EVENT)
-}
-
 /// The keys that mean something regardless of what they would type.
 ///
 /// Printable keys are deliberately absent: they arrive as `Event::Text`, and
-/// listing them here as well is the doubling described above. The exception is
-/// the small set the state machine binds with Ctrl - those arrive as
-/// `Event::Key` only, because the toolkit suppresses their text.
+/// listing them here as well is the doubling described above. The letters the
+/// program binds with Ctrl live in [`chord`], which is reached only while Ctrl
+/// is held.
 fn binding(key: egui::Key) -> Option<Key> {
     use egui::Key as E;
     Some(match key {
@@ -146,15 +158,24 @@ fn binding(key: egui::Key) -> Option<Key> {
         E::F10 => Key::F(10),
         E::F11 => Key::F(11),
         E::F12 => Key::F(12),
-        // The Ctrl chords the program binds. A letter only reaches this arm
-        // when the toolkit withheld its text, which it does exactly when a
-        // modifier made it a command rather than a character.
+        _ => return None,
+    })
+}
+
+/// The letters the program binds with Ctrl.
+///
+/// Reached only when Ctrl is held, which is the whole of the guard against
+/// doubling. `C`, `V` and `X` are absent because the toolkit never lets those
+/// keys through - it turns them into `Event::Copy`, `Event::Paste` and
+/// `Event::Cut` first, and [`translate`] puts the chord back from there. `L`
+/// is absent because nothing binds it: it was listed here and then silently
+/// swallowed one layer up.
+fn chord(key: egui::Key) -> Option<Key> {
+    use egui::Key as E;
+    Some(match key {
         E::A => Key::Char('a'),
-        E::C => Key::Char('c'),
-        E::L => Key::Char('l'),
         E::Q => Key::Char('q'),
         E::U => Key::Char('u'),
-        E::V => Key::Char('v'),
         E::W => Key::Char('w'),
         _ => return None,
     })
@@ -364,6 +385,74 @@ mod tests {
         assert_eq!(typed, vec![KeyEvent::new(Key::Char('1'), Mods::NONE)]);
     }
 
+    /// The letters that are also chords, typed plainly.
+    ///
+    /// This is the case the test above could never have caught: `Num1` is not
+    /// a chord, so it was never in the table that fired twice. Every one of
+    /// these appeared as `aa`, `qq`, `uu`, `vv`, `ww`, `cc` in the search box.
+    #[test]
+    fn a_letter_that_is_also_a_chord_is_still_typed_once() {
+        for (key, c) in [
+            (egui::Key::A, 'a'),
+            (egui::Key::C, 'c'),
+            (egui::Key::L, 'l'),
+            (egui::Key::Q, 'q'),
+            (egui::Key::U, 'u'),
+            (egui::Key::V, 'v'),
+            (egui::Key::W, 'w'),
+        ] {
+            let typed = keys(vec![
+                egui::Event::Text(c.to_string()),
+                press(key, egui::Modifiers::NONE),
+            ]);
+            assert_eq!(typed, vec![KeyEvent::new(Key::Char(c), Mods::NONE)], "{c}");
+        }
+    }
+
+    /// Shift is not Ctrl, so it does not make a letter into a binding. This
+    /// arrived as `aA`: the lower case from the key table, the capital from
+    /// the text the toolkit sent alongside it.
+    #[test]
+    fn a_shifted_letter_types_the_capital_and_nothing_else() {
+        let typed = keys(vec![
+            egui::Event::Text("A".into()),
+            press(egui::Key::A, egui::Modifiers::SHIFT),
+        ]);
+        assert_eq!(typed, vec![KeyEvent::new(Key::Char('A'), Mods::NONE)]);
+    }
+
+    /// Ctrl+C never reaches us as a key: `egui-winit` recognises the chord and
+    /// sends this instead. Without the arm that puts it back, the state
+    /// machine's copy binding cannot be reached at all - which is exactly how
+    /// the shipped window came to have a Ctrl+C that did nothing.
+    #[test]
+    fn the_toolkits_copy_event_becomes_the_chord_the_program_binds() {
+        assert_eq!(
+            keys(vec![egui::Event::Copy]),
+            vec![KeyEvent::new(Key::Char('c'), Mods::CTRL)]
+        );
+    }
+
+    #[test]
+    fn the_toolkits_cut_event_becomes_the_chord_the_program_binds() {
+        assert_eq!(
+            keys(vec![egui::Event::Cut]),
+            vec![KeyEvent::new(Key::Char('x'), Mods::CTRL)]
+        );
+    }
+
+    /// Only one of the two routes may ever produce a copy. If a future
+    /// `egui-winit` stopped swallowing the chord and we still listed `C` in
+    /// the chord table, one keypress would copy twice.
+    #[test]
+    fn a_clipboard_chord_is_produced_from_one_place_only() {
+        let both = keys(vec![
+            egui::Event::Copy,
+            press(egui::Key::C, egui::Modifiers::CTRL),
+        ]);
+        assert_eq!(both, vec![KeyEvent::new(Key::Char('c'), Mods::CTRL)]);
+    }
+
     #[test]
     fn a_release_types_nothing() {
         let released = keys(vec![egui::Event::Key {
@@ -421,30 +510,17 @@ mod tests {
         }])
     }
 
-    /// The wheel has been in the help panel since the help panel existed and
-    /// has never worked: there was no arm for it, so every wheel event fell
-    /// through to the catch-all and was dropped.
+    /// The wheel is not an input to this program.
+    ///
+    /// It used to be translated into arrow keys, which meant a hand resting on
+    /// a mouse walked the selection - and with recall behind the Up arrow,
+    /// leaning on one could open somebody's search history. Nothing replaces
+    /// it: the arrows already move the list and carry the window with them.
     #[test]
-    fn the_wheel_moves_through_the_results() {
-        assert_eq!(wheel(-1.0), vec![KeyEvent::new(Key::Down, Mods::NONE)]);
-        assert_eq!(wheel(1.0), vec![KeyEvent::new(Key::Up, Mods::NONE)]);
-    }
-
-    /// A trackpad reports a stream of small fractions rather than whole
-    /// notches, so a bare cast would scroll nowhere at all on one.
-    #[test]
-    fn a_trackpads_fraction_of_a_notch_still_moves_one_row() {
-        assert_eq!(wheel(0.2).len(), 1);
-        assert_eq!(wheel(-0.05).len(), 1);
-        assert!(wheel(0.0).is_empty(), "and a still wheel moves nothing");
-    }
-
-    /// A flick that threw the selection a hundred rows down the list is a
-    /// flick that lost somebody's place.
-    #[test]
-    fn a_fast_flick_is_capped() {
-        assert_eq!(wheel(-40.0).len(), 4);
-        assert!(wheel(f32::NAN).is_empty(), "and a broken one moves nothing");
+    fn the_wheel_does_nothing_at_all() {
+        for dy in [-40.0, -1.0, -0.05, 0.0, 0.2, 1.0, 40.0, f32::NAN] {
+            assert!(wheel(dy).is_empty(), "a wheel event of {dy} did something");
+        }
     }
 
     /// The guard that keeps the AltGr reconstruction and the toolkit from both

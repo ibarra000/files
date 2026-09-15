@@ -242,6 +242,16 @@ impl Actors {
     }
 
     pub fn dispatch(&self, cmds: CmdList) {
+        // A dismissal in the same turn as an open is the panel getting out of
+        // a viewer's way, not somebody pressing Escape. The two want opposite
+        // things from the foreground and are otherwise indistinguishable by
+        // the time they reach the hotkey thread - see `Summoner::hide`.
+        //
+        // Read off the list rather than carried on the command, because
+        // `Cmd::DismissOverlay` is a unit variant that a dozen tests match by
+        // equality, and `open_selection` pushes the open first.
+        let handing_over = cmds.iter().any(|cmd| matches!(cmd, Cmd::Open(_)));
+
         for cmd in cmds {
             match cmd {
                 Cmd::Search { query, epoch } => {
@@ -266,7 +276,16 @@ impl Actors {
                         }
                     }
                 }
-                Cmd::Open(request) => self.opener.request(request, &self.events),
+                Cmd::Open(request) => {
+                    // Here, and not on the worker that does the launching.
+                    // Windows grants this only to the process that currently
+                    // owns the foreground, and by the time the open worker has
+                    // merged a document off a share, the panel is long gone.
+                    // `dispatch` runs on the thread that draws the panel, which
+                    // still has it.
+                    crate::open::launch::allow_foreground_handover();
+                    self.opener.request(request, &self.events);
+                }
                 Cmd::SaveViewer(viewer) => crate::config::write::save_viewer_async(
                     self.backend
                         .settings
@@ -292,13 +311,13 @@ impl Actors {
                 // whether the panel is on screen.
                 Cmd::DismissOverlay => {
                     if let Some(hotkey) = &self.hotkey {
-                        hotkey.dismiss();
+                        hotkey.dismiss(handing_over);
                     }
                 }
                 // Both are for whoever is drawing, not for a worker. Named
                 // rather than wildcarded, so a command nothing handles is a
                 // compile error here instead of a keystroke that does nothing.
-                Cmd::OpenHelp | Cmd::Quit => {}
+                Cmd::ToggleHelp | Cmd::Quit => {}
             }
         }
     }

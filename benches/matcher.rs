@@ -22,6 +22,7 @@ use std::sync::Arc;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use files::config::MatcherKind;
 use files::config::SEGMENT_MAX_BYTES;
+use files::config::hidden::Hidden;
 use files::index::builder::SnapshotBuilder;
 use files::index::snapshot::Snapshot;
 use files::index::tree::{SegmentBuilder, TreeIndex};
@@ -49,7 +50,16 @@ fn simd_versus_naive(c: &mut Criterion) {
 
     for kind in [MatcherKind::Simd, MatcherKind::Naive] {
         group.bench_function(BenchmarkId::from_parameter(format!("{kind:?}")), |b| {
-            b.iter(|| matcher::search(&snap, "job_0012345", kind, &CancelToken::never()).unwrap());
+            b.iter(|| {
+                matcher::search(
+                    &snap,
+                    "job_0012345",
+                    kind,
+                    &Hidden::none(),
+                    &CancelToken::never(),
+                )
+                .unwrap()
+            });
         });
     }
     group.finish();
@@ -66,7 +76,14 @@ fn scaling(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(arena_bytes(&snap)));
         group.bench_with_input(BenchmarkId::from_parameter(n), &snap, |b, snap| {
             b.iter(|| {
-                matcher::search(snap, "_0042_", MatcherKind::Simd, &CancelToken::never()).unwrap()
+                matcher::search(
+                    snap,
+                    "_0042_",
+                    MatcherKind::Simd,
+                    &Hidden::none(),
+                    &CancelToken::never(),
+                )
+                .unwrap()
             });
         });
     }
@@ -91,7 +108,14 @@ fn query_shape(c: &mut Criterion) {
     ] {
         group.bench_function(label, |b| {
             b.iter(|| {
-                matcher::search(&snap, query, MatcherKind::Simd, &CancelToken::never()).unwrap()
+                matcher::search(
+                    &snap,
+                    query,
+                    MatcherKind::Simd,
+                    &Hidden::none(),
+                    &CancelToken::never(),
+                )
+                .unwrap()
             });
         });
     }
@@ -115,7 +139,8 @@ fn cancellation_latency(c: &mut Criterion) {
                 // fixed cost of noticing.
                 epoch.bump();
                 let started = Instant::now();
-                let _ = matcher::search(&snap, "job", MatcherKind::Simd, &token).unwrap();
+                let _ = matcher::search(&snap, "job", MatcherKind::Simd, &Hidden::none(), &token)
+                    .unwrap();
                 total += started.elapsed();
             }
             total
@@ -223,7 +248,10 @@ fn tree_scaling(c: &mut Criterion) {
             BenchmarkId::new("files", index.len()),
             &index,
             |b, index| {
-                b.iter(|| matcher::search_tree(index, "123456-07", &CancelToken::never()).unwrap());
+                b.iter(|| {
+                    matcher::search_tree(index, "123456-07", &Hidden::none(), &CancelToken::never())
+                        .unwrap()
+                });
             },
         );
         // A query that names a *folder*, so the hits come through the
@@ -234,7 +262,13 @@ fn tree_scaling(c: &mut Criterion) {
             &index,
             |b, index| {
                 b.iter(|| {
-                    matcher::search_tree(index, "job_012345", &CancelToken::never()).unwrap()
+                    matcher::search_tree(
+                        index,
+                        "job_012345",
+                        &Hidden::none(),
+                        &CancelToken::never(),
+                    )
+                    .unwrap()
                 });
             },
         );

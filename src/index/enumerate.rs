@@ -112,6 +112,17 @@ pub struct ListOpts {
     pub deadline: Option<Instant>,
     /// Overrides the configured strategy, for `--bench`.
     pub force: Option<EnumStrategy>,
+    /// Skip files Windows marks hidden or system.
+    ///
+    /// Acted on here rather than at search time because the attribute is not
+    /// part of the name and is therefore not kept: the snapshot stores bytes,
+    /// so this is the last moment anyone knows. The consequence, which
+    /// `config::hidden` sets out, is that turning this on only takes effect
+    /// once the share is next scanned.
+    ///
+    /// Off by default so that a caller which has not been told otherwise -
+    /// `--bench`, the parity fixtures - enumerates the directory as it is.
+    pub hide_system: bool,
 }
 
 impl Default for ListOpts {
@@ -122,6 +133,7 @@ impl Default for ListOpts {
             max_entries: usize::MAX,
             deadline: None,
             force: None,
+            hide_system: false,
         }
     }
 }
@@ -139,6 +151,11 @@ impl ListOpts {
 
     pub fn with_deadline(mut self, at: Instant) -> Self {
         self.deadline = Some(at);
+        self
+    }
+
+    pub fn hiding_system(mut self, yes: bool) -> Self {
+        self.hide_system = yes;
         self
     }
 
@@ -229,6 +246,20 @@ pub fn is_listable_file(attributes: u32) -> bool {
     attributes & DIRECTORY == 0
 }
 
+/// The same question, asked of a configuration that also hides system files.
+///
+/// `hide` narrows [`is_listable_file`] and nothing else. It deliberately has
+/// no counterpart for [`is_walkable_dir`]: some file servers mark an entire
+/// share or a whole department's folder system, and honouring that on a
+/// directory would quietly remove the share this program exists to search.
+/// Whatever a folder is marked, it is walked.
+#[inline]
+pub fn is_listable_file_with(attributes: u32, hide: bool) -> bool {
+    const HIDDEN: u32 = 0x0000_0002;
+    const SYSTEM: u32 = 0x0000_0004;
+    is_listable_file(attributes) && !(hide && attributes & (HIDDEN | SYSTEM) != 0)
+}
+
 /// True for the `.` and `..` pseudo-entries.
 ///
 /// A volume root such as `V:\` does not emit them, but a job folder such as
@@ -250,6 +281,45 @@ mod tests {
     const DIRECTORY: u32 = 0x0010;
     const REPARSE: u32 = 0x0400;
     const NORMAL: u32 = 0x0080;
+    const HIDDEN: u32 = 0x0002;
+    const SYSTEM: u32 = 0x0004;
+
+    #[test]
+    fn a_marked_file_is_listed_unless_the_caller_asked_otherwise() {
+        for marked in [NORMAL | HIDDEN, NORMAL | SYSTEM, NORMAL | HIDDEN | SYSTEM] {
+            assert!(
+                is_listable_file_with(marked, false),
+                "{marked:#x} vanished from a caller that never asked"
+            );
+            assert!(
+                !is_listable_file_with(marked, true),
+                "{marked:#x} was still listed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ordinary_file_is_listed_either_way() {
+        for attributes in [NORMAL, 0, NORMAL | REPARSE] {
+            assert!(is_listable_file_with(attributes, true), "{attributes:#x}");
+            assert!(is_listable_file_with(attributes, false), "{attributes:#x}");
+        }
+    }
+
+    /// The narrowing applies to files and to nothing else. Some file servers
+    /// mark a whole share or a department's folder system, and honouring that
+    /// on a directory would quietly remove the share this program searches -
+    /// which is a far worse failure than the noise it was meant to remove.
+    #[test]
+    fn a_marked_folder_is_still_walked() {
+        for marked in [
+            DIRECTORY | HIDDEN,
+            DIRECTORY | SYSTEM,
+            DIRECTORY | HIDDEN | SYSTEM,
+        ] {
+            assert!(is_walkable_dir(marked), "{marked:#x} would hide a share");
+        }
+    }
 
     #[test]
     fn skips_directories() {

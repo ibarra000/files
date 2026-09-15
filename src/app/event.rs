@@ -132,6 +132,9 @@ pub enum OpenMsg {
         /// The code has more pages than the ceiling allows, so the document
         /// stops short of the end.
         truncated: bool,
+        /// Something worth saying about *how* it opened, when it did not open
+        /// the way the viewer setting asked for.
+        note: Option<String>,
     },
     Failed {
         path: Arc<str>,
@@ -219,13 +222,15 @@ pub enum Cmd {
     /// because the window work has to happen on the thread that owns the
     /// window, and because whether the overlay is up has exactly one owner.
     DismissOverlay,
-    /// Show the keyboard-shortcuts window.
+    /// Show the keyboard-shortcuts window, or put it away if it is already up.
     ///
     /// A command rather than a flag on the state, because the window belongs to
     /// the shell: the state machine's business is what the keys mean, and
     /// "which windows are open" is not something it can be asked to be right
-    /// about.
-    OpenHelp,
+    /// about. Which is also why this says *toggle* rather than carrying the
+    /// answer - only the shell knows whether the window is open, so only the
+    /// shell can decide which way a press of F1 goes.
+    ToggleHelp,
     Quit,
 }
 

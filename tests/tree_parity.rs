@@ -22,6 +22,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use files::config::hidden::Hidden;
 use files::index::fake_source::FakeDirSource;
 use files::index::tree::SegmentSink;
 use files::index::walk::{WalkOpts, walk_tree};
@@ -101,7 +102,7 @@ fn indexed(src: &FakeDirSource) -> Arc<files::index::tree::TreeIndex> {
 }
 
 fn found(index: &files::index::tree::TreeIndex, code: &str) -> HashSet<String> {
-    matcher::search_tree(index, code, &CancelToken::never())
+    matcher::search_tree(index, code, &Hidden::none(), &CancelToken::never())
         .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
         .unwrap_or_default()
 }

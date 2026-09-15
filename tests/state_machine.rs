@@ -12,12 +12,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use files::app::event::{
-    AppEvent, Cmd, IndexMsg, OpenMsg, Redraw, RefreshTarget, Response, SearchMsg, VerifyMsg,
+    AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, RefreshTarget, Response, SearchMsg,
+    VerifyMsg,
 };
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
 use files::config::{
-    MIN_QUERY_LEN, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS, ViewerKind,
+    ENTER_WATCHDOG, MIN_QUERY_LEN, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
+    VISIBLE_ROWS, ViewerKind,
 };
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
@@ -93,7 +95,7 @@ fn a_short_query_is_not_dispatched() {
 }
 
 #[test]
-fn every_keystroke_past_the_minimum_dispatches_a_local_search() {
+fn typing_arms_one_search_rather_than_one_per_keystroke() {
     let (mut s, now) = state();
     let r = type_in(&mut s, "11-D-0704", now);
     let searches = r
@@ -101,11 +103,26 @@ fn every_keystroke_past_the_minimum_dispatches_a_local_search() {
         .iter()
         .filter(|c| matches!(c, Cmd::Search { .. }))
         .count();
-    assert!(
-        searches >= 5,
-        "local matching is cheap enough to run per keystroke"
+    assert_eq!(
+        searches, 0,
+        "typing dispatched a search rather than arming one"
     );
+    assert!(s.search_due_at().is_some(), "nothing was armed");
     assert_eq!(s.phase, QueryPhase::LocalPending);
+
+    // And the pause produces exactly one, carrying the whole code rather than
+    // any of the eight prefixes on the way to it.
+    let tick = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
+    let dispatched: Vec<_> = tick
+        .cmds
+        .iter()
+        .filter_map(|c| match c {
+            Cmd::Search { query, .. } => Some(query.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dispatched, vec!["11-D-0704".to_string()]);
+    assert!(s.search_due_at().is_none(), "the deadline was not retired");
 }
 
 /// An unusual query is searched for rather than refused.
@@ -118,9 +135,11 @@ fn every_keystroke_past_the_minimum_dispatches_a_local_search() {
 #[test]
 fn an_unusual_code_is_searched_for_rather_than_refused() {
     let (mut s, now) = state();
-    let r = type_in(&mut s, "!!!", now);
+    type_in(&mut s, "!!!", now);
     assert_eq!(s.phase, QueryPhase::LocalPending);
     assert_ne!(s.empty_reason, Some(EmptyReason::NoSharesConfigured));
+    // Behind the pause now, like any other typed code.
+    let r = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
     assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
 }
 
@@ -257,11 +276,61 @@ fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
     assert!(
         s.toast
             .as_ref()
-            .is_some_and(|t| t.text.contains("nothing selected")),
+            .is_some_and(|t| t.text.contains("Nothing selected")),
         "{:?}",
         s.toast
     );
     assert_eq!(s.input, "11-D-0704", "the code must survive");
+}
+
+/// Ctrl+X takes the selection with it.
+///
+/// Reaches the state machine as a `Char('x')` with Ctrl, which no keyboard
+/// ever sends: `gui::input` reconstructs it from the toolkit's `Event::Cut`,
+/// which is also what Shift+Delete arrives as.
+#[test]
+fn ctrl_x_cuts_the_selected_text() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(shift(Key::Left), now);
+    s.update(shift(Key::Left), now);
+
+    let r = s.update(ctrl(Key::Char('x')), now);
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Copy(text) if text == "04")),
+        "{:?}",
+        r.cmds
+    );
+    assert_eq!(
+        s.input, "11-D-07",
+        "the selection was copied but not removed"
+    );
+    assert!(!s.should_quit);
+}
+
+/// With nothing selected there is nothing to remove, and saying so beats a
+/// key that silently does nothing.
+#[test]
+fn ctrl_x_with_no_selection_leaves_the_code_alone() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let r = s.update(ctrl(Key::Char('x')), now);
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::Copy(_))),
+        "{:?}",
+        r.cmds
+    );
+    assert_eq!(s.input, "11-D-0704", "the code must survive");
+    assert!(
+        s.toast
+            .as_ref()
+            .is_some_and(|t| t.text.contains("Nothing selected")),
+        "{:?}",
+        s.toast
+    );
 }
 
 /// Ctrl+Q is the *only* way out, and the bindings most likely to be hit by
@@ -394,7 +463,7 @@ fn enter_opens_the_selection() {
         Cmd::Open(req)
             if &*req.path == "V:\\a.pdf"
                 && req.query == "11-D-0704"
-                && req.viewer == ViewerKind::Pdf
+                && req.viewer == ViewerKind::Auto
     ));
     assert_eq!(
         r.cmds.iter().filter(|c| matches!(c, Cmd::Open(_))).count(),
@@ -414,8 +483,26 @@ fn enter_opens_the_selection() {
 fn enter_with_no_results_reports_rather_than_opening() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
-    let r = s.update(press(Key::Enter), now);
-    assert!(r.cmds.is_empty());
+    // Enter inside the pause asks the matcher rather than answering from a
+    // list that belongs to the previous code. The report comes when it does.
+    let asked = s.update(press(Key::Enter), now);
+    assert!(
+        asked.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
+        "Enter did not flush the pending search: {:?}",
+        asked.cmds
+    );
+    assert!(s.toast.is_none(), "it reported before it had looked");
+
+    let r = s.update(
+        AppEvent::Search(SearchMsg {
+            epoch: s.query_epoch(),
+            query: "11-D-0704".into(),
+            elapsed: Duration::ZERO,
+            result: Ok(SearchOutcome::default()),
+        }),
+        now,
+    );
+    assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Open(_))));
     assert!(s.toast.is_some());
 }
 
@@ -904,11 +991,11 @@ fn busy_means_any_share_is_busy() {
     publish(&mut s, MappingId(1), now, |st| {
         st.activity = Activity::Scanning { seen: 10 };
     });
-    assert!(s.wants_animation());
+    assert!(s.is_busy());
     publish(&mut s, MappingId(1), now, |st| {
         st.activity = Activity::Idle;
     });
-    assert!(!s.wants_animation());
+    assert!(!s.is_busy());
 }
 
 #[test]
@@ -916,7 +1003,7 @@ fn a_verifying_state_asks_for_animation_frames() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
-    assert!(s.wants_animation());
+    assert!(s.is_busy());
     assert!(s.next_deadline().is_some());
 }
 
@@ -925,7 +1012,7 @@ fn animation_stops_when_the_work_finishes() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
-    assert!(s.wants_animation());
+    assert!(s.is_busy());
 
     s.update(
         AppEvent::Verify(VerifyMsg {
@@ -936,10 +1023,7 @@ fn animation_stops_when_the_work_finishes() {
         }),
         now,
     );
-    assert!(
-        !s.wants_animation(),
-        "derived from state, never a sticky flag"
-    );
+    assert!(!s.is_busy(), "derived from state, never a sticky flag");
 }
 
 // --- verification outcomes --------------------------------------------
@@ -1038,7 +1122,7 @@ fn an_audit_failure_warns_the_user() {
     );
     let toast = s.toast.as_ref().expect("a silent downgrade would be worse");
     assert_eq!(toast.severity, Severity::Warn);
-    assert!(toast.text.contains("server filter"));
+    assert!(toast.text.contains("Server filter"));
 }
 
 // --- honest emptiness --------------------------------------------------
@@ -1137,21 +1221,25 @@ fn a_failed_open_is_reported_rather_than_swallowed() {
 fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
     let (mut s, now) = state();
     s.settings.viewer_persistable = true;
-    assert_eq!(s.viewer, ViewerKind::Pdf);
+    assert_eq!(s.viewer, ViewerKind::Auto, "the default opens by file type");
 
     let r = s.update(press(Key::F(2)), now);
-    assert_eq!(s.viewer, ViewerKind::Avwin);
+    assert_eq!(s.viewer, ViewerKind::Pdf);
     assert_eq!(r.redraw, Redraw::Yes, "the help line changes");
     assert!(
         r.cmds
             .iter()
-            .any(|c| matches!(c, Cmd::SaveViewer(ViewerKind::Avwin))),
+            .any(|c| matches!(c, Cmd::SaveViewer(ViewerKind::Pdf))),
         "{:?}",
         r.cmds
     );
 
+    // All the way round, so a mode that F2 cannot reach is a failure here
+    // rather than something nobody notices.
     s.update(press(Key::F(2)), now);
-    assert_eq!(s.viewer, ViewerKind::Pdf, "it cycles back");
+    assert_eq!(s.viewer, ViewerKind::Avwin);
+    s.update(press(Key::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Auto, "it cycles back");
 }
 
 /// A doubled character is visible; a doubled toggle is a silent no-op that
@@ -1162,7 +1250,7 @@ fn f2_on_key_release_does_not_toggle_twice() {
     let mut ev = KeyEvent::new(Key::F(2), Mods::NONE);
     ev.phase = KeyPhase::Release;
     s.update(AppEvent::Key(ev), now);
-    assert_eq!(s.viewer, ViewerKind::Pdf, "a release must change nothing");
+    assert_eq!(s.viewer, ViewerKind::Auto, "a release must change nothing");
 }
 
 /// With FILES_VIEWER or --viewer in play the file value is ignored at the next
@@ -1173,7 +1261,7 @@ fn f2_says_so_when_the_choice_cannot_be_persisted() {
     s.settings.viewer_persistable = false;
 
     let r = s.update(press(Key::F(2)), now);
-    assert_eq!(s.viewer, ViewerKind::Avwin, "it still applies");
+    assert_eq!(s.viewer, ViewerKind::Pdf, "it still applies");
     assert!(
         !r.cmds.iter().any(|c| matches!(c, Cmd::SaveViewer(_))),
         "nothing should be written"
@@ -1197,7 +1285,7 @@ fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
     let epoch = s.query_epoch();
 
     let r = s.update(press(Key::F(2)), now);
-    assert_eq!(s.viewer, ViewerKind::Avwin, "the viewer still toggles");
+    assert_eq!(s.viewer, ViewerKind::Pdf, "the viewer still toggles");
     assert_eq!(s.input.text(), recalled, "the entry is not committed");
     assert_eq!(s.query_epoch(), epoch, "and nothing is searched for");
     assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
@@ -1234,7 +1322,7 @@ fn enter_carries_the_viewer_that_is_active_now_not_the_one_configured_at_startup
     assert!(
         r.cmds
             .iter()
-            .any(|c| matches!(c, Cmd::Open(req) if req.viewer == ViewerKind::Avwin)),
+            .any(|c| matches!(c, Cmd::Open(req) if req.viewer == ViewerKind::Pdf)),
         "{:?}",
         r.cmds
     );
@@ -1251,6 +1339,7 @@ fn a_partial_assembly_warns_and_names_what_was_skipped() {
             pages: 12,
             skipped: vec!["11-D-0704_Page7.pdf (could not be read)".into()],
             truncated: false,
+            note: None,
         }),
         now,
     );
@@ -1269,6 +1358,7 @@ fn a_complete_assembly_says_nothing() {
             pages: 13,
             skipped: Vec::new(),
             truncated: false,
+            note: None,
         }),
         now,
     );
@@ -1286,6 +1376,7 @@ fn a_truncated_document_says_the_set_is_longer() {
             pages: 512,
             skipped: Vec::new(),
             truncated: true,
+            note: None,
         }),
         now,
     );
@@ -1373,7 +1464,7 @@ fn a_busy_index_keeps_the_frame_animating() {
         }),
         now,
     );
-    assert!(s.wants_animation());
+    assert!(s.is_busy());
 }
 
 /// Several assertions need an immutable view of the state while also
@@ -1480,15 +1571,21 @@ fn left_and_right_always_move_the_caret() {
     let typed = s.update(key('X'), now);
 
     assert_eq!(s.input.text(), "11-D-070X4", "the caret moved, not the row");
-    // Asserted on the dispatch rather than on the selection going away.
-    // Typing used to empty the list, so "the row changed" was a usable proxy
-    // for "the search re-ran"; it is not one any more, because the results
-    // stay on screen until the ones that replace them arrive. See
+    // Asserted on the deadline rather than on the dispatch, and on the
+    // dispatch rather than on the selection going away. Typing used to empty
+    // the list, so "the row changed" was a usable proxy for "the search
+    // re-ran"; then the results began surviving the keystroke, and now the
+    // search itself waits for a pause. What must still be true is that the
+    // keystroke *re-armed* it. See
     // `typing_keeps_the_results_until_the_new_ones_arrive` below.
     assert!(
-        typed.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
-        "typing re-ran the search, as it must: {:?}",
+        typed.cmds.is_empty(),
+        "typing dispatched rather than arming: {:?}",
         typed.cmds
+    );
+    assert!(
+        s.search_due_at().is_some(),
+        "typing did not re-arm the search, as it must"
     );
     assert_ne!(
         s.query_epoch(),
@@ -1654,4 +1751,349 @@ fn far_more_than_one_screenful_of_results_is_reachable() {
         "the last of {} results is reachable",
         files::config::MAX_RESULTS
     );
+}
+
+// --- the pause, and what must not go wrong inside it --------------------
+
+/// Enter typed before the pause elapses must not open the row on screen: that
+/// row answers the *previous* code. Opening it would open the wrong file
+/// without saying so, which is the worst thing this program could do.
+#[test]
+fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
+    let (mut s, now) = state();
+
+    // A settled query, with results for the code as it stands.
+    type_in(&mut s, "11-D-070", now);
+    let v = view(&s);
+    s.update(
+        search_result(&v, vec![hit("11-D-070-OLD.pdf")], 1, 9_000),
+        now,
+    );
+    assert_eq!(s.hits.len(), 1);
+
+    // One more character, then Enter straight away.
+    s.update(key('4'), now);
+    assert!(s.search_due_at().is_some());
+    let pressed = s.update(press(Key::Enter), now);
+
+    assert!(
+        !pressed.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
+        "Enter opened a row belonging to the previous code"
+    );
+    assert!(
+        pressed.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
+        "Enter did not ask the matcher: {:?}",
+        pressed.cmds
+    );
+
+    // And when the answer lands, that is what gets opened.
+    let v = view(&s);
+    let r = s.update(
+        search_result(&v, vec![hit("11-D-0704-NEW.pdf")], 1, 9_000),
+        now,
+    );
+    let opened = r.cmds.iter().find_map(|c| match c {
+        Cmd::Open(req) => Some(format!("{req:?}")),
+        _ => None,
+    });
+    let opened = opened.expect("the answer did not open anything");
+    assert!(
+        opened.contains("11-D-0704-NEW"),
+        "opened the wrong file: {opened}"
+    );
+}
+
+/// An edit between Enter and the answer cancels the open. The keystroke was
+/// about a code the user has since moved on from.
+#[test]
+fn an_edit_between_enter_and_the_answer_cancels_the_open() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(press(Key::Enter), now);
+
+    let stale = view(&s);
+    s.update(key('9'), now);
+    let r = s.update(search_result(&stale, vec![hit("gone.pdf")], 1, 9_000), now);
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
+        "a superseded answer opened a file"
+    );
+}
+
+/// A matcher that never answers must not leave Enter dead.
+#[test]
+fn a_matcher_that_never_answers_an_enter_gives_the_keystroke_back() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(press(Key::Enter), now);
+    assert!(s.toast.is_none());
+
+    s.update(AppEvent::Tick, now + ENTER_WATCHDOG);
+    assert!(s.toast.is_some(), "the keystroke was swallowed");
+}
+
+/// The local answer may not walk the phase back out of the verification.
+///
+/// Both deadlines are 300ms, so both fall due on one tick and either can
+/// answer first. A local answer is never news about the server.
+#[test]
+fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+
+    let due = now + VERIFY_DEBOUNCE;
+    s.update(AppEvent::Tick, due);
+    assert!(s.phase.is_verifying(), "the verification did not start");
+
+    // The matcher answers a frame later, as it always does.
+    let v = view(&s);
+    s.update(search_result(&v, vec![hit("a.pdf")], 1, 9_000), due);
+    assert!(
+        s.phase.is_verifying(),
+        "the local answer blinked the spinner off: {:?}",
+        s.phase
+    );
+    assert_eq!(s.hits.len(), 1, "and it still applied the results");
+}
+
+/// A cleared field must leave nothing armed. This one is not caught by the
+/// epoch guard: the edit bumps the epoch on its way past, so a late dispatch
+/// carries the current one and its answer would be accepted.
+#[test]
+fn clearing_the_field_stands_every_clock_down() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    assert!(s.search_due_at().is_some());
+
+    for _ in 0..9 {
+        s.update(press(Key::Backspace), now);
+    }
+    assert!(s.input.is_empty());
+    assert!(s.search_due_at().is_none(), "a search was left armed");
+    assert!(s.verify_due_at().is_none());
+    assert!(s.next_deadline().is_none(), "the loop cannot block");
+}
+
+/// A pasted code arrives whole, so it is searched for at once. Nobody pastes
+/// half a job number.
+#[test]
+fn a_paste_is_searched_for_at_once_rather_than_debounced() {
+    let (mut s, now) = state();
+    let r = s.update(AppEvent::Paste("11-D-0704".into()), now);
+    assert!(
+        r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
+        "a paste waited out the pause: {:?}",
+        r.cmds
+    );
+    assert!(s.search_due_at().is_none());
+}
+
+// --- the house style ----------------------------------------------------
+
+/// Every toast this state machine can raise, held to the house style.
+///
+/// Toasts are written here and drawn by `view::status` in the same 13 pt run
+/// as the status line, which is what makes them status text however far from
+/// `view` they live. For the whole of the rewrite that was invisible, because
+/// they were computed and thrown away - so by the time anything drew them the
+/// footer alternated between `Searching...` and `nothing to open` seconds
+/// apart, in two different conventions, and nobody had ever seen it happen.
+///
+/// A toast this cannot reach is a toast nothing here is checking, so a new
+/// `set_toast` belongs in this list.
+fn every_toast() -> Vec<String> {
+    let mut out = Vec::new();
+    let mut raised = |s: &AppState| {
+        out.push(
+            s.toast
+                .as_ref()
+                .expect("this step raised no toast, so it checks nothing")
+                .text
+                .clone(),
+        )
+    };
+
+    // Nothing selected, and nothing to open.
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(ctrl(Key::Char('c')), now);
+    raised(&s);
+
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(search_result(&view(&s), Vec::new(), 0, 9_000), now);
+    s.update(press(Key::Enter), now);
+    raised(&s);
+
+    // And something to open, which says so while it is being assembled.
+    let (mut s, now) = state();
+    with_results(&mut s, now, 4);
+    s.update(press(Key::Down), now);
+    s.update(press(Key::Enter), now);
+    raised(&s);
+
+    // The clipboard, in all three of its answers.
+    for msg in [
+        ClipboardMsg::Copied { chars: 1 },
+        ClipboardMsg::Copied { chars: 9 },
+        ClipboardMsg::Read { text: "   ".into() },
+        ClipboardMsg::Failed {
+            detail: "the clipboard was held by another program".into(),
+        },
+    ] {
+        let (mut s, now) = state();
+        s.update(AppEvent::Clipboard(msg), now);
+        raised(&s);
+    }
+
+    // Opening, in every way it can end other than cleanly.
+    for msg in [
+        OpenMsg::Launched {
+            path: "R:\\11d\\a.pdf".into(),
+            pages: 8,
+            skipped: vec!["page 3 is not a PDF".into()],
+            truncated: false,
+            note: None,
+        },
+        OpenMsg::Launched {
+            path: "R:\\11d\\a.pdf".into(),
+            pages: 64,
+            skipped: Vec::new(),
+            truncated: true,
+            note: None,
+        },
+        OpenMsg::Launched {
+            path: "R:\\11d\\a.dwg".into(),
+            pages: 1,
+            skipped: Vec::new(),
+            truncated: false,
+            note: Some("Opened in avwin \u{b7} no dwg_converter is set".into()),
+        },
+        OpenMsg::Failed {
+            path: "R:\\11d\\a.pdf".into(),
+            detail: "the file no longer exists".into(),
+        },
+        OpenMsg::ViewerSaveFailed {
+            detail: "the configuration file is read-only".into(),
+        },
+    ] {
+        let (mut s, now) = state();
+        s.update(AppEvent::Open(msg), now);
+        raised(&s);
+    }
+
+    // Every viewer, saved and unsaveable.
+    for viewer in [ViewerKind::Auto, ViewerKind::Pdf, ViewerKind::Avwin] {
+        let (mut s, now) = state();
+        s.update(AppEvent::Open(OpenMsg::ViewerSaved { viewer }), now);
+        raised(&s);
+
+        let mut unsaveable = AppState::new(
+            Settings {
+                viewer_persistable: false,
+                ..Settings::default()
+            },
+            now,
+        );
+        unsaveable.viewer = viewer;
+        unsaveable.update(press(Key::F(2)), now);
+        raised(&unsaveable);
+    }
+
+    // An actor that stopped.
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::ActorDied {
+            actor: "index",
+            detail: "attempt to subtract with overflow".into(),
+        },
+        now,
+    );
+    raised(&s);
+
+    // The hotkey that could not be claimed.
+    let (mut s, now) = state();
+    s.update(
+        AppEvent::Hotkey(files::app::event::HotkeyMsg::Unavailable {
+            reason: "Ctrl+Shift+Space is already claimed \u{b7} set hotkey in config.toml to \
+                     another combination, or to \"off\""
+                .into(),
+        }),
+        now,
+    );
+    raised(&s);
+
+    // A refresh, both ways.
+    for error in [None, Some(EnumError::Transient(53))] {
+        let (mut s, now) = state();
+        s.update(
+            AppEvent::Index(IndexMsg::RefreshReport {
+                id: MappingId(0),
+                entries: 812_000,
+                elapsed: Duration::from_millis(1_200),
+                error,
+            }),
+            now,
+        );
+        raised(&s);
+    }
+
+    // The drive picker, one drive and all of them.
+    let (mut s, now) = state();
+    s.update(press(Key::F(5)), now);
+    s.update(press(Key::Enter), now);
+    raised(&s);
+
+    let (mut s, now) = state();
+    s.update(press(Key::F(5)), now);
+    s.update(key('a'), now);
+    raised(&s);
+
+    // A search that never came back. Enter has to land while one is still
+    // due, which is what arms the watchdog - pressing it over a list that has
+    // already arrived opens a file instead, and pressing it after the debounce
+    // has fired opens nothing and says so.
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(press(Key::Enter), now);
+    s.update(
+        AppEvent::Tick,
+        now + ENTER_WATCHDOG + Duration::from_secs(1),
+    );
+    let watchdog = s.toast.as_ref().expect("the watchdog said nothing");
+    assert!(
+        watchdog.text.contains("did not answer"),
+        "{:?}",
+        watchdog.text
+    );
+    raised(&s);
+
+    out
+}
+
+#[test]
+fn every_toast_keeps_the_house_style() {
+    let toasts = every_toast();
+    files::view::style::check_all(
+        "the toasts",
+        toasts.iter().map(String::as_str),
+        files::view::style::Slot::Status,
+    );
+}
+
+/// A toast starts the way a line starts.
+///
+/// The exception is the actor name in `<actor> stopped unexpectedly`, which is
+/// an internal identifier printed verbatim beside the same name in the log.
+#[test]
+fn every_toast_starts_the_way_a_line_should() {
+    for toast in every_toast() {
+        if toast.contains("stopped unexpectedly") {
+            continue;
+        }
+        assert!(
+            files::view::style::starts_capitalised(&toast),
+            "the toast {toast:?} does not start a sentence"
+        );
+    }
 }

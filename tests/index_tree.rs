@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::bounded;
 use files::app::event::AppEvent;
 use files::config::Settings;
+use files::config::hidden::Hidden;
 use files::index::actor::{self, IndexContext};
 use files::index::errors::EnumError;
 use files::index::fake_source::FakeDirSource;
@@ -123,7 +124,7 @@ fn found(store: &IndexStore, query: &str) -> Vec<String> {
     let Some(tree) = store.first_tree_slot().as_tree() else {
         return Vec::new();
     };
-    matcher::search_tree(&tree, query, &CancelToken::never())
+    matcher::search_tree(&tree, query, &Hidden::none(), &CancelToken::never())
         .map(|o| o.hits.iter().map(|h| h.path.to_string()).collect())
         .unwrap_or_default()
 }

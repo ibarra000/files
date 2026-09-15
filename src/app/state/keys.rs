@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use crate::app::key::{Key, KeyEvent};
 
-use super::{AppState, Severity};
+use super::{AppState, Severity, Urgency};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
 use crate::config::VISIBLE_ROWS;
 
@@ -67,6 +67,15 @@ impl AppState {
             }
         }
 
+        // Escape peels the recall list the way it peels the drive picker, and
+        // for the reason `on_escape` gives for that exception: "a list that
+        // cannot be shut without taking the panel with it would be a trap."
+        // The status line has been promising "Esc to go back" throughout;
+        // until now nothing kept the promise and the whole window closed.
+        if self.history.is_browsing() && key.key == Key::Esc {
+            return self.end_recall();
+        }
+
         let response = match key.key {
             // The one key that leaves. Ctrl+Q rather than Ctrl+C because Ctrl+C
             // copies a selection here, and rather than Esc because Esc is
@@ -79,6 +88,10 @@ impl AppState {
                 Response::none().with(Cmd::Quit)
             }
             Key::Char('c') if ctrl => self.copy_selection(now),
+            // Never arrives as a `Char('x')` from a keyboard: the toolkit
+            // turns Ctrl+X and Shift+Delete into one event and `gui::input`
+            // turns that back into this. See that module's note.
+            Key::Char('x') if ctrl => self.cut_selection(now),
             Key::Char('v') if ctrl => Response::none().with(Cmd::ReadClipboard),
             Key::Char('a') if ctrl => {
                 self.input.select_all();
@@ -89,7 +102,7 @@ impl AppState {
                     Response::none()
                 } else {
                     self.input.clear();
-                    self.on_input_changed(now)
+                    self.on_input_changed(now, Urgency::Typed)
                 }
             }
             Key::Char('w') if ctrl => self.delete_field(now),
@@ -102,7 +115,7 @@ impl AppState {
             // untypable with nothing on screen to say why.
             Key::Char(c) if ctrl && alt => {
                 self.input.insert_char(c);
-                self.on_input_changed(now)
+                self.on_input_changed(now, Urgency::Typed)
             }
 
             // Every other modified key is a binding this program does not
@@ -112,7 +125,7 @@ impl AppState {
 
             Key::Char(c) => {
                 self.input.insert_char(c);
-                self.on_input_changed(now)
+                self.on_input_changed(now, Urgency::Typed)
             }
 
             Key::Backspace if ctrl || alt => self.delete_field(now),
@@ -120,13 +133,13 @@ impl AppState {
                 if !self.input.backspace() {
                     return leaving;
                 }
-                self.on_input_changed(now)
+                self.on_input_changed(now, Urgency::Typed)
             }
             Key::Delete => {
                 if !self.input.delete() {
                     return leaving;
                 }
-                self.on_input_changed(now)
+                self.on_input_changed(now, Urgency::Typed)
             }
 
             // The text field always has the keyboard, so these are always
@@ -170,7 +183,7 @@ impl AppState {
             // F1 is the one key every program has meant "help" for thirty
             // years, and it was unbound. Everything the hint bar cannot fit
             // lives behind it, which is what lets that bar stay short.
-            Key::F(1) => Response::redraw().with(Cmd::OpenHelp),
+            Key::F(1) => Response::redraw().with(Cmd::ToggleHelp),
 
             Key::F(2) => self.toggle_viewer(now),
 
@@ -197,7 +210,9 @@ impl AppState {
     /// again.
     fn toggle_viewer(&mut self, now: Instant) -> Response {
         self.viewer = self.viewer.next();
-        let name = self.viewer.name();
+        // `display`, not `name`: the latter is the spelling the config file
+        // round-trips, and `Pdf` reads as a typo on screen.
+        let name = self.viewer.display();
 
         if self.settings.viewer_persistable {
             // The toast is raised by the save reporting back, so that what the
@@ -208,7 +223,7 @@ impl AppState {
             // writing it would report a save the next start ignores. Saying so
             // is better than saving into the void.
             self.set_toast(
-                format!("viewer: {name} (this session only)"),
+                format!("Viewer: {name} \u{b7} this session only"),
                 Severity::Info,
                 now,
             );
@@ -267,7 +282,7 @@ impl AppState {
         };
         self.picking_share = false;
         self.set_toast(
-            format!("updating {}...", self.settings.routes.label(id)),
+            format!("Updating {}\u{2026}", self.settings.routes.label(id)),
             Severity::Info,
             now,
         );
@@ -283,6 +298,9 @@ impl AppState {
     /// update having done nothing.
     fn after_refresh(&mut self, mut r: Response) -> Response {
         if self.input.chars().count() >= crate::config::MIN_QUERY_LEN {
+            // Dispatched here and now, so any debounce armed by the keystroke
+            // that opened the picker would only be a second, redundant run.
+            self.search_due_at = None;
             self.verify_due_at = Some(self.last_frame);
             r = r.with(Cmd::Search {
                 query: self.input.text().to_string(),
@@ -295,7 +313,11 @@ impl AppState {
     fn update_every_share(&mut self, now: Instant) -> Response {
         self.picking_share = false;
         let n = self.share_ids().len();
-        self.set_toast(format!("updating all {n} drives..."), Severity::Info, now);
+        self.set_toast(
+            format!("Updating all {n} drives\u{2026}"),
+            Severity::Info,
+            now,
+        );
         self.after_refresh(Response::redraw().with(Cmd::RefreshIndex {
             target: RefreshTarget::All,
             force: true,
@@ -313,14 +335,15 @@ impl AppState {
         if self.picking_share {
             return self.move_share(-1);
         }
-        if self.showing_recent() {
-            return match self.begin_recall() {
-                // The first arrow lands on the newest code rather than stepping
-                // past it. Beginning and then stepping would skip one, which is
-                // the sort of thing nobody reports and everybody works around.
-                Some(first) => first,
-                None => self.history_older(),
-            };
+        if self.history.is_browsing() {
+            return self.history_older();
+        }
+        // The only door into recall. An empty field is a *precondition* rather
+        // than a description of what is on screen: the body shows the first-run
+        // block until this key is pressed, which is what keeps a list of
+        // somebody's job codes from appearing in front of whoever walks past.
+        if self.can_begin_recall() {
+            return self.begin_recall();
         }
         match self.selected_row() {
             // The top holds rather than wrapping. There is nowhere to hand
@@ -335,11 +358,12 @@ impl AppState {
         if self.picking_share {
             return self.move_share(1);
         }
-        if self.showing_recent() {
-            return match self.begin_recall() {
-                Some(first) => first,
-                None => self.history_newer(),
-            };
+        // Never *starts* recall, which is the asymmetry that matters. Down
+        // used to call `begin_recall` too, so pressing it on an empty field put
+        // the code just cleared straight back - and pressing it again cleared
+        // it, and again put it back. One key, two states, forever.
+        if self.history.is_browsing() {
+            return self.history_newer();
         }
         if self.hits.is_empty() {
             return Response::none();
@@ -362,48 +386,60 @@ impl AppState {
     // --- help ---------------------------------------------------------------
     // --- recall -----------------------------------------------------------
 
-    /// True when the body is showing the codes used before.
+    /// True when the codes used before are on screen.
     ///
-    /// With nothing typed the list *is* your recent codes, so recall stops
-    /// being a mode and becomes the empty state. That retires the half-typed
-    /// draft the old `Esc` restored, and with it the whole question of which
-    /// layer a keystroke was aimed at.
+    /// Exactly "the Up arrow started browsing", and nothing else. The list is
+    /// not a view of an empty field any more: it used to appear on its own
+    /// whenever nothing was typed, which meant every summon of an empty panel
+    /// opened onto somebody's search history with nobody having asked for it.
     ///
-    /// The first clause is what keeps it true while a code is being *previewed*:
-    /// stepping onto an entry puts it in the field, and a rule that looked only
-    /// at whether the field was empty would stop browsing after one press and
-    /// hand the next arrow to a result list that is not on screen.
+    /// It stays true while a code is being *previewed* - stepping onto an entry
+    /// puts it in the field - which is why this is asked before anything looks
+    /// at whether the field is empty.
     pub fn showing_recent(&self) -> bool {
-        self.history.is_browsing() || (self.input.is_empty() && !self.history.is_empty())
+        self.history.is_browsing()
     }
 
-    /// Steps onto the most recent code, which is what the first arrow does.
+    /// Whether Up would open the recall list rather than move a selection.
     ///
-    /// `None` when there is nothing remembered - an arrow with nowhere to go,
-    /// which must do nothing rather than something surprising.
-    fn begin_recall(&mut self) -> Option<Response> {
-        if self.history.is_browsing() {
-            return None;
-        }
-        // The draft is always empty here - `showing_recent` says so when
-        // browsing has not started - which is why nothing has to be preserved
-        // to come back to.
-        let entry = self.history.begin("")?.to_string();
+    /// Its own predicate rather than a second meaning for `showing_recent`.
+    /// One function answering both "is the list on screen" and "may it be
+    /// opened" is what let the renderer and the hint bar disagree about it.
+    fn can_begin_recall(&self) -> bool {
+        !self.history.is_browsing() && self.input.is_empty() && !self.history.is_empty()
+    }
+
+    /// Steps onto the most recent code, which is what the first Up does.
+    ///
+    /// The first arrow lands on the newest code rather than stepping past it:
+    /// beginning and then stepping would skip one, which is the sort of thing
+    /// nobody reports and everybody works around.
+    fn begin_recall(&mut self) -> Response {
+        let Some(entry) = self.history.begin().map(str::to_string) else {
+            // An arrow with nowhere to go does nothing, rather than something
+            // surprising - and draws no frame for it.
+            return Response::none();
+        };
         self.input.set_text(entry);
         // Browsing must not search, and must not rewrite the list being
         // browsed. Stepping through twenty codes would otherwise be twenty
-        // server round trips and twenty recall entries for codes nobody has
-        // chosen yet, so both pending deadlines are stood down and re-armed
-        // when an entry is actually taken.
-        self.verify_due_at = None;
-        self.remember_due_at = None;
-        Some(Response::redraw())
+        // server round trips, twenty matcher runs over the whole index and
+        // twenty recall entries for codes nobody has chosen yet - so every
+        // pending deadline is stood down, and re-armed when an entry is
+        // actually taken. Browsing does not go through `on_input_changed`, so
+        // nothing else would clear them.
+        // `stand_down` rather than three assignments: it also clears
+        // `enter_pending`, and Enter inside `SEARCH_DEBOUNCE` followed by Up
+        // otherwise left it armed - so when the matcher answered it opened a
+        // row under a recalled code nobody had searched for.
+        self.stand_down();
+        Response::redraw()
     }
 
     /// Takes the code being previewed and searches for it.
     pub(super) fn accept_recall(&mut self, now: Instant) -> Response {
         self.leave_history();
-        self.on_input_changed(now)
+        self.on_input_changed(now, Urgency::Complete)
     }
 
     pub(super) fn history_older(&mut self) -> Response {
@@ -421,13 +457,26 @@ impl AppState {
                 self.input.set_text(entry);
                 Response::redraw()
             }
-            // Past the newest entry, so the half-typed code comes back.
-            None => self.restore_draft(),
+            // Past the newest entry, which is the way out of recall by arrow.
+            None => self.end_recall(),
         }
     }
 
-    fn restore_draft(&mut self) -> Response {
-        self.history.cancel();
+    /// Leaves recall, putting the field back the way recall found it.
+    ///
+    /// Empty, always: `on_up` only starts browsing from an empty field, so
+    /// there is nothing else it could have found - which is the whole of what
+    /// `History`'s draft used to hold and the reason it could be deleted.
+    ///
+    /// And it *stays* empty. This used to be followed by a Down that called
+    /// `begin_recall` again and put the code straight back.
+    ///
+    /// Nothing is searched for: clearing a field that was already clear is not
+    /// an edit, so `on_input_changed` is deliberately not called and the phase,
+    /// the empty reason and the (already empty) result list are left exactly as
+    /// browsing found them.
+    pub(super) fn end_recall(&mut self) -> Response {
+        self.history.accept();
         self.input.clear();
         Response::redraw()
     }
@@ -441,17 +490,33 @@ impl AppState {
                 // Nothing selected is worth saying: this is the key that used
                 // to quit, so silence here reads as "the program ignored me"
                 // to anyone expecting the old behaviour.
-                self.set_toast("nothing selected to copy".into(), Severity::Info, now);
+                self.set_toast("Nothing selected to copy".into(), Severity::Info, now);
                 Response::redraw()
             }
         }
+    }
+
+    /// Copy, then remove what was copied.
+    ///
+    /// The copy is ordered *after* the edit in the response rather than issued
+    /// first, which costs nothing: `Cmd::Copy` carries the text by value, so
+    /// the clipboard thread is not reading a field the edit has already
+    /// changed.
+    fn cut_selection(&mut self, now: Instant) -> Response {
+        let Some(text) = self.input.selected_text().map(str::to_string) else {
+            self.set_toast("Nothing selected to cut".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        self.input.delete_selection();
+        self.on_input_changed(now, Urgency::Typed)
+            .with(Cmd::Copy(text))
     }
 
     fn delete_field(&mut self, now: Instant) -> Response {
         if !self.input.delete_prev_field() {
             return Response::none();
         }
-        self.on_input_changed(now)
+        self.on_input_changed(now, Urgency::Typed)
     }
 
     fn on_escape(&mut self, now: Instant) -> Response {
@@ -490,6 +555,6 @@ impl AppState {
             return Response::none();
         }
         self.input.clear();
-        self.on_input_changed(now)
+        self.on_input_changed(now, Urgency::Typed)
     }
 }

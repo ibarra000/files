@@ -99,6 +99,32 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         }
     );
 
+    // Reported because "why can I not find this file" is the question this
+    // setting causes, and the answer is invisible from the panel: a hidden
+    // file is not shown greyed out, it is simply not there.
+    let _ = writeln!(out);
+    let hidden = &settings.hidden;
+    if hidden.is_empty() {
+        let _ = writeln!(out, "HIDDEN  nothing is hidden by extension");
+    } else {
+        let list: Vec<&str> = hidden.suffixes().collect();
+        let _ = writeln!(out, "HIDDEN  {}", list.join(" "));
+    }
+    let _ = writeln!(
+        out,
+        "        system and hidden files: {}{}",
+        if hidden.hides_system() {
+            "hidden"
+        } else {
+            "shown"
+        },
+        if hidden.hides_system() {
+            "  (applies to a drive from its next scan)"
+        } else {
+            ""
+        }
+    );
+
     let _ = writeln!(out);
     let _ = writeln!(out, "OK");
 }
@@ -504,7 +530,7 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         "  avwin.exe           {}",
         if crate::open::avwin_available() {
             "found on PATH"
-        } else if settings.viewer == crate::config::ViewerKind::Avwin {
+        } else if settings.viewer.may_use_avwin() {
             "NOT FOUND on PATH - Enter will fail"
         } else {
             "not found on PATH (not in use)"
@@ -517,6 +543,31 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         match &settings.pdf_viewer {
             Some(p) => p.display().to_string(),
             None => "the system's .pdf association".into(),
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "  dwg converter       {}",
+        match &settings.dwg_converter {
+            None => ".dwg files open in avwin.exe (no dwg_converter set)".to_string(),
+            Some(argv) => {
+                let prog = argv.first().map(String::as_str).unwrap_or_default();
+                // Checked here and nowhere else, on purpose: this file roams to
+                // laptops where the converter is legitimately absent, so a
+                // missing one must not stop the program starting.
+                let found = std::path::Path::new(prog).is_file()
+                    || crate::open::launch::program_on_path(prog);
+                format!(
+                    "{}{}",
+                    argv.join(" "),
+                    if found {
+                        ""
+                    } else {
+                        "\n                      NOT FOUND - .dwg files will open in avwin.exe"
+                    }
+                )
+            }
         }
     );
 

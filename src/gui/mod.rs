@@ -93,14 +93,21 @@ pub fn run(settings: Settings, source: Arc<dyn DirSource>) -> eframe::Result<()>
     let ctx = egui::Context::default();
 
     let options = eframe::NativeOptions {
+        // Said out loud rather than left to `Renderer::default()`, even though
+        // `glow` is now the only backend compiled in and the default would pick
+        // it anyway. The panel's transparency depends on presenting through the
+        // window DC - see the note in `Cargo.toml` - and a line that says which
+        // renderer that is cannot be changed by accident.
+        renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("files")
             .with_app_id("files")
             // Frameless: the panel paints its own edge. A caption bar on a
             // thing summoned by a hotkey is a thing nobody asked to manage.
             .with_decorations(false)
-            // Per-pixel alpha, so the compositor has something to put a
-            // backdrop behind.
+            // Per-pixel alpha, and load-bearing: this is what makes winit
+            // call `DwmEnableBlurBehindWindow`, which is the whole of how a
+            // window on Windows becomes transparent. See `Cargo.toml`.
             .with_transparent(true)
             .with_resizable(false)
             .with_always_on_top()
@@ -117,10 +124,6 @@ pub fn run(settings: Settings, source: Arc<dyn DirSource>) -> eframe::Result<()>
         // We place the window ourselves on every summon; restoring the last
         // session's rectangle would fight that.
         persist_window: false,
-        // Without this the window is opaque black on Windows whatever
-        // `with_transparent` says - wgpu's default DX12 swapchain offers no
-        // alpha mode that blends. See [`crate::gpu`], which spells out why.
-        wgpu_options: crate::gpu::transparent_config(),
         ..Default::default()
     };
 
@@ -380,8 +383,7 @@ impl Shell {
     /// system and a swapchain reconfigure behind it, and how many of them one
     /// keystroke costs is a number a test can hold us to.
     fn resize(&mut self, ctx: &egui::Context, visual: &anim::Visual) {
-        let acrylic = self.backdrop == Some(window::Backdrop::Acrylic);
-        if let Some(size) = self.frame.resize(visual, acrylic) {
+        if let Some(size) = self.frame.resize(visual) {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
     }
@@ -429,20 +431,38 @@ impl eframe::App for Shell {
             return;
         }
 
-        // A transition owes a frame immediately; a deadline owes one later.
-        // With neither there is no request at all, and the process parks until
-        // the hotkey or a worker wakes it - which is the whole of the claim
-        // that sitting in the notification area costs nothing.
-        if self.frame.motion.is_animating() || self.windows.any_open() {
+        // Something owes a frame soon; a deadline owes one later. With neither
+        // there is no request at all, and the process parks until the hotkey or
+        // a worker wakes it - which is the whole of the claim that sitting in
+        // the notification area costs nothing.
+        //
+        // The only thing left that owes a frame on its own account is the gate
+        // that stops the body going empty for one frame, and it owes at most
+        // seven of them. Asking for frames at the compositor's rate was right
+        // when the panel's presence, height, body and selection were all in
+        // flight at once; it is now a deadline like any other.
+        //
+        // Taking the earlier of the two is load-bearing. Capping at
+        // `ANIMATION_TICK` alone would let the panel sleep past a search
+        // falling due and stretch a 300ms pause to 400.
+        let animating = self
+            .frame
+            .motion
+            .is_animating()
+            .then_some(crate::config::ANIMATION_TICK);
+        let deadline = self
+            .app
+            .next_deadline()
+            .map(|due| due.saturating_duration_since(now));
+
+        if self.windows.any_open() {
+            // An ordinary window, driven by its own input.
             ctx.request_repaint();
-        } else if let Some(deadline) = self.app.next_deadline() {
+        } else if let Some(wait) = [animating, deadline].into_iter().flatten().min() {
             // A floor of a millisecond: `request_repaint_after(ZERO)` means
             // "again immediately", and a deadline already in the past would pin
             // a core.
-            let wait = deadline
-                .saturating_duration_since(now)
-                .max(Duration::from_millis(1));
-            ctx.request_repaint_after(wait);
+            ctx.request_repaint_after(wait.max(Duration::from_millis(1)));
         }
     }
 
@@ -488,7 +508,11 @@ impl eframe::App for Shell {
             self.app.feed(AppEvent::Intent(intent), now);
         }
         if self.app.take_help_request() {
-            self.windows.open(Window::Help);
+            // Toggled rather than opened: F1 says "show or hide" in the panel
+            // this draws. The other half of that is in `windows::show_one`,
+            // for the presses this viewport never receives because the help
+            // window has the keyboard.
+            self.windows.toggle(Window::Help);
         }
         let _ = self.app.pump(now);
     }

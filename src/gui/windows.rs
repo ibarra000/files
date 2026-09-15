@@ -16,6 +16,24 @@
 //! all of the time, that is the difference between paying for them always and
 //! paying for them when they are open.
 //!
+//! ## These windows cannot outlive the panel, and deferring them will not help
+//!
+//! Worth writing down, because it looks like a bug and the obvious fix does not
+//! work. `Windows::show` is called from `eframe::App::ui`, so a window is only
+//! re-shown while the panel is being drawn - and dismissing the panel therefore
+//! takes every one of these with it.
+//!
+//! Making them deferred does **not** fix that. `Context::show_viewport_deferred`
+//! must still be called "each pass when the child viewport should exist", and
+//! `eframe::App::logic`'s own documentation says that while the window is
+//! hidden "eframe runs no egui pass at all" and that you "may NOT show any ui"
+//! from `logic`. There is nowhere left to call it from. The only way a child
+//! could outlive the panel is to stop hiding the panel, which is the one thing
+//! a summoned overlay must do.
+//!
+//! So Escape closes the window that has the keyboard, and the panel taking its
+//! children with it is the documented consequence rather than an oversight.
+//!
 //! # Why Diagnostics exists at all
 //!
 //! `--doctor` already prints everything here. But this program is about to stop
@@ -88,6 +106,28 @@ impl Windows {
                 self.diagnostics = true;
                 self.report = None;
             }
+        }
+    }
+
+    /// Opens the window, or shuts it if it is already up.
+    ///
+    /// What F1 does, as against what the tray menu does. A menu item named
+    /// "Keyboard shortcuts" that closed the window when it was open would be a
+    /// menu that lies, so that route still calls [`Self::open`]; a key the help
+    /// panel itself describes as "show or hide" has to do both.
+    pub fn toggle(&mut self, which: Window) {
+        if self.is_open(which) {
+            self.close(which);
+        } else {
+            self.open(which);
+        }
+    }
+
+    fn close(&mut self, which: Window) {
+        match which {
+            Window::Help => self.help = false,
+            Window::Settings => self.settings = false,
+            Window::Diagnostics => self.diagnostics = false,
         }
     }
 
@@ -165,10 +205,25 @@ fn show_one(
                         .show(ui, &mut body);
                 });
 
-            // The title bar's close button. Without this the window can be
-            // closed and immediately reappears, because nothing told the parent
-            // it had gone.
-            if ctx.input(|i| i.viewport().close_requested()) {
+            // The title bar's close button, and Escape while this window has
+            // the keyboard. Without the first the window closes and
+            // immediately reappears, because nothing told the parent it had
+            // gone; without the second, the key that shuts every other layer of
+            // this program does nothing here.
+            //
+            // F1 is the third, and it is needed *as well as* the toggle in the
+            // shell rather than instead of it. Once this window has the
+            // keyboard its keystrokes land in this viewport's input, not the
+            // panel's, so `gui::mod::Shell::logic` never sees the press and the
+            // toggle there can never fire. Scoped to Help because F1 closing
+            // the settings window would be a key doing something unrelated to
+            // what it says. The two cannot disagree: whichever of them sees the
+            // press, it closes.
+            let by_key = ctx.input(|i| {
+                i.key_pressed(egui::Key::Escape)
+                    || (which == Window::Help && i.key_pressed(egui::Key::F1))
+            });
+            if by_key || ctx.input(|i| i.viewport().close_requested()) {
                 open = false;
             }
         },
@@ -234,7 +289,7 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
     // second copy of the truth is how the file and the window come to disagree.
     // What this adds is knowing *what is in force right now*, which is the
     // question somebody actually has.
-    heading(ui, theme, "SHARES");
+    heading(ui, theme, "Drives");
     for mapping in settings.routes.enabled() {
         row(
             ui,
@@ -245,13 +300,13 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
     }
     if settings.routes.enabled().count() == 0 {
         ui.label(
-            egui::RichText::new("No shares are configured.")
+            egui::RichText::new("No drives are configured.")
                 .font(theme::font(theme::SIZE_ROW, Weight::Regular))
                 .color(theme.tone(view::status::Tone::Warn)),
         );
     }
 
-    heading(ui, theme, "SHORTCUT");
+    heading(ui, theme, "Shortcut");
     row(
         ui,
         theme,
@@ -263,13 +318,13 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
             .unwrap_or_else(|| "off".into()),
     );
 
-    heading(ui, theme, "OPENING");
-    row(ui, theme, "Viewer", &format!("{:?}", settings.viewer));
+    heading(ui, theme, "Opening");
+    row(ui, theme, "Viewer", settings.viewer.display());
     if let Some(path) = &settings.pdf_viewer {
         row(ui, theme, "PDF viewer", &path.display().to_string());
     }
 
-    heading(ui, theme, "REMEMBERING");
+    heading(ui, theme, "Remembering");
     row(
         ui,
         theme,
@@ -280,7 +335,7 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
         row(ui, theme, "Stored in", &path.display().to_string());
     }
 
-    heading(ui, theme, "CONFIGURATION FILE");
+    heading(ui, theme, "Configuration file");
     let config = crate::config::file::default_config_path();
     match &config {
         Some(path) => {
@@ -294,7 +349,12 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
             }
         }
         None => {
-            row(ui, theme, "Path", "none - running on the built-in defaults");
+            row(
+                ui,
+                theme,
+                "Path",
+                "None \u{b7} running on the built-in defaults",
+            );
         }
     }
 }
@@ -341,6 +401,54 @@ mod tests {
 
         windows.open(Window::Settings);
         assert!(windows.is_open(Window::Help), "opening one closed another");
+    }
+
+    /// What F1 does. It used to only ever open, so a second press was a no-op
+    /// and the window could be shut by nothing but Escape or its title bar -
+    /// while the help panel it displays promised "show or hide this list of
+    /// keys" throughout.
+    #[test]
+    fn toggling_a_window_opens_it_and_then_shuts_it() {
+        let mut windows = Windows::default();
+
+        windows.toggle(Window::Help);
+        assert!(
+            windows.is_open(Window::Help),
+            "the first press did not open"
+        );
+
+        windows.toggle(Window::Help);
+        assert!(
+            !windows.is_open(Window::Help),
+            "the second press did not shut"
+        );
+        assert!(!windows.any_open());
+    }
+
+    /// The tray menu opens; only the key toggles. A menu item that closed the
+    /// window it names would be a menu that lies.
+    #[test]
+    fn opening_an_already_open_window_leaves_it_open() {
+        let mut windows = Windows::default();
+        windows.open(Window::Help);
+        windows.open(Window::Help);
+        assert!(windows.is_open(Window::Help));
+    }
+
+    #[test]
+    fn toggling_one_window_does_not_touch_the_others() {
+        let mut windows = Windows::default();
+        windows.open(Window::Settings);
+        windows.open(Window::Diagnostics);
+
+        windows.toggle(Window::Help);
+        windows.toggle(Window::Help);
+
+        assert!(windows.is_open(Window::Settings), "settings was shut too");
+        assert!(
+            windows.is_open(Window::Diagnostics),
+            "diagnostics was shut too"
+        );
     }
 
     /// `doctor` touches the network shares, so the report is taken once per

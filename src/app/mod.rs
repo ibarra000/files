@@ -50,6 +50,15 @@ pub struct App {
     rx: Receiver<AppEvent>,
     /// What the events applied so far have asked for, not yet dispatched.
     pending: CmdList,
+    /// Somebody pressed F1, and the shell has not acted on it yet.
+    ///
+    /// A latch rather than an entry in `pending`, and that is the whole of the
+    /// fix for a keystroke that did nothing for as long as it existed. `pump`
+    /// drains `pending` into `Actors::dispatch`, which names `Cmd::ToggleHelp`
+    /// only to ignore it - so by the time the shell asked, the request had
+    /// already been thrown away. `logic` feeds and pumps; `ui` asks. Nothing
+    /// that survives only between those two can be read from there.
+    help_requested: bool,
     /// ...and whether they changed anything on screen.
     redraw: Redraw,
 }
@@ -87,25 +96,26 @@ impl App {
             actors,
             rx,
             pending: CmdList::new(),
+            help_requested: false,
             redraw: Redraw::No,
         })
     }
 
     /// Whether `F1` was pressed since this was last asked.
     ///
-    /// [`Cmd::OpenHelp`] is addressed to whoever is drawing rather than to a
-    /// worker, and this is where it is taken off the queue. Read-and-clear
-    /// rather than a flag the shell resets, because two readers of one
-    /// "somebody asked for help" is how a window comes to open twice or not at
-    /// all.
+    /// [`Cmd::ToggleHelp`] is addressed to whoever is drawing rather than to a
+    /// worker. Read-and-clear, so two readers of one "somebody asked for help"
+    /// cannot toggle the window twice or not at all - which with a toggle is
+    /// the difference between opening it and leaving it exactly as it was.
+    ///
+    /// Reads a latch set in [`Self::feed`] rather than scanning `pending`. It
+    /// used to scan, and could therefore never see a keystroke: `logic` feeds
+    /// the key and then calls [`Self::pump`], which empties `pending` into
+    /// `Actors::dispatch`; `ui` asks afterwards, by which time there is
+    /// nothing left to find. Clicking the F1 chip worked and pressing F1 did
+    /// not, for the sole reason that the click is fed two lines above the ask.
     pub fn take_help_request(&mut self) -> bool {
-        let mut wanted = false;
-        self.pending.retain(|cmd| {
-            let is_help = matches!(cmd, event::Cmd::OpenHelp);
-            wanted |= is_help;
-            !is_help
-        });
-        wanted
+        std::mem::take(&mut self.help_requested)
     }
 
     /// Applies one event, holding on to what it asked for.
@@ -116,6 +126,12 @@ impl App {
     pub fn feed(&mut self, event: AppEvent, now: Instant) {
         let response = self.state.update(event, now);
         self.redraw = self.redraw.or(response.redraw);
+        // Latched on the way past, because `pending` does not survive the
+        // `pump` that `logic` performs before `ui` ever asks.
+        self.help_requested |= response
+            .cmds
+            .iter()
+            .any(|cmd| matches!(cmd, event::Cmd::ToggleHelp));
         self.pending.extend(response.cmds);
     }
 
@@ -171,6 +187,7 @@ impl App {
             actors,
             rx,
             pending: CmdList::new(),
+            help_requested: false,
             redraw: Redraw::No,
         }
     }
@@ -296,6 +313,34 @@ mod tests {
             app.state.input.text(),
             "a",
             "the keystroke ahead of the quit was dropped"
+        );
+        app.shutdown();
+    }
+
+    /// F1 survives the pump that happens between the key and the question.
+    ///
+    /// The seam nothing covered, and the reason F1 did nothing for as long as
+    /// it existed. `tests/overlay.rs` asserts the state machine *emits*
+    /// `Cmd::ToggleHelp`, which it always did; `gui::Shell::logic` then feeds and
+    /// pumps, and `ui` asks afterwards. Anything that lived only in `pending`
+    /// was gone by then.
+    #[test]
+    fn a_help_request_survives_the_pump_that_follows_it() {
+        let (_tx, rx) = bounded::<AppEvent>(4);
+        let mut app = App::around(state(), actors_for_test(), rx);
+        let now = Instant::now();
+
+        app.feed(AppEvent::Key(KeyEvent::new(Key::F(1), Mods::NONE)), now);
+        // Exactly what the shell does between the keystroke and the question.
+        let _ = app.pump(now);
+
+        assert!(
+            app.take_help_request(),
+            "the pump swallowed the request before anybody could read it"
+        );
+        assert!(
+            !app.take_help_request(),
+            "read-and-clear, or the window opens again on the next frame"
         );
         app.shutdown();
     }

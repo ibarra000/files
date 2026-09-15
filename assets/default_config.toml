@@ -162,4 +162,62 @@ refresh = "manual"
 # Which viewer Enter uses. Left uncommented because F2 switches it while
 # running and saves the choice here, and the writer replaces this line rather
 # than appending a second one.
-viewer = "pdf"                       # pdf | avwin
+viewer = "auto"                      # auto | pdf | avwin
+#
+# auto  picks per file: a .pdf is assembled into the whole document, a .dwg is
+#       converted to one (see dwg_converter below), and anything else is handed
+#       to avwin, which opens far more kinds of file than this program knows
+#       about. It is the default for a fresh install.
+# pdf   always produces a PDF, converting a drawing on the way.
+# avwin always hands the one selected file to avwin, whatever it is - which is
+#       how to see a .pdf or a .dwg there rather than anywhere else.
+
+# How to turn a .dwg into a PDF, so drawings can open in the PDF viewer.
+#
+# There is no way to read a DWG in this program: it is AutoCAD's own closed
+# format, and every route to a PDF is somebody else's converter. Point this at
+# whichever one you have.
+#
+# {in} and {out} are replaced. They are substituted *inside* an argument, so
+# --out={out} works, and each argument stays one argument - a path with spaces
+# in it needs no quoting because the command line is never re-parsed.
+#
+#   dwg_converter = 'C:\Tools\dwg2pdf.exe'
+#       is short for ['C:\Tools\dwg2pdf.exe', '{in}', '{out}']
+#
+#   dwg_converter = ['C:\Tools\dwg2pdf.exe', '-i', '{in}', '-o', '{out}', '--quiet']
+#
+# Left unset, a .dwg opens in avwin.exe, which reads drawings natively. The
+# converted file is cached, so the same drawing is converted once, and the cache
+# is invalidated when either the drawing or this command changes.
+# `files --doctor` says whether the converter can be found.
+# dwg_converter = 'C:\Tools\dwg2pdf.exe'
+
+# Files that are never offered, however well they match.
+#
+# A drawing share is not only drawings: alongside them sit the files Windows
+# and its programs leave behind, and a search for a job code used to return
+# Thumbs.db and a handful of shortcuts as readily as it returned the drawing.
+#
+# Write extensions, not patterns and not filenames - 'db', not '*.db' and not
+# 'Thumbs.db'. The leading dot is optional and the case does not matter. A
+# single one may be written on its own: hide_extensions = 'db'.
+#
+# Left uncommented because this is what a fresh install is expected to want.
+# Set it to [] to hide nothing, which is the quickest way to find out whether
+# this is why a file you expected is not in the list. The change takes effect
+# at the next start; it needs no re-scan of the drives, because the filter is
+# applied as the results are chosen rather than as the index is built.
+hide_extensions = ['db', 'js', 'lnk', 'ini', 'tmp', 'bak', 'url', 'exe', 'dll', 'bat', 'cmd', 'ps1', 'vbs']
+
+# Also hide whatever Windows itself marks hidden or system.
+#
+# That is the ~$ files Office leaves behind while a document is open, and the
+# bookkeeping a file server keeps in the folder it belongs to.
+#
+# Unlike the list above, this one *does* need a re-scan to take effect: the
+# attribute is not part of the name, so it is read while the folder is being
+# listed and is not stored anywhere afterwards. Press F5 and choose the drive.
+# Folders are never hidden by this, whatever they are marked - some servers
+# mark a whole share system, and honouring that would hide the share.
+hide_system_files = true

@@ -172,7 +172,10 @@ const SETTINGS_KEYS: &[&str] = &[
     "hotkey",
     "viewer",
     "pdf_viewer",
+    "dwg_converter",
     "theme",
+    "hide_extensions",
+    "hide_system_files",
 ];
 const ROOT_KEYS: &[&str] = &["version", "mapping", "settings"];
 
@@ -191,7 +194,10 @@ pub struct FileSettings {
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
+    pub dwg_converter: Option<Vec<String>>,
     pub theme: Option<String>,
+    pub hide_extensions: Option<Vec<String>>,
+    pub hide_system_files: Option<bool>,
 }
 
 /// A parsed configuration.
@@ -582,13 +588,105 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                         item.span(),
                         None,
                         None,
-                        format!("unknown viewer {v:?} (expected \"pdf\" or \"avwin\")"),
+                        format!("unknown viewer {v:?} (expected \"auto\", \"pdf\" or \"avwin\")"),
                         None,
                     );
                 }
                 out.viewer = raw.map(str::to_string);
             }
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
+            "dwg_converter" => {
+                // A string is a program on its own; an array is the whole
+                // command. Both end up as an argument vector, because that is
+                // what never has to be quoted.
+                let argv = match value {
+                    Some(v) if v.is_str() => v
+                        .as_str()
+                        .map(|s| crate::config::expand_converter(vec![s.to_string()])),
+                    Some(v) => v.as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|e| e.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                    None => None,
+                };
+                // Rejected here rather than ignored later, for the same reason
+                // as `viewer` above. A template with no `{out}` produces a
+                // converter that writes nowhere, which on screen is
+                // indistinguishable from one that hangs: every drawing would
+                // sit for the whole timeout and then fail.
+                if let Some(v) = &argv {
+                    let joined = v.join(" ");
+                    if v.is_empty() || !joined.contains("{in}") || !joined.contains("{out}") {
+                        ctx.err(
+                            item.span(),
+                            None,
+                            None,
+                            "dwg_converter must name a program and contain {in} and {out}"
+                                .to_string(),
+                            None,
+                        );
+                    }
+                }
+                out.dwg_converter = argv;
+            }
+            "hide_system_files" => out.hide_system_files = value.and_then(Value::as_bool),
+            "hide_extensions" => {
+                // One extension may be written bare, as `dwg_converter`
+                // allows: hiding a single type is a common enough edit that
+                // making it an array of one would only be ceremony.
+                let list = match value {
+                    Some(v) if v.is_str() => v.as_str().map(|s| vec![s.to_string()]),
+                    Some(v) => v.as_array().map(|a| {
+                        a.iter()
+                            .filter_map(|e| e.as_str().map(str::to_string))
+                            .collect()
+                    }),
+                    None => None,
+                };
+                // An extension, not a pattern and not a filename. Someone
+                // reaching for `*.db` or `Thumbs.db` has written something
+                // that would match nothing at all, and a filter that hides
+                // nothing is worse than no filter: they would go on believing
+                // the file was meant to be there.
+                if let Some(v) = &list {
+                    for entry in v {
+                        let bare = entry.trim().trim_start_matches('.');
+                        // Wildcards are checked before the dot, because
+                        // `*.db` is the likeliest mistake and trips both -
+                        // and being told to drop the star is more use than
+                        // being told to drop the dot.
+                        let bad = if bare.is_empty() {
+                            Some("an extension cannot be blank")
+                        } else if bare.contains(['*', '?']) {
+                            Some("this is not a pattern; write the extension only")
+                        } else if bare.contains('.') {
+                            Some("write the extension only, as \"db\" or \".db\"")
+                        } else if bare.contains(['/', '\\']) {
+                            Some("an extension cannot contain a path")
+                        } else if !bare.is_ascii() {
+                            // `Hidden` drops these, because it cannot judge
+                            // one consistently - see its `hides_folded`.
+                            // Reported rather than dropped silently: a filter
+                            // entry that is quietly ignored is a filter
+                            // somebody believes is running.
+                            Some("an extension must be ASCII")
+                        } else {
+                            None
+                        };
+                        if let Some(why) = bad {
+                            ctx.err(
+                                item.span(),
+                                None,
+                                None,
+                                format!("hide_extensions entry {entry:?}: {why}"),
+                                None,
+                            );
+                        }
+                    }
+                }
+                out.hide_extensions = list;
+            }
             "theme" => {
                 let raw = value.and_then(Value::as_str);
                 // Rejected here rather than ignored, for the same reason as
@@ -725,7 +823,115 @@ path = 'R:\'
 kind = "tree"
 "#;
 
+    // --- hiding files -------------------------------------------------------
+
+    #[test]
+    fn hide_extensions_accepts_an_array() {
+        let c = parse_ok(&format!(
+            "{MINIMAL}
+[settings]
+hide_extensions = ['db', '.LNK']
+"
+        ));
+        assert_eq!(
+            c.settings.hide_extensions,
+            Some(vec!["db".to_string(), ".LNK".to_string()])
+        );
+    }
+
+    /// Hiding one type is a common enough edit that requiring an array of one
+    /// would only be ceremony - the same shorthand `dwg_converter` allows.
+    #[test]
+    fn hide_extensions_accepts_a_bare_string() {
+        let c = parse_ok(&format!(
+            "{MINIMAL}
+[settings]
+hide_extensions = 'db'
+"
+        ));
+        assert_eq!(c.settings.hide_extensions, Some(vec!["db".to_string()]));
+    }
+
+    #[test]
+    fn hide_extensions_may_be_emptied_to_hide_nothing() {
+        let c = parse_ok(&format!(
+            "{MINIMAL}
+[settings]
+hide_extensions = []
+"
+        ));
+        assert_eq!(c.settings.hide_extensions, Some(Vec::new()));
+    }
+
+    /// A pattern or a whole filename would match nothing at all, and a filter
+    /// that silently hides nothing is worse than no filter: whoever wrote it
+    /// goes on believing the file was meant to be there.
+    #[test]
+    fn a_pattern_or_a_filename_is_rejected_rather_than_ignored() {
+        for bad in ["'*.db'", "'Thumbs.db'", "'db/js'", "''"] {
+            let errs = parse_err(&format!(
+                "{MINIMAL}
+[settings]
+hide_extensions = [{bad}]
+"
+            ));
+            let text = messages(&errs);
+            assert!(
+                text.contains("hide_extensions"),
+                "{bad} was accepted or misreported: {text}"
+            );
+        }
+    }
+
+    /// Dropped by `Hidden` because it cannot judge one consistently, so it has
+    /// to be reported here - a filter entry that is silently ignored is worse
+    /// than one that is refused.
+    #[test]
+    fn a_non_ascii_extension_is_refused_rather_than_quietly_dropped() {
+        let errs = parse_err(&format!(
+            "{MINIMAL}\n[settings]\nhide_extensions = ['dé']\n"
+        ));
+        let text = messages(&errs);
+        assert!(text.contains("ASCII"), "{text}");
+    }
+
+    #[test]
+    fn hide_system_files_is_a_flag() {
+        let c = parse_ok(&format!(
+            "{MINIMAL}
+[settings]
+hide_system_files = false
+"
+        ));
+        assert_eq!(c.settings.hide_system_files, Some(false));
+    }
+
+    /// Both keys have to be in `SETTINGS_KEYS` or the shipped file that
+    /// mentions them stops the program at startup, which is what an unknown
+    /// key means here.
+    #[test]
+    fn both_new_keys_are_known_to_the_allowlist() {
+        for key in ["hide_extensions", "hide_system_files"] {
+            assert!(
+                SETTINGS_KEYS.contains(&key),
+                "{key} would be an unknown key"
+            );
+        }
+    }
+
     // --- the shipped default ------------------------------------------------
+
+    /// The shipped file is the compiled-in default, so this is also the test
+    /// that the block it documents actually parses and resolves.
+    #[test]
+    fn the_shipped_default_hides_the_files_that_prompted_it() {
+        let c = builtin();
+        let hidden = c.settings.hide_extensions.expect("nothing shipped");
+        for ext in ["db", "js", "lnk"] {
+            assert!(hidden.iter().any(|e| e == ext), "{ext} is not hidden");
+        }
+        assert_eq!(c.settings.hide_system_files, Some(true));
+    }
 
     #[test]
     fn the_shipped_default_parses() {
@@ -941,11 +1147,21 @@ kind = "tree"
         );
     }
 
-    /// The viewer key ships uncommented because F2 rewrites it in place.
+    /// The viewer key ships uncommented because F2 rewrites it in place, and
+    /// it ships set to `auto`.
+    ///
+    /// A fresh install writes this file verbatim, so what is written here *is*
+    /// the default a new machine gets - the `#[default]` on [`ViewerKind`]
+    /// only covers a machine with no configuration file at all. The two have
+    /// to agree, and this is what makes them.
     #[test]
     fn the_shipped_default_sets_a_viewer_the_writer_can_replace() {
         let c = builtin();
-        assert_eq!(c.settings.viewer.as_deref(), Some("pdf"));
+        assert_eq!(
+            c.settings.viewer.as_deref(),
+            Some(crate::config::ViewerKind::default().name()),
+            "a fresh install would not get the default viewer"
+        );
     }
 
     /// Silently defaulting every setting is the failure this file refuses
@@ -1254,5 +1470,34 @@ enable = false
     fn a_missing_explicit_file_is_an_error() {
         let errs = load_file(Path::new(r"C:\definitely-not-here-8812.toml"), true).unwrap_err();
         assert!(messages(&errs).contains("could not be read"));
+    }
+
+    /// A converter that writes nowhere looks exactly like one that hangs:
+    /// every drawing would sit for the whole timeout and then fail.
+    #[test]
+    fn a_converter_template_must_say_where_the_output_goes() {
+        let bad = format!("{MINIMAL}\n[settings]\ndwg_converter = ['x.exe', '{{in}}']\n");
+        let errs = parse_err(&bad);
+        assert!(messages(&errs).contains("{out}"), "{}", messages(&errs));
+    }
+
+    /// A bare program means the obvious thing, so the common case needs no
+    /// array.
+    #[test]
+    fn a_converter_may_be_written_as_a_bare_program() {
+        let text = format!("{MINIMAL}\n[settings]\ndwg_converter = 'C:\\t\\x.exe'\n");
+        let c = parse_ok(&text);
+        assert_eq!(
+            c.settings.dwg_converter.as_deref(),
+            Some(&[r"C:\t\x.exe".to_string(), "{in}".into(), "{out}".into()][..])
+        );
+    }
+
+    /// The roaming-laptop rule: a converter that is not installed here must not
+    /// stop the program starting.
+    #[test]
+    fn a_converter_path_is_not_checked_at_load() {
+        let text = format!("{MINIMAL}\n[settings]\ndwg_converter = 'Z:\\nope\\missing.exe'\n");
+        let _ = parse_ok(&text);
     }
 }

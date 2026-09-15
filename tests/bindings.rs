@@ -19,7 +19,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use files::app::event::{AppEvent, Redraw, SearchMsg};
+use files::app::event::{AppEvent, HotkeyMsg, Redraw, SearchMsg};
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
@@ -87,11 +87,12 @@ fn table() -> Vec<Binding> {
         // Everywhere.
         b(Key::Char('q'), CTRL, Searching, "quit"),
         b(Key::Char('c'), CTRL, Searching, "copy the selected text"),
+        b(Key::Char('x'), CTRL, Searching, "cut the selected text"),
         b(Key::Char('v'), CTRL, Searching, "paste"),
         b(Key::Char('a'), CTRL, Searching, "select the whole code"),
         b(Key::Char('u'), CTRL, Searching, "clear the line"),
         b(Key::Char('w'), CTRL, Searching, "delete the previous field"),
-        anymod(Key::F(1), Searching, "open the shortcuts window"),
+        anymod(Key::F(1), Searching, "show or hide the shortcuts window"),
         anymod(Key::F(2), Searching, "switch viewer"),
         anymod(Key::F(5), Searching, "choose a drive to update"),
         // The drive picker, which is the one thing that borrows the body.
@@ -159,9 +160,27 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
 /// by assigning a field - so the fixture cannot describe a state the program
 /// cannot get into.
 fn fixture(at: Where) -> (AppState, Instant) {
+    fixture_in(at, false)
+}
+
+/// The same, with the panel summoned - which is the *shipped* configuration
+/// and the one the hint bar calls `compact`.
+///
+/// It had no fixture until now, so `Context::of` always saw `compact: false`
+/// and the short set the real panel draws was never contract-tested. That is
+/// how a panel shipped whose only route to the shortcut window was a key it
+/// advertised nowhere.
+///
+/// Summoned before anything is typed, because `enter_overlay` stands down
+/// whatever was being browsed and selects the field - so summoning afterwards
+/// would unwind the state `at` just reached.
+fn fixture_in(at: Where, compact: bool) -> (AppState, Instant) {
     let now = Instant::now();
     let mut s = AppState::new(Settings::default(), now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+    if compact {
+        s.update(AppEvent::Hotkey(HotkeyMsg::Summoned), now);
+    }
     for c in "11-D-0704".chars() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), NONE)), now);
     }
@@ -291,23 +310,25 @@ fn every_binding_in_the_table_still_answers() {
 /// reader concludes the program is broken rather than the line.
 #[test]
 fn every_advertised_key_is_a_live_binding() {
-    for at in [Where::Searching, Where::Recent, Where::Picking] {
-        let (s, now) = fixture(at);
-        for chip in hints::hints(hints::Context::of(&s)) {
-            let Some(code) = key_of(chip.key) else {
-                // Arrow clusters like `↑↓` are covered by the table above,
-                // which names each direction separately.
-                continue;
-            };
-            let mut probe = fixture(at).0;
-            let before = snapshot(&probe);
-            let r = probe.update(AppEvent::Key(KeyEvent::new(code, mods_of(chip.key))), now);
-            assert!(
-                r.redraw == Redraw::Yes || !r.cmds.is_empty() || snapshot(&probe) != before,
-                "{at:?} advertises {:?} ({}), which does nothing",
-                chip.key,
-                chip.label
-            );
+    for compact in [false, true] {
+        for at in [Where::Searching, Where::Recent, Where::Picking] {
+            let (s, now) = fixture_in(at, compact);
+            for chip in hints::hints(hints::Context::of(&s)) {
+                let Some(code) = key_of(chip.key) else {
+                    // Arrow clusters like `↑↓` are covered by the table above,
+                    // which names each direction separately.
+                    continue;
+                };
+                let mut probe = fixture_in(at, compact).0;
+                let before = snapshot(&probe);
+                let r = probe.update(AppEvent::Key(KeyEvent::new(code, mods_of(chip.key))), now);
+                assert!(
+                    r.redraw == Redraw::Yes || !r.cmds.is_empty() || snapshot(&probe) != before,
+                    "{at:?} (compact {compact}) advertises {:?} ({}), which does nothing",
+                    chip.key,
+                    chip.label
+                );
+            }
         }
     }
 }
@@ -317,8 +338,11 @@ fn every_advertised_key_is_a_live_binding() {
 #[test]
 fn nothing_is_advertised_that_the_table_has_never_heard_of() {
     let all = table();
-    for at in [Where::Searching, Where::Recent, Where::Picking] {
-        let (s, _) = fixture(at);
+    for (compact, at) in [false, true]
+        .into_iter()
+        .flat_map(|c| [Where::Searching, Where::Recent, Where::Picking].map(|a| (c, a)))
+    {
+        let (s, _) = fixture_in(at, compact);
         for chip in hints::hints(hints::Context::of(&s)) {
             let Some(code) = key_of(chip.key) else {
                 continue;
@@ -380,16 +404,25 @@ fn browsing_hands_back_every_key_it_does_not_own() {
     );
 
     // The fixture steps onto the newest entry, so Down is already past the end
-    // of the list - and past the end empties the field, which is the recent
-    // list again rather than a search for nothing.
+    // of the list - and past the end leaves recall with the field empty.
     let (mut s, now) = fixture(Where::Recent);
     s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
     assert_eq!(s.input.text(), "", "Down past the newest empties the field");
     assert_eq!(
         where_of(&s),
-        Where::Recent,
-        "and an empty field is still the recent list"
+        Where::Searching,
+        "and leaves the list rather than staying in it"
     );
+
+    // And it *stays* empty however many times it is pressed. Down used to
+    // start recall exactly as Up does, so on an empty field the first press
+    // put the code just cleared straight back, the second cleared it and the
+    // third put it back - one key, two states, forever.
+    for _ in 0..4 {
+        s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
+        assert_eq!(s.input.text(), "", "Down put the cleared code back");
+        assert_eq!(where_of(&s), Where::Searching);
+    }
 
     // Up steps further back, and F2 is deliberately not a way out of it:
     // which program opens a file has nothing to do with which code is being
@@ -483,8 +516,11 @@ fn a_key_release_is_not_a_second_keystroke() {
 /// choice, so none of them may be a bare key name with no verb in it.
 #[test]
 fn every_chip_says_what_its_key_does() {
-    for at in [Where::Searching, Where::Recent, Where::Picking] {
-        let (s, _) = fixture(at);
+    for (compact, at) in [false, true]
+        .into_iter()
+        .flat_map(|c| [Where::Searching, Where::Recent, Where::Picking].map(|a| (c, a)))
+    {
+        let (s, _) = fixture_in(at, compact);
         for chip in hints::hints(hints::Context::of(&s)) {
             assert!(
                 chip.label.len() >= 4 && chip.label.contains(char::is_alphabetic),
@@ -509,6 +545,7 @@ fn help_name(binding: &Binding) -> Option<&'static str> {
         Key::Char(c) if ctrl => match c {
             'q' => "Ctrl+Q",
             'c' => "Ctrl+C",
+            'x' => "Ctrl+X",
             'v' => "Ctrl+V",
             'a' => "Ctrl+A",
             'u' => "Ctrl+U",
@@ -597,4 +634,33 @@ fn mods_of(name: &str) -> Mods {
     } else {
         NONE
     }
+}
+
+/// The panel you actually get says how to find every key.
+///
+/// F1 has opened the shortcut window since the window existed, and the bar the
+/// shipped panel draws advertised it nowhere - so the only way to discover it
+/// was to already know. The compact set had no fixture either, which is how
+/// that survived: every contract test above ran against the full bar.
+#[test]
+fn the_compact_bar_offers_a_way_to_see_every_key() {
+    let (s, _) = fixture_in(Where::Searching, false);
+    assert!(
+        !hints::Context::of(&s).compact,
+        "the plain fixture should not be compact, or this proves nothing"
+    );
+
+    let (s, _) = fixture_in(Where::Searching, true);
+    let cx = hints::Context::of(&s);
+    assert!(cx.compact, "the summoned fixture is not the compact bar");
+
+    let help = hints::hints(cx)
+        .into_iter()
+        .find(|h| h.key == "F1")
+        .expect("the compact bar does not mention F1");
+    assert_eq!(
+        help.action,
+        Some(hints::Action::Help),
+        "the F1 chip is not clickable"
+    );
 }
