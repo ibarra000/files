@@ -176,6 +176,37 @@ refresh = "manual"
 # still there on F5, which they only see by asking.
 # stale_notices = true
 
+# Whether the panel ever puts itself away.
+#
+# Off by default, and that is a reversal. The panel used to vanish the moment
+# Enter opened something, which also threw away everything the open had to
+# say: the answer comes back a moment later - how many pages were skipped, or
+# that the file could not be opened at all - and it was arriving at a window
+# that had already gone. Nobody ever read one.
+#
+# Staying up also means a second code is a keystroke rather than a hotkey: the
+# one just opened is selected, so typing replaces it. The viewer opens behind
+# the panel and the keyboard stays here; Escape puts the panel away and brings
+# the viewer forward.
+#
+# Turn it on for the old behaviour. Escape and the hotkey close the panel
+# either way - this is only about the times it decides for itself.
+# auto_hide = false
+
+# Whether an assembled document opens read-only.
+#
+# On by default, and the reason is this program's own cache rather than the
+# share. The "pdf" mode merges the pages of a set into one document and
+# names the result after a hash of its contents, so a viewer that saves a
+# change back into it leaves a file whose name no longer describes it - and
+# every later open of that code then gets the edited copy instead of the
+# drawing.
+#
+# Turn it off to annotate what comes out and save it. This reaches only files
+# this program wrote: a single PDF opened straight off the share is exactly as
+# writable as it is on the drive, because nothing here writes to a share.
+# pdf_read_only = true
+
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes
@@ -212,13 +243,20 @@ refresh = "manual"
 # than appending a second one.
 viewer = "auto"                      # auto | pdf | avwin
 #
-# auto  picks per file: a .pdf is assembled into the whole document, and
-#       anything else - a drawing included - is handed to avwin, which opens
-#       far more kinds of file than this program knows about. It is the
-#       default for a fresh install.
-# pdf   assembles a document out of anything it can. A drawing is the one
-#       thing it cannot: DWG is AutoCAD's own closed format and there is no
-#       way to read it here, so a .dwg still opens in avwin.
+# auto  hands the file to Windows, which opens it in whatever is registered
+#       for that kind of file - the same program you would get by
+#       double-clicking it in Explorer. It is the default for a fresh install.
+#
+#       This used to assemble a .pdf and send everything else to avwin, which
+#       made avwin the answer for every file type this program had not heard
+#       of, on machines that may not have it installed at all. If a file type
+#       has no program registered, the panel says so and F2 is the way to
+#       avwin.
+# pdf   assembles a document out of anything it can: the pages of a drawing
+#       set are separate files on the share, so this is what opens all of them
+#       as one. A drawing is the one thing it cannot assemble - DWG is
+#       AutoCAD's own closed format and there is no way to read it here - so a
+#       .dwg still opens in avwin.
 # avwin always hands the one selected file to avwin, whatever it is - which is
 #       how to see a .pdf there rather than in the PDF viewer.
 

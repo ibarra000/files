@@ -610,12 +610,13 @@ impl ViewerKind {
 
     /// Whether `avwin.exe` can be reached from this mode.
     ///
-    /// Not `== Avwin`, and the difference matters: under `Auto` avwin opens
-    /// everything that is neither a drawing nor a document, so reporting it as
-    /// "not in use" would hide the one fact somebody chasing a dead Enter key
-    /// needs.
+    /// `Auto` used to be on this list, back when it sent everything that was
+    /// not a document to avwin. It hands those to the system now, so a machine
+    /// with no avwin installed is no longer warned at startup about a viewer
+    /// nothing was going to ask for. F2 is still the way to reach it, and the
+    /// warning is still right for anyone who does.
     pub fn may_use_avwin(self) -> bool {
-        matches!(self, Self::Avwin | Self::Auto)
+        matches!(self, Self::Avwin)
     }
 
     /// The spelling written to the config file, so it must be one `parse`
@@ -702,6 +703,29 @@ pub struct Settings {
     /// it - the ages are still there in the share list, which they only see by
     /// asking for it.
     pub stale_notices: bool,
+    /// Whether the panel ever puts itself away.
+    ///
+    /// Off by default, which is a reversal. The panel used to vanish the
+    /// instant Enter opened something, and everything the open had to say
+    /// arrived afterwards from the worker thread - `Opening...`, the count of
+    /// pages it had to skip, `Could not open ...` - onto a window that was
+    /// already gone. None of it was ever read by anybody. Staying up is also
+    /// what makes opening a second code a keystroke rather than a hotkey.
+    ///
+    /// On for anyone who wants the old behaviour. Escape and the hotkey close
+    /// the panel either way: this is about the times it decides for itself.
+    pub auto_hide: bool,
+    /// Whether an assembled document is handed to the viewer read-only.
+    ///
+    /// On by default, and the reason is the cache rather than the share. A
+    /// merged document is named after a hash of its own contents, so a viewer
+    /// that saves a change back into it leaves a file whose name no longer
+    /// describes it, and every later open of that code gets the edited copy.
+    ///
+    /// Off for somebody who genuinely wants to annotate what comes out and
+    /// save it somewhere. It reaches only files this program wrote: a single
+    /// PDF opened straight off the share is as writable as it is on disk.
+    pub pdf_read_only: bool,
     /// How many shares may be walked at once.
     ///
     /// One walk already keeps [`WALK_CONCURRENCY`] directory reads in flight,
@@ -732,6 +756,15 @@ pub struct Settings {
     /// Where they are remembered. `None` disables storage without disabling
     /// recall within the session.
     pub history_path: Option<PathBuf>,
+    /// Where the panel remembers the spot it was dragged to.
+    ///
+    /// Derived rather than configured, exactly like [`Self::history_path`]:
+    /// there is no `placement_path` key, so no existing configuration file can
+    /// become a hard startup error over a feature it has never heard of. `None`
+    /// means the panel can still be dragged, and simply forgets on exit.
+    ///
+    /// See [`crate::placement`] for why a position is not a setting.
+    pub placement_path: Option<PathBuf>,
     /// The chord that summons the window into the compact overlay.
     ///
     /// Parsed at the edge rather than carried as text, so a typo is reported
@@ -800,11 +833,14 @@ impl Settings {
             live_updates: true,
             persist: true,
             stale_notices: true,
+            auto_hide: false,
+            pdf_read_only: true,
             max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
             cache_dir: default_cache_dir(),
             index_log: None,
             history: true,
             history_path: crate::history::default_path(),
+            placement_path: crate::placement::default_path(),
             hotkey: crate::hotkey::spec::HotkeySpec::default(),
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
@@ -915,6 +951,16 @@ impl Settings {
         {
             self.stale_notices = v;
         }
+        if env_bool("FILES_AUTO_HIDE").is_none()
+            && let Some(v) = f.auto_hide
+        {
+            self.auto_hide = v;
+        }
+        if env_bool("FILES_PDF_READ_ONLY").is_none()
+            && let Some(v) = f.pdf_read_only
+        {
+            self.pdf_read_only = v;
+        }
         if env_str("FILES_MATCHER").is_none()
             && let Some(v) = f.matcher.as_deref().and_then(MatcherKind::parse)
         {
@@ -1016,6 +1062,12 @@ impl Settings {
         }
         if let Some(v) = env_bool("FILES_STALE_NOTICES") {
             s.stale_notices = v;
+        }
+        if let Some(v) = env_bool("FILES_AUTO_HIDE") {
+            s.auto_hide = v;
+        }
+        if let Some(v) = env_bool("FILES_PDF_READ_ONLY") {
+            s.pdf_read_only = v;
         }
         if let Some(v) = env_bool("FILES_LIVE_UPDATES") {
             s.live_updates = v;

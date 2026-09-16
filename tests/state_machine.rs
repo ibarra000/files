@@ -1926,8 +1926,12 @@ fn every_toast() -> Vec<String> {
     s.update(press(Key::Enter), now);
     raised(&s);
 
-    // And something to open, which says so while it is being assembled.
+    // And something to open, which says so while it is being assembled. In
+    // `Pdf`, because that is now the only mode that assembles anything:
+    // `Auto` hands the file to the system, which is a call that returns before
+    // a notice about it could be read.
     let (mut s, now) = state();
+    s.viewer = ViewerKind::Pdf;
     with_results(&mut s, now, 4);
     s.update(press(Key::Down), now);
     s.update(press(Key::Enter), now);

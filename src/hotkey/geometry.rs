@@ -101,6 +101,33 @@ pub fn place(work: RectPx, want: (i32, i32)) -> RectPx {
     RectPx::new(left, top, left + w, top + h)
 }
 
+/// Where the overlay goes when somebody has already put it somewhere.
+///
+/// The same clamp order as [`place`], and the whole of the safety argument is
+/// that it is the same: size first, then the work area as a hard ceiling, then
+/// the position. `at` is the remembered top-left corner, and it is a *request*
+/// rather than an instruction - a rectangle saved against a monitor that has
+/// since been unplugged, or one saved on a machine with a taller taskbar, is
+/// nudged back inside the work area rather than honoured off the edge.
+///
+/// Note what is deliberately *not* here: no check for whether the position is
+/// "close enough" to be worth restoring, and no fallback to [`place`]. Either
+/// would mean a panel that sometimes returns to where it was left and sometimes
+/// does not, with the difference decided by arithmetic the user cannot see.
+pub fn place_at(work: RectPx, want: (i32, i32), at: (i32, i32)) -> RectPx {
+    let w = want
+        .0
+        .clamp(MIN_PX.0.min(work.width()), work.width().max(1));
+    let h = want
+        .1
+        .clamp(MIN_PX.1.min(work.height()), work.height().max(1));
+
+    let left = at.0.clamp(work.left, (work.right - w).max(work.left));
+    let top = at.1.clamp(work.top, (work.bottom - h).max(work.top));
+
+    RectPx::new(left, top, left + w, top + h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +211,68 @@ mod tests {
             short.left, tall.left,
             "the centre does not move with height"
         );
+    }
+
+    // --- a position somebody chose ------------------------------------------
+
+    /// The point of the whole feature: what was asked for is what is used.
+    #[test]
+    fn a_remembered_position_is_used_as_it_stands() {
+        let r = place_at(WORK, (720, 300), (40, 700));
+        assert_eq!(r, RectPx::new(40, 700, 760, 1000));
+    }
+
+    /// A second monitor to the left of the primary one has negative
+    /// coordinates, and that is an ordinary layout rather than a damaged value.
+    #[test]
+    fn a_position_on_a_monitor_left_of_the_primary_one_is_honoured() {
+        let work = RectPx::new(-1920, 0, 0, 1040);
+        let r = place_at(work, (720, 300), (-1500, 120));
+        assert_eq!(r, RectPx::new(-1500, 120, -780, 420));
+    }
+
+    /// The monitor it was saved against is gone, so the work area it is being
+    /// placed into no longer contains it. It must land on screen.
+    #[test]
+    fn a_position_off_the_work_area_is_nudged_fully_inside_it() {
+        let r = place_at(WORK, (720, 300), (5000, 5000));
+        assert_eq!(r, RectPx::new(1920 - 720, 1040 - 300, 1920, 1040));
+
+        let r = place_at(WORK, (720, 300), (-4000, -4000));
+        assert_eq!(r, RectPx::new(0, 0, 720, 300));
+    }
+
+    /// The clamp order is the same argument [`place`] makes: a size that went
+    /// wrong gives at worst a full-screen window, never an unreachable one, and
+    /// a remembered position cannot talk it out of that.
+    #[test]
+    fn a_size_larger_than_the_screen_still_fills_it_rather_than_leaving_it() {
+        let r = place_at(WORK, (99_999, 99_999), (600, 600));
+        assert_eq!(r, RectPx::new(0, 0, 1920, 1040));
+    }
+
+    #[test]
+    fn a_size_of_nothing_is_still_raised_to_something_that_can_be_seen() {
+        let r = place_at(WORK, (0, 0), (100, 100));
+        assert_eq!((r.width(), r.height()), MIN_PX);
+    }
+
+    /// A work area narrower than the panel - a small remote session - must
+    /// still produce a rectangle that starts inside it.
+    #[test]
+    fn a_tiny_screen_gets_a_remembered_window_that_fits_it() {
+        let work = RectPx::new(0, 0, 200, 100);
+        let r = place_at(work, (720, 300), (150, 90));
+        assert!(r.left >= work.left && r.right <= work.right, "{r:?}");
+        assert!(r.top >= work.top && r.bottom <= work.bottom, "{r:?}");
+    }
+
+    /// Placing a panel and then remembering exactly where it landed must be a
+    /// fixed point, or the panel would creep a little on every summon.
+    #[test]
+    fn remembering_where_the_default_placement_put_it_changes_nothing() {
+        let placed = place(WORK, (720, 300));
+        let again = place_at(WORK, (720, 300), (placed.left, placed.top));
+        assert_eq!(placed, again);
     }
 }

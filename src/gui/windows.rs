@@ -143,22 +143,30 @@ impl Windows {
         self.help || self.settings || self.diagnostics
     }
 
-    /// Draws whichever are open.
+    /// Draws whichever are open, and reports anything that was clicked.
+    ///
+    /// A return value rather than a callback because these windows are drawn
+    /// inline inside the parent's pass: `Shell` is already borrowed for the
+    /// frame, and a closure that could reach back into it would not compile.
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         theme: &Theme,
         state: &AppState,
         settings: &Settings,
+        placement: Option<(i32, i32)>,
         report: impl Fn() -> String,
-    ) {
+    ) -> Clicked {
+        let mut clicked = Clicked::default();
         if self.help {
             let open = show_one(ctx, theme, Window::Help, |ui| help(ui, theme, state));
             self.help = open;
         }
         if self.settings {
             let open = show_one(ctx, theme, Window::Settings, |ui| {
-                self::settings(ui, theme, settings)
+                if self::settings(ui, theme, settings, placement) {
+                    clicked.forget_placement = true;
+                }
             });
             self.settings = open;
         }
@@ -175,7 +183,18 @@ impl Windows {
             });
             self.diagnostics = open;
         }
+        clicked
     }
+}
+
+/// What the user pressed in one of these windows, for the caller to act on.
+///
+/// A struct of one field rather than a bare `bool`, because the Settings window
+/// is where a second such button would go and a `bool` return says nothing
+/// about which one it was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Clicked {
+    pub forget_placement: bool,
 }
 
 /// One window, returning whether it is still open.
@@ -283,7 +302,13 @@ fn help(ui: &mut egui::Ui, theme: &Theme, state: &AppState) {
     }
 }
 
-fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
+/// Returns whether the remembered window position was asked to be forgotten.
+fn settings(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    settings: &Settings,
+    placement: Option<(i32, i32)>,
+) -> bool {
     // Read-only, deliberately. Everything here comes from a file the user
     // already owns and can already edit, and a settings window that writes a
     // second copy of the truth is how the file and the window come to disagree.
@@ -323,6 +348,18 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
     if let Some(path) = &settings.pdf_viewer {
         row(ui, theme, "PDF viewer", &path.display().to_string());
     }
+    row(
+        ui,
+        theme,
+        "Read-only",
+        if settings.pdf_read_only { "on" } else { "off" },
+    );
+    row(
+        ui,
+        theme,
+        "Closes on open",
+        if settings.auto_hide { "yes" } else { "no" },
+    );
 
     heading(ui, theme, "Remembering");
     row(
@@ -333,6 +370,33 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
     );
     if let Some(path) = &settings.history_path {
         row(ui, theme, "Stored in", &path.display().to_string());
+    }
+
+    // The one control in this window that writes anything, and it is not a
+    // contradiction of the note at the top: a window position is runtime state
+    // the mouse produced, not a line in a file the user maintains. There is
+    // nothing here for the file and the window to disagree about.
+    let mut forget = false;
+    heading(ui, theme, "Where the panel appears");
+    match placement {
+        Some((left, top)) => {
+            row(
+                ui,
+                theme,
+                "Position",
+                &format!("where you left it, {left},{top}"),
+            );
+            ui.add_space(8.0);
+            forget = ui.button("Forget the remembered position").clicked();
+        }
+        None => {
+            row(
+                ui,
+                theme,
+                "Position",
+                "chosen by the program \u{b7} drag the panel to move it",
+            );
+        }
     }
 
     heading(ui, theme, "Configuration file");
@@ -357,6 +421,7 @@ fn settings(ui: &mut egui::Ui, theme: &Theme, settings: &Settings) {
             );
         }
     }
+    forget
 }
 
 fn diagnostics(ui: &mut egui::Ui, theme: &Theme, report: &str) {

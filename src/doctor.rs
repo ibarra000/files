@@ -194,6 +194,22 @@ fn report_quick_search(settings: &Settings, out: &mut dyn Write) {
             return;
         }
     }
+    // Where the panel will actually come up, which stopped being a pure
+    // function of the screen the moment a drag could move it. Somebody
+    // reporting "it appears off the side of my screen" needs to know whether a
+    // remembered position is in play before anything else is worth checking.
+    match settings
+        .placement_path
+        .as_deref()
+        .and_then(crate::placement::load)
+    {
+        Some((left, top)) => {
+            let _ = writeln!(out, "  position:  remembered, at {left},{top}");
+        }
+        None => {
+            let _ = writeln!(out, "  position:  placed by the program");
+        }
+    }
     match &probe.registered {
         Some(Ok(())) => {
             let _ = writeln!(out, "  claim:     accepted");
@@ -597,7 +613,16 @@ fn volume_serial_of(dir: &std::path::Path) -> Option<u32> {
 /// exactly these four lines.
 fn report_viewer(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out, "VIEWER");
-    let _ = writeln!(out, "  viewer              {}", settings.viewer.name());
+    let _ = writeln!(
+        out,
+        "  viewer              {} ({})",
+        settings.viewer.name(),
+        match settings.viewer {
+            crate::config::ViewerKind::Auto => "each file opens in whatever Windows registered",
+            crate::config::ViewerKind::Pdf => "the pages of a code, merged into one document",
+            crate::config::ViewerKind::Avwin => "the one selected file, handed to avwin",
+        }
+    );
 
     let _ = writeln!(
         out,
@@ -607,7 +632,10 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         } else if settings.viewer.may_use_avwin() {
             "NOT FOUND on PATH - Enter will fail"
         } else {
-            "not found on PATH (not in use)"
+            // Not a complaint under `auto` or `pdf`: neither reaches avwin
+            // unless F2 is pressed, and most machines running this do not have
+            // it installed at all.
+            "not found on PATH (not in use - F2 would need it)"
         }
     );
 
@@ -617,6 +645,16 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         match &settings.pdf_viewer {
             Some(p) => p.display().to_string(),
             None => "the system's .pdf association".into(),
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "  read-only           {}",
+        if settings.pdf_read_only {
+            "yes - an assembled document is handed over read-only"
+        } else {
+            "no - an assembled document can be saved over (pdf_read_only = false)"
         }
     );
 

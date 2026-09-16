@@ -23,6 +23,7 @@
 //! is idle would sit in a channel nobody was waiting on.
 
 pub mod anim;
+pub mod drag;
 pub mod fonts;
 pub mod frame;
 pub mod input;
@@ -43,6 +44,7 @@ use crate::app::App;
 use crate::app::event::AppEvent;
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
+use crate::placement;
 use windows::{Window, Windows};
 
 pub use theme::{PANEL_MAX_H, PANEL_W};
@@ -218,6 +220,16 @@ struct Shell {
     _tray: Option<tray::Tray>,
     /// Whether the window has already been asked to hide for this dismissal.
     parked: bool,
+    /// The panel being moved with the pointer, if it is.
+    drag: drag::Drag,
+    /// The thread that owns `%APPDATA%\files\window.txt`.
+    ///
+    /// Owned here rather than by [`crate::app::actors::Actors`], and that is
+    /// the deliberate half: a window position is a pixel coordinate, and
+    /// `AppState` is the one thing in this program that has no coordinates in
+    /// it. Routing this through a `Cmd` would mean the state machine carrying a
+    /// value it can neither produce nor check. See [`crate::app::state::pointer`].
+    placement: Option<placement::Writer>,
 }
 
 impl Shell {
@@ -249,6 +261,7 @@ impl Shell {
             let ctx = ctx.clone();
             Arc::new(move || ctx.request_repaint())
         };
+        let placement_path = settings.placement_path.clone();
         let app = App::start(settings, source, wake)?;
 
         // The hotkey thread has been running since `App::start`, waiting to be
@@ -256,6 +269,20 @@ impl Shell {
         if let Some(hwnd) = hwnd {
             app.actors.panel.publish(hwnd);
         }
+
+        // And where to summon it to, if the last session left an answer.
+        // Published before the first summon can happen rather than lazily,
+        // because the hotkey thread reads this on a keypress it does not
+        // coordinate with: a position that arrives late is a panel that flashes
+        // up in the default place first.
+        //
+        // A writer that will not start is not a reason to fail. Dragging still
+        // works for the session; it is only the remembering that is lost, which
+        // is exactly the bargain `history` makes.
+        let placement = placement_path.and_then(|path| {
+            app.actors.panel.remember(placement::load(&path));
+            placement::spawn_writer(path).ok()
+        });
 
         // Built on the event loop's own thread, which is where the tray icon's
         // hidden window has to live for its messages to be pumped at all.
@@ -288,6 +315,8 @@ impl Shell {
             windows: Windows::default(),
             #[cfg(windows)]
             _tray,
+            drag: drag::Drag::new(),
+            placement,
         })
     }
 
@@ -387,6 +416,75 @@ impl Shell {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
     }
+
+    /// Moves the panel with the pointer, and remembers where it was left.
+    ///
+    /// `response` is the interaction over the panel's whole rectangle.
+    /// Registered *before* `overlay::show` when no modifier is held, so the
+    /// field, the rows and the chips are added on top of it and win the press -
+    /// which makes the drag handle "whatever none of them claimed" without this
+    /// function needing to know where any of them are. With Alt held it is
+    /// registered afterwards instead, so the whole panel becomes a handle.
+    ///
+    /// The arithmetic is [`drag::Drag`], and it is there rather than here for
+    /// the reason every other pure decision in this crate is split out: a
+    /// window cannot be dragged inside a test.
+    fn follow_drag(&mut self, ctx: &egui::Context, response: &egui::Response) {
+        if response.drag_started() {
+            // `interact_pointer_pos` is where the press landed, which is not
+            // `hover_pos` once the pointer has moved off the panel - and it is
+            // the press that set the grab point.
+            let grab = response.interact_pointer_pos();
+            let outer = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
+            if let (Some(grab), Some(outer)) = (grab, outer) {
+                self.drag.begin(grab, outer);
+            }
+        }
+
+        if response.dragged()
+            && let Some(pointer) = ctx.pointer_latest_pos()
+            && let Some(at) = self.drag.update(pointer)
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(at));
+        }
+
+        if response.drag_stopped()
+            && let Some(at) = self.drag.end()
+        {
+            self.moved_to(ctx, at);
+        }
+    }
+
+    /// Records where a drag left the panel, in the units the hotkey thread
+    /// works in.
+    ///
+    /// Points on the way in, because that is what egui reports and what
+    /// `OuterPosition` expects; device pixels on the way out, because that is
+    /// what `SetWindowPos` and `GetMonitorInfoW` speak. Converting here means
+    /// one conversion rather than one per consumer - the same argument
+    /// [`crate::hotkey::geometry::RectPx`] makes for itself.
+    fn moved_to(&mut self, ctx: &egui::Context, at: egui::Pos2) {
+        let scale = ctx.pixels_per_point();
+        let px = ((at.x * scale).round() as i32, (at.y * scale).round() as i32);
+
+        self.app.actors.panel.remember(Some(px));
+        if let Some(writer) = &self.placement {
+            writer.store(px);
+        }
+    }
+
+    /// Puts the panel back to being placed by the program.
+    ///
+    /// Both halves matter and they are not the same one: the slot is what the
+    /// *next summon* reads, and the file is what the *next session* reads.
+    /// Clearing one without the other is how a position comes back from the
+    /// dead after a restart.
+    fn forget_placement(&mut self) {
+        self.app.actors.panel.remember(None);
+        if let Some(writer) = &self.placement {
+            writer.forget();
+        }
+    }
 }
 
 impl eframe::App for Shell {
@@ -481,15 +579,34 @@ impl eframe::App for Shell {
 
         // Before the panel, so an auxiliary window that wants the keyboard is
         // not fighting a panel that also does.
-        {
+        let clicked = {
             let context = ui.ctx().clone();
             let settings = self.app.state.settings.clone();
             let theme = self.theme;
-            self.windows
-                .show(&context, &theme, &self.app.state, &settings, || {
-                    report(&settings)
-                });
+            let placement = self.app.actors.panel.remembered();
+            self.windows.show(
+                &context,
+                &theme,
+                &self.app.state,
+                &settings,
+                placement,
+                || report(&settings),
+            )
+        };
+        if clicked.forget_placement {
+            self.forget_placement();
         }
+
+        // Alt makes the whole panel a handle, because the chrome left over
+        // between the field, the rows and the chips is a thin target and the
+        // panel is frameless - there is no caption bar to reach for. Which side
+        // of `overlay::show` this is registered on *is* the policy: egui gives
+        // a press to the last widget that claimed the point, so before means
+        // "only what nothing else wanted" and after means "everything".
+        let alt = ui.input(|i| i.modifiers.alt);
+        let handle = egui::Id::new("files-chrome");
+        let sense = egui::Sense::click_and_drag();
+        let chrome = (!alt).then(|| ui.interact(ui.max_rect(), handle, sense));
 
         let intents = overlay::show(
             ui,
@@ -501,10 +618,24 @@ impl eframe::App for Shell {
             wall,
         );
 
+        let chrome = match chrome {
+            Some(chrome) => chrome,
+            None => ui.interact(ui.max_rect(), handle, sense),
+        };
+        self.follow_drag(&ui.ctx().clone(), &chrome);
+
         // Fed rather than sent: these were produced on the drawing thread, and
         // a send would go round the channel to arrive one frame later - which
         // for a hover is a highlight that trails the pointer.
+        //
+        // Dropped entirely while the panel is being moved: the pointer is over
+        // rows the whole way across the desktop, and a drag that left the
+        // selection somewhere else is a drag that opened the wrong drawing the
+        // next time Enter was pressed.
         for intent in intents {
+            if self.drag.is_dragging() {
+                break;
+            }
             self.app.feed(AppEvent::Intent(intent), now);
         }
         if self.app.take_help_request() {

@@ -1,8 +1,10 @@
-//! Changing one value in `config.toml` without disturbing the rest of it.
+//! Changing values in `config.toml` without disturbing the rest of it.
 //!
 //! This is the only thing in the program that writes to the user's
-//! configuration, and it exists because F2 switches viewers and the choice
-//! should still be there tomorrow.
+//! configuration. It began with one value, because F2 switches viewers and the
+//! choice should still be there tomorrow; the settings window writes the rest
+//! through the same steps, every one of which is here because of a way this
+//! can go wrong.
 //!
 //! # Why a format-preserving edit
 //!
@@ -72,13 +74,165 @@ impl WriteError {
     }
 }
 
-/// Writes `viewer` into `[settings]`, preserving everything else.
-pub fn save_viewer(path: &Path, viewer: ViewerKind) -> Result<(), WriteError> {
+/// A key this module is allowed to write.
+///
+/// An enum rather than a `&str`, so [`current`] is exhaustive over it. The
+/// read-back check is the only thing that proves a save did anything, and a
+/// key it forgot to check is a save that silently does nothing - which is the
+/// failure this whole module exists to avoid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingKey {
+    Viewer,
+    Theme,
+    Hotkey,
+    History,
+    StaleNotices,
+    LiveUpdates,
+    PdfViewer,
+    HideExtensions,
+    HideSystemFiles,
+}
+
+impl SettingKey {
+    pub const ALL: [Self; 9] = [
+        Self::Viewer,
+        Self::Theme,
+        Self::Hotkey,
+        Self::History,
+        Self::StaleNotices,
+        Self::LiveUpdates,
+        Self::PdfViewer,
+        Self::HideExtensions,
+        Self::HideSystemFiles,
+    ];
+
+    /// The spelling in the file.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Viewer => "viewer",
+            Self::Theme => "theme",
+            Self::Hotkey => "hotkey",
+            Self::History => "history",
+            Self::StaleNotices => "stale_notices",
+            Self::LiveUpdates => "live_updates",
+            Self::PdfViewer => "pdf_viewer",
+            Self::HideExtensions => "hide_extensions",
+            Self::HideSystemFiles => "hide_system_files",
+        }
+    }
+}
+
+/// Every key above is one the loader accepts.
+///
+/// Checked rather than trusted, because `SETTINGS_KEYS` is an allowlist and an
+/// unrecognised key is a hard startup error. A typo in the table above would
+/// not fail here - it would fail on the user's next launch, in a file a button
+/// they pressed had just written. This makes it a build error instead.
+const _: () = {
+    const fn same(a: &str, b: &str) -> bool {
+        let (a, b) = (a.as_bytes(), b.as_bytes());
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut i = 0;
+        while i < a.len() {
+            if a[i] != b[i] {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+
+    let mut i = 0;
+    while i < SettingKey::ALL.len() {
+        let name = SettingKey::ALL[i].name();
+        let mut found = false;
+        let mut j = 0;
+        while j < super::file::SETTINGS_KEYS.len() {
+            if same(name, super::file::SETTINGS_KEYS[j]) {
+                found = true;
+            }
+            j += 1;
+        }
+        assert!(found, "a writable key is missing from SETTINGS_KEYS");
+        i += 1;
+    }
+};
+
+/// A value in the shape it will be written, and compared in on the way back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scalar {
+    Str(String),
+    Bool(bool),
+    /// A path, written as a TOML *literal* string.
+    ///
+    /// `'V:\Documents'` rather than `"V:\\Documents"`. A basic string
+    /// processes backslash escapes, so a Windows path written into one comes
+    /// back either mangled or as a parse error. That is the first thing the
+    /// shipped file warns the user about, and it would be a poor thing for the
+    /// program to then do to its own file.
+    Path(String),
+    List(Vec<String>),
+}
+
+impl Scalar {
+    fn to_item(&self) -> Item {
+        match self {
+            Self::Str(s) => value(s.as_str()),
+            Self::Bool(b) => value(*b),
+            Self::Path(p) => Item::Value(literal(p)),
+            Self::List(items) => {
+                let mut array = toml_edit::Array::new();
+                for item in items {
+                    array.push(item.as_str());
+                }
+                value(array)
+            }
+        }
+    }
+}
+
+/// A path as a literal string, falling back to a basic one.
+///
+/// A literal string has no escape mechanism at all, so it cannot hold a single
+/// quote. `V:\O'Brien` therefore has to be written the other way - which is
+/// correct there, because the backslash escaping `toml_edit` applies is what
+/// the loader will undo.
+fn literal(path: &str) -> toml_edit::Value {
+    // The two characters a literal string cannot hold. There is no escape for
+    // either, so these go back to a basic string - which is correct there,
+    // because the escaping `toml_edit` applies is what the loader will undo.
+    if path.contains('\'') || path.contains('\n') {
+        return path.into();
+    }
+    // `toml_edit` will not build a literal string directly: both repr
+    // constructors are private to the crate. So one is parsed and its value
+    // taken, which is sound precisely because the two cases that could make
+    // the snippet mean something else are handled above.
+    format!("x = '{path}'")
+        .parse::<DocumentMut>()
+        .ok()
+        .and_then(|doc| doc.get("x").and_then(Item::as_value).cloned())
+        .unwrap_or_else(|| path.into())
+}
+
+/// One change to the configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Edit {
+    /// Set the key, replacing it if it is already there.
+    Set { key: SettingKey, value: Scalar },
+    /// Remove the key, returning the setting to its default.
+    Unset { key: SettingKey },
+}
+
+/// Applies every edit, preserving everything else in the file.
+pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
     // Re-read rather than reuse whatever was parsed at startup. Another
     // instance - or the user, in an editor - may have changed a mapping since,
     // and rewriting from stale text would quietly undo their work.
     let text = std::fs::read_to_string(path).map_err(|e| WriteError::Io(e.to_string()))?;
-    let updated = with_viewer(&text, viewer)?;
+    let updated = apply(&text, edits)?;
 
     // Proof that the next start will accept what is about to be written.
     let reloaded = super::file::parse(
@@ -99,18 +253,24 @@ pub fn save_viewer(path: &Path, viewer: ViewerKind) -> Result<(), WriteError> {
     // only thing that proves what the next start will actually see, and
     // reporting a save that silently does nothing is the one failure this
     // whole module exists to avoid.
-    if reloaded.settings.viewer.as_deref() != Some(viewer.name()) {
-        return Err(WriteError::DidNotStick);
+    for edit in edits {
+        let stuck = match edit {
+            Edit::Set { key, value } => current(*key, &reloaded.settings).as_ref() == Some(value),
+            Edit::Unset { key } => current(*key, &reloaded.settings).is_none(),
+        };
+        if !stuck {
+            return Err(WriteError::DidNotStick);
+        }
     }
 
     write_atomically(path, &updated).map_err(|e| WriteError::Io(e.to_string()))
 }
 
-/// Returns `text` with the viewer set, as a pure string transformation.
+/// Returns `text` with every edit applied, as a pure string transformation.
 ///
 /// Separated from the filesystem so every shape the user's file can be in is
 /// testable without one.
-pub fn with_viewer(text: &str, viewer: ViewerKind) -> Result<String, WriteError> {
+pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
     let mut doc: DocumentMut = text
         .parse()
         .map_err(|e: toml_edit::TomlError| WriteError::Io(e.to_string()))?;
@@ -119,14 +279,17 @@ pub fn with_viewer(text: &str, viewer: ViewerKind) -> Result<String, WriteError>
     // mistyped for `[settings]` - would send the assignment below into
     // toml_edit's `IndexMut`, which is an `.expect("index not found")`. The
     // loader rejects this shape now, but this runs against whatever is on disk
-    // at the moment F2 is pressed, which need not be what started the program.
+    // at the moment the key is pressed, which need not be what started the
+    // program.
     if let Some(existing) = doc.get("settings")
         && !existing.is_table()
     {
         return Err(WriteError::NotATable);
     }
 
-    if !doc.contains_key("settings") {
+    // Only for an edit that needs somewhere to put a value. Removing a key
+    // from a table that does not exist is already done.
+    if edits.iter().any(|e| matches!(e, Edit::Set { .. })) && !doc.contains_key("settings") {
         let mut table = Table::new();
         // Without this the table is "implicit" and is not rendered at all, so
         // the key would be written under no heading and read back as a
@@ -139,12 +302,66 @@ pub fn with_viewer(text: &str, viewer: ViewerKind) -> Result<String, WriteError>
         doc["settings"] = Item::Table(table);
     }
 
-    // A plain assignment. Deliberately no attempt to find and uncomment an
-    // existing `# viewer = ...` line: toml_edit has no notion of commented-out
-    // keys, and doing it by string surgery is how a hand-edited file gets
-    // corrupted.
-    doc["settings"]["viewer"] = value(viewer.name());
+    for edit in edits {
+        match edit {
+            // A plain assignment. Deliberately no attempt to find and
+            // uncomment an existing `# viewer = ...` line: toml_edit has no
+            // notion of commented-out keys, and doing it by string surgery is
+            // how a hand-edited file gets corrupted.
+            Edit::Set { key, value } => doc["settings"][key.name()] = value.to_item(),
+            Edit::Unset { key } => {
+                if let Some(table) = doc.get_mut("settings").and_then(Item::as_table_mut) {
+                    table.remove(key.name());
+                }
+            }
+        }
+    }
     Ok(doc.to_string())
+}
+
+/// What the loader would now apply for `key`, in the shape it was written in.
+///
+/// `None` means the file says nothing about it, so the default is in force.
+fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
+    match key {
+        SettingKey::Viewer => s.viewer.clone().map(Scalar::Str),
+        SettingKey::Theme => s.theme.clone().map(Scalar::Str),
+        // Compared through the canonical spelling rather than the text that
+        // was written, because `ctrl+shift+space` and `Ctrl+Shift+Space` are
+        // the same chord and a save is not a failure for having been tidied.
+        SettingKey::Hotkey => s.hotkey.map(|spec| {
+            Scalar::Str(match spec.bound() {
+                Some(hk) => crate::hotkey::spec::describe(hk),
+                None => "off".into(),
+            })
+        }),
+        SettingKey::History => s.history.map(Scalar::Bool),
+        SettingKey::StaleNotices => s.stale_notices.map(Scalar::Bool),
+        SettingKey::LiveUpdates => s.live_updates.map(Scalar::Bool),
+        SettingKey::PdfViewer => s
+            .pdf_viewer
+            .as_ref()
+            .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
+        SettingKey::HideExtensions => s.hide_extensions.clone().map(Scalar::List),
+        SettingKey::HideSystemFiles => s.hide_system_files.map(Scalar::Bool),
+    }
+}
+
+/// Writes `viewer` into `[settings]`, preserving everything else.
+pub fn save_viewer(path: &Path, viewer: ViewerKind) -> Result<(), WriteError> {
+    save(path, &[viewer_edit(viewer)])
+}
+
+/// Returns `text` with the viewer set, as a pure string transformation.
+pub fn with_viewer(text: &str, viewer: ViewerKind) -> Result<String, WriteError> {
+    apply(text, &[viewer_edit(viewer)])
+}
+
+fn viewer_edit(viewer: ViewerKind) -> Edit {
+    Edit::Set {
+        key: SettingKey::Viewer,
+        value: Scalar::Str(viewer.name().to_string()),
+    }
 }
 
 /// Replaces the file in one step.
@@ -189,6 +406,25 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 /// kill it mid-write. Temp-then-rename bounds that to a stray `.tmp` beside
 /// the configuration rather than a damaged one.
 pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Events) {
+    save_async(path, vec![viewer_edit(viewer)], events, move |outcome| {
+        AppEvent::Open(match outcome {
+            Ok(()) => OpenMsg::ViewerSaved { viewer },
+            Err(detail) => OpenMsg::ViewerSaveFailed { detail },
+        })
+    });
+}
+
+/// Saves off the UI thread, reporting the outcome through `report`.
+///
+/// The caller supplies the event because what to say about a failed save
+/// depends on what was being saved: F2 has a footer to correct, and the
+/// settings window has a field to put back.
+pub fn save_async(
+    path: Option<PathBuf>,
+    edits: Vec<Edit>,
+    events: Events,
+    report: impl FnOnce(Result<(), String>) -> AppEvent + Send + 'static,
+) {
     let reporter = events.clone();
     let spawned = std::thread::Builder::new()
         .name("files-config-write".into())
@@ -201,17 +437,12 @@ pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Even
             // the panel is drawn in.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match path {
                 None => Err(WriteError::NoConfigFile.detail()),
-                Some(path) => save_viewer(&path, viewer).map_err(|e| e.detail()),
+                Some(path) => save(&path, &edits).map_err(|e| e.detail()),
             }));
 
-            let msg = match outcome {
-                Ok(Ok(())) => OpenMsg::ViewerSaved { viewer },
-                Ok(Err(detail)) => OpenMsg::ViewerSaveFailed { detail },
-                Err(_) => OpenMsg::ViewerSaveFailed {
-                    detail: "the configuration file could not be rewritten".into(),
-                },
-            };
-            let _ = events.send(AppEvent::Open(msg));
+            let _ = events.send(report(outcome.unwrap_or_else(|_| {
+                Err("the configuration file could not be rewritten".into())
+            })));
         });
 
     // A thread that never started would otherwise be the quietest failure of

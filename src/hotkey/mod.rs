@@ -92,6 +92,15 @@ mod imp {
         }
 
         pub fn publish(&self, _hwnd: isize) {}
+
+        /// Accepted and discarded off Windows, for the reason the whole stub
+        /// exists: `gui` names this unconditionally, and a method that vanishes
+        /// on another platform takes the panel's entire test suite with it.
+        pub fn remember(&self, _at: Option<(i32, i32)>) {}
+
+        pub fn remembered(&self) -> Option<(i32, i32)> {
+            None
+        }
     }
 
     pub fn spawn(

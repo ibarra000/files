@@ -161,14 +161,16 @@ fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
     // failure to open: it degrades to the single selected file.
     let snapshot = match super::route_of(request.viewer, &request.path) {
         super::Route::Document => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
-        // avwin is handed one file, so it has no use for a listing.
-        super::Route::Avwin => None,
+        // Both of these are handed one file, so neither has a use for a
+        // listing.
+        super::Route::Avwin | super::Route::Shell => None,
     };
 
     let cx = OpenContext {
         snapshot: snapshot.as_deref(),
         cache_dir: backend.settings.cache_dir.as_deref(),
         pdf_viewer: backend.settings.pdf_viewer.as_deref(),
+        read_only: backend.settings.pdf_read_only,
     };
 
     match super::open(request, &cx) {

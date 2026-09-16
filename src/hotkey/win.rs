@@ -34,7 +34,7 @@
 //!   is undefined behaviour. The hazard is removed by construction.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, HWND};
@@ -96,9 +96,55 @@ const READY_TIMEOUT: Duration = Duration::from_millis(500);
 /// Zero means the window does not exist yet: the thread starts before the
 /// toolkit has created anything, and a hotkey pressed in that window of time
 /// must do nothing rather than act on a null pointer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Panel {
     hwnd: AtomicIsize,
+    /// Where the user last dragged the panel to, in device pixels, packed as
+    /// two `i32`s into one atomic.
+    ///
+    /// Packed rather than held behind a lock because it is written on every
+    /// frame of a drag and read once per summon, and because the two halves are
+    /// meaningless apart: a torn read that took the left from one position and
+    /// the top from another would put the panel somewhere nobody ever left it.
+    /// One atomic makes that unrepresentable rather than unlikely.
+    ///
+    /// [`NOWHERE`] means nobody has moved it, and the panel is placed.
+    at: AtomicI64,
+}
+
+/// No remembered position.
+///
+/// A sentinel rather than an `Option` because the value lives in an atomic, and
+/// the pair has to be read in one go - see [`Panel::at`].
+///
+/// The packing is a bijection, so *some* coordinate maps onto any sentinel that
+/// could be chosen. `i64::MIN` is the image of `(i32::MIN, 0)` exactly, which a
+/// test caught: remembering that position and then asking what was remembered
+/// answered "nothing". [`COORD_LIMIT`] is what makes the sentinel unreachable
+/// rather than merely unlikely.
+const NOWHERE: i64 = i64::MIN;
+
+/// Furthest from the desktop origin a coordinate is taken seriously.
+///
+/// A million pixels is some five hundred 4K monitors laid end to end, so no
+/// arrangement of real displays reaches it. Clamping to it costs nothing for
+/// every position anybody can produce, and buys the one property [`NOWHERE`]
+/// needs: the high half of a packed value is now always within a million of
+/// zero, and `i32::MIN` - the high half of the sentinel - is not.
+///
+/// Clamping rather than rejecting because the two end in the same place
+/// anyway. [`geometry::place_at`] pulls whatever it is given inside the work
+/// area of the nearest monitor, so an absurd coordinate was always going to
+/// become an edge; doing it here as well only decides *which* edge.
+const COORD_LIMIT: i32 = 1_000_000;
+
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            hwnd: AtomicIsize::new(0),
+            at: AtomicI64::new(NOWHERE),
+        }
+    }
 }
 
 impl Panel {
@@ -111,9 +157,43 @@ impl Panel {
         self.hwnd.store(hwnd, Ordering::Release);
     }
 
+    /// Published by the drawing thread when a drag ends, and once at startup
+    /// from whatever [`crate::placement::load`] found.
+    ///
+    /// `None` puts the panel back to being placed by
+    /// [`geometry::place`], which is what the Settings window asks for when
+    /// somebody wants the default back.
+    pub fn remember(&self, at: Option<(i32, i32)>) {
+        let packed = match at {
+            Some((left, top)) => {
+                let left = left.clamp(-COORD_LIMIT, COORD_LIMIT);
+                let top = top.clamp(-COORD_LIMIT, COORD_LIMIT);
+                let packed = ((left as i64) << 32) | (top as u32 as i64);
+                debug_assert_ne!(packed, NOWHERE, "a real position packed to the sentinel");
+                packed
+            }
+            None => NOWHERE,
+        };
+        self.at.store(packed, Ordering::Release);
+    }
+
+    /// Whether a position is being remembered, for `--doctor` and for the
+    /// Settings window.
+    pub fn remembered(&self) -> Option<(i32, i32)> {
+        self.placed()
+    }
+
     fn get(&self) -> Option<HWND> {
         let bits = self.hwnd.load(Ordering::Acquire);
         (bits != 0).then_some(bits as HWND)
+    }
+
+    fn placed(&self) -> Option<(i32, i32)> {
+        let packed = self.at.load(Ordering::Acquire);
+        if packed == NOWHERE {
+            return None;
+        }
+        Some(((packed >> 32) as i32, packed as u32 as i32))
     }
 }
 
@@ -375,7 +455,7 @@ impl Summoner {
                 self.prev = fg as isize;
             }
 
-            let rect = place(hwnd);
+            let rect = place(hwnd, panel.placed());
             SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -461,22 +541,39 @@ impl Summoner {
 /// drawing thread owns it and reads of a value that is animating would be a
 /// second opinion about it. Reading it here means the placement is exactly
 /// right for the panel as it is at the instant it appears.
-fn place(hwnd: HWND) -> RectPx {
-    let work = win_hwnd::work_area(hwnd).unwrap_or(RectPx::new(0, 0, 1920, 1080));
-
+///
+/// `at` is the position the user dragged the panel to, if they ever did. Note
+/// which monitor each branch asks about, because it is the difference between
+/// the feature working and appearing to work: the default placement asks about
+/// the monitor the *window* is on, while a remembered position asks about the
+/// monitor that *position* is on. They agree on every summon but the first
+/// after a cold start - at which point the window is still wherever the toolkit
+/// created it, and asking about the window would quietly drag a position saved
+/// on the second screen back onto the first.
+fn place(hwnd: HWND, at: Option<(i32, i32)>) -> RectPx {
     // SAFETY: `rect` is a live local; the call reports failure by return value.
     let want = unsafe {
         let mut rect = std::mem::zeroed();
         if GetWindowRect(hwnd, &mut rect) != 0 {
             (rect.right - rect.left, rect.bottom - rect.top)
         } else {
-            // Clamped up to `MIN_PX` by `place`, so a window whose size could
-            // not be read still lands somewhere it can be seen and dismissed.
+            // Clamped up to `MIN_PX` by both placements, so a window whose size
+            // could not be read still lands somewhere it can be seen and
+            // dismissed.
             (0, 0)
         }
     };
 
-    geometry::place(work, want)
+    match at {
+        Some(at) => {
+            let work = win_hwnd::work_area_at(at).unwrap_or(RectPx::new(0, 0, 1920, 1080));
+            geometry::place_at(work, want, at)
+        }
+        None => {
+            let work = win_hwnd::work_area(hwnd).unwrap_or(RectPx::new(0, 0, 1920, 1080));
+            geometry::place(work, want)
+        }
+    }
 }
 
 pub fn probe(spec: HotkeySpec) -> Probe {
@@ -513,5 +610,85 @@ pub fn probe(spec: HotkeySpec) -> Probe {
         supported: true,
         registered,
         window,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The packing is the one piece of arithmetic in this file that a test can
+    /// reach, and getting it wrong would not crash - it would put the panel
+    /// somewhere plausible and wrong. A sign-extended `top` is the likely
+    /// mistake, which is why the negative cases are here.
+    #[test]
+    fn a_remembered_position_survives_the_round_trip() {
+        let panel = Panel::default();
+        assert_eq!(panel.placed(), None, "a fresh panel remembers nothing");
+
+        for at in [
+            (0, 0),
+            (1234, 56),
+            // A monitor to the left of, or above, the primary one.
+            (-1920, 200),
+            (100, -1080),
+            (-1920, -1080),
+            (COORD_LIMIT, -COORD_LIMIT),
+        ] {
+            panel.remember(Some(at));
+            assert_eq!(panel.placed(), Some(at), "{at:?} did not survive");
+        }
+    }
+
+    /// The sentinel is the image of `(i32::MIN, 0)` under a bijective packing,
+    /// so without [`COORD_LIMIT`] that exact position reads back as "never
+    /// moved". This is the test that found it.
+    #[test]
+    fn no_position_is_mistaken_for_no_position_at_all() {
+        let panel = Panel::default();
+        for at in [
+            (i32::MIN, 0),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+            (i32::MIN, i32::MAX),
+        ] {
+            panel.remember(Some(at));
+            assert!(
+                panel.placed().is_some(),
+                "{at:?} was mistaken for no position at all"
+            );
+        }
+    }
+
+    /// And a coordinate no desktop can produce is brought back to one that can,
+    /// rather than stored as it stands.
+    #[test]
+    fn a_coordinate_no_desktop_could_produce_is_brought_back_in_range() {
+        let panel = Panel::default();
+        panel.remember(Some((i32::MIN, i32::MAX)));
+        assert_eq!(panel.placed(), Some((-COORD_LIMIT, COORD_LIMIT)));
+    }
+
+    /// Forgetting has to work from any position.
+    #[test]
+    fn a_position_can_always_be_forgotten() {
+        let panel = Panel::default();
+        panel.remember(Some((i32::MIN, 0)));
+        assert!(panel.placed().is_some());
+
+        panel.remember(None);
+        assert_eq!(panel.placed(), None);
+    }
+
+    /// Every corner of a desktop far larger than any real one survives intact.
+    #[test]
+    fn an_ordinary_desktop_coordinate_is_never_clamped() {
+        let panel = Panel::default();
+        for left in [-100_000, -1, 0, 1, 100_000] {
+            for top in [-100_000, -1, 0, 1, 100_000] {
+                panel.remember(Some((left, top)));
+                assert_eq!(panel.placed(), Some((left, top)), "{left},{top} moved");
+            }
+        }
     }
 }

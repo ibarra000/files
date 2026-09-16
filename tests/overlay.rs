@@ -302,7 +302,7 @@ fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
 }
 
 #[test]
-fn opening_a_result_from_the_overlay_closes_it() {
+fn opening_a_result_from_the_overlay_leaves_it_up() {
     let (mut s, now) = state();
     let (settled, _) = settle(&mut s, CODE, now);
     deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
@@ -315,6 +315,51 @@ fn opening_a_result_from_the_overlay_closes_it() {
         "nothing was opened: {:?}",
         r.cmds
     );
+    assert!(
+        !has(&r, &Cmd::DismissOverlay),
+        "the overlay put itself away, so nothing on it could be read: {:?}",
+        r.cmds
+    );
+}
+
+/// The code just opened is selected, so the next one replaces it.
+///
+/// The counterpart to the summon behaviour: an overlay that stays up is only
+/// useful for a second search if the first code is not in the way of typing
+/// it.
+#[test]
+fn opening_a_result_selects_the_code_it_opened() {
+    let (mut s, now) = state();
+    let (settled, _) = settle(&mut s, CODE, now);
+    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    summon(&mut s, settled);
+
+    s.update(press(Key::Enter), settled);
+
+    assert_eq!(
+        s.input.selected_text(),
+        Some(CODE),
+        "the code was left unselected, so a second search types into the first"
+    );
+}
+
+/// The old behaviour, for anyone who asks for it by name.
+#[test]
+fn auto_hide_closes_the_overlay_on_an_open() {
+    let now = Instant::now();
+    let mut s = AppState::new(
+        Settings {
+            auto_hide: true,
+            ..Settings::default()
+        },
+        now,
+    );
+    let (settled, _) = settle(&mut s, CODE, now);
+    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    summon(&mut s, settled);
+
+    let r = s.update(press(Key::Enter), settled);
+
     assert!(has(&r, &Cmd::DismissOverlay), "the overlay stayed up");
 }
 

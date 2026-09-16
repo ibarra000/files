@@ -537,8 +537,10 @@ fn write_bytes_atomically(bytes: &[u8], out: &Path) -> std::io::Result<()> {
 
     match std::fs::rename(&tmp, out) {
         Ok(()) => Ok(()),
-        // Another instance assembled the same document first. The name is the
-        // content, so whatever is there is what we were about to write.
+        // Another instance assembled the same document first, or the one
+        // already there is read-only and Windows refused to replace it. The
+        // name is the content either way, so whatever is there is what we were
+        // about to write.
         Err(_) if out.is_file() => {
             let _ = std::fs::remove_file(&tmp);
             Ok(())
@@ -573,9 +575,35 @@ pub fn gc(cache_dir: &Path, max_age: std::time::Duration) {
             .map(|t| now.duration_since(t).unwrap_or_default() > max_age)
             .unwrap_or(false);
         if old {
+            // Cleared first, because a document handed over read-only cannot
+            // be deleted while it still is: `remove_file` is refused outright
+            // on Windows. Without this, the first collectable document is also
+            // the last, and the cache grows for as long as the program is
+            // installed. Unconditional - the attribute may have been set by a
+            // run whose configuration has since changed.
+            let _ = set_read_only(&entry.path(), false);
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Sets or clears the read-only attribute on a file in the cache.
+///
+/// `std::fs` rather than `SetFileAttributesW`: `Permissions::set_readonly` is
+/// `FILE_ATTRIBUTE_READONLY` on Windows, which is the whole of what this
+/// needs, and it costs no `unsafe` and no extra `windows-sys` feature.
+///
+/// Reading the current value first is not an optimisation. Every document in
+/// here is opened far more often than it is written, so the common call has
+/// nothing to do, and a `set_permissions` on a file a viewer currently holds
+/// is worth not making.
+pub(crate) fn set_read_only(path: &Path, read_only: bool) -> std::io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    if perms.readonly() == read_only {
+        return Ok(());
+    }
+    perms.set_readonly(read_only);
+    std::fs::set_permissions(path, perms)
 }
 
 #[cfg(test)]
@@ -1012,6 +1040,51 @@ mod tests {
 
         gc(cache.path(), std::time::Duration::ZERO);
         assert!(!keep.is_file(), "an expired document must be collected");
+    }
+
+    /// The interaction that makes the cache grow forever if it is missed.
+    ///
+    /// A document handed to the viewer read-only keeps that attribute, and
+    /// Windows refuses `remove_file` on a read-only file - so without the
+    /// clear in `gc`, the first document anybody opens is also the last one
+    /// the collector can ever remove.
+    #[test]
+    fn a_read_only_document_is_still_collected() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("pdf");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("bbbb.pdf");
+        std::fs::write(&doc, b"%PDF-1.5\n").unwrap();
+        set_read_only(&doc, true).unwrap();
+        assert!(
+            std::fs::metadata(&doc).unwrap().permissions().readonly(),
+            "the fixture did not take the attribute, so this proves nothing"
+        );
+
+        gc(cache.path(), std::time::Duration::ZERO);
+
+        assert!(!doc.is_file(), "a read-only document was never collected");
+    }
+
+    #[test]
+    fn the_read_only_attribute_goes_on_and_comes_off_again() {
+        let cache = tempfile::tempdir().unwrap();
+        let doc = cache.path().join("cccc.pdf");
+        std::fs::write(&doc, b"%PDF-1.5\n").unwrap();
+
+        let readonly = || std::fs::metadata(&doc).unwrap().permissions().readonly();
+        assert!(!readonly());
+
+        set_read_only(&doc, true).unwrap();
+        assert!(readonly(), "the document was not protected");
+
+        // Twice, because the option being off has to free a document an
+        // earlier run already marked - and a second call must not fail on a
+        // file that is already where it is being asked to be.
+        set_read_only(&doc, false).unwrap();
+        set_read_only(&doc, false).unwrap();
+        assert!(!readonly(), "turning the option off did not give it back");
+        std::fs::write(&doc, b"%PDF-1.5\n%edited\n").unwrap();
     }
 
     #[test]

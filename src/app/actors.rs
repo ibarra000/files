@@ -279,7 +279,15 @@ impl Actors {
         // Read off the list rather than carried on the command, because
         // `Cmd::DismissOverlay` is a unit variant that a dozen tests match by
         // equality, and `open_selection` pushes the open first.
-        let handing_over = cmds.iter().any(|cmd| matches!(cmd, Cmd::Open(_)));
+        //
+        // Both halves are required, and the second one is new. The panel is
+        // topmost: if it stays visible and gives the foreground away anyway,
+        // it ends up floating over the viewer without the keyboard, and what
+        // the user types goes somewhere they are not looking. So the foreground
+        // is handed over only when the panel is going away with it. Escape has
+        // no `Cmd::Open` and still restores the window behind, as before.
+        let handing_over = cmds.iter().any(|cmd| matches!(cmd, Cmd::Open(_)))
+            && cmds.iter().any(|cmd| matches!(cmd, Cmd::DismissOverlay));
 
         for cmd in cmds {
             match cmd {
@@ -316,7 +324,13 @@ impl Actors {
                     // merged a document off a share, the panel is long gone.
                     // `dispatch` runs on the thread that draws the panel, which
                     // still has it.
-                    crate::open::launch::allow_foreground_handover();
+                    //
+                    // Not given away when the panel is staying up: it keeps the
+                    // keyboard so the next code can be typed straight away, and
+                    // the viewer comes up behind it. Escape brings it forward.
+                    if handing_over {
+                        crate::open::launch::allow_foreground_handover();
+                    }
                     self.opener.request(request, &self.events);
                 }
                 Cmd::SaveViewer(viewer) => crate::config::write::save_viewer_async(

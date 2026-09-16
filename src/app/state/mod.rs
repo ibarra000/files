@@ -756,10 +756,11 @@ impl AppState {
         // one program was; saying nothing for a second or more now would read
         // as the keypress having been ignored.
         //
-        // Asked of the *route* rather than the mode: under `Auto` a spreadsheet
-        // goes straight to avwin and needs no notice, while a drawing needs one
-        // more than a document does.
-        if route != crate::open::Route::Avwin {
+        // Asked of the *route* rather than the mode: assembling a document is
+        // the only one of the three that goes to the share at all. Handing one
+        // file to avwin or to the shell is a single call that returns at once,
+        // and a notice for it would be on screen and gone inside a frame.
+        if route == crate::open::Route::Document {
             self.set_toast("Opening\u{2026}".into(), Severity::Info, now);
             response.redraw = Redraw::Yes;
         }
@@ -772,11 +773,28 @@ impl AppState {
             response = response.with(cmd);
         }
 
-        // The overlay exists to be got rid of: the drawing is opening, so the
-        // search is over. `request_dismiss` re-runs the gate and finds this
-        // code already at the head of the list, so no second write happens.
+        // The overlay used to be got rid of here unconditionally, on the
+        // reasoning that the drawing is opening so the search is over. What
+        // that actually did was throw away every word the open had to say: the
+        // worker answers on its own thread, and `Opening...`, the count of
+        // pages it skipped and `Could not open ...` all arrived at a window
+        // that had already gone. Staying up is what makes those readable, and
+        // what makes a second code a keystroke rather than a hotkey.
+        //
+        // `request_dismiss` re-runs the gate and finds this code already at
+        // the head of the list, so no second write happens.
         if self.overlay_up {
-            response.merge(self.request_dismiss());
+            if self.settings.auto_hide {
+                response.merge(self.request_dismiss());
+            } else {
+                // Staying up, so leave the field the way a summon does: the
+                // code just opened is exactly what the next keystroke should
+                // replace. Inside the `overlay_up` arm rather than beside it,
+                // because a window that was never summoned is not staying up -
+                // it was already there, and selecting its text on an open
+                // would be a keystroke nobody asked for.
+                self.input.select_all();
+            }
         }
         response
     }

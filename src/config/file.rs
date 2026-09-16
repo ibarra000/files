@@ -159,13 +159,15 @@ impl Ctx<'_> {
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
 const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh", "depth"];
-const SETTINGS_KEYS: &[&str] = &[
+pub(super) const SETTINGS_KEYS: &[&str] = &[
     "enum_strategy",
     "matcher",
     "server_filter",
     "persist",
     "max_concurrent_scans",
     "stale_notices",
+    "auto_hide",
+    "pdf_read_only",
     "live_updates",
     "cache_dir",
     "history",
@@ -187,6 +189,8 @@ pub struct FileSettings {
     pub persist: Option<bool>,
     pub max_concurrent_scans: Option<usize>,
     pub stale_notices: Option<bool>,
+    pub auto_hide: Option<bool>,
+    pub pdf_read_only: Option<bool>,
     pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
     pub history: Option<bool>,
@@ -598,6 +602,8 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "server_filter" => out.server_filter = value.and_then(Value::as_bool),
             "persist" => out.persist = value.and_then(Value::as_bool),
             "stale_notices" => out.stale_notices = value.and_then(Value::as_bool),
+            "auto_hide" => out.auto_hide = value.and_then(Value::as_bool),
+            "pdf_read_only" => out.pdf_read_only = value.and_then(Value::as_bool),
             "max_concurrent_scans" => {
                 // Rejected rather than clamped. A zero here means "index
                 // nothing, ever", which nobody writes on purpose, and this

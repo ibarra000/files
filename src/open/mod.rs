@@ -7,10 +7,17 @@
 //! and `avwin.exe` is probed once at startup so its absence is learned before
 //! it is needed rather than after.
 //!
-//! # Two viewers, one keypress
+//! # Three destinations, one keypress
 //!
 //! [`ViewerKind::Avwin`] is that original behaviour: the one file under the
 //! cursor, handed to one program.
+//!
+//! [`ViewerKind::Auto`] hands the file to the desktop instead, and names no
+//! program at all: whatever is registered for that extension opens it, which
+//! is the program the user would have got from Explorer. It used to route by
+//! extension and send everything it had no opinion about to avwin, which made
+//! a viewer most machines do not have the answer for file types this program
+//! has never heard of.
 //!
 //! [`ViewerKind::Pdf`] treats the typed code as naming a *document*. The pages
 //! of a drawing set are separate files on the share, so it re-collects them
@@ -102,23 +109,27 @@ pub struct OpenContext<'a> {
     pub snapshot: Option<&'a crate::index::snapshot::Snapshot>,
     pub cache_dir: Option<&'a Path>,
     pub pdf_viewer: Option<&'a Path>,
+    /// Whether a document this program assembled is handed over read-only.
+    pub read_only: bool,
 }
 
 /// Where one open actually goes, once the mode and the file are both known.
 ///
 /// [`ViewerKind`] is what the user chose; this is what that means for the file
 /// under the cursor. They are separate types because `Auto` is not reducible to
-/// either of the others - a drawing goes somewhere neither `Pdf` nor `Avwin`
-/// has ever gone.
+/// either of the others - it hands the file over without naming a program at
+/// all, which is somewhere neither `Pdf` nor `Avwin` has ever gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// Every page of the code, merged.
     Document,
     /// One file, handed to `avwin.exe`.
     Avwin,
+    /// One file, handed to whatever the system has registered for it.
+    Shell,
 }
 
-/// Which of the two a mode and a file name add up to.
+/// Which of the three a mode and a file name add up to.
 ///
 /// Pure, total and filesystem-free, which is the point: the whole routing table
 /// is testable with no share, no viewer and no disk, and it is asked twice - by
@@ -141,12 +152,15 @@ pub fn route_of(viewer: ViewerKind, path: &str) -> Route {
             Some("dwg") => Route::Avwin,
             _ => Route::Document,
         },
-        // By type. Everything that is not a document is something this program
-        // has no opinion about, and avwin opens far more than it can.
-        ViewerKind::Auto => match ext.as_deref() {
-            Some("pdf") => Route::Document,
-            _ => Route::Avwin,
-        },
+        // Not by type at all: the file is handed to the system, which already
+        // knows what opens a `.xlsx` and never needed this program to have an
+        // opinion about it.
+        //
+        // This used to send a `.pdf` to the document route and everything else
+        // to avwin, which made a program most machines do not have the answer
+        // for every file type this one had not heard of. `pdf` and `avwin` are
+        // still there for anyone who wants either of them by name.
+        ViewerKind::Auto => Route::Shell,
     }
 }
 
@@ -155,6 +169,59 @@ pub fn open(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenE
     match route_of(request.viewer, &request.path) {
         Route::Avwin => open_one_with_avwin(&request.path),
         Route::Document => open_as_document(request, cx),
+        Route::Shell => open_one_with_shell(&request.path, cx),
+    }
+}
+
+/// Opens one file the way the desktop would, which is what `Auto` means.
+///
+/// The existence check is the same one the avwin path makes, for the same
+/// reason: a stale index should say the file is gone, rather than leave the
+/// shell to report it in a dialog this program did not write.
+fn open_one_with_shell(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
+    if !Path::new(path.as_ref()).exists() {
+        return Err(OpenError::FileMissing);
+    }
+    launch::open_associated(path, cx.pdf_viewer).map_err(OpenError::Launch)?;
+    Ok(Opened {
+        path: Arc::clone(path),
+        pages: 1,
+        skipped: Vec::new(),
+        truncated: false,
+    })
+}
+
+/// Hands a document this program assembled over read-only, or gives it back.
+///
+/// Only ever applied to a file inside the cache. The share is somebody else's
+/// disk and nothing here writes to it - and `pdf::assemble` returns the
+/// original path when a code has a single page, so "the file about to be
+/// opened" and "a file this program produced" are not the same question.
+///
+/// The reason is not politeness about the share. A merged document is named
+/// after a hash of its own contents, so a viewer that saves an annotation back
+/// into it leaves a file whose name is a lie, and every later open of that code
+/// serves the edited copy rather than the drawing. Read-only closes that.
+///
+/// Clearing matters as much as setting: turning the option off has to free the
+/// documents an earlier run already marked, or it only takes effect for codes
+/// nobody has opened yet.
+///
+/// Best effort. A viewer that opens the document anyway is a better outcome
+/// than an open refused over a file attribute, so this reports and carries on.
+fn guard_cached(path: &str, cx: &OpenContext<'_>) {
+    let Some(cache_dir) = cx.cache_dir else {
+        return;
+    };
+    let path = Path::new(path);
+    if !path.starts_with(cache_dir) {
+        return;
+    }
+    if let Err(e) = pdf::set_read_only(path, cx.read_only) {
+        log::warn!(
+            "could not change the read-only attribute on {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -198,7 +265,8 @@ fn open_as_document(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opene
         _ => return open_one_as_pdf(&request.path, cx),
     };
 
-    launch::open_pdf(&assembled.path, cx.pdf_viewer).map_err(OpenError::Launch)?;
+    guard_cached(&assembled.path, cx);
+    launch::open_associated(&assembled.path, cx.pdf_viewer).map_err(OpenError::Launch)?;
     Ok(Opened {
         path: assembled.path,
         pages: assembled.pages,
@@ -212,7 +280,7 @@ fn open_one_as_pdf(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, Open
     if !Path::new(path.as_ref()).exists() {
         return Err(OpenError::FileMissing);
     }
-    launch::open_pdf(path, cx.pdf_viewer).map_err(OpenError::Launch)?;
+    launch::open_associated(path, cx.pdf_viewer).map_err(OpenError::Launch)?;
     Ok(Opened {
         path: Arc::clone(path),
         pages: 1,
@@ -276,12 +344,59 @@ mod tests {
         }
     }
 
+    /// The invariant that keeps read-only off somebody else's disk.
+    ///
+    /// `pdf::assemble` hands back the original path when a code has a single
+    /// page, so the file about to be opened is routinely one on the share -
+    /// and this program does not write to a share, attributes included.
+    #[test]
+    fn only_a_document_in_the_cache_is_ever_marked_read_only() {
+        let cache = tempfile::tempdir().unwrap();
+        let share = tempfile::tempdir().unwrap();
+
+        let merged = cache.path().join("aaaa.pdf");
+        std::fs::write(&merged, b"%PDF-1.5\n").unwrap();
+        let on_the_share = share.path().join("11-D-0704.pdf");
+        std::fs::write(&on_the_share, b"%PDF-1.5\n").unwrap();
+
+        let cx = OpenContext {
+            snapshot: None,
+            cache_dir: Some(cache.path()),
+            pdf_viewer: None,
+            read_only: true,
+        };
+        guard_cached(&merged.to_string_lossy(), &cx);
+        guard_cached(&on_the_share.to_string_lossy(), &cx);
+
+        let readonly = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().readonly();
+        assert!(
+            readonly(&merged),
+            "the assembled document was not protected"
+        );
+        assert!(
+            !readonly(&on_the_share),
+            "an attribute was written to the share"
+        );
+
+        // And the option turns it back off, for the document only.
+        let writable = OpenContext {
+            read_only: false,
+            ..cx
+        };
+        guard_cached(&merged.to_string_lossy(), &writable);
+        assert!(
+            !readonly(&merged),
+            "turning it off did not give the file back"
+        );
+    }
+
     #[test]
     fn a_missing_file_is_reported_before_the_viewer_is_involved() {
         let cx = OpenContext {
             snapshot: None,
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
         let err = open(
             &request(
@@ -305,6 +420,7 @@ mod tests {
             snapshot: None,
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
 
         // avwin.exe is not present on a development machine, so this
@@ -353,6 +469,7 @@ mod tests {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
 
         let inside = request(r"R:\11d\11-d-0704_Page1.pdf", "11-d-0704", ViewerKind::Pdf);
@@ -378,6 +495,7 @@ mod tests {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
         let picked = request(r"R:\11d\11-d-0704.pdf", "11-d-0704", ViewerKind::Pdf);
 
@@ -396,6 +514,7 @@ mod tests {
             snapshot: None,
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
         let picked = request(
             r"C:\definitely-not-here-4a91\x.pdf",
@@ -415,6 +534,7 @@ mod tests {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
         let picked = request(r"R:\11d\something-else.pdf", "11-d-0704", ViewerKind::Pdf);
         assert!(collect_group(&picked, &cx).is_none());
@@ -451,6 +571,7 @@ mod tests {
             snapshot: Some(&snap),
             cache_dir: Some(cache.path()),
             pdf_viewer: None,
+            read_only: true,
         };
         let picked = request(
             &dir.path().join("11-d-0704.pdf").to_string_lossy(),
@@ -493,6 +614,7 @@ mod tests {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
+            read_only: true,
         };
         let picked = request("R:\\11d\\11-d-0704.pdf", "11-d-0704", ViewerKind::Pdf);
 
@@ -542,12 +664,13 @@ mod tests {
         use ViewerKind::{Auto, Avwin, Pdf};
 
         for (viewer, path, want) in [
-            // Auto picks per file.
-            (Auto, r"R:\11d\11-D-0704.pdf", Route::Document),
-            (Auto, r"R:\11d\11-D-0704.DWG", Route::Avwin),
-            (Auto, r"R:\11d\notes.docx", Route::Avwin),
-            (Auto, r"R:\11d\scan.tif", Route::Avwin),
-            (Auto, r"R:\11d\README", Route::Avwin),
+            // Auto does not pick at all: every kind of file, the one this
+            // program has an opinion about included, goes to the system.
+            (Auto, r"R:\11d\11-D-0704.pdf", Route::Shell),
+            (Auto, r"R:\11d\11-D-0704.DWG", Route::Shell),
+            (Auto, r"R:\11d\notes.docx", Route::Shell),
+            (Auto, r"R:\11d\scan.tif", Route::Shell),
+            (Auto, r"R:\11d\README", Route::Shell),
             // Forced: pdf assembles a document out of anything it can. A
             // drawing is the one thing it cannot, so that still goes to avwin.
             (Pdf, r"R:\11d\11-D-0704.pdf", Route::Document),
@@ -570,9 +693,12 @@ mod tests {
     /// whether the fold was applied or not, and so prove nothing.
     #[test]
     fn the_extension_is_matched_however_it_is_spelled() {
-        for spelling in ["pdf", "PDF", "Pdf", "pDf"] {
+        // Asked of `Pdf`, which is the only mode left that reads the extension
+        // at all: `Auto` hands every file to the system without looking, and a
+        // share where somebody typed `.DWG` is still a share full of drawings.
+        for spelling in ["dwg", "DWG", "Dwg", "dWg"] {
             let path = format!(r"R:\11d\11-D-0704.{spelling}");
-            assert_eq!(route_of(ViewerKind::Auto, &path), Route::Document);
+            assert_eq!(route_of(ViewerKind::Pdf, &path), Route::Avwin);
         }
     }
 }

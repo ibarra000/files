@@ -5,10 +5,10 @@
 //! * **`avwin.exe`** by name on `PATH`, as this program has always done.
 //! * **A configured `pdf_viewer`**, spawned directly. Only ever given a
 //!   `.pdf`, because the file the user picked is not always one - see
-//!   [`open_pdf`].
-//! * **The system's `.pdf` association**, via `ShellExecuteW`. The default,
-//!   because which PDF reader someone wants is their decision and Windows
-//!   already records it.
+//!   [`open_associated`].
+//! * **The file's association**, via `ShellExecuteW`. The default, and under
+//!   `Auto` the answer for every kind of file: which program opens a `.pdf` or
+//!   a `.xlsx` is the user's decision and Windows already records it.
 //!
 //! # Why `ShellExecuteW` and not `cmd /C start`
 //!
@@ -34,6 +34,10 @@ pub enum LaunchError {
     /// extension, because the degrade path opens whatever the cursor was on -
     /// which is not always a PDF, and blaming PDFs for an unopenable `.dwg`
     /// sends the reader looking in the wrong place.
+    ///
+    /// Ordinary rather than rare since `Auto` started handing every file to
+    /// the shell: a file type nobody on this machine has a program for used to
+    /// go to avwin and open. So the message says how to get that back.
     NoHandler(String),
     Io(String),
 }
@@ -43,10 +47,10 @@ impl LaunchError {
         match self {
             Self::ViewerNotFound(name) => format!("{name} not found on PATH"),
             Self::NoHandler(kind) if kind.is_empty() => {
-                "no program is registered to open this kind of file".into()
+                "nothing is registered to open this kind of file \u{b7} F2 for avwin".into()
             }
             Self::NoHandler(kind) => {
-                format!("no program is registered to open {kind} files on this machine")
+                format!("nothing is registered to open {kind} files \u{b7} F2 for avwin")
             }
             Self::Io(e) => e.clone(),
         }
@@ -58,14 +62,19 @@ pub fn open_avwin(path: &str) -> Result<(), LaunchError> {
     spawn(AVWIN, path)
 }
 
-/// Opens `path` for the PDF viewer.
+/// Opens `path` the way the desktop would.
 ///
 /// `configured` is used only when `path` really is a PDF. Under the rule that
 /// a selected row outside the code's page group opens on its own, the target
 /// can be a `.doc` or a `.dwg`, and handing that to a program chosen for its
 /// PDF rendering would be worse than useless. Those go to the shell, which
 /// knows what to do with them.
-pub fn open_pdf(path: &str, configured: Option<&Path>) -> Result<(), LaunchError> {
+///
+/// Named for what it does rather than for the one caller it used to have: the
+/// `Auto` mode hands every kind of file through here, and a `pdf_viewer`
+/// somebody named by hand is still their choice rather than this program
+/// picking one for them.
+pub fn open_associated(path: &str, configured: Option<&Path>) -> Result<(), LaunchError> {
     match configured {
         Some(exe) if is_pdf(path) => spawn(&exe.to_string_lossy(), path),
         _ => shell_open(path),

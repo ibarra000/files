@@ -24,7 +24,7 @@ pub enum Row {
 
 pub fn rows(viewer: ViewerKind) -> Vec<Row> {
     let opens = match viewer {
-        ViewerKind::Auto => "open it in whichever program suits the file",
+        ViewerKind::Auto => "open it in whatever Windows opens that kind of file with",
         ViewerKind::Pdf => "open every page of that code as one document",
         ViewerKind::Avwin => "open the selected file in avwin",
     };
@@ -74,6 +74,11 @@ pub fn rows(viewer: ViewerKind) -> Vec<Row> {
         Row::Entry("Double-click", "open that result"),
         Row::Entry("Drag", "select part of the code, to copy it"),
         Row::Entry("Shift+drag", "select anything on screen, as usual"),
+        Row::Entry("Alt+drag", "move the box itself, from anywhere on it"),
+        Row::Entry("", "The edges around the box move it too, without the"),
+        Row::Entry("", "Alt. Wherever you leave it is where it comes back,"),
+        Row::Entry("", "next time and next week. Settings has a button to"),
+        Row::Entry("", "put that back to the middle."),
         Row::Blank,
         Row::Heading("Codes you used before"),
         Row::Entry("Up", "from an empty line, list them"),
