@@ -159,6 +159,26 @@ pub mod aliases {
     pub const EMPTY: &str = "None yet.";
 }
 
+/// What the drives section says, above the list of them.
+///
+/// Here for the same reason the alias wording is: it is prose, and prose is
+/// what the house style is checked on.
+pub mod drives {
+    pub const HEADING: &str = "Drives";
+    pub const HELP: &str = "Where to search. A change here takes effect when files next \
+                            starts, and the comments in the configuration file are lost \
+                            when a drive is edited.";
+    pub const NAME_HINT: &str = "Name";
+    pub const PATH_HINT: &str = "Folder or drive";
+    pub const ADD: &str = "Add";
+    pub const REMOVE: &str = "Remove";
+    pub const NOT_THERE: &str = "This is not there right now \u{b7} fine on a laptop, \
+                                 worth checking otherwise";
+    pub const NEEDS_NAME: &str = "a drive needs a name";
+    pub const NEEDS_PATH: &str = "a drive needs a folder to search";
+    pub const NAME_TAKEN: &str = "that name is already a drive";
+}
+
 /// The whole form, as it stands right now.
 pub fn sections(settings: &Settings) -> Vec<Section> {
     vec![
@@ -373,6 +393,16 @@ mod tests {
                 aliases::ADD,
                 aliases::REMOVE,
                 aliases::EMPTY,
+                drives::HEADING,
+                drives::HELP,
+                drives::NAME_HINT,
+                drives::PATH_HINT,
+                drives::ADD,
+                drives::REMOVE,
+                drives::NOT_THERE,
+                drives::NEEDS_NAME,
+                drives::NEEDS_PATH,
+                drives::NAME_TAKEN,
             ]
             .map(str::to_string),
         );

@@ -70,6 +70,46 @@ impl AppState {
         response
     }
 
+    /// The drive list was changed in the window.
+    ///
+    /// Written, and applied to nothing. An index actor per drive is started
+    /// once at launch with its own copy of the settings; telling one to become
+    /// a different drive is a far larger thing than editing a list, and doing
+    /// it badly would mean a search answered from a cache keyed to a path
+    /// nobody is searching any more.
+    ///
+    /// The routing table *is* replaced, so the window shows what it just
+    /// wrote rather than what it wrote over - and the form says in so many
+    /// words that searching will not change until the next start. Every
+    /// consumer that matters holds its own clone, so this moves the display
+    /// and nothing else.
+    pub(super) fn on_drives(&mut self, list: Vec<crate::paths::Mapping>) -> Response {
+        // Renumbered, because an id is a position: removing the first of three
+        // would otherwise leave ids 1 and 2 in a list whose slots are 0 and 1,
+        // and `statuses` is indexed by exactly that.
+        let renumbered: Vec<_> = list
+            .iter()
+            .enumerate()
+            .map(|(i, m)| crate::paths::Mapping {
+                id: crate::paths::MappingId(i as u16),
+                ..m.clone()
+            })
+            .collect();
+
+        self.settings.routes = std::sync::Arc::new(crate::paths::Routes::new(
+            renumbered.clone(),
+            self.settings.routes.source().clone(),
+        ));
+        // One status per configured drive, or the next report from an actor
+        // would be filed against a slot that no longer exists.
+        self.resize_statuses();
+
+        Response::redraw().with(Cmd::SaveSetting {
+            edit: Edit::Mappings(renumbered),
+            label: "Drives",
+        })
+    }
+
     pub(super) fn on_setting(&mut self, change: SettingChange, _now: Instant) -> Response {
         let SettingChange { key, typed, label } = change;
         let edit = Edit::from_typed(key, typed);

@@ -2987,3 +2987,90 @@ fn removing_the_last_alias_is_still_written() {
     let r = s.update(AppEvent::Aliases(Vec::new()), now);
     assert_eq!(saved_edit(&r), Some(Edit::Aliases(Vec::new())));
 }
+
+// --- editing drives in the window -------------------------------------------
+
+use files::paths::{Mapping, MappingKind, RefreshPolicy};
+
+fn drive(index: u16, name: &str, path: &str) -> Mapping {
+    Mapping {
+        id: MappingId(index),
+        name: name.into(),
+        path: std::path::PathBuf::from(path),
+        kind: MappingKind::Tree,
+        enabled: true,
+        refresh: RefreshPolicy::Manual,
+        depth: 1,
+    }
+}
+
+/// An id is a position in the list, and `statuses` is indexed by it. Removing
+/// the first of three would otherwise leave ids 1 and 2 in a list whose slots
+/// are 0 and 1, and the next report from an actor would be filed against a
+/// drive that is not there.
+#[test]
+fn removing_a_drive_renumbers_the_rest() {
+    let (mut s, now) = saveable();
+    let three = vec![
+        drive(0, "a", r"A:\"),
+        drive(1, "b", r"B:\"),
+        drive(2, "c", r"C:\"),
+    ];
+    s.update(AppEvent::Drives(three.clone()), now);
+
+    let without_first: Vec<_> = three.into_iter().skip(1).collect();
+    let r = s.update(AppEvent::Drives(without_first), now);
+
+    let ids: Vec<u16> = s.settings.routes.all().iter().map(|m| m.id.0).collect();
+    assert_eq!(ids, [0, 1], "ids must be positions in the list");
+
+    let Some(Edit::Mappings(written)) = saved_edit(&r) else {
+        panic!("the drives must be written");
+    };
+    assert_eq!(
+        written.iter().map(|m| m.id.0).collect::<Vec<_>>(),
+        [0, 1],
+        "the file must get the renumbered list too"
+    );
+}
+
+/// The window shows what it just wrote, rather than what it wrote over.
+#[test]
+fn the_drive_list_on_screen_follows_what_was_saved() {
+    let (mut s, now) = saveable();
+    s.update(AppEvent::Drives(vec![drive(0, "only", r"Z:\")]), now);
+
+    assert_eq!(s.settings.routes.names(), ["only"]);
+}
+
+/// Searching must not change until the next start: an index actor per drive
+/// is started once, with its own copy of the settings.
+#[test]
+fn changing_drives_says_it_waits_for_a_restart() {
+    assert!(
+        !files::config::write::SettingKey::ALL
+            .iter()
+            .any(|k| k.name() == "mapping"),
+        "drives are not a settings key, so nothing claims they apply at once"
+    );
+}
+
+/// One status per configured drive, or a report lands in a slot that is gone.
+#[test]
+fn the_status_list_keeps_pace_with_the_drive_list() {
+    let (mut s, now) = saveable();
+    s.update(
+        AppEvent::Drives(vec![drive(0, "a", r"A:\\"), drive(1, "b", r"B:\\")]),
+        now,
+    );
+    assert_eq!(s.settings.routes.all().len(), 2);
+    // Every configured drive can be asked about, which is only true when the
+    // status list was resized alongside the routing table.
+    for mapping in s.settings.routes.all() {
+        assert!(
+            s.status_of(mapping.id).is_some(),
+            "{} has no slot",
+            mapping.name
+        );
+    }
+}

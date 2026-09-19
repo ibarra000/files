@@ -661,6 +661,9 @@ impl eframe::App for Shell {
         if let Some(aliases) = clicked.aliases {
             self.app.feed(AppEvent::Aliases(aliases), now);
         }
+        if let Some(mappings) = clicked.mappings {
+            self.app.feed(AppEvent::Drives(mappings), now);
+        }
         if clicked.asked.check_now {
             self.app.actors.check_for_updates();
         }

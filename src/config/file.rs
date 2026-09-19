@@ -339,83 +339,12 @@ pub fn parse(
     let settings = parse_settings(&doc, &mut ctx);
     let aliases = parse_aliases(&doc, &mut ctx);
 
-    if mappings.iter().filter(|m| m.enabled).count() == 0 {
-        ctx.err(
-            None,
-            None,
-            None,
-            "no enabled mappings; nothing could ever be searched",
-            None,
-        );
-    }
-
-    // Two mappings on the same directory are refused rather than merged. The
-    // persisted index is keyed by a hash of the path (`persist::MappingKey`),
-    // so both actors would write the same cache entry and each cold start
-    // would restore whichever wrote last - and every result would appear
-    // twice in one merged list.
-    for (i, a) in mappings.iter().enumerate() {
-        if !a.enabled || !a.kind.is_searched() {
-            continue;
-        }
-        for b in mappings.iter().skip(i + 1) {
-            if !b.enabled || !b.kind.is_searched() {
-                continue;
-            }
-            if winpath::same_dir(&a.path, &b.path) {
-                ctx.err(
-                    None,
-                    None,
-                    None,
-                    format!(
-                        "mappings `{}` and `{}` both point at {}; \
-                         indexing one directory twice returns every file twice",
-                        a.name,
-                        b.name,
-                        a.path.display()
-                    ),
-                    None,
-                );
-                continue;
-            }
-            // A *tree* mapping containing another indexed mapping walks that
-            // one's files as well as its own, so every hit inside appears
-            // twice in one merged list and is walked twice on every pass.
-            //
-            // A flat parent is fine and stays legal: a flat mapping lists only
-            // its own directory's entries, so a child mapping's files are not
-            // in it to begin with.
-            //
-            // A *live* parent is fine too, and deliberately so - a walked tree
-            // inside a live share is the configuration somebody actually wants,
-            // because it indexes the part people work in and leaves the rest to
-            // the server. The live pass is what keeps it from returning those
-            // files a second time: it skips any directory that is the root of
-            // another enabled mapping.
-            let nested = if a.kind == MappingKind::Tree && winpath::contains(&a.path, &b.path) {
-                Some((a, b))
-            } else if b.kind == MappingKind::Tree && winpath::contains(&b.path, &a.path) {
-                Some((b, a))
-            } else {
-                None
-            };
-            if let Some((outer, inner)) = nested {
-                ctx.err(
-                    None,
-                    None,
-                    None,
-                    format!(
-                        "mapping `{}` ({}) lies inside the walked tree `{}` ({}); \
-                         every file under it would be indexed twice and shown twice",
-                        inner.name,
-                        inner.path.display(),
-                        outer.name,
-                        outer.path.display()
-                    ),
-                    None,
-                );
-            }
-        }
+    // The rules about mappings *as a set*, from the same function the
+    // settings window uses. A configuration the file refuses has to be one
+    // the window refuses, and two implementations of that would eventually
+    // disagree about which.
+    for conflict in crate::paths::conflicts(&mappings) {
+        ctx.err(None, None, None, conflict.detail(), None);
     }
 
     if ctx.errors.is_empty() {
@@ -1452,7 +1381,7 @@ hide_system_files = false
         match parse(&text, p(), ConfigSource::BuiltIn) {
             Ok(_) => panic!("a config with nothing enabled should be rejected"),
             Err(e) => assert!(
-                messages(&e).contains("no enabled mappings"),
+                messages(&e).contains("no enabled drives"),
                 "{}",
                 messages(&e)
             ),

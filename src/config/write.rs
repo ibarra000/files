@@ -284,6 +284,15 @@ pub enum Edit {
     /// its own worth preserving - the explanation of what an alias *is* lives
     /// in the block above them, which this does not touch.
     Aliases(Vec<crate::alias::Alias>),
+    /// Replace the whole `[[mapping]]` array.
+    ///
+    /// All of it, like the aliases, and for the same reason: the window edits
+    /// the list rather than one entry of it. Unlike the aliases these tables
+    /// often carry comments - the shipped file explains each drive at length -
+    /// and those are lost when a drive is edited. That is the one place in
+    /// this module where something the user wrote is not preserved, and it is
+    /// why the window says so before it does it.
+    Mappings(Vec<crate::paths::Mapping>),
 }
 
 /// What a control in the settings window produced.
@@ -338,7 +347,7 @@ impl Edit {
     pub fn key(&self) -> Option<SettingKey> {
         match self {
             Self::Set { key, .. } | Self::Unset { key } => Some(*key),
-            Self::Aliases(_) => None,
+            Self::Aliases(_) | Self::Mappings(_) => None,
         }
     }
 }
@@ -375,6 +384,20 @@ pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
             Edit::Set { key, value } => current(*key, &reloaded.settings).as_ref() == Some(value),
             Edit::Unset { key } => current(*key, &reloaded.settings).is_none(),
             Edit::Aliases(want) => reloaded.aliases.all() == want.as_slice(),
+            // By what the loader made of them rather than by equality: an id
+            // is a position in the list, and a path is normalised on the way
+            // in, so the values that come back are not the values that went
+            // out even when the save was perfect.
+            Edit::Mappings(want) => {
+                let got = reloaded.routes.all();
+                got.len() == want.len()
+                    && got.iter().zip(want).all(|(g, w)| {
+                        g.name == w.name
+                            && g.kind == w.kind
+                            && g.enabled == w.enabled
+                            && crate::util::winpath::same_dir(&g.path, &w.path)
+                    })
+            }
         };
         if !stuck {
             return Err(WriteError::DidNotStick);
@@ -431,6 +454,28 @@ pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
                 if let Some(table) = doc.get_mut("settings").and_then(Item::as_table_mut) {
                     table.remove(key.name());
                 }
+            }
+            Edit::Mappings(mappings) => {
+                let mut array = toml_edit::ArrayOfTables::new();
+                for mapping in mappings {
+                    let mut table = Table::new();
+                    table["name"] = value(mapping.name.as_ref());
+                    table["path"] = Item::Value(literal(&mapping.path.to_string_lossy()));
+                    table["kind"] = value(mapping.kind.label());
+                    table["enabled"] = value(mapping.enabled);
+                    // Only where it means something. `refresh` on a live
+                    // mapping and `depth` on an indexed one are both refused
+                    // by the loader rather than ignored, so writing them
+                    // unconditionally would produce a file that will not load.
+                    if mapping.kind.is_indexed() {
+                        table["refresh"] = value(mapping.refresh.label());
+                    }
+                    if mapping.kind.is_live() {
+                        table["depth"] = value(i64::from(mapping.depth));
+                    }
+                    array.push(table);
+                }
+                doc["mapping"] = Item::ArrayOfTables(array);
             }
             Edit::Aliases(aliases) => {
                 doc.remove("alias");
@@ -775,6 +820,137 @@ settings = {{ persist = true }}
             before,
             "a refused save must leave the file alone"
         );
+    }
+
+    // --- drives -------------------------------------------------------------
+
+    fn mapping(
+        i: u16,
+        name: &str,
+        path: &str,
+        kind: crate::paths::MappingKind,
+    ) -> crate::paths::Mapping {
+        crate::paths::Mapping {
+            id: crate::paths::MappingId(i),
+            name: name.into(),
+            path: std::path::PathBuf::from(path),
+            kind,
+            enabled: true,
+            refresh: crate::paths::RefreshPolicy::default_for(kind),
+            depth: crate::config::DEFAULT_LIVE_DEPTH,
+        }
+    }
+
+    #[test]
+    fn writing_drives_produces_a_file_that_loads_them_back() {
+        use crate::paths::MappingKind;
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Mappings(vec![
+                mapping(0, "custompro", r"V:\Documents\custpro", MappingKind::Flat),
+                mapping(1, "jobs", r"R:\", MappingKind::Tree),
+            ])],
+        )
+        .unwrap();
+
+        let parsed = reload(&after);
+        assert_eq!(parsed.routes.names(), ["custompro", "jobs"]);
+        assert_eq!(parsed.routes.all()[0].kind, MappingKind::Flat);
+        assert_eq!(parsed.routes.all()[1].kind, MappingKind::Tree);
+    }
+
+    /// A Windows path must go in as a literal string, or the backslashes are
+    /// escapes and the file either means something else or will not parse.
+    #[test]
+    fn a_drive_path_is_written_as_a_literal_string() {
+        use crate::paths::MappingKind;
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Mappings(vec![mapping(
+                0,
+                "jobs",
+                r"V:\Documents\custpro",
+                MappingKind::Flat,
+            )])],
+        )
+        .unwrap();
+
+        assert!(after.contains(r"'V:\Documents\custpro'"), "{after}");
+        assert_eq!(
+            reload(&after).routes.all()[0].path,
+            std::path::PathBuf::from(r"V:\Documents\custpro")
+        );
+    }
+
+    /// `refresh` on a live mapping and `depth` on an indexed one are both
+    /// refused by the loader rather than ignored, so writing them everywhere
+    /// would produce a file that will not load.
+    #[test]
+    fn only_the_keys_that_mean_something_for_a_kind_are_written() {
+        use crate::paths::MappingKind;
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Mappings(vec![
+                mapping(0, "walked", r"R:\", MappingKind::Tree),
+                mapping(1, "asked", r"S:\", MappingKind::Live),
+            ])],
+        )
+        .unwrap();
+
+        reload(&after);
+        assert_eq!(after.matches("refresh =").count(), 1, "{after}");
+        assert_eq!(after.matches("depth =").count(), 1, "{after}");
+    }
+
+    /// The writer must never produce a file the loader refuses - here, two
+    /// drives on one directory.
+    #[test]
+    fn a_drive_list_the_loader_would_refuse_is_refused_by_the_writer_too() {
+        use crate::paths::MappingKind;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = save(
+            &path,
+            &[Edit::Mappings(vec![
+                mapping(0, "one", r"R:\", MappingKind::Tree),
+                mapping(1, "two", r"R:\", MappingKind::Tree),
+            ])],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, WriteError::WouldNotReload(_)), "{err:?}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// Replaced wholesale. Writing twice must not leave the old drives behind.
+    #[test]
+    fn writing_drives_twice_replaces_rather_than_appends() {
+        use crate::paths::MappingKind;
+        let once = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Mappings(vec![mapping(
+                0,
+                "a",
+                r"A:\",
+                MappingKind::Tree,
+            )])],
+        )
+        .unwrap();
+        let twice = apply(
+            &once,
+            &[Edit::Mappings(vec![mapping(
+                0,
+                "b",
+                r"B:\",
+                MappingKind::Tree,
+            )])],
+        )
+        .unwrap();
+
+        assert_eq!(reload(&twice).routes.names(), ["b"]);
     }
 
     // --- aliases ------------------------------------------------------------

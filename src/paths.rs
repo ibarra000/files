@@ -53,6 +53,108 @@ pub fn ensure_app_dirs(settings: &crate::config::Settings) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Why a set of drives cannot be used together.
+///
+/// Shared by the loader and by the settings window, so that a configuration
+/// the file refuses is one the window refuses, in the same words. These are
+/// the rules about mappings *as a set* - a single mapping's own problems are
+/// reported against the line that holds them, which only the parser can do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Conflict {
+    /// Nothing enabled, so nothing could ever be searched.
+    NothingEnabled,
+    /// Two mappings on one directory.
+    ///
+    /// Refused rather than merged: the persisted index is keyed by a hash of
+    /// the path, so both actors would write the same cache entry and each cold
+    /// start would restore whichever wrote last - and every result would
+    /// appear twice in one merged list.
+    SameDirectory { a: String, b: String, at: PathBuf },
+    /// One mapping inside a walked tree.
+    ///
+    /// A tree walks the inner mapping's files as well as its own, so every hit
+    /// inside appears twice and is walked twice on every pass. A *flat* parent
+    /// is legal - it lists only its own directory - and so is a *live* one,
+    /// which skips any directory that is the root of another enabled mapping.
+    NestedInTree {
+        inner: String,
+        inner_at: PathBuf,
+        outer: String,
+        outer_at: PathBuf,
+    },
+}
+
+impl Conflict {
+    pub fn detail(&self) -> String {
+        match self {
+            Self::NothingEnabled => "no enabled drives; nothing could ever be searched".into(),
+            Self::SameDirectory { a, b, at } => format!(
+                "drives `{a}` and `{b}` both point at {}; \
+                 indexing one directory twice returns every file twice",
+                at.display()
+            ),
+            Self::NestedInTree {
+                inner,
+                inner_at,
+                outer,
+                outer_at,
+            } => format!(
+                "drive `{inner}` ({}) lies inside the walked tree `{outer}` ({}); \
+                 every file under it would be indexed twice and shown twice",
+                inner_at.display(),
+                outer_at.display()
+            ),
+        }
+    }
+}
+
+/// Everything wrong with this set of drives taken together.
+///
+/// All of them rather than the first, for the reason the configuration loader
+/// reports every error at once: making somebody fix four problems in four
+/// attempts is gratuitous when all four are already known.
+pub fn conflicts(mappings: &[Mapping]) -> Vec<Conflict> {
+    let mut out = Vec::new();
+    if !mappings.iter().any(|m| m.enabled) {
+        out.push(Conflict::NothingEnabled);
+    }
+
+    for (i, a) in mappings.iter().enumerate() {
+        if !a.enabled || !a.kind.is_searched() {
+            continue;
+        }
+        for b in mappings.iter().skip(i + 1) {
+            if !b.enabled || !b.kind.is_searched() {
+                continue;
+            }
+            if winpath::same_dir(&a.path, &b.path) {
+                out.push(Conflict::SameDirectory {
+                    a: a.name.to_string(),
+                    b: b.name.to_string(),
+                    at: a.path.clone(),
+                });
+                continue;
+            }
+            let nested = if a.kind == MappingKind::Tree && winpath::contains(&a.path, &b.path) {
+                Some((a, b))
+            } else if b.kind == MappingKind::Tree && winpath::contains(&b.path, &a.path) {
+                Some((b, a))
+            } else {
+                None
+            };
+            if let Some((outer, inner)) = nested {
+                out.push(Conflict::NestedInTree {
+                    inner: inner.name.to_string(),
+                    inner_at: inner.path.clone(),
+                    outer: outer.name.to_string(),
+                    outer_at: outer.path.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Identifies a mapping. Its position in the configured list.
 ///
 /// Deliberately not the name: it is compared per result row and used as a map
@@ -138,7 +240,12 @@ impl MappingKind {
 }
 
 /// One configured share.
-#[derive(Clone, Debug)]
+///
+/// Comparable so the writer can check a saved list against what it meant to
+/// save. Note that equality here is exact, which a read-back is not: an id is
+/// a position and a path is normalised on the way in, so `write::save`
+/// compares the parts that should survive rather than the whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mapping {
     pub id: MappingId,
     pub name: Box<str>,

@@ -34,6 +34,8 @@ pub enum AppEvent {
     Setting(crate::app::state::SettingChange),
     /// The alias list was changed in the settings window.
     Aliases(Vec<crate::alias::Alias>),
+    /// The drive list was changed in the settings window.
+    Drives(Vec<crate::paths::Mapping>),
     Paste(String),
     Search(SearchMsg),
     Verify(VerifyMsg),

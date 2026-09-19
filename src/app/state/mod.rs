@@ -515,6 +515,7 @@ impl AppState {
             AppEvent::Setting(change) => self.on_setting(change, now),
             AppEvent::Update(msg) => self.on_update(msg, now),
             AppEvent::Aliases(list) => self.on_aliases(list, now),
+            AppEvent::Drives(list) => self.on_drives(list),
             AppEvent::Paste(text) => self.on_paste(&text, now),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),
@@ -1702,6 +1703,20 @@ impl AppState {
         }
         self.update = Some(*found);
         Response::redraw()
+    }
+
+    /// Keeps one status per configured drive.
+    ///
+    /// `MappingId` is a position in the list, and `statuses` is indexed by it,
+    /// so a list that changed length leaves a report from an actor filed
+    /// against a slot that is not there. Existing entries are kept: a drive
+    /// that did not move keeps what is known about it.
+    pub(super) fn resize_statuses(&mut self) {
+        let wanted = self.settings.routes.all().len();
+        self.statuses.truncate(wanted);
+        while self.statuses.len() < wanted {
+            self.statuses.push(Arc::new(IndexStatus::default()));
+        }
     }
 
     fn set_toast(&mut self, text: String, severity: Severity, now: Instant) {

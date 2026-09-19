@@ -140,6 +140,29 @@ pub struct Windows {
     /// list - adding and removing each write the whole array immediately - so
     /// the window never holds a version of the aliases the file does not.
     draft: AliasDraft,
+    /// The drive being typed into the "add" row. Same category as `draft`.
+    drive: DriveDraft,
+}
+
+/// The boxes on the row that adds a drive.
+struct DriveDraft {
+    name: String,
+    path: String,
+    kind: crate::paths::MappingKind,
+    problem: Option<String>,
+}
+
+impl Default for DriveDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            path: String::new(),
+            // What most drives are, and the one whose cost is a background
+            // walk rather than a round trip per search.
+            kind: crate::paths::MappingKind::Tree,
+            problem: None,
+        }
+    }
 }
 
 /// The three boxes on the row that adds an alias.
@@ -215,6 +238,7 @@ impl Windows {
     ) -> Clicked {
         let mut clicked = Clicked::default();
         let mut aliases_changed = None;
+        let mut mappings_changed = None;
         if self.help {
             let open = show_one(ctx, theme, Window::Help, |ui| help(ui, theme, state));
             self.help = open;
@@ -227,17 +251,21 @@ impl Windows {
                 let mut form = Form {
                     editing,
                     draft: &mut self.draft,
+                    drive: &mut self.drive,
                     changed,
                     asked,
                     aliases: None,
+                    mappings: None,
                 };
                 if self::settings(ui, theme, state, settings, placement, &mut form) {
                     clicked.forget_placement = true;
                 }
                 aliases_changed = form.aliases;
+                mappings_changed = form.mappings;
             });
             self.settings = open;
             clicked.aliases = aliases_changed;
+            clicked.mappings = mappings_changed;
         }
         if self.diagnostics {
             // Computed on the first frame the window is up rather than when the
@@ -268,6 +296,8 @@ pub struct Clicked {
     pub asked: Asked,
     /// The alias list as it should now be, when this frame changed it.
     pub aliases: Option<Vec<crate::alias::Alias>>,
+    /// And the drive list, likewise.
+    pub mappings: Option<Vec<crate::paths::Mapping>>,
     /// Controls the user moved, in the order they moved them.
     pub changed: Vec<SettingChange>,
 }
@@ -387,10 +417,13 @@ fn help(ui: &mut egui::Ui, theme: &Theme, state: &AppState) {
 struct Form<'a> {
     editing: &'a mut Option<(SettingKey, String)>,
     draft: &'a mut AliasDraft,
+    drive: &'a mut DriveDraft,
     changed: &'a mut Vec<SettingChange>,
     asked: &'a mut Asked,
     /// The alias list as it should now be, when this frame changed it.
     aliases: Option<Vec<crate::alias::Alias>>,
+    /// And the drive list, likewise.
+    mappings: Option<Vec<crate::paths::Mapping>>,
 }
 
 fn settings(
@@ -418,26 +451,7 @@ fn settings(
 
     aliases(ui, theme, settings, form);
 
-    // Still read-only, and the one thing here that is. A mistyped share path
-    // is the single configuration error with no symptom - the search simply
-    // finds nothing and the code looks like a job with no files - so it is
-    // worth more care than a text box in a list.
-    heading(ui, theme, "Drives");
-    for mapping in settings.routes.enabled() {
-        row(
-            ui,
-            theme,
-            &mapping.name,
-            &format!("{} ({:?})", mapping.path.display(), mapping.kind),
-        );
-    }
-    if settings.routes.enabled().count() == 0 {
-        ui.label(
-            egui::RichText::new("No drives are configured.")
-                .font(theme::font(theme::SIZE_ROW, Weight::Regular))
-                .color(theme.tone(view::status::Tone::Warn)),
-        );
-    }
+    drives(ui, theme, settings, form);
 
     if let Some(path) = &settings.history_path {
         heading(ui, theme, "Remembering");
@@ -672,6 +686,186 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &m
             }
         });
     });
+}
+
+/// The drives, with a row to add one and a button to take one away.
+///
+/// The most dangerous control in this window, and the one written most
+/// carefully. A mistyped share path is the single configuration error with no
+/// symptom: the search finds nothing, and a code with no files looks exactly
+/// like a job with no files. So a path that is not there is called out on the
+/// row rather than accepted silently - as a warning and not a refusal, because
+/// this configuration roams to laptops where `R:\` legitimately is not mapped.
+///
+/// Every change is written whole and takes effect at the next start. Nothing
+/// is applied live: an index actor per drive is started once, and telling one
+/// to become a different drive is a much larger thing than editing a list.
+fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
+    use view::settings::drives as words;
+
+    heading(ui, theme, words::HEADING);
+    ui.label(
+        egui::RichText::new(words::HELP)
+            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+            .color(theme.dim),
+    );
+    ui.add_space(6.0);
+
+    let current = settings.routes.all();
+    for mapping in current {
+        ui.horizontal(|ui| {
+            let mut enabled = mapping.enabled;
+            if ui.checkbox(&mut enabled, "").changed() {
+                form.mappings = Some(
+                    current
+                        .iter()
+                        .map(|m| {
+                            let mut m = m.clone();
+                            if m.id == mapping.id {
+                                m.enabled = enabled;
+                            }
+                            m
+                        })
+                        .collect(),
+                );
+            }
+            ui.allocate_ui_with_layout(
+                egui::vec2(84.0, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(mapping.name.as_ref())
+                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                            .color(theme.accent),
+                    );
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(220.0, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(mapping.path.display().to_string())
+                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                            .color(theme.text),
+                    );
+                },
+            );
+            ui.label(
+                egui::RichText::new(mapping.kind.label())
+                    .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                    .color(theme.dim),
+            );
+            if ui.button(words::REMOVE).clicked() {
+                form.mappings = Some(
+                    current
+                        .iter()
+                        .filter(|m| m.id != mapping.id)
+                        .cloned()
+                        .collect(),
+                );
+            }
+        });
+
+        // The one error with no symptom, said out loud. A warning rather than
+        // a refusal: this file roams, and a laptop at home has none of them.
+        if mapping.enabled && !mapping.path.as_os_str().is_empty() && !mapping.path.is_dir() {
+            ui.horizontal(|ui| {
+                ui.add_space(28.0);
+                ui.label(
+                    egui::RichText::new(words::NOT_THERE)
+                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .color(theme.tone(view::status::Tone::Warn)),
+                );
+            });
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut form.drive.name)
+                .hint_text(words::NAME_HINT)
+                .desired_width(84.0),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut form.drive.path)
+                .hint_text(words::PATH_HINT)
+                .desired_width(214.0),
+        );
+        egui::ComboBox::from_id_salt("files-drive-kind")
+            .selected_text(form.drive.kind.label())
+            .width(76.0)
+            .show_ui(ui, |ui| {
+                for kind in [
+                    crate::paths::MappingKind::Flat,
+                    crate::paths::MappingKind::Tree,
+                    crate::paths::MappingKind::Live,
+                ] {
+                    ui.selectable_value(&mut form.drive.kind, kind, kind.label());
+                }
+            });
+        if ui.button(words::ADD).clicked() {
+            match new_drive(current, form.drive) {
+                Ok(next) => {
+                    form.mappings = Some(next);
+                    *form.drive = DriveDraft::default();
+                }
+                Err(problem) => form.drive.problem = Some(problem),
+            }
+        }
+    });
+
+    if let Some(problem) = &form.drive.problem {
+        ui.label(
+            egui::RichText::new(crate::view::sentence(problem))
+                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .color(theme.tone(view::status::Tone::Warn)),
+        );
+    }
+}
+
+/// The list as it would be with this drive added, or why it cannot be.
+///
+/// The set rules come from `paths::conflicts`, which is what the loader uses,
+/// so a drive this accepts is one the next start accepts. The rest - a name,
+/// a path, a name that is already taken - are the per-entry rules the parser
+/// applies against a line, restated here against a box.
+fn new_drive(
+    current: &[crate::paths::Mapping],
+    draft: &DriveDraft,
+) -> Result<Vec<crate::paths::Mapping>, String> {
+    use view::settings::drives as words;
+
+    let name = draft.name.trim();
+    let path = draft.path.trim();
+    if name.is_empty() {
+        return Err(words::NEEDS_NAME.into());
+    }
+    if path.is_empty() {
+        return Err(words::NEEDS_PATH.into());
+    }
+    if current.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
+        return Err(words::NAME_TAKEN.into());
+    }
+
+    let mut next = current.to_vec();
+    next.push(crate::paths::Mapping {
+        // The position it is about to occupy. Ids are positions in this list,
+        // so the one being appended takes the index at the end of it.
+        id: crate::paths::MappingId(next.len() as u16),
+        name: name.into(),
+        path: crate::util::winpath::normalise_root(std::path::Path::new(path)),
+        kind: draft.kind,
+        enabled: true,
+        refresh: crate::paths::RefreshPolicy::default_for(draft.kind),
+        depth: crate::config::DEFAULT_LIVE_DEPTH,
+    });
+
+    match crate::paths::conflicts(&next).first() {
+        Some(conflict) => Err(conflict.detail()),
+        None => Ok(next),
+    }
 }
 
 /// The alias list, with a row to add one and a button to take one away.
