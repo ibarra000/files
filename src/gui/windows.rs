@@ -60,6 +60,19 @@ use crate::config::write::{SettingKey, Typed};
 use crate::gui::theme::{self, Theme, Weight};
 use crate::view;
 
+/// What the update section was asked to do.
+///
+/// Its own type rather than two more bools on [`Clicked`], because these two
+/// are a pair: one asks a question and the other acts on its answer, and they
+/// are the only buttons here that reach outside the window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Asked {
+    /// Look at the update folder now, rather than waiting for the timer.
+    pub check_now: bool,
+    /// Install what the last look found.
+    pub install: bool,
+}
+
 /// The label column, so every control in the form starts at one rule rather
 /// than stepping in and out with the length of each name.
 const KEY_COLUMN: f32 = 190.0;
@@ -190,8 +203,14 @@ impl Windows {
         if self.settings {
             let editing = &mut self.editing;
             let changed = &mut clicked.changed;
+            let asked = &mut clicked.asked;
             let open = show_one(ctx, theme, Window::Settings, |ui| {
-                if self::settings(ui, theme, settings, placement, editing, changed) {
+                let mut form = Form {
+                    editing,
+                    changed,
+                    asked,
+                };
+                if self::settings(ui, theme, state, settings, placement, &mut form) {
                     clicked.forget_placement = true;
                 }
             });
@@ -222,6 +241,8 @@ impl Windows {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Clicked {
     pub forget_placement: bool,
+    /// What the update section was asked to do.
+    pub asked: Asked,
     /// Controls the user moved, in the order they moved them.
     pub changed: Vec<SettingChange>,
 }
@@ -332,13 +353,25 @@ fn help(ui: &mut egui::Ui, theme: &Theme, state: &AppState) {
 }
 
 /// Returns whether the remembered window position was asked to be forgotten.
+/// Everything one frame of the settings window produces or carries over.
+///
+/// Bundled rather than passed as four more parameters, because they are one
+/// thing: what this frame learned, on its way back to the caller that can act
+/// on it. `editing` is the odd one out and belongs here anyway - it is the
+/// only piece that survives the frame.
+struct Form<'a> {
+    editing: &'a mut Option<(SettingKey, String)>,
+    changed: &'a mut Vec<SettingChange>,
+    asked: &'a mut Asked,
+}
+
 fn settings(
     ui: &mut egui::Ui,
     theme: &Theme,
+    state: &AppState,
     settings: &Settings,
     placement: Option<(i32, i32)>,
-    editing: &mut Option<(SettingKey, String)>,
-    changed: &mut Vec<SettingChange>,
+    form: &mut Form<'_>,
 ) -> bool {
     // This window used to be read-only, on the grounds that a settings window
     // writing a second copy of the truth is how the file and the window come
@@ -351,7 +384,7 @@ fn settings(
     for section in view::settings::sections(settings) {
         heading(ui, theme, section.heading);
         for row in &section.rows {
-            control(ui, theme, row, editing, changed);
+            control(ui, theme, row, form);
         }
     }
 
@@ -416,13 +449,75 @@ fn settings(
         &crate::update::Version::current().to_string(),
     );
     match &settings.update_from {
-        Some(folder) => row(ui, theme, "Looking in", &folder.display().to_string()),
         None => row(
             ui,
             theme,
             "Looking in",
             "Nowhere \u{b7} set update_from to be told about new versions",
         ),
+        Some(folder) => {
+            row(ui, theme, "Looking in", &folder.display().to_string());
+
+            // Three states, and the third is not the second. "Nothing yet"
+            // means the checker has not answered, which is a different thing
+            // from having looked and found nothing - claiming to be up to
+            // date before knowing would be the one lie this section could
+            // tell.
+            match &state.update {
+                None => row(ui, theme, "Status", "Looking\u{2026}"),
+                Some(crate::update::Found::UpToDate) => {
+                    row(ui, theme, "Status", "This is the newest version")
+                }
+                Some(crate::update::Found::Unavailable { detail }) => {
+                    row(ui, theme, "Status", detail)
+                }
+                Some(crate::update::Found::Available { manifest, msi }) => {
+                    row(ui, theme, "Available", &manifest.version.to_string());
+                    if let Some(notes) = &manifest.notes {
+                        row(ui, theme, "What changed", notes);
+                    }
+                    if !msi.is_file() {
+                        row(
+                            ui,
+                            theme,
+                            "Installer",
+                            "Not where the manifest says it is \u{b7} ask whoever published it",
+                        );
+                    }
+                }
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.add_space(KEY_COLUMN);
+                if ui.button("Check now").clicked() {
+                    form.asked.check_now = true;
+                }
+                // Only when there is something to install and something to
+                // install it from. A button that reported a problem when
+                // pressed is a button that should not have been pressable.
+                let ready = matches!(
+                    &state.update,
+                    Some(crate::update::Found::Available { msi, .. }) if msi.is_file()
+                );
+                if ready && ui.button("Install and restart").clicked() {
+                    form.asked.install = true;
+                }
+            });
+            if matches!(&state.update, Some(crate::update::Found::Available { .. })) {
+                ui.horizontal(|ui| {
+                    ui.add_space(KEY_COLUMN);
+                    ui.label(
+                        egui::RichText::new(
+                            "Installing closes files, asks Windows for permission, \
+                             and opens it again.",
+                        )
+                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .color(theme.dim),
+                    );
+                });
+            }
+        }
     }
 
     heading(ui, theme, "Configuration file");
@@ -456,15 +551,11 @@ fn settings(
 /// Hiding it would answer "why can I not change the theme?" with silence; this
 /// way the setting is visible, its value is visible, and the line underneath
 /// names what is holding it.
-fn control(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    row: &view::settings::Row,
-    editing: &mut Option<(SettingKey, String)>,
-    changed: &mut Vec<SettingChange>,
-) {
+fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &mut Form<'_>) {
     use view::settings::Field;
 
+    let changed = &mut *form.changed;
+    let editing = &mut *form.editing;
     let mut push = |typed| {
         changed.push(SettingChange {
             key: row.key,

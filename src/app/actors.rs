@@ -63,6 +63,12 @@ pub struct Actors {
     /// `history` is: a search tool that will not run because it could not tell
     /// you a file's size is a worse tool than one without the pane.
     previewer: Option<crate::preview::worker::Previewer>,
+    /// Looks at the update folder now and then.
+    ///
+    /// `None` when no folder is configured, which is what ships - so the
+    /// whole feature costs nothing at all on a machine that has no such
+    /// share, which is most of them until somebody sets one up.
+    updates: Option<crate::update::check::Checker>,
     /// Absent when history is switched off, or when there is nowhere to put
     /// it. Recall still works within the session either way.
     history: Option<history::Writer>,
@@ -218,6 +224,18 @@ impl Actors {
         // refusing to start over.
         let previewer = crate::preview::worker::spawn(Arc::clone(&backend), tx.clone()).ok();
 
+        // Only when there is somewhere to look. Best effort beyond that, like
+        // the history writer: a thread that would not start must cost the
+        // checking and never the program.
+        let updates = settings.update_from.as_ref().and_then(|folder| {
+            crate::update::check::Checker::start(
+                folder.clone(),
+                crate::update::Version::current(),
+                tx.clone(),
+            )
+            .ok()
+        });
+
         // Best effort, like the history writer: a chord another program owns
         // must cost the shortcut, never the program.
         //
@@ -247,6 +265,7 @@ impl Actors {
                 indexes,
                 opener,
                 previewer,
+                updates,
                 history,
                 hotkey,
                 panel,
@@ -416,6 +435,16 @@ impl Actors {
     /// to exit, and index writes are temp-then-rename so nothing is left
     /// half-written. Making the user wait out a 45-second network timeout
     /// would be strictly worse.
+    /// Asks the checker to look now, rather than waiting for its timer.
+    ///
+    /// Does nothing when no update folder is configured, which is the same
+    /// answer the button gives: there is nowhere to look.
+    pub fn check_for_updates(&self) {
+        if let Some(updates) = &self.updates {
+            updates.check_now();
+        }
+    }
+
     pub fn shutdown(&mut self) -> bool {
         let budget = SHUTDOWN_JOIN_BUDGET;
         let mut clean = true;
@@ -446,6 +475,12 @@ impl Actors {
         // finished.
         if let Some(previewer) = &mut self.previewer {
             previewer.shutdown();
+        }
+        // Budgeted, unlike the previewer: the worst this can be waiting on is
+        // one read of a small file, and there is nothing half-written for an
+        // abandoned one to leave behind.
+        if let Some(updates) = &mut self.updates {
+            clean &= updates.shutdown(budget);
         }
         if let Some(writer) = &mut self.history {
             writer.shutdown();

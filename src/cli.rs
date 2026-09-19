@@ -40,6 +40,16 @@ pub enum Mode {
     CheckConfig {
         query: Option<String>,
     },
+    /// Finish an update: wait for the panel to exit, install, start it again.
+    ///
+    /// Not a thing anybody types. `files.exe` starts a copy of `files-cli.exe`
+    /// this way from outside the installation, because an installer cannot
+    /// replace the executable that is driving it. See `crate::update::apply`.
+    ApplyUpdate {
+        msi: PathBuf,
+        wait_pid: u32,
+        relaunch: Option<PathBuf>,
+    },
     Help,
     Version,
 }
@@ -171,6 +181,11 @@ OPTIONS:
                         space (default: ctrl+shift+space). The Copilot key on
                         newer keyboards sends shift+win+f23, so that value
                         binds the key itself
+    --apply-update      finish an update: wait for the running panel to exit,
+    --msi <PATH>        install <PATH>, then start it again from --relaunch.
+    --wait-pid <PID>    Started by the panel itself from a staging folder,
+    --relaunch <PATH>   because an installer cannot replace the executable
+                        driving it. Not a thing to type by hand
     --no-persist        do not read or write the on-disk index
     --index-log <PATH>  append one line per index scheduling decision: what
                         woke it, what the directory stamp said, whether it
@@ -227,6 +242,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     let mut walk: Option<WalkArgs> = None;
     let mut demo = false;
     let mut check_config = false;
+    let mut apply_update = false;
+    let mut msi: Option<PathBuf> = None;
+    let mut wait_pid: Option<u32> = None;
+    let mut relaunch: Option<PathBuf> = None;
 
     let mut it = args.into_iter().peekable();
     while let Some(arg) = it.next() {
@@ -275,6 +294,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                 walk.get_or_insert_with(WalkArgs::default).max_depth = Some(d.max(1));
             }
             "--check-config" => check_config = true,
+            "--apply-update" => apply_update = true,
+            "--msi" => msi = Some(PathBuf::from(value("--msi")?)),
+            "--wait-pid" => {
+                let raw = value("--wait-pid")?;
+                wait_pid =
+                    Some(raw.parse::<u32>().map_err(|_| {
+                        ArgError(format!("--wait-pid wants a number, not {raw:?}"))
+                    })?);
+            }
+            "--relaunch" => relaunch = Some(PathBuf::from(value("--relaunch")?)),
             "--config" => config = ConfigChoice::Explicit(PathBuf::from(value("--config")?)),
             "--no-config" => config = ConfigChoice::None,
             "--allow-write" => allow_write = true,
@@ -329,6 +358,26 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
             }
             other => return Err(ArgError(format!("unrecognised argument: {other}"))),
         }
+    }
+
+    // Above everything, including `--check-config`. This is not a mode
+    // somebody chose from a menu of them; it is an instruction from the copy
+    // of this program that is about to exit, and anything else on the line
+    // would be a mistake rather than a preference.
+    if apply_update {
+        let msi = msi.ok_or_else(|| ArgError("--apply-update needs --msi".into()))?;
+        let wait_pid =
+            wait_pid.ok_or_else(|| ArgError("--apply-update needs --wait-pid".into()))?;
+        return Ok(Args {
+            mode: Mode::ApplyUpdate {
+                msi,
+                wait_pid,
+                relaunch,
+            },
+            config,
+            overrides,
+            demo,
+        });
     }
 
     // `--check-config` wins over a mode, so `--check-config --query X` shows

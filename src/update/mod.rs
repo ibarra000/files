@@ -24,6 +24,8 @@
 //! and a check in the startup path is an SMB round trip - or an SMB timeout -
 //! in front of a window somebody is waiting for.
 
+pub mod apply;
+pub mod check;
 pub mod manifest;
 pub mod version;
 

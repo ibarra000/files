@@ -143,6 +143,12 @@ pub struct AppState {
     /// travels to the worker on the command rather than being read from
     /// anywhere shared.
     pub viewer: ViewerKind,
+    /// What the last look at the update folder found.
+    ///
+    /// `None` until the checker has answered once, which is a different thing
+    /// from having looked and found nothing - the settings window says so
+    /// rather than claiming to be up to date before it knows.
+    pub update: Option<crate::update::Found>,
 
     query_epoch: u64,
     /// When the code on the line becomes worth matching against the index.
@@ -287,6 +293,7 @@ impl AppState {
             last_frame_wall: SystemTime::UNIX_EPOCH,
             query: Query::default(),
             expansion: None,
+            update: None,
             last_verified_query: None,
             preview: None,
             preview_target_path: None,
@@ -506,6 +513,7 @@ impl AppState {
             AppEvent::Key(key) => self.on_key(key, now),
             AppEvent::Intent(intent) => self.on_intent(intent, now),
             AppEvent::Setting(change) => self.on_setting(change, now),
+            AppEvent::Update(msg) => self.on_update(msg, now),
             AppEvent::Paste(text) => self.on_paste(&text, now),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),
@@ -1670,6 +1678,31 @@ impl AppState {
         response
     }
 
+    /// The checker reporting what it saw.
+    ///
+    /// Said once per version rather than once per look. The timer fires every
+    /// few hours and the answer does not change between releases, so a toast
+    /// each time would be nagging about something the settings window is
+    /// already showing.
+    fn on_update(&mut self, msg: crate::app::event::UpdateMsg, now: Instant) -> Response {
+        let crate::app::event::UpdateMsg::Looked(found) = msg;
+
+        if let crate::update::Found::Available { manifest, .. } = found.as_ref()
+            && offered_version(self.update.as_ref()) != Some(manifest.version)
+        {
+            self.set_toast(
+                format!(
+                    "Version {} is available \u{b7} open the settings to install it",
+                    manifest.version
+                ),
+                Severity::Info,
+                now,
+            );
+        }
+        self.update = Some(*found);
+        Response::redraw()
+    }
+
     fn set_toast(&mut self, text: String, severity: Severity, now: Instant) {
         self.toast = Some(Toast { text, severity });
         self.toast_expires_at = Some(now + TOAST_LIFETIME);
@@ -1678,5 +1711,17 @@ impl AppState {
     /// Age of the oldest served listing, for the status line.
     pub fn index_age(&self, now: SystemTime) -> Option<Duration> {
         self.index.age(now)
+    }
+}
+
+/// The version a previous look offered, if it offered one.
+///
+/// Free-standing rather than a method, because it answers a question about a
+/// value rather than about the state - and the caller needs it while holding
+/// a borrow of the field it reads.
+fn offered_version(found: Option<&crate::update::Found>) -> Option<crate::update::Version> {
+    match found? {
+        crate::update::Found::Available { manifest, .. } => Some(manifest.version),
+        _ => None,
     }
 }

@@ -56,6 +56,24 @@ fn main() -> io::Result<()> {
             println!("files {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        // Also before the configuration, and for a sharper reason than the
+        // two above: this copy is running from a staging folder to upgrade an
+        // installation, so the user's configuration has nothing to do with
+        // it - and a file that would not load must not be what stops an
+        // update the user already agreed to.
+        Mode::ApplyUpdate {
+            ref msi,
+            wait_pid,
+            ref relaunch,
+        } => {
+            return match files::update::apply::run_helper(msi, wait_pid, relaunch.as_deref()) {
+                Ok(()) => Ok(()),
+                Err(detail) => {
+                    eprintln!("files-cli: {detail}");
+                    std::process::exit(1);
+                }
+            };
+        }
         _ => {}
     }
 
@@ -69,7 +87,7 @@ fn main() -> io::Result<()> {
 
     match args.mode {
         // Answered above, before the configuration was read.
-        Mode::Help | Mode::Version => Ok(()),
+        Mode::Help | Mode::Version | Mode::ApplyUpdate { .. } => Ok(()),
         Mode::CheckConfig { ref query } => {
             let mut out = io::stdout().lock();
             doctor::check_config(&settings, query.as_deref(), &mut out);

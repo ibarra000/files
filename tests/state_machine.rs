@@ -2829,3 +2829,86 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
         );
     }
 }
+
+// --- being told about a new version ----------------------------------------
+
+use files::app::event::UpdateMsg;
+use files::update::{Found, Manifest, Version};
+
+fn looked(found: Found) -> AppEvent {
+    AppEvent::Update(UpdateMsg::Looked(Box::new(found)))
+}
+
+fn available(version: &str) -> Found {
+    Found::Available {
+        manifest: Manifest {
+            version: Version::parse(version).unwrap(),
+            msi: "files.msi".into(),
+            sha256: None,
+            notes: None,
+        },
+        msi: std::path::PathBuf::from("files.msi"),
+    }
+}
+
+#[test]
+fn a_new_version_is_announced_once_it_is_known_about() {
+    let (mut s, now) = state();
+    s.update(looked(available("0.3.0")), now);
+
+    let toast = s.toast.as_ref().expect("a new version must be announced");
+    assert!(toast.text.contains("0.3.0"), "{}", toast.text);
+    assert_eq!(toast.severity, Severity::Info);
+}
+
+/// The timer fires every few hours and the answer does not change between
+/// releases. A toast each time would be nagging about something the settings
+/// window is already showing.
+#[test]
+fn the_same_version_is_not_announced_twice() {
+    let (mut s, now) = state();
+    s.update(looked(available("0.3.0")), now);
+    s.toast = None;
+
+    s.update(looked(available("0.3.0")), now);
+    assert!(s.toast.is_none(), "it nagged about a version already seen");
+}
+
+/// But a second release, published while the program was left running, is
+/// news again.
+#[test]
+fn a_further_version_is_announced_again() {
+    let (mut s, now) = state();
+    s.update(looked(available("0.3.0")), now);
+    s.toast = None;
+
+    s.update(looked(available("0.4.0")), now);
+    let toast = s.toast.as_ref().expect("a further version is news");
+    assert!(toast.text.contains("0.4.0"), "{}", toast.text);
+}
+
+/// The dull answers are recorded and said nothing about. The window reads
+/// them; nobody needs interrupting to hear that nothing has changed.
+#[test]
+fn a_dull_answer_is_remembered_without_being_announced() {
+    for found in [
+        Found::UpToDate,
+        Found::Unavailable {
+            detail: "the share is not there".into(),
+        },
+    ] {
+        let (mut s, now) = state();
+        s.update(looked(found.clone()), now);
+
+        assert_eq!(s.update.as_ref(), Some(&found));
+        assert!(s.toast.is_none(), "it interrupted to say nothing happened");
+    }
+}
+
+/// Until the checker has answered once, the window must not claim to be up to
+/// date - not knowing is a different thing from knowing there is nothing.
+#[test]
+fn nothing_is_known_about_updates_until_a_look_answers() {
+    let (s, _now) = state();
+    assert_eq!(s.update, None);
+}

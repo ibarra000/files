@@ -399,6 +399,44 @@ impl Shell {
     /// transition however carefully one was written. The hotkey thread does the
     /// hiding: it also has to hand the keyboard back to whatever the panel took
     /// it from, and that is a foreground change.
+    /// Stages the update, hands it to the helper, and asks to quit.
+    ///
+    /// Here rather than in the state machine because every step of it is I/O -
+    /// copying an installer, starting a process - and the state machine does
+    /// none. What it does own is the decision to quit, which is why that half
+    /// goes back through the ordinary route.
+    fn install_update(&mut self, now: Instant) {
+        let state = &self.app.state;
+        let Some(crate::update::Found::Available { manifest, msi }) = &state.update else {
+            return;
+        };
+
+        let staged =
+            crate::update::apply::stage(manifest, msi, state.settings.cache_dir.as_deref())
+                .and_then(|staged| {
+                    crate::update::apply::hand_over(&staged)?;
+                    Ok(staged)
+                });
+
+        match staged {
+            Ok(_) => {
+                // Through the ordinary quit, so the workers are stopped and
+                // the index is written exactly as they would be on Ctrl+Q.
+                // The helper is already waiting for this process to go.
+                self.app.state.should_quit = true;
+            }
+            // Nothing has been installed and nothing has been closed, so the
+            // only thing owed is an explanation.
+            Err(problem) => self.app.feed(
+                AppEvent::Open(crate::app::event::OpenMsg::SettingSaveFailed {
+                    label: "The update",
+                    detail: problem.detail(),
+                }),
+                now,
+            ),
+        }
+    }
+
     fn park(&mut self) {
         // An auxiliary window is a task somebody is in the middle of, and all
         // three are drawn from `ui`, which only runs while the panel is up.
@@ -619,6 +657,12 @@ impl eframe::App for Shell {
         // switch that moves after the click that moved it.
         for change in clicked.changed {
             self.app.feed(AppEvent::Setting(change), now);
+        }
+        if clicked.asked.check_now {
+            self.app.actors.check_for_updates();
+        }
+        if clicked.asked.install {
+            self.install_update(now);
         }
 
         // Alt makes the whole panel a handle, because the chrome left over

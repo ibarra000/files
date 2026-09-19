@@ -101,6 +101,10 @@ features = [
     "Win32_System_WindowsProgramming",
     "Win32_NetworkManagement_WNet",
     "Win32_Security",
+    # BCrypt, for the SHA-256 of a staged installer. The operating system
+    # already has one; a crate for it would be a dependency to check one file
+    # once, at the moment somebody presses a button.
+    "Win32_Security_Cryptography",
     # ShellExecuteW, so a merged PDF opens in whatever the user has registered
     # for .pdf rather than a program this app picked for them.
     "Win32_UI_Shell",

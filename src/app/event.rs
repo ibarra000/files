@@ -44,6 +44,8 @@ pub enum AppEvent {
     Clipboard(ClipboardMsg),
     /// The overlay hotkey did something. Sent only by the hotkey thread.
     Hotkey(HotkeyMsg),
+    /// What a look at the update folder found.
+    Update(UpdateMsg),
     /// A worker thread panicked. Surfaced rather than leaving a spinner up
     /// forever.
     ActorDied {
@@ -201,6 +203,21 @@ pub enum OpenMsg {
         label: &'static str,
         detail: String,
     },
+}
+
+/// What the update checker has to report.
+///
+/// One variant, because there is one question and it always has an answer -
+/// including the dull one. A check that reported only good news would leave
+/// the settings window unable to say when it last looked without that reading
+/// as though the thread had died.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateMsg {
+    /// Boxed, because `AppEvent` is what travels the channel and every
+    /// variant pays for the largest. A manifest holds three strings and this
+    /// arrives a few times a day; a keystroke holds none and arrives hundreds
+    /// of times a minute.
+    Looked(Box<crate::update::Found>),
 }
 
 /// Whether the frame needs redrawing.
