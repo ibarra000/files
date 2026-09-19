@@ -155,6 +155,33 @@ impl Ctx<'_> {
     }
 }
 
+/// A boolean, or an error against the line that is not one.
+///
+/// `and_then(Item::as_bool)` on its own turns `auto_hide = "true"` into
+/// `None`, which is indistinguishable here from the key being absent - so the
+/// setting silently keeps its default, and the only symptom is a program that
+/// does not do what the file plainly says. The quoting mistake is the likely
+/// one: every other value in this file is a string, and TOML is the only
+/// format in the building where `true` and `"true"` are different things.
+///
+/// `enabled` is the case worth the helper on its own. It defaulted to *true*
+/// when the value would not parse, so `enabled = "no"` indexed the share it
+/// was written to switch off - which is the exact failure the key allowlist
+/// above exists to prevent, reached by a different route.
+fn bool_at(ctx: &mut Ctx<'_>, key: &str, item: &Item) -> Option<bool> {
+    if let Some(b) = item.as_bool() {
+        return Some(b);
+    }
+    ctx.err(
+        item.span(),
+        None,
+        None,
+        format!("{key} must be true or false, written without quotes"),
+        None,
+    );
+    None
+}
+
 /// Keys accepted at each level. Anything else is an error: a typo like
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
@@ -484,7 +511,10 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
             }
         };
 
-        let enabled = table.get("enabled").and_then(Item::as_bool).unwrap_or(true);
+        let enabled = match table.get("enabled") {
+            Some(item) => bool_at(ctx, "enabled", item).unwrap_or(true),
+            None => true,
+        };
 
         // `depth` belongs to a live mapping and to nothing else, and `refresh`
         // to everything else. Each is refused where it does not apply rather
@@ -599,11 +629,11 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 out.enum_strategy = value.and_then(Value::as_str).map(str::to_string)
             }
             "matcher" => out.matcher = value.and_then(Value::as_str).map(str::to_string),
-            "server_filter" => out.server_filter = value.and_then(Value::as_bool),
-            "persist" => out.persist = value.and_then(Value::as_bool),
-            "stale_notices" => out.stale_notices = value.and_then(Value::as_bool),
-            "auto_hide" => out.auto_hide = value.and_then(Value::as_bool),
-            "pdf_read_only" => out.pdf_read_only = value.and_then(Value::as_bool),
+            "server_filter" => out.server_filter = bool_at(ctx, key, item),
+            "persist" => out.persist = bool_at(ctx, key, item),
+            "stale_notices" => out.stale_notices = bool_at(ctx, key, item),
+            "auto_hide" => out.auto_hide = bool_at(ctx, key, item),
+            "pdf_read_only" => out.pdf_read_only = bool_at(ctx, key, item),
             "max_concurrent_scans" => {
                 // Rejected rather than clamped. A zero here means "index
                 // nothing, ever", which nobody writes on purpose, and this
@@ -620,9 +650,9 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     None => {}
                 }
             }
-            "live_updates" => out.live_updates = value.and_then(Value::as_bool),
+            "live_updates" => out.live_updates = bool_at(ctx, key, item),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
-            "history" => out.history = value.and_then(Value::as_bool),
+            "history" => out.history = bool_at(ctx, key, item),
             "hotkey" => {
                 // Rejected here rather than ignored later, for the same reason
                 // as `viewer` below and more sharply: a hotkey that silently
@@ -655,7 +685,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 out.viewer = raw.map(str::to_string);
             }
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
-            "hide_system_files" => out.hide_system_files = value.and_then(Value::as_bool),
+            "hide_system_files" => out.hide_system_files = bool_at(ctx, key, item),
             "hide_extensions" => {
                 // One extension may be written bare rather than as an array
                 // of one: hiding a single type is a common enough edit that
@@ -1371,6 +1401,47 @@ hide_system_files = false
         let text = format!("{MINIMAL}\n[settings]\nserver_fitler = true\n");
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("unknown setting"));
+    }
+
+    /// The right key, spelled right, with a value that is not a boolean.
+    ///
+    /// Quietly ignored until this was written, which is the same failure an
+    /// unknown key gets refused for: the file says one thing and the program
+    /// does another, with nothing on screen to connect them.
+    #[test]
+    fn a_setting_that_should_be_a_boolean_is_rejected_when_it_is_not_one() {
+        for value in ["\"true\"", "\"yes\"", "1", "0"] {
+            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            let errs = parse_err(&text);
+            assert!(
+                messages(&errs).contains("auto_hide must be true or false"),
+                "{value} was accepted or ignored: {:?}",
+                messages(&errs)
+            );
+        }
+
+        // And the two spellings that are booleans still load.
+        for value in ["true", "false"] {
+            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            parse(&text, p(), ConfigSource::BuiltIn).expect(value);
+        }
+    }
+
+    /// The dangerous one, because its fallback was `true`.
+    ///
+    /// `enabled = "no"` used to index the share it was written to switch off:
+    /// the value would not parse, and `unwrap_or(true)` then read that as
+    /// permission rather than as a mistake.
+    #[test]
+    fn a_mapping_enabled_by_a_non_boolean_is_rejected_rather_than_enabled() {
+        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+             kind = \"tree\"\nenabled = \"no\"\n";
+        let errs = parse_err(text);
+        assert!(
+            messages(&errs).contains("enabled must be true or false"),
+            "{:?}",
+            messages(&errs)
+        );
     }
 
     /// Two flat shares are both indexed now.
