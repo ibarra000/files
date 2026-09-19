@@ -103,6 +103,7 @@ pub fn rows(viewer: ViewerKind) -> Vec<Row> {
         Row::Blank,
         Row::Heading("Leaving"),
         Row::Entry("F1", "show or hide this list of keys"),
+        Row::Entry("Ctrl+,", "show or hide the settings"),
         Row::Entry("Ctrl+Q", "quit. Esc does not quit, and Ctrl+C copies"),
         Row::Blank,
     ]

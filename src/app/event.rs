@@ -305,6 +305,8 @@ pub enum Cmd {
     /// answer - only the shell knows whether the window is open, so only the
     /// shell can decide which way a press of F1 goes.
     ToggleHelp,
+    /// Show or hide the settings window.
+    ToggleSettings,
     Quit,
 }
 

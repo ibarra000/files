@@ -662,7 +662,11 @@ impl eframe::App for Shell {
             }
             self.app.feed(AppEvent::Intent(intent), now);
         }
-        if self.app.take_help_request() {
+        let requested = self.app.take_window_requests();
+        if requested.settings {
+            self.windows.toggle(Window::Settings);
+        }
+        if requested.help {
             // Toggled rather than opened: F1 says "show or hide" in the panel
             // this draws. The other half of that is in `windows::show_one`,
             // for the presses this viewport never receives because the help

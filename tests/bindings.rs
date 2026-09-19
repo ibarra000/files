@@ -93,6 +93,12 @@ fn table() -> Vec<Binding> {
         b(Key::Char('a'), CTRL, Searching, "select the whole code"),
         b(Key::Char('u'), CTRL, Searching, "clear the line"),
         b(Key::Char('w'), CTRL, Searching, "delete the previous field"),
+        b(
+            Key::Char(','),
+            CTRL,
+            Searching,
+            "show or hide the settings window",
+        ),
         anymod(Key::F(1), Searching, "show or hide the shortcuts window"),
         anymod(Key::F(2), Searching, "switch viewer"),
         anymod(

@@ -106,6 +106,11 @@ impl AppState {
                 }
             }
             Key::Char('w') if ctrl => self.delete_field(now),
+            // What this operating system uses for settings everywhere else.
+            // F1 to F5 are all spoken for, and a sixth function key would be
+            // one nobody guesses. Above the Ctrl+Alt arm, so it is reached at
+            // all: everything below treats a modified character as text.
+            Key::Char(',') if ctrl && !alt => Response::redraw().with(Cmd::ToggleSettings),
 
             // AltGr arrives as Ctrl+Alt on Windows, and on a German, Polish
             // or French layout that is how `@`, `{`, `[` and the accented

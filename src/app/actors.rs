@@ -404,7 +404,7 @@ impl Actors {
                 // Both are for whoever is drawing, not for a worker. Named
                 // rather than wildcarded, so a command nothing handles is a
                 // compile error here instead of a keystroke that does nothing.
-                Cmd::ToggleHelp | Cmd::Quit => {}
+                Cmd::ToggleHelp | Cmd::ToggleSettings | Cmd::Quit => {}
             }
         }
     }

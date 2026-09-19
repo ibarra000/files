@@ -35,6 +35,17 @@ use self::state::AppState;
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 
+/// Windows a keystroke asked the shell to show or hide.
+///
+/// A struct of bools rather than one enum, because two can legitimately be
+/// asked for in the same turn - a burst of keystrokes is fed before anything
+/// reads this - and an enum would make the second silently replace the first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowRequests {
+    pub help: bool,
+    pub settings: bool,
+}
+
 /// Everything a driver needs, with no opinion about who is drawing.
 ///
 /// `run` used to own the loop. A window toolkit owns its own, so what is left
@@ -50,7 +61,7 @@ pub struct App {
     rx: Receiver<AppEvent>,
     /// What the events applied so far have asked for, not yet dispatched.
     pending: CmdList,
-    /// Somebody pressed F1, and the shell has not acted on it yet.
+    /// Windows a keystroke asked for that the shell has not acted on yet.
     ///
     /// A latch rather than an entry in `pending`, and that is the whole of the
     /// fix for a keystroke that did nothing for as long as it existed. `pump`
@@ -58,7 +69,7 @@ pub struct App {
     /// only to ignore it - so by the time the shell asked, the request had
     /// already been thrown away. `logic` feeds and pumps; `ui` asks. Nothing
     /// that survives only between those two can be read from there.
-    help_requested: bool,
+    requested: WindowRequests,
     /// ...and whether they changed anything on screen.
     redraw: Redraw,
 }
@@ -96,14 +107,14 @@ impl App {
             actors,
             rx,
             pending: CmdList::new(),
-            help_requested: false,
+            requested: WindowRequests::default(),
             redraw: Redraw::No,
         })
     }
 
-    /// Whether `F1` was pressed since this was last asked.
+    /// Which windows were asked for since this was last called.
     ///
-    /// [`Cmd::ToggleHelp`] is addressed to whoever is drawing rather than to a
+    /// These commands are addressed to whoever is drawing rather than to a
     /// worker. Read-and-clear, so two readers of one "somebody asked for help"
     /// cannot toggle the window twice or not at all - which with a toggle is
     /// the difference between opening it and leaving it exactly as it was.
@@ -114,8 +125,8 @@ impl App {
     /// `Actors::dispatch`; `ui` asks afterwards, by which time there is
     /// nothing left to find. Clicking the F1 chip worked and pressing F1 did
     /// not, for the sole reason that the click is fed two lines above the ask.
-    pub fn take_help_request(&mut self) -> bool {
-        std::mem::take(&mut self.help_requested)
+    pub fn take_window_requests(&mut self) -> WindowRequests {
+        std::mem::take(&mut self.requested)
     }
 
     /// Applies one event, holding on to what it asked for.
@@ -128,10 +139,13 @@ impl App {
         self.redraw = self.redraw.or(response.redraw);
         // Latched on the way past, because `pending` does not survive the
         // `pump` that `logic` performs before `ui` ever asks.
-        self.help_requested |= response
-            .cmds
-            .iter()
-            .any(|cmd| matches!(cmd, event::Cmd::ToggleHelp));
+        for cmd in &response.cmds {
+            match cmd {
+                event::Cmd::ToggleHelp => self.requested.help = true,
+                event::Cmd::ToggleSettings => self.requested.settings = true,
+                _ => {}
+            }
+        }
         self.pending.extend(response.cmds);
     }
 
@@ -187,7 +201,7 @@ impl App {
             actors,
             rx,
             pending: CmdList::new(),
-            help_requested: false,
+            requested: WindowRequests::default(),
             redraw: Redraw::No,
         }
     }
@@ -335,11 +349,11 @@ mod tests {
         let _ = app.pump(now);
 
         assert!(
-            app.take_help_request(),
+            app.take_window_requests().help,
             "the pump swallowed the request before anybody could read it"
         );
         assert!(
-            !app.take_help_request(),
+            !app.take_window_requests().help,
             "read-and-clear, or the window opens again on the next frame"
         );
         app.shutdown();
