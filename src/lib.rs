@@ -23,5 +23,6 @@ pub mod preview;
 pub mod search;
 #[cfg(windows)]
 pub mod single;
+pub mod update;
 pub mod util;
 pub mod view;
