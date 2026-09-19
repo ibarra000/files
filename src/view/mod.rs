@@ -53,6 +53,7 @@ pub mod help;
 pub mod hints;
 pub mod preview;
 pub mod row;
+pub mod settings;
 pub mod shares;
 pub mod status;
 
