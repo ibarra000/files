@@ -28,6 +28,7 @@ pub mod fonts;
 pub mod frame;
 pub mod input;
 pub mod overlay;
+pub mod preview;
 pub mod row;
 pub mod theme;
 #[cfg(windows)]
@@ -370,7 +371,7 @@ impl Shell {
     /// foreground change from. This only notices the change and tells the
     /// animator, which is why a summon and a dismiss cannot get out of step
     /// with what the rest of the program thinks is happening.
-    fn follow_overlay(&mut self) {
+    fn follow_overlay(&mut self, ctx: &egui::Context) {
         let up = self.app.state.overlay_up;
         if up == self.up {
             return;
@@ -378,6 +379,13 @@ impl Shell {
         self.up = up;
         if up {
             self.parked = false;
+            // Chosen here and nowhere else, which is the whole of why it is
+            // stable: this runs once, on the transition into being up, so the
+            // panel cannot change width while somebody is looking at it. A
+            // monitor that is unplugged mid-session is answered on the next
+            // summon rather than mid-keystroke.
+            let monitor = ctx.input(|i| i.viewport().monitor_size.map(|s| s.x));
+            self.frame.set_layout(theme::Layout::for_monitor(monitor));
             self.frame.motion.summon();
         } else {
             self.frame.motion.dismiss();
@@ -514,7 +522,7 @@ impl eframe::App for Shell {
         let _ = self.app.pump(now);
 
         self.serve_requests();
-        self.follow_overlay();
+        self.follow_overlay(ctx);
 
         // Every deadline in `next_deadline` is anchored on the last frame, so a
         // turn that does not draw still has to say a turn happened - or the age

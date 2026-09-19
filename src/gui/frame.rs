@@ -32,7 +32,7 @@ use eframe::egui::{Vec2, vec2};
 use crate::app::state::AppState;
 use crate::gui::anim::{Motion, Target, Visual};
 use crate::gui::overlay;
-use crate::gui::theme::PANEL_W;
+use crate::gui::theme::Layout;
 
 /// How far the window may sit from the size it wants before it is worth
 /// telling the window system.
@@ -48,6 +48,13 @@ const DEADBAND: f32 = 1.0;
 pub struct Frame {
     pub motion: Motion,
     window: Vec2,
+    /// Whether the pane beside the list is in play.
+    ///
+    /// Held here rather than asked per frame, because it decides the window's
+    /// *width* and a width that is recomputed is a width that can change while
+    /// the panel is up. Set once per summon by `Shell::follow_overlay`; see
+    /// [`Layout`] for why that is the only safe cadence.
+    layout: Layout,
 }
 
 impl Default for Frame {
@@ -63,19 +70,29 @@ impl Frame {
             // Deliberately not `ZERO`: the first real size must always be
             // sent, and no size is within the dead-band of NaN.
             window: vec2(f32::NAN, f32::NAN),
+            layout: Layout::default(),
         }
+    }
+
+    /// Chooses the layout for the summon that is starting.
+    pub fn set_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.layout
     }
 
     /// Told what the world looks like, then how much time has passed, then
     /// asked what to draw. One order, in one place.
     pub fn advance(&mut self, state: &AppState, dt: f32) -> Visual {
-        let measured = overlay::measure(state);
+        let measured = overlay::measure(state, self.layout);
         self.motion.retarget(Target {
             height: measured.height,
             content: measured.content,
             selection_y: measured.selection_y,
         });
-        self.motion.advance(dt)
+        self.motion.advance(dt, self.layout)
     }
 
     /// The size to ask the window system for, or `None` when it already has it.
@@ -96,7 +113,7 @@ impl Frame {
         // Rounded first. Sizes are sent in points and a display cannot tell
         // 320.0 from 320.4 apart, so `DEADBAND` is now purely a guard against
         // re-sending a size the window is already at.
-        let want = vec2(PANEL_W.round(), visual.height.round().max(1.0));
+        let want = vec2(self.layout.width().round(), visual.height.round().max(1.0));
         if (want - self.window).length() < DEADBAND {
             return None;
         }

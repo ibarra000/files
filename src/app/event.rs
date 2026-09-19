@@ -37,6 +37,8 @@ pub enum AppEvent {
     Live(LiveMsg),
     Index(IndexMsg),
     Open(OpenMsg),
+    /// What a file is, for the pane beside the list. See [`crate::preview`].
+    Preview(PreviewMsg),
     Clipboard(ClipboardMsg),
     /// The overlay hotkey did something. Sent only by the hotkey thread.
     Hotkey(HotkeyMsg),
@@ -139,6 +141,20 @@ pub enum ClipboardMsg {
     Failed { detail: String },
 }
 
+/// What the preview worker found out.
+///
+/// One variant, and deliberately no `Failed`. Every way this can go wrong -
+/// a share that has gone away, a file deleted between the search and the
+/// pointer reaching it, an index not yet built - is already a field on
+/// [`crate::preview::Facts`], because each of them is a fact about the file
+/// worth drawing rather than an error worth reporting. A pane that empties and
+/// raises a toast whenever a share is slow would be worse at the one job it
+/// has.
+#[derive(Debug, Clone)]
+pub enum PreviewMsg {
+    Ready(Arc<crate::preview::Preview>),
+}
+
 #[derive(Debug, Clone)]
 pub enum OpenMsg {
     Launched {
@@ -228,6 +244,13 @@ pub enum Cmd {
         force: bool,
     },
     Open(OpenRequest),
+    /// Find out what the file under the pointer is.
+    ///
+    /// Carries the path rather than the row for the reason `selected_path`
+    /// exists: `apply_hits` replaces the result list wholesale, so a rank is
+    /// stale the instant results land and the answer would be drawn against
+    /// whatever file happened to inherit the row.
+    Preview(crate::preview::Request),
     /// Write the chosen viewer back to the configuration file, preserving
     /// every comment in it. Emitted only when the state machine already knows
     /// the value can stick - see `Settings::viewer_persistable`.

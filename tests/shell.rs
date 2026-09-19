@@ -30,10 +30,10 @@ fn at(height: f32, content: Content) -> Target {
 
 /// Runs `secs` of frames, handing each visual to `f`.
 fn play(motion: &mut Motion, secs: f32, mut f: impl FnMut(Visual)) -> Visual {
-    let mut last = motion.advance(0.0);
+    let mut last = motion.advance(0.0, files::gui::theme::Layout::List);
     let mut elapsed = 0.0;
     while elapsed < secs {
-        last = motion.advance(FRAME);
+        last = motion.advance(FRAME, files::gui::theme::Layout::List);
         f(last);
         elapsed += FRAME;
     }
@@ -50,7 +50,7 @@ fn shown(height: f32) -> Motion {
     let mut motion = Motion::new();
     motion.retarget(at(height, Content::Results));
     motion.summon();
-    motion.advance(0.0);
+    motion.advance(0.0, files::gui::theme::Layout::List);
     assert_eq!(motion.phase(), Phase::Shown);
     motion
 }
@@ -68,7 +68,7 @@ fn a_summon_is_immediate() {
     // No frames run: the panel is up on the same call. The hotkey thread has
     // already put the window on screen by this point, and there is no longer a
     // curve to play alongside that.
-    let visual = motion.advance(0.0);
+    let visual = motion.advance(0.0, files::gui::theme::Layout::List);
     assert_eq!(motion.phase(), Phase::Shown);
     assert_eq!(visual.height, 240.0, "it must arrive at its full height");
     assert_eq!(visual.content, Content::Recent);
@@ -105,7 +105,7 @@ fn re_summoning_a_panel_that_is_already_up_does_not_reset_the_empty_gate() {
     motion.retarget(at(160.0, Content::Empty));
     run(&mut motion, EMPTY_HOLD / 2.0);
     assert_eq!(
-        motion.advance(0.0).content,
+        motion.advance(0.0, files::gui::theme::Layout::List).content,
         Content::Results,
         "the gate should still be holding the old body"
     );
@@ -129,7 +129,7 @@ fn the_height_is_whatever_was_last_measured() {
     // On the first frame, exactly. The window is sized from this, and a height
     // that took a tenth of a second to arrive was a `SetWindowPos` per frame
     // for the whole of it.
-    let visual = motion.advance(FRAME);
+    let visual = motion.advance(FRAME, files::gui::theme::Layout::List);
     assert_eq!(visual.height, 376.0, "the height did not snap");
     assert!(
         !motion.is_animating(),
@@ -155,7 +155,7 @@ fn a_body_that_is_empty_for_a_frame_is_never_shown_as_empty() {
 
     // One frame of nothing, exactly as an in-flight query produces.
     motion.retarget(at(160.0, Content::Empty));
-    let blink = motion.advance(FRAME);
+    let blink = motion.advance(FRAME, files::gui::theme::Layout::List);
     assert_eq!(blink.content, Content::Results, "it flinched");
     assert_eq!(blink.height, 440.0, "and went looking for a new height");
 
@@ -163,7 +163,7 @@ fn a_body_that_is_empty_for_a_frame_is_never_shown_as_empty() {
     // it did with one: an ungated transient is now an instant snap from four
     // hundred and forty points to a hundred and sixty and back.
     motion.retarget(at(440.0, Content::Results));
-    let recovered = motion.advance(FRAME);
+    let recovered = motion.advance(FRAME, files::gui::theme::Layout::List);
     assert_eq!(recovered.content, Content::Results);
     assert_eq!(recovered.height, 440.0);
 }
@@ -199,7 +199,7 @@ fn the_first_selection_appears_in_place_rather_than_sliding_in() {
         ..at(300.0, Content::Results)
     });
 
-    let visual = motion.advance(FRAME);
+    let visual = motion.advance(FRAME, files::gui::theme::Layout::List);
     assert_eq!(visual.selection_y, Some(120.0));
 }
 
@@ -211,11 +211,18 @@ fn the_selection_lands_on_the_row_it_was_given() {
         ..at(300.0, Content::Results)
     };
     motion.retarget(rows(120.0));
-    assert_eq!(motion.advance(FRAME).selection_y, Some(120.0));
+    assert_eq!(
+        motion
+            .advance(FRAME, files::gui::theme::Layout::List)
+            .selection_y,
+        Some(120.0)
+    );
 
     motion.retarget(rows(160.0));
     assert_eq!(
-        motion.advance(FRAME).selection_y,
+        motion
+            .advance(FRAME, files::gui::theme::Layout::List)
+            .selection_y,
         Some(160.0),
         "the highlight took a frame to get there"
     );
@@ -229,10 +236,15 @@ fn a_cleared_selection_draws_nothing() {
         selection_y: Some(120.0),
         ..at(300.0, Content::Results)
     });
-    motion.advance(FRAME);
+    motion.advance(FRAME, files::gui::theme::Layout::List);
 
     motion.retarget(at(300.0, Content::Recent));
-    assert_eq!(motion.advance(FRAME).selection_y, None);
+    assert_eq!(
+        motion
+            .advance(FRAME, files::gui::theme::Layout::List)
+            .selection_y,
+        None
+    );
 }
 
 // -- frames that are not sixty a second -------------------------------------
@@ -242,9 +254,9 @@ fn a_frame_time_that_is_not_a_number_cannot_wedge_the_panel() {
     let mut motion = shown(440.0);
     motion.retarget(at(160.0, Content::Empty));
 
-    motion.advance(f32::NAN);
-    motion.advance(f32::INFINITY);
-    motion.advance(-1.0);
+    motion.advance(f32::NAN, files::gui::theme::Layout::List);
+    motion.advance(f32::INFINITY, files::gui::theme::Layout::List);
+    motion.advance(-1.0, files::gui::theme::Layout::List);
 
     // A poisoned accumulator would be a gate no frame could ever open, and the
     // body would never be allowed to go empty at all.
@@ -264,6 +276,6 @@ fn a_fresh_animator_is_idle() {
     assert!(motion.is_hidden());
     assert!(!motion.is_animating());
 
-    let visual = motion.advance(FRAME);
+    let visual = motion.advance(FRAME, files::gui::theme::Layout::List);
     assert_eq!(visual.selection_y, None);
 }

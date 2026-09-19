@@ -18,6 +18,7 @@ pub mod log;
 pub mod open;
 pub mod paths;
 pub mod placement;
+pub mod preview;
 pub mod search;
 #[cfg(windows)]
 pub mod single;

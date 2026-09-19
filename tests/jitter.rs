@@ -24,6 +24,7 @@ use files::app::state::AppState;
 use files::config::Settings;
 use files::gui::anim::{Content, Phase, Visual};
 use files::gui::frame::Frame;
+use files::gui::theme::Layout;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 
@@ -131,7 +132,13 @@ impl Rig {
     /// A panel already up and settled, so a test about typing is not also a
     /// test about the entrance.
     fn summoned(corpus: Vec<&'static str>) -> Self {
+        Self::summoned_in(corpus, Layout::List)
+    }
+
+    /// The same, on a monitor wide enough for the pane beside the list.
+    fn summoned_in(corpus: Vec<&'static str>, layout: Layout) -> Self {
         let mut rig = Self::new(corpus);
+        rig.frame.set_layout(layout);
         rig.feed(AppEvent::Hotkey(HotkeyMsg::Summoned));
         rig.frame.motion.summon();
         rig.run(Duration::from_millis(400));
@@ -464,4 +471,123 @@ fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
         rig.log.resizes
     );
     assert_eq!(rig.log.body_changes(), 0, "and the body changed under them");
+}
+
+// --- the pane beside the list ----------------------------------------------
+
+/// The panel's width is fixed for the life of a summon.
+///
+/// This is what makes the pane affordable at all. `measure` decides the height
+/// from the row count, and if it decided the *width* from whether anything was
+/// under the pointer, then sweeping a mouse down a list would be one
+/// `SetWindowPos` and one swapchain reconfigure per row - the cost the height
+/// transition was deleted for, arriving sideways.
+#[test]
+fn the_pane_never_changes_the_width_of_the_panel() {
+    let mut rig = Rig::summoned_in(corpus(), Layout::Pane);
+
+    // A list that grows, shrinks, empties and comes back: every row-count
+    // change the panel has.
+    rig.type_code("11-D-0704", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+    rig.type_code("-", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+    rig.state.update(
+        AppEvent::Key(KeyEvent::new(Key::Backspace, Mods::NONE)),
+        rig.now,
+    );
+    rig.run(SEARCH_SETTLE);
+
+    let widths: Vec<f32> = rig.log.resizes.iter().map(|(w, _)| *w).collect();
+    assert!(!widths.is_empty(), "the window was never sized at all");
+    assert!(
+        widths.iter().all(|w| *w == widths[0]),
+        "the panel changed width during a session: {widths:?}"
+    );
+    assert_eq!(
+        widths[0],
+        files::gui::theme::PANEL_WIDE_W,
+        "the pane layout did not get the wide panel"
+    );
+}
+
+/// And in the narrow layout the popup contributes no height, because it is
+/// drawn over the rows rather than under them.
+#[test]
+fn the_popup_does_not_change_how_tall_the_panel_is() {
+    use files::app::event::PreviewMsg;
+    use files::app::state::pointer::Intent;
+    use files::preview::{Facts, Preview};
+
+    let mut rig = Rig::summoned(corpus());
+    rig.type_code("11-D-0704", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+
+    let before = files::gui::overlay::measure(&rig.state, Layout::List).height;
+
+    let hit = rig
+        .state
+        .hits
+        .first()
+        .cloned()
+        .expect("the fixture found nothing");
+    rig.feed(AppEvent::Intent(Intent::Hover(Some(0))));
+    rig.feed(AppEvent::Preview(PreviewMsg::Ready(Arc::new(Preview {
+        path: hit.path.clone(),
+        name: hit.name.clone(),
+        facts: Facts {
+            bytes: Some(1),
+            ..Facts::default()
+        },
+        pages: None,
+    }))));
+    assert!(rig.state.preview.is_some(), "the fixture stored no preview");
+
+    let after = files::gui::overlay::measure(&rig.state, Layout::List).height;
+    assert_eq!(before, after, "the popup made the panel taller");
+}
+
+/// The pane needs room even when the search found one file, so the results
+/// body has a floor - and that floor must not move with what is in the pane.
+#[test]
+fn the_pane_gets_the_same_room_whatever_is_in_it() {
+    use files::app::event::PreviewMsg;
+    use files::app::state::pointer::Intent;
+    use files::preview::{Facts, Pages, Preview};
+
+    let mut rig = Rig::summoned_in(corpus(), Layout::Pane);
+    rig.type_code("11-D-0704", KEYSTROKE_GAP);
+    rig.run(SEARCH_SETTLE);
+
+    let empty = files::gui::overlay::measure(&rig.state, Layout::Pane).height;
+
+    let hit = rig
+        .state
+        .hits
+        .first()
+        .cloned()
+        .expect("the fixture found nothing");
+    rig.feed(AppEvent::Intent(Intent::Hover(Some(0))));
+    rig.feed(AppEvent::Preview(PreviewMsg::Ready(Arc::new(Preview {
+        path: hit.path.clone(),
+        name: hit.name.clone(),
+        facts: Facts {
+            bytes: Some(1),
+            modified: Some(SystemTime::UNIX_EPOCH),
+            share: Some("jobs".into()),
+            folder: Some(r"R:\11d".into()),
+            missing: false,
+        },
+        pages: Some(Pages {
+            total: 13,
+            named: vec![Arc::from("a.pdf"), Arc::from("b.pdf")],
+            capped: false,
+        }),
+    }))));
+
+    let full = files::gui::overlay::measure(&rig.state, Layout::Pane).height;
+    assert_eq!(
+        empty, full,
+        "the panel resized itself around the pane's contents"
+    );
 }

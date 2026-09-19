@@ -36,7 +36,7 @@ use crate::app::state::pointer::Intent;
 use crate::app::state::{AppState, EmptyReason};
 use crate::gui::anim::{Content, Visual};
 use crate::gui::theme::{self, Theme, Weight};
-use crate::gui::{row, window::Backdrop};
+use crate::gui::{preview, row, window::Backdrop};
 use crate::view::{self, Emphasis, Run};
 
 /// How tall one line of the empty state or the help list is.
@@ -58,13 +58,28 @@ const CARET_MARGIN: f32 = 12.0;
 pub struct Measured {
     pub content: Content,
     pub rows: usize,
+    /// How wide the panel is in the layout it was measured for. Constant for
+    /// the life of a summon - see [`theme::Layout`].
+    pub width: f32,
     pub height: f32,
     /// Top of the selected row, in points from the top of the list.
     pub selection_y: Option<f32>,
 }
 
+/// The fewest rows the list is given when the pane is beside it.
+///
+/// The pane holds a name, two facts, a page heading, four page names and a
+/// folder: nine lines, which is more than a two-result list is tall. Without a
+/// floor the pane would be clipped to the height of whatever the search
+/// happened to return, so searching a code with one page would show a pane with
+/// room for its name and nothing else.
+///
+/// Eight rather than nine because the field and the footer are outside the
+/// body, and both add room the pane can draw into.
+const PANE_MIN_ROWS: usize = 8;
+
 /// Which body belongs on screen, and how tall the panel wants to be.
-pub fn measure(state: &AppState) -> Measured {
+pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
     let content = body_of(state);
     let rows = match content {
         Content::Shares => state.share_ids().len(),
@@ -79,6 +94,16 @@ pub fn measure(state: &AppState) -> Measured {
     let body_h = match content {
         Content::Results | Content::Recent | Content::Shares => shown as f32 * theme::ROW_H,
         Content::Empty => shown as f32 * LINE_H + theme::PAD_Y * 2.0,
+    };
+
+    // The pane needs a height of its own, and the list is the only thing that
+    // has one. Applied to the results body alone: the drive picker and the
+    // empty states have no file to describe, so the pane is not drawn beside
+    // them and would only be padding them out.
+    let body_h = if layout.has_pane() && content == Content::Results {
+        body_h.max(PANE_MIN_ROWS as f32 * theme::ROW_H)
+    } else {
+        body_h
     };
 
     // Relative to the window, not to the list. This used to be
@@ -107,6 +132,7 @@ pub fn measure(state: &AppState) -> Measured {
     Measured {
         content,
         rows: shown,
+        width: layout.width(),
         height: theme::FIELD_H + body_h + theme::FOOTER_H + theme::PAD_Y * 2.0,
         selection_y,
     }
@@ -179,6 +205,16 @@ pub fn show(
     rule(ui, theme, footer.top(), rect);
     intents.extend(draw_footer(ui, state, theme, footer, now, wall));
 
+    // The pane takes its column off the right before the body is given what is
+    // left, so the list is laid out inside a narrower rectangle rather than
+    // being drawn full width and covered up. A row that reaches under the pane
+    // is a row whose folder column is unreadable and whose click lands on
+    // something else.
+    let pane = preview::pane_rect(rect, visual.layout, cursor);
+    if let Some(pane) = pane {
+        cursor = Rect::from_min_max(cursor.min, pos2(pane.left(), cursor.max.y));
+    }
+
     // One pass. The body used to be drawn twice while one cross-faded into the
     // other - which is why everything below took an alpha, and why the outgoing
     // pass had to be told not to accept clicks.
@@ -192,7 +228,38 @@ pub fn show(
         wall,
     ));
 
+    // After the body, so the pane sits over the surface rather than under the
+    // rows, and so the popup below is drawn on top of the list it describes.
+    match pane {
+        Some(pane) => preview::draw_pane(ui, state, theme, pane, wall),
+        None => {
+            if visual.content == Content::Results
+                && let Some(anchor) = hovered_row_rect(state, cursor)
+            {
+                preview::draw_popup(ui, state, theme, anchor, cursor, wall);
+            }
+        }
+    }
+
     intents
+}
+
+/// Where the row under the pointer is, for the popup to hang from.
+///
+/// Derived from the measurement, exactly as `visual.selection_y` is, rather
+/// than read back off a row's rectangle: it is the same arithmetic, and one
+/// place to be wrong about it is better than two.
+fn hovered_row_rect(state: &AppState, list: Rect) -> Option<Rect> {
+    let rank = state.hovered()?;
+    let y = rank.checked_sub(state.scroll_top())? as f32 * theme::ROW_H;
+    let top = list.top() + y;
+    if top + theme::ROW_H > list.bottom() {
+        return None;
+    }
+    Some(Rect::from_min_size(
+        pos2(list.left() + theme::PAD_X, top),
+        vec2(list.width() - theme::PAD_X * 2.0, theme::ROW_H),
+    ))
 }
 
 /// Tells the accessibility tree that `text` is at `rect`.
@@ -1013,7 +1080,10 @@ mod tests {
     /// gets the onboarding block rather than an empty list.
     #[test]
     fn an_empty_field_with_no_history_shows_the_first_run_block() {
-        assert_eq!(measure(&state()).content, Content::Empty);
+        assert_eq!(
+            measure(&state(), theme::Layout::List).content,
+            Content::Empty
+        );
     }
 
     /// Recall stops being a mode: with nothing typed, the list *is* your
@@ -1026,25 +1096,31 @@ mod tests {
         // Unasked for. These used to be what an empty field showed, so every
         // summon of an empty panel put the job codes this person had looked up
         // in front of whoever was standing behind them.
-        assert_eq!(measure(&state).content, Content::Empty);
+        assert_eq!(measure(&state, theme::Layout::List).content, Content::Empty);
 
         state.update(
             AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)),
             std::time::Instant::now(),
         );
-        assert_eq!(measure(&state).content, Content::Recent);
+        assert_eq!(
+            measure(&state, theme::Layout::List).content,
+            Content::Recent
+        );
     }
 
     #[test]
     fn typing_something_that_matches_shows_the_results() {
-        assert_eq!(measure(&with_hits(3)).content, Content::Results);
+        assert_eq!(
+            measure(&with_hits(3), theme::Layout::List).content,
+            Content::Results
+        );
     }
 
     #[test]
     fn typing_something_that_matches_nothing_shows_why() {
         let mut state = state();
         state.input.set_text("zzzz");
-        assert_eq!(measure(&state).content, Content::Empty);
+        assert_eq!(measure(&state, theme::Layout::List).content, Content::Empty);
     }
 
     /// The drive picker replaces the body rather than floating over it, which
@@ -1052,10 +1128,16 @@ mod tests {
     #[test]
     fn the_drive_picker_replaces_whatever_was_there() {
         let mut state = with_hits(3);
-        assert_eq!(measure(&state).content, Content::Results);
+        assert_eq!(
+            measure(&state, theme::Layout::List).content,
+            Content::Results
+        );
 
         state.picking_share = true;
-        assert_eq!(measure(&state).content, Content::Shares);
+        assert_eq!(
+            measure(&state, theme::Layout::List).content,
+            Content::Shares
+        );
     }
 
     /// Eight rows is a glance. A search that matched four hundred files must
@@ -1063,7 +1145,7 @@ mod tests {
     #[test]
     fn the_panel_never_grows_past_its_ceiling() {
         for n in [0, 1, 7, 8, 9, 400] {
-            let measured = measure(&with_hits(n));
+            let measured = measure(&with_hits(n), theme::Layout::List);
             assert!(
                 measured.rows <= theme::MAX_ROWS,
                 "{n} hits asked for {} rows",
@@ -1081,11 +1163,11 @@ mod tests {
     /// One row at a time, and always enough for the field and the footer.
     #[test]
     fn the_panel_grows_by_exactly_one_row_per_result() {
-        let one = measure(&with_hits(1)).height;
-        let two = measure(&with_hits(2)).height;
+        let one = measure(&with_hits(1), theme::Layout::List).height;
+        let two = measure(&with_hits(2), theme::Layout::List).height;
         assert!((two - one - theme::ROW_H).abs() < 0.01, "{one} then {two}");
 
-        let none = measure(&with_hits(0));
+        let none = measure(&with_hits(0), theme::Layout::List);
         assert!(
             none.height >= theme::FIELD_H + theme::FOOTER_H,
             "a panel with no results still has a field and a footer"
@@ -1103,13 +1185,18 @@ mod tests {
     fn the_selection_is_reported_as_a_point_inside_the_window() {
         let mut state = with_hits(VISIBLE_ROWS * 3);
         select(&mut state, 3);
-        assert_eq!(measure(&state).selection_y, Some(3.0 * theme::ROW_H));
+        assert_eq!(
+            measure(&state, theme::Layout::List).selection_y,
+            Some(3.0 * theme::ROW_H)
+        );
 
         // Far down the list: the window has followed, so the point is still
         // inside it - and is not pinned to the bottom row.
         let last = state.hits.len() - 1;
         select(&mut state, last);
-        let far = measure(&state).selection_y.expect("still selected");
+        let far = measure(&state, theme::Layout::List)
+            .selection_y
+            .expect("still selected");
         assert!(
             (0.0..=(VISIBLE_ROWS - 1) as f32 * theme::ROW_H).contains(&far),
             "the highlight was placed at {far}, outside the window"
@@ -1124,12 +1211,15 @@ mod tests {
     /// Nothing selected is not row zero selected.
     #[test]
     fn a_body_with_no_selection_places_no_highlight() {
-        assert_eq!(measure(&with_hits(3)).selection_y, None);
+        assert_eq!(
+            measure(&with_hits(3), theme::Layout::List).selection_y,
+            None
+        );
 
         let mut state = state();
         state.history.record("11-D-0704");
         assert_eq!(
-            measure(&state).selection_y,
+            measure(&state, theme::Layout::List).selection_y,
             None,
             "the recent list is not the result list"
         );
@@ -1160,7 +1250,9 @@ mod tests {
             assert_eq!(window.len(), VISIBLE_ROWS, "step {step}: short window");
 
             // And the band is drawn inside the panel rather than below it.
-            let y = measure(&state).selection_y.expect("a highlighted row");
+            let y = measure(&state, theme::Layout::List)
+                .selection_y
+                .expect("a highlighted row");
             assert!(
                 (0.0..VISIBLE_ROWS as f32 * theme::ROW_H).contains(&y),
                 "step {step}: the highlight is at {y}, off the list"

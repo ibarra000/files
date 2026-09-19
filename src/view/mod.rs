@@ -51,6 +51,7 @@ pub mod style;
 pub mod empty;
 pub mod help;
 pub mod hints;
+pub mod preview;
 pub mod row;
 pub mod shares;
 pub mod status;

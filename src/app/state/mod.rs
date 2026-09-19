@@ -28,6 +28,7 @@ mod keys;
 mod model;
 mod overlay;
 pub mod pointer;
+mod preview;
 
 pub use model::{EmptyReason, LiveProgress, QueryPhase, Severity, TOAST_LIFETIME, Toast, Urgency};
 
@@ -204,6 +205,19 @@ pub struct AppState {
     /// terminal reports no "the pointer left the window" event and a hover
     /// that outlives the pointer is a lie.
     hovered: Option<usize>,
+    /// What the file under the pointer is, once the worker has said.
+    ///
+    /// `None` while nothing is being pointed at, and also for the moment
+    /// between moving onto a row and the answer arriving - see
+    /// [`AppState::follow_preview`] for why it is cleared rather than left up.
+    pub preview: Option<Arc<crate::preview::Preview>>,
+    /// Which file `preview` is, or is about to be, about.
+    ///
+    /// Held separately because it is set the instant the pointer moves, while
+    /// `preview` is set 120 ms later: the gap between them is what an arriving
+    /// answer is checked against.
+    preview_target_path: Option<Arc<str>>,
+    preview_due_at: Option<Instant>,
     /// How far the help panel is scrolled.
     ///
     /// Clamped against the pane on the way out rather than on the way in, so a
@@ -263,6 +277,9 @@ impl AppState {
             last_frame_wall: SystemTime::UNIX_EPOCH,
             query: Query::default(),
             last_verified_query: None,
+            preview: None,
+            preview_target_path: None,
+            preview_due_at: None,
             help_scroll: 0,
             hovered: None,
         }
@@ -422,6 +439,7 @@ impl AppState {
             self.remember_due_at,
             self.verify_watchdog_at,
             self.toast_expires_at,
+            self.preview_due_at,
             // Without this the loop parks in an unbounded receive whenever
             // nothing else is pending, so the age on screen froze until a
             // keystroke happened to arrive and then jumped.
@@ -442,7 +460,19 @@ impl AppState {
         self.dispatch(event, now)
     }
 
+    /// Runs the event, then lets the preview pane notice what it changed.
+    ///
+    /// The second half is here rather than at each of the five sites that can
+    /// move the selection, because a sixth site added later would not know to
+    /// call it - and the symptom of forgetting is the pane describing the
+    /// previous file under this one's name. See [`preview`].
     fn dispatch(&mut self, event: AppEvent, now: Instant) -> Response {
+        let mut response = self.dispatch_event(event, now);
+        response.merge(self.follow_preview(now));
+        response
+    }
+
+    fn dispatch_event(&mut self, event: AppEvent, now: Instant) -> Response {
         match event {
             AppEvent::Key(key) => self.on_key(key, now),
             AppEvent::Intent(intent) => self.on_intent(intent, now),
@@ -453,6 +483,7 @@ impl AppState {
             AppEvent::Live(msg) => self.on_live(msg, now),
             AppEvent::Index(msg) => self.on_index(msg, now),
             AppEvent::Open(msg) => self.on_open(msg, now),
+            AppEvent::Preview(msg) => self.on_preview(msg),
             AppEvent::Clipboard(msg) => self.on_clipboard(msg, now),
             AppEvent::Hotkey(msg) => self.on_hotkey(msg, now),
             AppEvent::ActorDied { actor, detail } => {
@@ -1484,6 +1515,11 @@ impl AppState {
                 }));
             }
         }
+
+        // The pane beside the list, which is paced separately from everything
+        // above: it describes whatever is under the pointer rather than
+        // answering the query, so it falls due on its own schedule.
+        response.merge(self.preview_due(now));
 
         // A matcher that never answered an Enter. Hands the keystroke back
         // rather than leaving it dead.

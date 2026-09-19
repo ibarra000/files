@@ -214,6 +214,18 @@ pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 /// server CPU and must not fire per keystroke.
 pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// Quiet period before the pane beside the list asks what a file is.
+///
+/// A twentieth of [`VERIFY_DEBOUNCE`] and a different kind of pause. That one
+/// waits for somebody to stop *typing*, which is a decision they are still
+/// making; this one waits for them to stop *pointing*, which is already made -
+/// so it only has to be long enough that sweeping a mouse down twelve rows does
+/// not spend twelve round trips on rows nobody stopped at.
+///
+/// Not zero, and the reason is where the answer comes from: `metadata` on a
+/// drawing share reached over a VPN is tens of milliseconds, not microseconds.
+pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
+
 /// Quiet period after the last keystroke before the code on the line reaches
 /// the recall list.
 ///

@@ -64,6 +64,71 @@ pub const CHIP_RADIUS: u8 = 4;
 /// between them.
 pub const PANEL_MAX_H: f32 = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0 + 2.0;
 
+/// The pane beside the list that says what a result is.
+///
+/// Narrower than half the list, deliberately. It holds a file name, two short
+/// facts and a handful of page names, and giving it more room would only let
+/// the folder line run on - while taking width from the column the names
+/// themselves are read in, which is the one that has to stay legible.
+pub const PREVIEW_W: f32 = 380.0;
+
+/// The panel with the pane attached.
+pub const PANEL_WIDE_W: f32 = PANEL_W + PREVIEW_W;
+
+/// The narrowest monitor that gets the pane rather than the popup.
+///
+/// The wide panel plus a margin, so the pane is only offered where the panel
+/// still reads as something summoned over the work rather than something that
+/// has taken the screen over. Below this the same words arrive as a popup
+/// beside the row instead, which costs no width at all.
+///
+/// Measured against the monitor rather than the work area because it is a
+/// question about the display, and a taskbar moving does not change whether a
+/// 1920-wide screen can hold an 1100-wide panel.
+pub const ROOM_FOR_PANE: f32 = PANEL_WIDE_W + 260.0;
+
+/// How the panel is laid out, decided once per summon.
+///
+/// Per summon rather than per frame, and the difference is the whole reason
+/// this is a stored decision rather than a function of the current width:
+/// recomputed every frame it would flip while the panel is up, and recomputed
+/// per selection it would change the *window's* width as the pointer moved,
+/// which is the class of jitter `gui::frame` and `tests/jitter.rs` exist to
+/// refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Layout {
+    /// List only. A hover brings the pane up over the rows.
+    #[default]
+    List,
+    /// List with the pane permanently beside it.
+    Pane,
+}
+
+impl Layout {
+    /// Which layout a monitor of this width gets.
+    ///
+    /// `None` - no monitor reported - takes [`Layout::List`], which is the
+    /// answer that fits everywhere.
+    pub fn for_monitor(width: Option<f32>) -> Self {
+        match width {
+            Some(w) if w >= ROOM_FOR_PANE => Self::Pane,
+            _ => Self::List,
+        }
+    }
+
+    /// How wide the panel is in this layout.
+    pub const fn width(self) -> f32 {
+        match self {
+            Self::List => PANEL_W,
+            Self::Pane => PANEL_WIDE_W,
+        }
+    }
+
+    pub const fn has_pane(self) -> bool {
+        matches!(self, Self::Pane)
+    }
+}
+
 // -- type -------------------------------------------------------------------
 
 /// The system's own typeface, in the two weights this draws with.
