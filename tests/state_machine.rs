@@ -2912,3 +2912,78 @@ fn nothing_is_known_about_updates_until_a_look_answers() {
     let (s, _now) = state();
     assert_eq!(s.update, None);
 }
+
+// --- editing aliases in the window ------------------------------------------
+
+use files::alias::Alias;
+
+fn alias(name: &str, code: &str) -> Alias {
+    Alias {
+        name: name.into(),
+        code: code.into(),
+        note: None,
+    }
+}
+
+fn saved_edit(r: &Response) -> Option<Edit> {
+    r.cmds.iter().find_map(|c| match c {
+        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
+        _ => None,
+    })
+}
+
+/// The table is read on the keystroke that needs it, so an added alias works
+/// at once rather than at the next start.
+#[test]
+fn an_alias_added_in_the_window_works_immediately() {
+    let (mut s, now) = saveable();
+    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
+
+    assert_eq!(
+        saved_edit(&r),
+        Some(Edit::Aliases(vec![alias("pw", "11-D-0704")]))
+    );
+
+    let r = type_in(&mut s, "pw", now);
+    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
+}
+
+/// A field still showing the expansion of an alias that has just been deleted
+/// is the silent disagreement the whole feature is written to avoid.
+#[test]
+fn removing_an_alias_stops_the_line_on_screen_expanding() {
+    let (mut s, now) = saveable();
+    s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_some());
+
+    s.update(AppEvent::Aliases(Vec::new()), now);
+
+    assert!(s.expansion().is_none(), "the expansion outlived the alias");
+    assert!(
+        matches!(s.phase, QueryPhase::TooShort { .. }),
+        "pw is two characters again, so it is too short again"
+    );
+}
+
+/// And adding one under a line already typed makes that line an alias.
+#[test]
+fn adding_an_alias_expands_a_line_that_is_already_on_the_panel() {
+    let (mut s, now) = saveable();
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_none());
+
+    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
+
+    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
+    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
+}
+
+/// An empty list is a legitimate state, and it must be written rather than
+/// leaving the old entries in the file.
+#[test]
+fn removing_the_last_alias_is_still_written() {
+    let (mut s, now) = saveable();
+    let r = s.update(AppEvent::Aliases(Vec::new()), now);
+    assert_eq!(saved_edit(&r), Some(Edit::Aliases(Vec::new())));
+}

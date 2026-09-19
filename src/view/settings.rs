@@ -141,6 +141,24 @@ fn index_of(options: &[Choice], value: &str) -> usize {
     options.iter().position(|o| o.value == value).unwrap_or(0)
 }
 
+/// What the aliases section says, above the list of them.
+///
+/// Here rather than beside the widgets that draw it for the reason the module
+/// note gives: this is prose, and prose is what the house style is checked on.
+/// A list cannot be a [`Row`] - it has no single value - so its words are
+/// constants instead.
+pub mod aliases {
+    pub const HEADING: &str = "Aliases";
+    pub const HELP: &str = "A short name for a code you open often. Type the name and you get \
+                            the results for the code, on the second keystroke.";
+    pub const NAME_HINT: &str = "Short name";
+    pub const CODE_HINT: &str = "What to search for";
+    pub const NOTE_HINT: &str = "What it is (optional)";
+    pub const ADD: &str = "Add";
+    pub const REMOVE: &str = "Remove";
+    pub const EMPTY: &str = "None yet.";
+}
+
 /// The whole form, as it stands right now.
 pub fn sections(settings: &Settings) -> Vec<Section> {
     vec![
@@ -345,6 +363,19 @@ mod tests {
                 }
             }
         }
+        lines.extend(
+            [
+                aliases::HEADING,
+                aliases::HELP,
+                aliases::NAME_HINT,
+                aliases::CODE_HINT,
+                aliases::NOTE_HINT,
+                aliases::ADD,
+                aliases::REMOVE,
+                aliases::EMPTY,
+            ]
+            .map(str::to_string),
+        );
         style::check_all(
             "the settings form",
             lines.iter().map(String::as_str),

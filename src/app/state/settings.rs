@@ -44,6 +44,32 @@ pub struct SettingChange {
 }
 
 impl AppState {
+    /// The alias list was changed in the window.
+    ///
+    /// Applied at once, and it can be: the table is read from `self.settings`
+    /// on the keystroke that needs it, so nothing captured a copy at startup.
+    /// Saved whole rather than by entry, because that is how the window edits
+    /// it - see [`crate::config::write::Edit::Aliases`].
+    pub(super) fn on_aliases(&mut self, list: Vec<crate::alias::Alias>, now: Instant) -> Response {
+        self.settings.aliases = std::sync::Arc::new(crate::alias::Aliases::new(list.clone()));
+
+        let mut response = Response::redraw().with(Cmd::SaveSetting {
+            edit: Edit::Aliases(list),
+            label: "Aliases",
+        });
+
+        // The line already on the panel may have just become an alias, or
+        // stopped being one. Put back through the ordinary path rather than
+        // re-resolved on the side, so the expansion, the query and the results
+        // move together - a field showing an expansion for an alias that has
+        // been removed is exactly the silent disagreement the resolution is
+        // written to avoid.
+        if !self.input.text().trim().is_empty() {
+            response.merge(self.on_input_changed(now, crate::app::state::Urgency::Complete));
+        }
+        response
+    }
+
     pub(super) fn on_setting(&mut self, change: SettingChange, _now: Instant) -> Response {
         let SettingChange { key, typed, label } = change;
         let edit = Edit::from_typed(key, typed);

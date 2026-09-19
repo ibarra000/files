@@ -32,6 +32,8 @@ pub enum AppEvent {
     Intent(crate::app::state::pointer::Intent),
     /// A control in the settings window was moved.
     Setting(crate::app::state::SettingChange),
+    /// The alias list was changed in the settings window.
+    Aliases(Vec<crate::alias::Alias>),
     Paste(String),
     Search(SearchMsg),
     Verify(VerifyMsg),

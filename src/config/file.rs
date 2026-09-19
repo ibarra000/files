@@ -622,7 +622,6 @@ fn parse_aliases(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Alias> {
     };
 
     let mut aliases: Vec<Alias> = Vec::with_capacity(tables.len());
-    let mut seen: Vec<String> = Vec::new();
 
     for (index, table) in tables.iter().enumerate() {
         let span = table.span();
@@ -650,79 +649,33 @@ fn parse_aliases(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Alias> {
             }
         }
 
-        if name.is_empty() {
-            ctx.err(
-                span.clone(),
-                Some(("alias", &label)),
-                None,
-                "missing or empty `name`",
-                None,
-            );
-        } else if !name.is_ascii() {
-            // The same reason `search::pattern` refuses a non-ASCII query: the
-            // case folding this is matched with is ASCII, so a name outside it
-            // would resolve on one machine and not on the next.
-            ctx.err(
-                span.clone(),
-                Some(("alias", &label)),
-                None,
-                "an alias name must be ASCII",
-                None,
-            );
-        } else if name.chars().any(char::is_whitespace) {
-            // An alias is matched against the whole line, so a name with a
-            // space in it is still reachable - but it reads as two words and
-            // nobody would guess it has to be typed exactly.
-            ctx.err(
-                span.clone(),
-                Some(("alias", &label)),
-                None,
-                "an alias name cannot contain a space",
-                None,
-            );
-        } else if seen.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
-            // Refused rather than letting the last one win, because which of
-            // two identically named aliases is in force is not a thing anybody
-            // should have to work out by reading the file top to bottom.
-            ctx.err(
-                span.clone(),
-                Some(("alias", &label)),
-                None,
-                "duplicate alias name",
-                None,
-            );
-        }
-        seen.push(name.clone());
-
         let code = table
             .get("code")
             .and_then(Item::as_str)
             .unwrap_or("")
             .trim()
             .to_string();
-        if code.is_empty() {
+
+        // The same judgement the settings window applies, from the same
+        // function. Two validators that have to agree is two validators that
+        // eventually will not - and the one that drifted would be the one
+        // letting somebody save an alias the next start refuses.
+        if let Err(problem) = crate::alias::check(&name, &code, &aliases) {
+            // The span of the key that was actually wrong, where there is one.
+            // A complaint about `code` pointing at the top of the table is a
+            // complaint somebody has to re-read the whole table to act on.
+            let at = match problem {
+                crate::alias::Invalid::NoCode | crate::alias::Invalid::UnsearchableCode(_) => {
+                    table.get("code").and_then(Item::span)
+                }
+                _ => table.get("name").and_then(Item::span),
+            };
             ctx.err(
-                span.clone(),
+                at.or(span.clone()),
                 Some(("alias", &label)),
                 None,
-                "missing or empty `code`",
-                None,
-            );
-        } else if let Err(reject) = crate::search::query::Query::parse(&code).check() {
-            // Checked against the very same judgement the matcher applies, so
-            // an alias can never expand into a line the search would then turn
-            // down. This is what lets a two-letter *name* exist without
-            // lowering `MIN_QUERY_LEN` for anybody: the name is short, the
-            // line it stands for is not.
-            ctx.err(
-                table.get("code").and_then(Item::span).or(span.clone()),
-                Some(("alias", &label)),
-                None,
-                format!(
-                    "`code` is not something this can search for: {}",
-                    reject.detail()
-                ),
-                Some(code.clone()),
+                problem.detail(),
+                (!code.is_empty()).then(|| code.clone()),
             );
         }
 
@@ -2161,7 +2114,7 @@ case    = "lower"
         let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
-        assert!(text.contains("not something this can search for"), "{text}");
+        assert!(text.contains("could not be searched for"), "{text}");
         assert!(text.contains("at least 3 characters"), "{text}");
     }
 
@@ -2180,13 +2133,16 @@ case    = "lower"
             "{MINIMAL}\n[[alias]]\nname = \"pw\"\ncode = \"11-D-0704\"\n\
              \n[[alias]]\nname = \"PW\"\ncode = \"11-D-0705\"\n"
         );
-        assert!(messages(&parse_err(&text)).contains("duplicate alias name"));
+        assert!(messages(&parse_err(&text)).contains("already an alias"));
     }
 
     #[test]
     fn an_alias_needs_both_a_name_and_a_code() {
-        assert!(messages(&parse_err(&with_alias("code = \"11-D-0704\""))).contains("empty `name`"));
-        assert!(messages(&parse_err(&with_alias("name = \"pw\""))).contains("empty `code`"));
+        assert!(messages(&parse_err(&with_alias("code = \"11-D-0704\""))).contains("needs a name"));
+        assert!(
+            messages(&parse_err(&with_alias("name = \"pw\"")))
+                .contains("needs something to search for")
+        );
     }
 
     #[test]

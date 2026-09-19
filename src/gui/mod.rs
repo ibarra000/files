@@ -658,6 +658,9 @@ impl eframe::App for Shell {
         for change in clicked.changed {
             self.app.feed(AppEvent::Setting(change), now);
         }
+        if let Some(aliases) = clicked.aliases {
+            self.app.feed(AppEvent::Aliases(aliases), now);
+        }
         if clicked.asked.check_now {
             self.app.actors.check_for_updates();
         }

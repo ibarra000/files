@@ -133,6 +133,24 @@ pub struct Windows {
     /// takes the keyboard and the moment it gives it up, which is state any
     /// text box has to have. One, because only one can have the keyboard.
     editing: Option<(SettingKey, String)>,
+    /// The alias being typed into the "add" row, and why it cannot be added.
+    ///
+    /// The same category as `editing` above: the state a control has while it
+    /// is being filled in, and not a copy of the alias list. There is no draft
+    /// list - adding and removing each write the whole array immediately - so
+    /// the window never holds a version of the aliases the file does not.
+    draft: AliasDraft,
+}
+
+/// The three boxes on the row that adds an alias.
+#[derive(Default)]
+struct AliasDraft {
+    name: String,
+    code: String,
+    note: String,
+    /// Shown under the row, and only after an attempt: complaining that a name
+    /// is empty before anybody has typed one is nagging.
+    problem: Option<String>,
 }
 
 impl Windows {
@@ -196,6 +214,7 @@ impl Windows {
         report: impl Fn() -> String,
     ) -> Clicked {
         let mut clicked = Clicked::default();
+        let mut aliases_changed = None;
         if self.help {
             let open = show_one(ctx, theme, Window::Help, |ui| help(ui, theme, state));
             self.help = open;
@@ -207,14 +226,18 @@ impl Windows {
             let open = show_one(ctx, theme, Window::Settings, |ui| {
                 let mut form = Form {
                     editing,
+                    draft: &mut self.draft,
                     changed,
                     asked,
+                    aliases: None,
                 };
                 if self::settings(ui, theme, state, settings, placement, &mut form) {
                     clicked.forget_placement = true;
                 }
+                aliases_changed = form.aliases;
             });
             self.settings = open;
+            clicked.aliases = aliases_changed;
         }
         if self.diagnostics {
             // Computed on the first frame the window is up rather than when the
@@ -243,6 +266,8 @@ pub struct Clicked {
     pub forget_placement: bool,
     /// What the update section was asked to do.
     pub asked: Asked,
+    /// The alias list as it should now be, when this frame changed it.
+    pub aliases: Option<Vec<crate::alias::Alias>>,
     /// Controls the user moved, in the order they moved them.
     pub changed: Vec<SettingChange>,
 }
@@ -361,8 +386,11 @@ fn help(ui: &mut egui::Ui, theme: &Theme, state: &AppState) {
 /// only piece that survives the frame.
 struct Form<'a> {
     editing: &'a mut Option<(SettingKey, String)>,
+    draft: &'a mut AliasDraft,
     changed: &'a mut Vec<SettingChange>,
     asked: &'a mut Asked,
+    /// The alias list as it should now be, when this frame changed it.
+    aliases: Option<Vec<crate::alias::Alias>>,
 }
 
 fn settings(
@@ -387,6 +415,8 @@ fn settings(
             control(ui, theme, row, form);
         }
     }
+
+    aliases(ui, theme, settings, form);
 
     // Still read-only, and the one thing here that is. A mistyped share path
     // is the single configuration error with no symptom - the search simply
@@ -642,6 +672,130 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &m
             }
         });
     });
+}
+
+/// The alias list, with a row to add one and a button to take one away.
+///
+/// There is no draft list. Adding and removing each write the whole array
+/// immediately, so the window never holds a version of the aliases the file
+/// does not - which is the same promise the rest of this form makes, kept the
+/// same way. The three boxes on the "add" row are the exception that proves
+/// it: they are what somebody is typing, not what is configured.
+fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
+    use view::settings::aliases as words;
+
+    heading(ui, theme, words::HEADING);
+    ui.label(
+        egui::RichText::new(words::HELP)
+            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+            .color(theme.dim),
+    );
+    ui.add_space(6.0);
+
+    let current = settings.aliases.all();
+    if current.is_empty() {
+        ui.label(
+            egui::RichText::new(words::EMPTY)
+                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .color(theme.faint),
+        );
+    }
+
+    for alias in current {
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(90.0, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(alias.name.as_ref())
+                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                            .color(theme.accent),
+                    );
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(200.0, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(
+                        egui::RichText::new(alias.code.as_ref())
+                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                            .color(theme.text),
+                    );
+                },
+            );
+            if ui.button(words::REMOVE).clicked() {
+                // The whole list, minus this one. Rewriting the array wholesale
+                // is what keeps "what the window shows" and "what the file
+                // says" the same object rather than two that have to be kept
+                // in step.
+                form.aliases = Some(
+                    current
+                        .iter()
+                        .filter(|a| a.name != alias.name)
+                        .cloned()
+                        .collect(),
+                );
+            }
+            if let Some(note) = &alias.note {
+                ui.label(
+                    egui::RichText::new(note.as_ref())
+                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .color(theme.dim),
+                );
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut form.draft.name)
+                .hint_text(words::NAME_HINT)
+                .desired_width(84.0),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut form.draft.code)
+                .hint_text(words::CODE_HINT)
+                .desired_width(194.0),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut form.draft.note)
+                .hint_text(words::NOTE_HINT)
+                .desired_width(150.0),
+        );
+        if ui.button(words::ADD).clicked() {
+            // The very same check the loader applies, from the same function.
+            // Anything this accepts is something the next start will accept,
+            // which is the entire point of it living in `crate::alias`.
+            match crate::alias::check(&form.draft.name, &form.draft.code, current) {
+                Ok(()) => {
+                    let mut next = current.to_vec();
+                    next.push(crate::alias::Alias {
+                        name: form.draft.name.trim().into(),
+                        code: form.draft.code.trim().into(),
+                        note: Some(form.draft.note.trim())
+                            .filter(|n| !n.is_empty())
+                            .map(Into::into),
+                    });
+                    form.aliases = Some(next);
+                    *form.draft = AliasDraft::default();
+                }
+                Err(problem) => form.draft.problem = Some(problem.detail()),
+            }
+        }
+    });
+
+    // Only after an attempt. Complaining that a name is empty before anybody
+    // has typed one is nagging at somebody who has done nothing wrong.
+    if let Some(problem) = &form.draft.problem {
+        ui.label(
+            egui::RichText::new(crate::view::sentence(problem))
+                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .color(theme.tone(view::status::Tone::Warn)),
+        );
+    }
 }
 
 fn diagnostics(ui: &mut egui::Ui, theme: &Theme, report: &str) {

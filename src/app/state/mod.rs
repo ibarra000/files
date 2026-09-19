@@ -514,6 +514,7 @@ impl AppState {
             AppEvent::Intent(intent) => self.on_intent(intent, now),
             AppEvent::Setting(change) => self.on_setting(change, now),
             AppEvent::Update(msg) => self.on_update(msg, now),
+            AppEvent::Aliases(list) => self.on_aliases(list, now),
             AppEvent::Paste(text) => self.on_paste(&text, now),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),

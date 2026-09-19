@@ -41,6 +41,67 @@
 //! minimum exists to prevent, and the two stop being the same question the
 //! moment one expands into the other.
 
+/// Why a name or a code cannot be used.
+///
+/// Shared by the loader and by the settings window, so that a thing the file
+/// refuses is a thing the window refuses, in the same words. Two validators
+/// that must agree is two validators that eventually will not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Invalid {
+    NoName,
+    NameIsNotAscii,
+    NameHasASpace,
+    DuplicateName,
+    NoCode,
+    /// The code is not something the search could ever run.
+    UnsearchableCode(crate::search::query::QueryReject),
+}
+
+impl Invalid {
+    /// A fragment, for the error line under the control or beside the key.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::NoName => "an alias needs a name".into(),
+            Self::NameIsNotAscii => "an alias name must be ASCII".into(),
+            Self::NameHasASpace => "an alias name cannot contain a space".into(),
+            Self::DuplicateName => "that name is already an alias".into(),
+            Self::NoCode => "an alias needs something to search for".into(),
+            Self::UnsearchableCode(reject) => {
+                format!("it could not be searched for: {}", reject.detail())
+            }
+        }
+    }
+}
+
+/// Whether this pair could be an alias, given the ones that already exist.
+///
+/// The rules exist to make one promise: an alias that was accepted is an alias
+/// that will work. See the note at the top of this module about why the code
+/// is judged by the matcher's own test rather than by a length of its own.
+pub fn check(name: &str, code: &str, existing: &[Alias]) -> Result<(), Invalid> {
+    let name = name.trim();
+    let code = code.trim();
+
+    if name.is_empty() {
+        return Err(Invalid::NoName);
+    }
+    if !name.is_ascii() {
+        return Err(Invalid::NameIsNotAscii);
+    }
+    if name.chars().any(char::is_whitespace) {
+        return Err(Invalid::NameHasASpace);
+    }
+    if existing.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
+        return Err(Invalid::DuplicateName);
+    }
+    if code.is_empty() {
+        return Err(Invalid::NoCode);
+    }
+    crate::search::query::Query::parse(code)
+        .check()
+        .map_err(Invalid::UnsearchableCode)
+}
+
 /// One configured alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alias {

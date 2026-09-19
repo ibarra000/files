@@ -277,6 +277,13 @@ pub enum Edit {
     Set { key: SettingKey, value: Scalar },
     /// Remove the key, returning the setting to its default.
     Unset { key: SettingKey },
+    /// Replace the whole `[[alias]]` array.
+    ///
+    /// All of it rather than one entry, because an alias list is short, is
+    /// rewritten whole by the window that edits it, and has no comments of
+    /// its own worth preserving - the explanation of what an alias *is* lives
+    /// in the block above them, which this does not touch.
+    Aliases(Vec<crate::alias::Alias>),
 }
 
 /// What a control in the settings window produced.
@@ -324,9 +331,14 @@ impl Edit {
         Self::Set { key, value }
     }
 
-    pub fn key(&self) -> SettingKey {
+    /// The setting this names, where it names one.
+    ///
+    /// `None` for an alias list, which is not a setting and has no key - the
+    /// reason this returns an option rather than picking one.
+    pub fn key(&self) -> Option<SettingKey> {
         match self {
-            Self::Set { key, .. } | Self::Unset { key } => *key,
+            Self::Set { key, .. } | Self::Unset { key } => Some(*key),
+            Self::Aliases(_) => None,
         }
     }
 }
@@ -362,6 +374,7 @@ pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
         let stuck = match edit {
             Edit::Set { key, value } => current(*key, &reloaded.settings).as_ref() == Some(value),
             Edit::Unset { key } => current(*key, &reloaded.settings).is_none(),
+            Edit::Aliases(want) => reloaded.aliases.all() == want.as_slice(),
         };
         if !stuck {
             return Err(WriteError::DidNotStick);
@@ -417,6 +430,22 @@ pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
             Edit::Unset { key } => {
                 if let Some(table) = doc.get_mut("settings").and_then(Item::as_table_mut) {
                     table.remove(key.name());
+                }
+            }
+            Edit::Aliases(aliases) => {
+                doc.remove("alias");
+                if !aliases.is_empty() {
+                    let mut array = toml_edit::ArrayOfTables::new();
+                    for alias in aliases {
+                        let mut table = Table::new();
+                        table["name"] = value(alias.name.as_ref());
+                        table["code"] = value(alias.code.as_ref());
+                        if let Some(note) = &alias.note {
+                            table["note"] = value(note.as_ref());
+                        }
+                        array.push(table);
+                    }
+                    doc["alias"] = Item::ArrayOfTables(array);
                 }
             }
         }
@@ -741,6 +770,137 @@ settings = {{ persist = true }}
 
         let before = std::fs::read_to_string(&path).unwrap();
         assert!(save_viewer(&path, ViewerKind::Avwin).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a refused save must leave the file alone"
+        );
+    }
+
+    // --- aliases ------------------------------------------------------------
+
+    fn alias(name: &str, code: &str) -> crate::alias::Alias {
+        crate::alias::Alias {
+            name: name.into(),
+            code: code.into(),
+            note: None,
+        }
+    }
+
+    #[test]
+    fn writing_aliases_produces_a_file_that_loads_them_back() {
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Aliases(vec![
+                alias("pw", "11-D-0704"),
+                crate::alias::Alias {
+                    name: "inv".into(),
+                    code: "ext:pdf inverter".into(),
+                    note: Some("The inverter drawings".into()),
+                },
+            ])],
+        )
+        .unwrap();
+
+        let parsed = reload(&after);
+        assert_eq!(parsed.aliases.len(), 2);
+        assert_eq!(
+            parsed.aliases.resolve("pw").unwrap().code.as_ref(),
+            "11-D-0704"
+        );
+        assert_eq!(
+            parsed.aliases.resolve("inv").unwrap().note.as_deref(),
+            Some("The inverter drawings")
+        );
+    }
+
+    /// The block explaining what an alias *is* lives above them in the shipped
+    /// file, and rewriting the list must not take it away.
+    #[test]
+    fn writing_aliases_leaves_the_comments_around_them_intact() {
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+        )
+        .unwrap();
+
+        for line in DEFAULT_CONFIG_TOML
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+        {
+            assert!(after.contains(line), "lost a comment: {line}");
+        }
+    }
+
+    /// Replaced wholesale, not appended to. Writing twice must not leave two
+    /// aliases called `pw`, which the loader would then refuse.
+    #[test]
+    fn writing_aliases_twice_replaces_rather_than_appends() {
+        let once = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+        )
+        .unwrap();
+        let twice = apply(&once, &[Edit::Aliases(vec![alias("pw", "11-D-0999")])]).unwrap();
+
+        let parsed = reload(&twice);
+        assert_eq!(parsed.aliases.len(), 1);
+        assert_eq!(
+            parsed.aliases.resolve("pw").unwrap().code.as_ref(),
+            "11-D-0999"
+        );
+    }
+
+    /// An empty list means no aliases, which is the shipped state - so the
+    /// array goes away rather than being written as an empty one.
+    #[test]
+    fn writing_an_empty_list_removes_the_aliases_entirely() {
+        let with = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+        )
+        .unwrap();
+        let without = apply(&with, &[Edit::Aliases(Vec::new())]).unwrap();
+
+        assert!(reload(&without).aliases.is_empty());
+        // A *live* table. The shipped file carries a commented-out example of
+        // one, which must survive: it is the documentation for the feature.
+        assert!(
+            !without.lines().any(|l| l.trim() == "[[alias]]"),
+            "{without}"
+        );
+        assert!(
+            without.lines().any(|l| l.trim() == "# [[alias]]"),
+            "the example in the comments must survive"
+        );
+    }
+
+    /// The read-back check has to cover aliases too, or a save that silently
+    /// did nothing would be reported as having worked.
+    #[test]
+    fn an_alias_write_is_checked_on_the_way_back_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+
+        save(&path, &[Edit::Aliases(vec![alias("pw", "11-D-0704")])]).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(reload(&after).aliases.len(), 1);
+    }
+
+    /// The writer must never produce a file the loader refuses - here, an
+    /// alias whose code is too short to search for.
+    #[test]
+    fn an_alias_the_loader_would_refuse_is_refused_by_the_writer_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let err = save(&path, &[Edit::Aliases(vec![alias("pw", "ab")])]).unwrap_err();
+
+        assert!(matches!(err, WriteError::WouldNotReload(_)), "{err:?}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             before,
