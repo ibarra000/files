@@ -217,7 +217,10 @@ impl AppState {
         // round-trips, and `Pdf` reads as a typo on screen.
         let name = self.viewer.display();
 
-        if self.settings.viewer_persistable {
+        if self
+            .settings
+            .can_save(crate::config::write::SettingKey::Viewer)
+        {
             // The toast is raised by the save reporting back, so that what the
             // user reads is what actually reached the disk.
             Response::redraw().with(Cmd::SaveViewer(self.viewer))

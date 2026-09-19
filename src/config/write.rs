@@ -120,6 +120,41 @@ impl SettingKey {
             Self::HideSystemFiles => "hide_system_files",
         }
     }
+
+    /// The environment variable that outranks the file for this key.
+    ///
+    /// Kept beside the file spelling because the two are one fact: a key the
+    /// loader reads from two places is a key that can be written to one of
+    /// them and then quietly ignored.
+    pub const fn env(self) -> &'static str {
+        match self {
+            Self::Viewer => "FILES_VIEWER",
+            Self::Theme => "FILES_THEME",
+            Self::Hotkey => "FILES_HOTKEY",
+            Self::History => "FILES_HISTORY",
+            Self::StaleNotices => "FILES_STALE_NOTICES",
+            Self::LiveUpdates => "FILES_LIVE_UPDATES",
+            Self::PdfViewer => "FILES_PDF_VIEWER",
+            Self::HideExtensions => "FILES_HIDE_EXTENSIONS",
+            Self::HideSystemFiles => "FILES_HIDE_SYSTEM_FILES",
+        }
+    }
+
+    /// Whether an empty value of [`Self::env`] still counts as set.
+    ///
+    /// True only for the hide list, where `FILES_HIDE_EXTENSIONS=` is the
+    /// deliberate way to say "hide nothing for this run" - a request that
+    /// would otherwise look unset and let the file quietly win.
+    /// [`crate::config::Settings::apply_file_settings`] makes the same
+    /// distinction, and these two have to agree.
+    pub const fn empty_is_a_value(self) -> bool {
+        matches!(self, Self::HideExtensions)
+    }
+
+    /// Its position, for the bitmask in [`crate::config::Settings`].
+    pub const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
 }
 
 /// Every key above is one the loader accepts.

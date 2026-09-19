@@ -91,7 +91,7 @@ impl Args {
             s.viewer = v;
             // The flag outranks the file for this run, so writing the file
             // would report a save that the next start ignores.
-            s.viewer_persistable = false;
+            s.pin_to_session(crate::config::write::SettingKey::Viewer);
         }
         if let Some(v) = &self.overrides.pdf_viewer {
             s.pdf_viewer = Some(v.clone());
@@ -196,10 +196,13 @@ ENVIRONMENT:
                                           mappings
     FILES_FS_STRATEGY, FILES_MATCHER, FILES_SERVER_FILTER, FILES_PERSIST,
     FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER,
-    FILES_HISTORY, FILES_HOTKEY
+    FILES_HISTORY, FILES_HOTKEY, FILES_THEME, FILES_STALE_NOTICES,
+    FILES_LIVE_UPDATES, FILES_HIDE_EXTENSIONS, FILES_HIDE_SYSTEM_FILES,
+    FILES_AUTO_HIDE, FILES_PDF_READ_ONLY, FILES_MAX_CONCURRENT_SCANS
 
-    Setting FILES_VIEWER also makes F2 a session-only switch: the environment
-    outranks the file, so saving the choice would change nothing.
+    Any of these outranks the configuration file, so a setting changed in the
+    settings window applies for the session and is not saved - the window says
+    which variable is holding it. Unset the variable to make the change stick.
 
     FILES_PROBE_INTERVAL, FILES_RESCAN_FLOOR   how often the index checks
                                           whether the share changed, and how
@@ -573,6 +576,14 @@ mod tests {
             "FILES_HOTKEY",
         ] {
             assert!(HELP.contains(var), "{var} is undocumented");
+        }
+
+        // The list above is hand-written and had already fallen behind -
+        // FILES_THEME was read by the loader and named by no one. Everything
+        // the settings window can write is enumerable, so that half is asked
+        // of the enumeration rather than of somebody's memory.
+        for key in crate::config::write::SettingKey::ALL {
+            assert!(HELP.contains(key.env()), "{} is undocumented", key.env());
         }
     }
 

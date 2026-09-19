@@ -1224,7 +1224,7 @@ fn a_failed_open_is_reported_rather_than_swallowed() {
 #[test]
 fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
     let (mut s, now) = state();
-    s.settings.viewer_persistable = true;
+    s.settings.have_file = true;
     assert_eq!(s.viewer, ViewerKind::Auto, "the default opens by file type");
 
     let r = s.update(press(Key::F(2)), now);
@@ -1262,7 +1262,7 @@ fn f2_on_key_release_does_not_toggle_twice() {
 #[test]
 fn f2_says_so_when_the_choice_cannot_be_persisted() {
     let (mut s, now) = state();
-    s.settings.viewer_persistable = false;
+    s.settings.have_file = false;
 
     let r = s.update(press(Key::F(2)), now);
     assert_eq!(s.viewer, ViewerKind::Pdf, "it still applies");
@@ -1986,7 +1986,7 @@ fn every_toast() -> Vec<String> {
 
         let mut unsaveable = AppState::new(
             Settings {
-                viewer_persistable: false,
+                have_file: false,
                 ..Settings::default()
             },
             now,

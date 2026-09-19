@@ -106,7 +106,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         out,
         "VIEWER  {}{}",
         settings.viewer.name(),
-        if settings.viewer_persistable {
+        if settings.can_save(crate::config::write::SettingKey::Viewer) {
             ""
         } else {
             "  (F2 applies for the session only)"
@@ -679,13 +679,15 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         }
     );
 
-    // Says why F2 will not stick, which is otherwise invisible.
-    if !settings.viewer_persistable {
-        let _ = writeln!(
-            out,
-            "  F2                  session only - the environment, the command line \
-             or --no-config outranks the file"
-        );
+    // Says why F2 will not stick, which is otherwise invisible - and which of
+    // the three reasons it is, because what to do about it differs.
+    if let Some(pin) = settings.pin(crate::config::write::SettingKey::Viewer) {
+        let reason = match pin {
+            crate::config::Pin::Environment(var) => format!("{var} outranks the file"),
+            crate::config::Pin::CommandLine => "--viewer outranks the file".to_string(),
+            crate::config::Pin::NoFile => "there is no configuration file".to_string(),
+        };
+        let _ = writeln!(out, "  F2                  session only - {reason}");
     }
     let _ = writeln!(out);
 }

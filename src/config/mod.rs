@@ -696,6 +696,35 @@ pub enum ConfigChoice {
     None,
 }
 
+/// Why a setting cannot be written back to the configuration file.
+///
+/// Carried rather than flattened to a bool because the three have different
+/// answers: two of them the user can undo, and which one it is decides what
+/// they would have to do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pin {
+    /// An environment variable holds it. Named, so it can be found and unset.
+    Environment(&'static str),
+    /// A command-line flag holds it, for this run only.
+    CommandLine,
+    /// There is no configuration file to write to at all.
+    NoFile,
+}
+
+impl Pin {
+    /// What to say beside a setting that cannot be changed.
+    ///
+    /// A fragment, lowercase, for the second half of a ` · ` join - which is
+    /// where every one of these is used. See `crate::view`.
+    pub fn detail(self) -> String {
+        match self {
+            Self::Environment(var) => format!("set by {var} \u{b7} this session only"),
+            Self::CommandLine => "set on the command line \u{b7} this session only".into(),
+            Self::NoFile => "no configuration file \u{b7} this session only".into(),
+        }
+    }
+}
+
 /// Resolved runtime settings.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -810,15 +839,19 @@ pub struct Settings {
     /// surfaced as a toast instead.
     pub pdf_viewer: Option<PathBuf>,
 
-    /// Whether an F2 toggle can be written back to the configuration file.
+    /// Whether a configuration file was actually read.
     ///
-    /// False when the environment or the command line set the viewer, because
-    /// `apply_file_settings` lets those win and the saved value would be
-    /// ignored at the next start; and false when there is no file to write to
-    /// at all. Decided here rather than in the actor that does the writing, so
-    /// the state machine can say "this session only" instead of reporting a
-    /// save that changes nothing.
-    pub viewer_persistable: bool,
+    /// `--no-config`, or a profile with nowhere to put one, means there is
+    /// nothing to write back to - so a setting changed in the window applies
+    /// for the session and no longer.
+    pub have_file: bool,
+    /// Settings a command-line flag has fixed for this run.
+    ///
+    /// The environment can be asked directly whenever the question comes up,
+    /// because it cannot change while this runs. A flag leaves nothing to ask,
+    /// so it is recorded here as it is applied. One bit per
+    /// [`write::SettingKey`]; see [`Self::pin`].
+    pub cli_pinned: u16,
     /// The files that are never shown, however well they match.
     ///
     /// One derived value rather than the two settings it is built from, so
@@ -842,6 +875,49 @@ impl Settings {
     /// against those two paths, which is why a configuration could name ten
     /// shares and have two of them indexed - and why an actor spawned with no
     /// flat mapping configured probed an empty path forever.
+    /// Why a setting cannot be written back, if it cannot.
+    ///
+    /// Generalises the question `viewer_persistable` asked for one key. It
+    /// exists because the layering runs file, then environment, then command
+    /// line: writing a key one of the upper two holds would report a save,
+    /// change the file, and change nothing about the program - now or at the
+    /// next start. The window greys the field and says who is holding it
+    /// instead, which is what F2 has always done in words.
+    pub fn pin(&self, key: write::SettingKey) -> Option<Pin> {
+        if self.cli_pinned & key.bit() != 0 {
+            return Some(Pin::CommandLine);
+        }
+        // Asked exactly the way `apply_file_settings` asks it. For most keys
+        // an empty value is not a value; for the hide list it is a deliberate
+        // "nothing, for this run". The two have to agree, or the window would
+        // offer to change something the loader is about to overrule.
+        let set = if key.empty_is_a_value() {
+            std::env::var(key.env()).is_ok()
+        } else {
+            env_str(key.env()).is_some()
+        };
+        if set {
+            return Some(Pin::Environment(key.env()));
+        }
+        if !self.have_file {
+            return Some(Pin::NoFile);
+        }
+        None
+    }
+
+    /// Whether a change to this setting would still be there tomorrow.
+    pub fn can_save(&self, key: write::SettingKey) -> bool {
+        self.pin(key).is_none()
+    }
+
+    /// Records that a command-line flag has fixed this setting.
+    ///
+    /// Called by the flag parser as it applies an override, because that is
+    /// the only moment anything knows a flag was given.
+    pub fn pin_to_session(&mut self, key: write::SettingKey) {
+        self.cli_pinned |= key.bit();
+    }
+
     pub fn with_routes(routes: Arc<Routes>, tweak: impl FnOnce(Self) -> Self) -> Self {
         tweak(Self {
             routes,
@@ -864,11 +940,11 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             pdf_viewer: None,
-            // Assume not, and let `load` say otherwise once it knows there is
-            // a file and that nothing outranks it. Defaulting the other way
-            // would make every test fixture and every `--no-config` session
-            // claim it could save.
-            viewer_persistable: false,
+            // Assume not, and let `load` say otherwise once it knows there
+            // is a file. Defaulting the other way would make every test
+            // fixture and every `--no-config` session claim it could save.
+            have_file: false,
+            cli_pinned: 0,
             // Set here and not only in the shipped TOML, because
             // `write_default_if_absent` never rewrites a file that exists:
             // everybody who already has a `config.toml` gets this value and
@@ -947,9 +1023,10 @@ impl Settings {
         let mut s = Self::from_env_with(parsed.routes);
         s.aliases = Arc::new(parsed.aliases);
         s.apply_file_settings(&parsed.settings);
-        // The environment outranks the file, so saving into the file while
-        // `FILES_VIEWER` is set would report success and change nothing.
-        s.viewer_persistable = have_file && env_str("FILES_VIEWER").is_none();
+        // Everything else about what may be written is asked of the
+        // environment when the question comes up; this is the one part of the
+        // answer that is not still lying around to be read.
+        s.have_file = have_file;
         Ok(s)
     }
 
@@ -1388,7 +1465,7 @@ mod tests {
     #[test]
     fn the_built_in_defaults_have_nowhere_to_persist_a_viewer() {
         let s = Settings::load(&ConfigChoice::None).expect("built-ins must load");
-        assert!(!s.viewer_persistable);
+        assert!(!s.can_save(write::SettingKey::Viewer));
     }
 
     #[test]
@@ -1437,4 +1514,107 @@ mod tests {
     /// million-entry directory.
     const _: () = assert!(MIN_QUERY_LEN >= 3);
     const _: () = assert!(MAX_SERVER_QUERY_LEN > MIN_QUERY_LEN);
+
+    // --- what may be written back -------------------------------------------
+
+    use write::SettingKey;
+
+    #[test]
+    fn a_setting_can_be_saved_when_a_file_was_read_and_nothing_outranks_it() {
+        let _guard = lock();
+        let s = Settings {
+            have_file: true,
+            ..Settings::default()
+        };
+        assert_eq!(s.pin(SettingKey::Theme), None);
+        assert!(s.can_save(SettingKey::Theme));
+    }
+
+    /// `--no-config`, or a profile with nowhere to put a file. The setting
+    /// still applies; it just will not be there tomorrow.
+    #[test]
+    fn nothing_can_be_saved_when_there_is_no_configuration_file() {
+        let _guard = lock();
+        let s = Settings::default();
+        assert!(!s.have_file);
+        for key in SettingKey::ALL {
+            assert_eq!(s.pin(key), Some(Pin::NoFile), "{}", key.name());
+        }
+    }
+
+    #[test]
+    fn a_command_line_flag_pins_one_setting_and_leaves_the_others_alone() {
+        let _guard = lock();
+        let mut s = Settings {
+            have_file: true,
+            ..Settings::default()
+        };
+        s.pin_to_session(SettingKey::Viewer);
+
+        assert_eq!(s.pin(SettingKey::Viewer), Some(Pin::CommandLine));
+        assert!(!s.can_save(SettingKey::Viewer));
+        assert!(s.can_save(SettingKey::Theme), "a flag pinned the wrong key");
+    }
+
+    /// The variable is named, because the user has to find and unset it.
+    #[test]
+    fn an_environment_variable_pins_a_setting_and_says_which_one_it_is() {
+        let _guard = lock();
+        let s = Settings {
+            have_file: true,
+            ..Settings::default()
+        };
+
+        // SAFETY: as in the test above - every read of this variable in this
+        // binary happens under the same lock, and both calls below are inside
+        // the guard.
+        unsafe { std::env::set_var("FILES_THEME", "dark") };
+        let pin = s.pin(SettingKey::Theme);
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("FILES_THEME") };
+
+        assert_eq!(pin, Some(Pin::Environment("FILES_THEME")));
+    }
+
+    /// One bit each, or two settings would pin each other.
+    #[test]
+    fn every_writable_key_has_a_bit_of_its_own() {
+        let mut seen = 0u16;
+        for key in SettingKey::ALL {
+            assert_eq!(seen & key.bit(), 0, "{} shares a bit", key.name());
+            seen |= key.bit();
+        }
+        assert_eq!(seen.count_ones() as usize, SettingKey::ALL.len());
+    }
+
+    /// Each key names the variable that actually overrules it. A wrong name
+    /// here would send somebody hunting for a variable that is not the one.
+    #[test]
+    fn every_writable_key_names_an_environment_variable_the_loader_reads() {
+        for key in SettingKey::ALL {
+            let env = key.env();
+            assert!(env.starts_with("FILES_"), "{env} is not one of ours");
+            assert!(
+                crate::cli::HELP.contains(env),
+                "{env} is not documented in --help"
+            );
+        }
+    }
+
+    #[test]
+    fn every_reason_a_setting_cannot_be_saved_explains_itself() {
+        for pin in [
+            Pin::Environment("FILES_THEME"),
+            Pin::CommandLine,
+            Pin::NoFile,
+        ] {
+            let detail = pin.detail();
+            assert!(!detail.is_empty());
+            crate::view::style::check_all(
+                "a pin",
+                [detail.as_str()],
+                crate::view::style::Slot::Status,
+            );
+        }
+    }
 }
