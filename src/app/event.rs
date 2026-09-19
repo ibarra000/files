@@ -30,6 +30,8 @@ pub enum AppEvent {
     /// What the pointer meant, already resolved against the layout that drew
     /// it. See [`crate::app::state::pointer`].
     Intent(crate::app::state::pointer::Intent),
+    /// A control in the settings window was moved.
+    Setting(crate::app::state::SettingChange),
     Paste(String),
     Search(SearchMsg),
     Verify(VerifyMsg),
@@ -187,6 +189,18 @@ pub enum OpenMsg {
     ViewerSaveFailed {
         detail: String,
     },
+    /// A setting changed in the window reached the configuration file.
+    ///
+    /// Carries the label rather than the key, because what the user is owed
+    /// is confirmation about the thing they just changed, spelled the way the
+    /// form spelled it.
+    SettingSaved {
+        label: &'static str,
+    },
+    SettingSaveFailed {
+        label: &'static str,
+        detail: String,
+    },
 }
 
 /// Whether the frame needs redrawing.
@@ -253,8 +267,18 @@ pub enum Cmd {
     Preview(crate::preview::Request),
     /// Write the chosen viewer back to the configuration file, preserving
     /// every comment in it. Emitted only when the state machine already knows
-    /// the value can stick - see `Settings::viewer_persistable`.
+    /// the value can stick - see `Settings::can_save`.
     SaveViewer(ViewerKind),
+    /// Write a setting changed in the window back to the configuration file.
+    ///
+    /// Emitted only for a setting `Settings::can_save` has already agreed to,
+    /// so this never reaches the disk to report a save the next start would
+    /// ignore.
+    SaveSetting {
+        edit: crate::config::write::Edit,
+        /// How the form spells it, for the message that reports the outcome.
+        label: &'static str,
+    },
     /// Put text on the system clipboard.
     Copy(String),
     /// Fetch the clipboard, to be inserted at the caret.

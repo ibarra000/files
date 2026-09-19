@@ -29,8 +29,10 @@ mod model;
 mod overlay;
 pub mod pointer;
 mod preview;
+mod settings;
 
 pub use model::{EmptyReason, LiveProgress, QueryPhase, Severity, TOAST_LIFETIME, Toast, Urgency};
+pub use settings::SettingChange;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -494,6 +496,7 @@ impl AppState {
         match event {
             AppEvent::Key(key) => self.on_key(key, now),
             AppEvent::Intent(intent) => self.on_intent(intent, now),
+            AppEvent::Setting(change) => self.on_setting(change, now),
             AppEvent::Paste(text) => self.on_paste(&text, now),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),
@@ -1515,6 +1518,22 @@ impl AppState {
                 // `display`, not `name`: the latter is the config spelling
                 // and is round-tripped through the file.
                 self.set_toast(format!("Viewer: {}", viewer.display()), Severity::Info, now);
+                Response::redraw()
+            }
+            OpenMsg::SettingSaved { label } => {
+                self.set_toast(format!("Saved \u{b7} {label}"), Severity::Info, now);
+                Response::redraw()
+            }
+            // The change is already in force for this session - the state
+            // machine applied it before asking for it to be written - so the
+            // message says what did and did not happen rather than implying
+            // nothing did.
+            OpenMsg::SettingSaveFailed { label, detail } => {
+                self.set_toast(
+                    format!("{label} changed for this session only \u{b7} {detail}"),
+                    Severity::Warn,
+                    now,
+                );
                 Response::redraw()
             }
             // Not fatal, and not silent: the toggle still applies to this

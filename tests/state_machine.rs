@@ -2592,3 +2592,240 @@ fn a_configuration_without_aliases_is_unchanged() {
     assert!(s.expansion().is_none());
     assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
 }
+
+// --- settings changed in the window ----------------------------------------
+
+use files::app::state::SettingChange;
+use files::config::write::{Edit, Scalar, SettingKey, Typed};
+
+fn saveable() -> (AppState, Instant) {
+    let settings = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    let now = Instant::now();
+    (AppState::new(settings, now), now)
+}
+
+fn change(s: &mut AppState, key: SettingKey, typed: Typed, now: Instant) -> Response {
+    s.update(
+        AppEvent::Setting(SettingChange {
+            key,
+            typed,
+            label: "Something",
+        }),
+        now,
+    )
+}
+
+fn saved(r: &Response) -> Option<Edit> {
+    r.cmds.iter().find_map(|c| match c {
+        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
+        _ => None,
+    })
+}
+
+/// The change happens now and is written after. Waiting for a write that may
+/// be going to a network share would be a switch that moves when SMB says it
+/// may.
+#[test]
+fn a_setting_applies_before_it_is_written() {
+    let (mut s, now) = saveable();
+    assert!(s.settings.history);
+
+    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
+
+    assert!(!s.settings.history, "the change waited for the writer");
+    assert_eq!(
+        saved(&r),
+        Some(Edit::Set {
+            key: SettingKey::History,
+            value: Scalar::Bool(false),
+        })
+    );
+}
+
+/// The four that are read where they are used, rather than captured at
+/// startup by a worker that cannot be told.
+#[test]
+fn the_settings_that_apply_at_once_actually_do() {
+    let (mut s, now) = saveable();
+
+    change(&mut s, SettingKey::Theme, Typed::Text("dark".into()), now);
+    assert_eq!(s.settings.theme, files::config::ThemeChoice::Dark);
+
+    change(&mut s, SettingKey::Viewer, Typed::Text("avwin".into()), now);
+    assert_eq!(s.settings.viewer, ViewerKind::Avwin);
+    assert_eq!(s.viewer, ViewerKind::Avwin, "Enter still opens the old one");
+
+    change(&mut s, SettingKey::StaleNotices, Typed::Flag(false), now);
+    assert!(!s.settings.stale_notices);
+}
+
+/// The form promises these wait for a restart, so nothing may quietly change
+/// underneath a worker holding a copy.
+#[test]
+fn a_setting_that_waits_for_a_restart_does_not_move_now() {
+    let (mut s, now) = saveable();
+    let before = s.settings.live_updates;
+
+    let r = change(&mut s, SettingKey::LiveUpdates, Typed::Flag(!before), now);
+
+    assert_eq!(s.settings.live_updates, before, "a captured setting moved");
+    assert!(saved(&r).is_some(), "but it must still be written");
+}
+
+/// Writing a setting the environment holds would report a save the next start
+/// ignores, so no command is emitted at all.
+#[test]
+fn a_setting_that_cannot_be_saved_is_not_written() {
+    let (mut s, now) = state();
+    assert!(!s.settings.have_file);
+
+    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
+
+    assert!(saved(&r).is_none(), "a pinned setting reached the writer");
+    assert!(!s.settings.history, "but it still applies for the session");
+}
+
+/// An emptied box means "no viewer of my own", which is the default - not a
+/// path to nowhere.
+#[test]
+fn clearing_a_path_unsets_the_key_rather_than_writing_an_empty_one() {
+    let (mut s, now) = saveable();
+    let r = change(&mut s, SettingKey::PdfViewer, Typed::Text("  ".into()), now);
+
+    assert_eq!(
+        saved(&r),
+        Some(Edit::Unset {
+            key: SettingKey::PdfViewer
+        })
+    );
+}
+
+/// An empty list is not an absent one: hide_extensions = [] is the documented
+/// way to hide nothing, and unsetting would restore the shipped list.
+#[test]
+fn clearing_the_hidden_types_writes_an_empty_list_rather_than_unsetting() {
+    let (mut s, now) = saveable();
+    let r = change(
+        &mut s,
+        SettingKey::HideExtensions,
+        Typed::Text("".into()),
+        now,
+    );
+
+    assert_eq!(
+        saved(&r),
+        Some(Edit::Set {
+            key: SettingKey::HideExtensions,
+            value: Scalar::List(Vec::new()),
+        })
+    );
+}
+
+#[test]
+fn a_list_of_types_is_tidied_on_the_way_in() {
+    let (mut s, now) = saveable();
+    let r = change(
+        &mut s,
+        SettingKey::HideExtensions,
+        Typed::Text(" .DB , js ,, lnk ".into()),
+        now,
+    );
+
+    assert_eq!(
+        saved(&r),
+        Some(Edit::Set {
+            key: SettingKey::HideExtensions,
+            value: Scalar::List(vec!["db".into(), "js".into(), "lnk".into()]),
+        })
+    );
+}
+
+/// A failed save is a change that already happened, so the message says which
+/// part of it did not.
+#[test]
+fn a_failed_save_says_the_change_applies_for_this_session() {
+    let (mut s, now) = saveable();
+    s.update(
+        AppEvent::Open(OpenMsg::SettingSaveFailed {
+            label: "Colours",
+            detail: "the drive is full".into(),
+        }),
+        now,
+    );
+
+    let toast = s.toast.as_ref().expect("a failed save must say so");
+    assert!(toast.text.contains("Colours"), "{}", toast.text);
+    assert!(toast.text.contains("this session only"), "{}", toast.text);
+    assert_eq!(toast.severity, Severity::Warn);
+}
+
+#[test]
+fn a_successful_save_confirms_what_was_changed() {
+    let (mut s, now) = saveable();
+    s.update(
+        AppEvent::Open(OpenMsg::SettingSaved { label: "Colours" }),
+        now,
+    );
+
+    let toast = s.toast.as_ref().expect("a save must confirm itself");
+    assert!(toast.text.contains("Colours"), "{}", toast.text);
+    assert_eq!(toast.severity, Severity::Info);
+}
+
+/// The form promises which settings move now and which wait. This is the only
+/// thing that holds the promise to what actually happens.
+///
+/// Table-driven over every key, with a value that differs from the default, so
+/// a key added without a decision in `apply_live` fails here rather than
+/// becoming a control that silently does nothing.
+#[test]
+fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
+    fn differs(key: SettingKey) -> Typed {
+        match key {
+            SettingKey::Theme => Typed::Text("dark".into()),
+            SettingKey::Viewer => Typed::Text("avwin".into()),
+            SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
+            SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
+            SettingKey::HideExtensions => Typed::Text("zzz".into()),
+            SettingKey::History
+            | SettingKey::StaleNotices
+            | SettingKey::LiveUpdates
+            | SettingKey::HideSystemFiles => Typed::Flag(false),
+        }
+    }
+
+    /// Everything `apply_live` is allowed to touch, read back off `Settings`.
+    fn snapshot(s: &AppState) -> String {
+        format!(
+            "{:?}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}|{}",
+            s.settings.theme,
+            s.settings.viewer,
+            s.settings.history,
+            s.settings.stale_notices,
+            s.settings.hotkey,
+            s.settings.live_updates,
+            s.settings.pdf_viewer,
+            s.settings.hidden.suffixes().collect::<Vec<_>>(),
+            s.settings.hidden.hides_system(),
+        )
+    }
+
+    for key in SettingKey::ALL {
+        let (mut s, now) = saveable();
+        let before = snapshot(&s);
+        change(&mut s, key, differs(key), now);
+        let moved = snapshot(&s) != before;
+
+        assert_eq!(
+            moved,
+            key.applies_at_once(),
+            "{} says it applies at once: {}, but moving it changed the \
+             settings: {moved}",
+            key.name(),
+            key.applies_at_once(),
+        );
+    }
+}

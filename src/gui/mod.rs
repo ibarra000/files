@@ -400,6 +400,15 @@ impl Shell {
     /// hiding: it also has to hand the keyboard back to whatever the panel took
     /// it from, and that is a foreground change.
     fn park(&mut self) {
+        // An auxiliary window is a task somebody is in the middle of, and all
+        // three are drawn from `ui`, which only runs while the panel is up.
+        // Parking now would take the settings window with it, mid-edit. See
+        // the note at the top of `windows`: not hiding the panel is the only
+        // way a child outlives it, and for as long as one is open that is the
+        // trade being made.
+        if self.windows.any_open() {
+            return;
+        }
         if !self.frame.motion.is_hidden() || self.parked {
             return;
         }
@@ -603,6 +612,13 @@ impl eframe::App for Shell {
         };
         if clicked.forget_placement {
             self.forget_placement();
+        }
+        // Fed rather than sent, for the reason the pointer intents below are:
+        // these were produced on the drawing thread, and a send would go round
+        // the channel to arrive one frame later - which for a switch is a
+        // switch that moves after the click that moved it.
+        for change in clicked.changed {
+            self.app.feed(AppEvent::Setting(change), now);
         }
 
         // Alt makes the whole panel a handle, because the chrome left over

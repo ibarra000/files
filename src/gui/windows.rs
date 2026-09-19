@@ -34,6 +34,16 @@
 //! So Escape closes the window that has the keyboard, and the panel taking its
 //! children with it is the documented consequence rather than an oversight.
 //!
+//! ## Which is why the panel does not park while one is open
+//!
+//! That consequence was tolerable while these were documents somebody read.
+//! It is not tolerable for a form somebody fills in: dismissing the panel
+//! mid-edit would take the settings window with it and discard whatever was
+//! half-typed. `gui::Shell::park` therefore refuses to park while
+//! [`Windows::any_open`], which is the one remaining way out named above -
+//! stop hiding the panel - taken deliberately and only for as long as a window
+//! is up.
+//!
 //! # Why Diagnostics exists at all
 //!
 //! `--doctor` already prints everything here. But this program is about to stop
@@ -44,10 +54,19 @@
 
 use eframe::egui;
 
-use crate::app::state::AppState;
+use crate::app::state::{AppState, SettingChange};
 use crate::config::Settings;
+use crate::config::write::{SettingKey, Typed};
 use crate::gui::theme::{self, Theme, Weight};
 use crate::view;
+
+/// The label column, so every control in the form starts at one rule rather
+/// than stepping in and out with the length of each name.
+const KEY_COLUMN: f32 = 190.0;
+
+/// Wide enough for a path worth reading, and for the hint text under an empty
+/// box.
+const TEXT_WIDTH: f32 = 260.0;
 
 /// Which of the three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -95,6 +114,12 @@ pub struct Windows {
     /// times a second would turn a diagnostics window into a load test against
     /// the thing being diagnosed.
     report: Option<String>,
+    /// The text box being typed in, and what is in it.
+    ///
+    /// Not a second copy of the settings: it exists between the moment a box
+    /// takes the keyboard and the moment it gives it up, which is state any
+    /// text box has to have. One, because only one can have the keyboard.
+    editing: Option<(SettingKey, String)>,
 }
 
 impl Windows {
@@ -163,8 +188,10 @@ impl Windows {
             self.help = open;
         }
         if self.settings {
+            let editing = &mut self.editing;
+            let changed = &mut clicked.changed;
             let open = show_one(ctx, theme, Window::Settings, |ui| {
-                if self::settings(ui, theme, settings, placement) {
+                if self::settings(ui, theme, settings, placement, editing, changed) {
                     clicked.forget_placement = true;
                 }
             });
@@ -192,9 +219,11 @@ impl Windows {
 /// A struct of one field rather than a bare `bool`, because the Settings window
 /// is where a second such button would go and a `bool` return says nothing
 /// about which one it was.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Clicked {
     pub forget_placement: bool,
+    /// Controls the user moved, in the order they moved them.
+    pub changed: Vec<SettingChange>,
 }
 
 /// One window, returning whether it is still open.
@@ -308,12 +337,28 @@ fn settings(
     theme: &Theme,
     settings: &Settings,
     placement: Option<(i32, i32)>,
+    editing: &mut Option<(SettingKey, String)>,
+    changed: &mut Vec<SettingChange>,
 ) -> bool {
-    // Read-only, deliberately. Everything here comes from a file the user
-    // already owns and can already edit, and a settings window that writes a
-    // second copy of the truth is how the file and the window come to disagree.
-    // What this adds is knowing *what is in force right now*, which is the
-    // question somebody actually has.
+    // This window used to be read-only, on the grounds that a settings window
+    // writing a second copy of the truth is how the file and the window come
+    // to disagree. That objection is right and is answered rather than
+    // overruled: there is no second copy. Every control below is drawn from
+    // the live `Settings` each frame, and a change is written through
+    // `config::write`, which reads the file back before it keeps the result.
+    // The only state held here is the text of the box being typed in, which
+    // any text box has to have.
+    for section in view::settings::sections(settings) {
+        heading(ui, theme, section.heading);
+        for row in &section.rows {
+            control(ui, theme, row, editing, changed);
+        }
+    }
+
+    // Still read-only, and the one thing here that is. A mistyped share path
+    // is the single configuration error with no symptom - the search simply
+    // finds nothing and the code looks like a job with no files - so it is
+    // worth more care than a text box in a list.
     heading(ui, theme, "Drives");
     for mapping in settings.routes.enabled() {
         row(
@@ -331,44 +376,8 @@ fn settings(
         );
     }
 
-    heading(ui, theme, "Shortcut");
-    row(
-        ui,
-        theme,
-        "Summon",
-        &settings
-            .hotkey
-            .bound()
-            .map(crate::hotkey::spec::describe)
-            .unwrap_or_else(|| "off".into()),
-    );
-
-    heading(ui, theme, "Opening");
-    row(ui, theme, "Viewer", settings.viewer.display());
-    if let Some(path) = &settings.pdf_viewer {
-        row(ui, theme, "PDF viewer", &path.display().to_string());
-    }
-    row(
-        ui,
-        theme,
-        "Read-only",
-        if settings.pdf_read_only { "on" } else { "off" },
-    );
-    row(
-        ui,
-        theme,
-        "Closes on open",
-        if settings.auto_hide { "yes" } else { "no" },
-    );
-
-    heading(ui, theme, "Remembering");
-    row(
-        ui,
-        theme,
-        "Recent codes",
-        if settings.history { "on" } else { "off" },
-    );
     if let Some(path) = &settings.history_path {
+        heading(ui, theme, "Remembering");
         row(ui, theme, "Stored in", &path.display().to_string());
     }
 
@@ -422,6 +431,109 @@ fn settings(
         }
     }
     forget
+}
+
+/// One setting, drawn as whatever kind of control it needs.
+///
+/// A control whose value cannot be saved is drawn disabled rather than hidden.
+/// Hiding it would answer "why can I not change the theme?" with silence; this
+/// way the setting is visible, its value is visible, and the line underneath
+/// names what is holding it.
+fn control(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    row: &view::settings::Row,
+    editing: &mut Option<(SettingKey, String)>,
+    changed: &mut Vec<SettingChange>,
+) {
+    use view::settings::Field;
+
+    let mut push = |typed| {
+        changed.push(SettingChange {
+            key: row.key,
+            typed,
+            label: row.label,
+        })
+    };
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(KEY_COLUMN, 22.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.label(
+                    egui::RichText::new(row.label)
+                        .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                        .color(theme.accent),
+                );
+            },
+        );
+
+        ui.add_enabled_ui(row.pin.is_none(), |ui| match &row.field {
+            // Every option at once rather than a drop-down. There are two or
+            // three of them, they have to be read to be chosen between, and a
+            // menu that has to be opened to see what is in it is a menu that
+            // hides the answer to the question the window was opened to ask.
+            Field::Choice { options, current } => {
+                for (i, option) in options.iter().enumerate() {
+                    if ui.selectable_label(i == *current, option.label).clicked() && i != *current {
+                        push(Typed::Text(option.value.to_string()));
+                    }
+                }
+            }
+            Field::Toggle { on } => {
+                let mut value = *on;
+                if ui.checkbox(&mut value, "").changed() {
+                    push(Typed::Flag(value));
+                }
+            }
+            // Committed when the box gives up the keyboard, which is both
+            // Enter and clicking away. Not per keystroke: every character of a
+            // path would otherwise be a write to a file on a network share,
+            // and half of them would name a program that does not exist yet.
+            Field::Text { value, placeholder } => {
+                let mut text = match &editing {
+                    Some((key, buffer)) if *key == row.key => buffer.clone(),
+                    _ => value.clone(),
+                };
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .hint_text(*placeholder)
+                        .desired_width(TEXT_WIDTH),
+                );
+                if response.lost_focus() {
+                    if text.trim() != value.trim() {
+                        push(Typed::Text(text));
+                    }
+                    *editing = None;
+                } else if response.has_focus() {
+                    *editing = Some((row.key, text));
+                }
+            }
+        });
+    });
+
+    // The sentence that says what the setting does, then whatever caveat it
+    // carries. Indented under the control rather than beside it, because at
+    // this width a sentence beside a checkbox is a sentence three words wide.
+    ui.horizontal(|ui| {
+        ui.add_space(KEY_COLUMN);
+        ui.vertical(|ui| {
+            ui.label(
+                egui::RichText::new(row.help)
+                    .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                    .color(theme.dim),
+            );
+            if let Some(caveat) = row.caveat() {
+                ui.label(
+                    egui::RichText::new(caveat)
+                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .color(theme.tone(view::status::Tone::Warn)),
+                );
+            }
+        });
+    });
 }
 
 fn diagnostics(ui: &mut egui::Ui, theme: &Theme, report: &str) {

@@ -155,6 +155,24 @@ impl SettingKey {
     pub const fn bit(self) -> u16 {
         1 << (self as u16)
     }
+
+    /// Whether a change is picked up without restarting.
+    ///
+    /// A property of the key because two places need it and must not
+    /// disagree: `app::state::settings` applies exactly these, and
+    /// `view::settings` is what tells the user the rest will wait. Two lists
+    /// would be one promise and one way of breaking it.
+    ///
+    /// What makes a key one of these is that it is read where it is used.
+    /// `Settings` is cloned into the backend, both workers and every index
+    /// actor, so anything one of them captured at startup cannot be changed
+    /// underneath it.
+    pub const fn applies_at_once(self) -> bool {
+        matches!(
+            self,
+            Self::Theme | Self::Viewer | Self::History | Self::StaleNotices
+        )
+    }
 }
 
 /// Every key above is one the loader accepts.
@@ -259,6 +277,58 @@ pub enum Edit {
     Set { key: SettingKey, value: Scalar },
     /// Remove the key, returning the setting to its default.
     Unset { key: SettingKey },
+}
+
+/// What a control in the settings window produced.
+///
+/// Two shapes, because there are two kinds of control that can produce a
+/// value: a box with text in it and a switch. Which of the four [`Scalar`]s
+/// that becomes is the key's business, not the window's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Typed {
+    Text(String),
+    Flag(bool),
+}
+
+impl Edit {
+    /// What a control's value amounts to, for this key.
+    ///
+    /// The per-key shape lives here rather than in the window because it is
+    /// the same knowledge [`current`] needs to read the value back: a key
+    /// written as a list and checked as a string would report every save as
+    /// having not stuck.
+    pub fn from_typed(key: SettingKey, typed: Typed) -> Self {
+        let value = match (key, typed) {
+            (_, Typed::Flag(on)) => Scalar::Bool(on),
+
+            // An emptied box means "no viewer of my own", which is the
+            // default - so the key goes away rather than being written as a
+            // path to nowhere.
+            (SettingKey::PdfViewer, Typed::Text(text)) if text.trim().is_empty() => {
+                return Self::Unset { key };
+            }
+            (SettingKey::PdfViewer, Typed::Text(text)) => Scalar::Path(text.trim().to_string()),
+
+            // An empty list is not an absent one. `hide_extensions = []` is
+            // the documented way to hide nothing, and unsetting it here would
+            // silently restore the shipped list instead.
+            (SettingKey::HideExtensions, Typed::Text(text)) => Scalar::List(
+                text.split(',')
+                    .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .collect(),
+            ),
+
+            (_, Typed::Text(text)) => Scalar::Str(text.trim().to_string()),
+        };
+        Self::Set { key, value }
+    }
+
+    pub fn key(&self) -> SettingKey {
+        match self {
+            Self::Set { key, .. } | Self::Unset { key } => *key,
+        }
+    }
 }
 
 /// Applies every edit, preserving everything else in the file.

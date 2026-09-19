@@ -155,7 +155,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                     options: THEMES,
                     current: index_of(THEMES, settings.theme.name()),
                 },
-                Applies::Now,
             )],
         },
         Section {
@@ -171,7 +170,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                         options: VIEWERS,
                         current: index_of(VIEWERS, settings.viewer.name()),
                     },
-                    Applies::Now,
                 ),
                 row(
                     settings,
@@ -183,7 +181,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                         value: path_of(settings.pdf_viewer.as_deref()),
                         placeholder: "Whatever Windows uses",
                     },
-                    Applies::AtNextStart,
                 ),
             ],
         },
@@ -199,7 +196,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                     value: hotkey_of(settings),
                     placeholder: "ctrl+shift+space",
                 },
-                Applies::AtNextStart,
             )],
         },
         Section {
@@ -213,7 +209,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                 Field::Toggle {
                     on: settings.history,
                 },
-                Applies::Now,
             )],
         },
         Section {
@@ -228,7 +223,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                     Field::Toggle {
                         on: settings.live_updates,
                     },
-                    Applies::AtNextStart,
                 ),
                 row(
                     settings,
@@ -239,7 +233,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                     Field::Toggle {
                         on: settings.stale_notices,
                     },
-                    Applies::Now,
                 ),
             ],
         },
@@ -264,7 +257,6 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                             .join(", "),
                         placeholder: "Nothing is hidden",
                     },
-                    Applies::AtNextStart,
                 ),
                 row(
                     settings,
@@ -275,23 +267,10 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                     Field::Toggle {
                         on: settings.hidden.hides_system(),
                     },
-                    Applies::AtNextStart,
                 ),
             ],
         },
     ]
-}
-
-/// Whether a change to a setting is read again without a restart.
-///
-/// Named rather than a bare bool at eight call sites, because `true` in that
-/// position reads as "yes, restart" about as easily as "yes, applies now".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Applies {
-    /// Read where it is used, so a change is visible at once.
-    Now,
-    /// Captured by a worker at startup, so a change waits for the next one.
-    AtNextStart,
 }
 
 fn row(
@@ -300,7 +279,6 @@ fn row(
     label: &'static str,
     help: &'static str,
     field: Field,
-    applies: Applies,
 ) -> Row {
     Row {
         key,
@@ -308,7 +286,10 @@ fn row(
         help,
         field,
         pin: settings.pin(key),
-        needs_restart: applies == Applies::AtNextStart,
+        // Asked of the key rather than written out here, so that this and the
+        // module that does the applying cannot come to disagree about which
+        // settings wait.
+        needs_restart: !key.applies_at_once(),
     }
 }
 

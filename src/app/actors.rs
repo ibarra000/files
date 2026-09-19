@@ -356,6 +356,24 @@ impl Actors {
                     viewer,
                     self.events.clone(),
                 ),
+                Cmd::SaveSetting { edit, label } => crate::config::write::save_async(
+                    self.backend
+                        .settings
+                        .routes
+                        .source()
+                        .path()
+                        .map(Path::to_path_buf),
+                    vec![edit],
+                    self.events.clone(),
+                    move |outcome| {
+                        AppEvent::Open(match outcome {
+                            Ok(()) => crate::app::event::OpenMsg::SettingSaved { label },
+                            Err(detail) => {
+                                crate::app::event::OpenMsg::SettingSaveFailed { label, detail }
+                            }
+                        })
+                    },
+                ),
                 // Best effort, and silently so. The previewer is absent only
                 // when its thread would not start, and a panel that refuses to
                 // search because it could not tell you a file's size is a worse
