@@ -128,6 +128,12 @@ fn source_for(args: &cli::Args, settings: &Settings) -> Arc<dyn DirSource> {
 /// fell over.
 fn run_gui(args: cli::Args, settings: Settings) -> io::Result<()> {
     let source = source_for(&args, &settings);
+    // Before the workers, so the first thing that writes finds somewhere to
+    // write to rather than discovering it is missing three threads away.
+    for created in files::paths::ensure_app_dirs(&settings) {
+        log::info!("created {}", created.display());
+    }
+
     prewarm(&settings, Arc::clone(&source));
 
     if let Err(err) = files::gui::run(settings, source) {

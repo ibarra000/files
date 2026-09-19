@@ -469,6 +469,16 @@ fn viewer_edit(viewer: ViewerKind) -> Edit {
     }
 }
 
+/// Replaces the whole file, for a caller that has already proved the text.
+///
+/// The migration is the one thing besides an edit that rewrites this file, and
+/// it rewrites all of it. It gets to the same temp-then-rename rather than a
+/// `fs::write` of its own, because the reason for that is the file and not the
+/// caller - see [`write_atomically`].
+pub fn replace(path: &Path, text: &str) -> Result<(), String> {
+    write_atomically(path, text).map_err(|e| e.to_string())
+}
+
 /// Replaces the file in one step.
 ///
 /// The same temp-then-rename this crate uses for the index, for a sharper

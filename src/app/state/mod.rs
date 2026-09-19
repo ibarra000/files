@@ -246,7 +246,7 @@ impl AppState {
         let statuses: Vec<Arc<IndexStatus>> = (0..settings.routes.all().len())
             .map(|_| Arc::new(IndexStatus::default()))
             .collect();
-        Self {
+        let mut state = Self {
             settings,
             input: Input::new(),
             history: History::new(),
@@ -293,7 +293,16 @@ impl AppState {
             preview_due_at: None,
             help_scroll: 0,
             hovered: None,
+        };
+
+        // Said on the first frame, because it has already happened by the time
+        // anything can be drawn. A program that rewrote a file the user
+        // maintains and never mentioned it would have, as its first symptom, a
+        // comment of theirs having quietly vanished.
+        if let Some(migrated) = state.settings.migrated.clone() {
+            state.set_toast(migrated.detail(), Severity::Info, now);
         }
+        state
     }
 
     /// The line, taken apart.

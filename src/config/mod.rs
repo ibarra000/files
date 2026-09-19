@@ -12,6 +12,7 @@
 
 pub mod file;
 pub mod hidden;
+pub mod migrate;
 pub mod write;
 
 use std::path::PathBuf;
@@ -838,6 +839,12 @@ pub struct Settings {
     /// there would be a regression, so this is reported by `--doctor` and
     /// surfaced as a toast instead.
     pub pdf_viewer: Option<PathBuf>,
+    /// What was done to a configuration too old for this build to read.
+    ///
+    /// Carried so it can be said out loud. A program that rewrites a file the
+    /// user maintains and never mentions it is one whose first symptom is a
+    /// comment of theirs having vanished.
+    pub migrated: Option<file::Migrated>,
     /// The folder to look in for a newer version.
     ///
     /// Unset means the whole feature is inert: no thread, no round trip and
@@ -947,6 +954,7 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             pdf_viewer: None,
+            migrated: None,
             update_from: None,
             // Assume not, and let `load` say otherwise once it knows there
             // is a file. Defaulting the other way would make every test
@@ -1006,11 +1014,14 @@ impl Settings {
         // Whether a file was actually read decides whether F2 has anywhere to
         // save to, so it is tracked here rather than rediscovered later.
         let mut have_file = false;
+        let mut migrated = None;
         let parsed = match choice {
             ConfigChoice::None => file::builtin(),
             ConfigChoice::Explicit(path) => {
                 have_file = true;
-                file::load_file(path, true)?
+                let (parsed, was) = file::load_migrating(path, true)?;
+                migrated = was;
+                parsed
             }
             ConfigChoice::Default => match file::default_config_path() {
                 Some(path) => {
@@ -1019,7 +1030,9 @@ impl Settings {
                     let _ = file::write_default_if_absent(&path);
                     if path.exists() {
                         have_file = true;
-                        file::load_file(&path, false)?
+                        let (parsed, was) = file::load_migrating(&path, false)?;
+                        migrated = was;
+                        parsed
                     } else {
                         file::builtin()
                     }
@@ -1030,6 +1043,7 @@ impl Settings {
 
         let mut s = Self::from_env_with(parsed.routes);
         s.aliases = Arc::new(parsed.aliases);
+        s.migrated = migrated;
         s.apply_file_settings(&parsed.settings);
         // Everything else about what may be written is asked of the
         // environment when the question comes up; this is the one part of the

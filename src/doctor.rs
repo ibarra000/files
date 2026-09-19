@@ -139,6 +139,23 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         }
     );
 
+    // Said here as well as in the panel, because the toast that reports it
+    // has five seconds and this does not: somebody asking why their file
+    // looks different is asking hours later.
+    if let Some(migrated) = &settings.migrated {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "UPDATED brought forward from version {}",
+            migrated.from
+        );
+        let _ = writeln!(
+            out,
+            "        the original is at {}",
+            migrated.backup.display()
+        );
+    }
+
     let _ = writeln!(out);
     let _ = writeln!(out, "OK");
 }
@@ -166,6 +183,7 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
     report_quick_search(settings, out);
     let _ = writeln!(out);
     report_viewer(settings, out);
+    report_directories(settings, out);
     report_updates(settings, out);
     report_recommendations(settings, out);
 }
@@ -745,6 +763,52 @@ fn report_updates(settings: &Settings, out: &mut dyn Write) {
         }
         crate::update::Found::Unavailable { detail } => {
             let _ = writeln!(out, "  available           unknown - {detail}");
+        }
+    }
+    let _ = writeln!(out);
+}
+
+/// The directories this program writes into, and whether they are there.
+///
+/// Each is created on demand by whatever writes to it, so this is not what
+/// makes them exist - it is what makes their absence visible. A profile whose
+/// `%APPDATA%` is redirected to a share that is not mounted fails one write at
+/// a time, in a worker, hours apart, and every failure looks like a different
+/// bug. Asked all at once it is one line naming the folder nobody can write.
+fn report_directories(settings: &Settings, out: &mut dyn Write) {
+    let _ = writeln!(out, "DIRECTORIES");
+    let places = [
+        (
+            "settings",
+            crate::config::file::default_config_path()
+                .and_then(|p| p.parent().map(Path::to_path_buf)),
+        ),
+        ("index cache", settings.cache_dir.clone()),
+        (
+            "recent codes",
+            settings
+                .history_path
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf),
+        ),
+    ];
+
+    for (what, dir) in places {
+        match dir {
+            Some(dir) if dir.is_dir() => {
+                let _ = writeln!(out, "  {what:<19} {}", dir.display());
+            }
+            Some(dir) => {
+                let _ = writeln!(
+                    out,
+                    "  {what:<19} {}  MISSING - and could not be created",
+                    dir.display()
+                );
+            }
+            None => {
+                let _ = writeln!(out, "  {what:<19} nowhere - this profile has none");
+            }
         }
     }
     let _ = writeln!(out);

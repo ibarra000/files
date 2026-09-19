@@ -20,6 +20,39 @@ use smallvec::SmallVec;
 
 use crate::util::winpath;
 
+/// Creates the directories this program writes into, and says which it had to.
+///
+/// Every one of these is created on demand by whatever writes there, so this
+/// is not what makes them exist - it is what makes their absence *visible*. A
+/// profile where `%APPDATA%` is redirected to a share that is not mounted
+/// fails one write at a time, in a worker, hours apart, and each failure looks
+/// like a different bug. Asked all at once at startup, it is one line in
+/// `--doctor` naming the directory nobody can write.
+///
+/// Returns what was created rather than what exists, so an ordinary start says
+/// nothing at all and a first run after an upgrade says exactly what it added.
+pub fn ensure_app_dirs(settings: &crate::config::Settings) -> Vec<PathBuf> {
+    let wanted = [
+        crate::config::file::default_config_path().and_then(|p| p.parent().map(Path::to_path_buf)),
+        settings.cache_dir.clone(),
+        settings
+            .history_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+    ];
+
+    wanted
+        .into_iter()
+        .flatten()
+        .filter(|dir| !dir.as_os_str().is_empty() && !dir.is_dir())
+        // Best effort, and silently so per directory: a read-only profile is
+        // a thing this program runs on, and the built-in defaults work there.
+        // What it must not do is stop starting over a folder it only wanted.
+        .filter(|dir| std::fs::create_dir_all(dir).is_ok())
+        .collect()
+}
+
 /// Identifies a mapping. Its position in the configured list.
 ///
 /// Deliberately not the name: it is compared per result row and used as a map
@@ -372,5 +405,56 @@ impl Routes {
     /// Every enabled live mapping, in configuration order.
     pub fn live(&self) -> impl Iterator<Item = &Mapping> {
         self.enabled().filter(|m| m.kind == MappingKind::Live)
+    }
+}
+
+#[cfg(test)]
+mod dir_tests {
+    use super::*;
+
+    /// Creates what is missing, and says so.
+    #[test]
+    fn a_missing_directory_is_created_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache").join("deeper");
+        let settings = crate::config::Settings {
+            cache_dir: Some(cache.clone()),
+            history_path: None,
+            ..Default::default()
+        };
+
+        let created = ensure_app_dirs(&settings);
+
+        assert!(cache.is_dir(), "the directory was not created");
+        assert!(created.contains(&cache), "{created:?}");
+    }
+
+    /// An ordinary start says nothing at all, which is what makes the first
+    /// start after an upgrade worth reading.
+    #[test]
+    fn a_directory_that_is_already_there_is_not_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = crate::config::Settings {
+            cache_dir: Some(dir.path().to_path_buf()),
+            history_path: None,
+            ..Default::default()
+        };
+
+        assert!(!ensure_app_dirs(&settings).contains(&dir.path().to_path_buf()));
+    }
+
+    /// A read-only profile is a thing this runs on, and the built-in defaults
+    /// work there. It must not stop starting over a folder it only wanted.
+    #[test]
+    fn a_directory_that_cannot_be_created_is_left_out_rather_than_fatal() {
+        let settings = crate::config::Settings {
+            // A path under a file is not a directory anybody can make.
+            cache_dir: Some(PathBuf::from(r"\?\nul\files\cache")),
+            history_path: None,
+            ..Default::default()
+        };
+
+        let created = ensure_app_dirs(&settings);
+        assert!(created.iter().all(|p| p.is_dir()), "{created:?}");
     }
 }

@@ -192,7 +192,7 @@ fn bool_at(ctx: &mut Ctx<'_>, key: &str, item: &Item) -> Option<bool> {
 /// Keys accepted at each level. Anything else is an error: a typo like
 /// `enable = false` that is quietly ignored leaves someone searching a share
 /// they believe they switched off.
-const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh", "depth"];
+pub(super) const MAPPING_KEYS: &[&str] = &["name", "path", "kind", "enabled", "refresh", "depth"];
 pub(super) const SETTINGS_KEYS: &[&str] = &[
     "enum_strategy",
     "matcher",
@@ -214,7 +214,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "hide_system_files",
 ];
 const ALIAS_KEYS: &[&str] = &["name", "code", "note"];
-const ROOT_KEYS: &[&str] = &["version", "mapping", "settings", "alias"];
+pub(super) const ROOT_KEYS: &[&str] = &["version", "mapping", "settings", "alias"];
 
 /// Global options a config file may carry. Applied under the environment.
 #[derive(Debug, Clone, Default)]
@@ -979,6 +979,127 @@ pub fn load_file(path: &Path, explicit: bool) -> Result<ParsedConfig, Vec<Config
         ConfigSource::Default(path.to_path_buf())
     };
     parse(&text, path, source)
+}
+
+/// What happened to a configuration too old for this build to read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Migrated {
+    /// What it said before.
+    pub from: i64,
+    /// Where the original was put.
+    pub backup: PathBuf,
+}
+
+impl Migrated {
+    /// What to tell somebody whose file was rewritten under them.
+    ///
+    /// Said rather than done silently, because the alternative is a program
+    /// that edits a file the user maintains and never mentions it - and the
+    /// first they would know is a comment of theirs having vanished.
+    pub fn detail(&self) -> String {
+        format!(
+            "Your settings were from an older version \u{b7} brought up to date, \
+             and the original is at {}",
+            self.backup.display()
+        )
+    }
+}
+
+/// Loads `path`, bringing it forward first if it is too old to read.
+///
+/// A version 1 file is otherwise a hard startup failure. That is a fair answer
+/// for one person who has just edited their own file and a very poor one for a
+/// fleet that has just been upgraded, where it would stop every machine whose
+/// configuration was stale, all at once, because of something nobody asked
+/// for. See [`super::migrate`].
+///
+/// The original is copied aside before anything is written. It holds paths
+/// somebody typed by hand and it roams with their profile, so the recoverable
+/// version of this is the only honest one.
+pub fn load_migrating(
+    path: &Path,
+    explicit: bool,
+) -> Result<(ParsedConfig, Option<Migrated>), Vec<ConfigError>> {
+    let first = load_file(path, explicit);
+    // Only the version this build cannot read is worth rewriting anybody's
+    // file over. Every other error is the user's own edit, and they are far
+    // better placed to fix it than this is to guess at it.
+    let Err(errors) = first else {
+        return first.map(|parsed| (parsed, None));
+    };
+    let Some(from) = outdated_version(path) else {
+        return Err(errors);
+    };
+
+    let text = std::fs::read_to_string(path).map_err(|e| vec![unreadable(path, &e)])?;
+    let migrated = match super::migrate::to_current(&text) {
+        Ok(migrated) => migrated,
+        // Report the original errors rather than the migration's: the user
+        // is being told their file is too old, which is true and actionable,
+        // and why an upgrade attempt also failed is this program's problem.
+        Err(_) => return Err(errors),
+    };
+
+    let source = if explicit {
+        ConfigSource::Explicit(path.to_path_buf())
+    } else {
+        ConfigSource::Default(path.to_path_buf())
+    };
+    // Proof before replacement, exactly as `write::save` insists on. A
+    // migration that produced something unloadable would otherwise turn a
+    // file with a fixable problem into one with two.
+    let parsed = parse(&migrated, path, source)?;
+
+    let backup = backup_path(path, from);
+    std::fs::copy(path, &backup).map_err(|e| vec![unwritable(&backup, &e.to_string())])?;
+    super::write::replace(path, &migrated).map_err(|e| vec![unwritable(path, &e)])?;
+
+    Ok((parsed, Some(Migrated { from, backup })))
+}
+
+/// The version a file claims, when this build cannot read it.
+///
+/// Read on its own rather than plucked out of the errors, because an error
+/// message is for a person and parsing one to make a decision is how a
+/// decision comes to depend on its own wording.
+fn outdated_version(path: &Path) -> Option<i64> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: toml_edit::ImDocument<String> = toml_edit::ImDocument::parse(text).ok()?;
+    let version = doc.get("version").and_then(Item::as_integer)?;
+    (version < CONFIG_VERSION).then_some(version)
+}
+
+/// Where the original goes. Beside the file, so it is found by whoever goes
+/// looking for the file itself.
+fn backup_path(path: &Path, from: i64) -> PathBuf {
+    let mut name = path
+        .file_stem()
+        .unwrap_or_else(|| std::ffi::OsStr::new("config"))
+        .to_os_string();
+    name.push(format!(".v{from}.bak"));
+    path.with_file_name(name)
+}
+
+fn unreadable(path: &Path, e: &std::io::Error) -> ConfigError {
+    ConfigError {
+        path: path.to_path_buf(),
+        loc: None,
+        entry: None,
+        rule: None,
+        message: format!("could not be read: {e}"),
+        snippet: None,
+    }
+}
+
+fn unwritable(path: &Path, detail: &str) -> ConfigError {
+    ConfigError {
+        path: path.to_path_buf(),
+        loc: None,
+        entry: None,
+        rule: None,
+        message: format!("could not be brought up to date: {detail}"),
+        snippet: None,
+    }
 }
 
 /// The compiled-in defaults, parsed through the ordinary loader.
@@ -1872,6 +1993,107 @@ enable = false
     fn a_missing_explicit_file_is_an_error() {
         let errs = load_file(Path::new(r"C:\definitely-not-here-8812.toml"), true).unwrap_err();
         assert!(messages(&errs).contains("could not be read"));
+    }
+
+    // --- bringing an old file forward ---------------------------------------
+
+    /// The shape the shipped version 1 file actually had.
+    const V1_FILE: &str = r#"
+version = 1
+
+[[mapping]]
+name    = "jobs"
+path    = 'R:\'
+kind    = "job-folder"
+enabled = true
+case    = "lower"
+
+  [[mapping.rules]]
+  pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)$'
+  folder  = '${1}${2}'
+"#;
+
+    /// The failure an automatic update must never cause: every machine whose
+    /// configuration was stale refusing to start, all at once.
+    #[test]
+    fn a_version_one_file_is_brought_forward_rather_than_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, V1_FILE).unwrap();
+
+        let (parsed, migrated) = load_migrating(&path, false).expect("it must load");
+
+        assert_eq!(parsed.routes.all().len(), 1);
+        assert_eq!(parsed.routes.all()[0].kind, MappingKind::Tree);
+        let migrated = migrated.expect("it must report that it happened");
+        assert_eq!(migrated.from, 1);
+    }
+
+    /// The paths are what somebody typed, and the file roams with their
+    /// profile. An unattended delete is unrecoverable; this is not.
+    #[test]
+    fn the_original_is_kept_beside_the_file_it_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, V1_FILE).unwrap();
+
+        let (_, migrated) = load_migrating(&path, false).unwrap();
+        let backup = migrated.unwrap().backup;
+
+        assert_eq!(backup.parent(), path.parent());
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), V1_FILE);
+    }
+
+    #[test]
+    fn the_file_on_disk_is_the_one_that_was_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, V1_FILE).unwrap();
+
+        load_migrating(&path, false).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(&format!("version = {CONFIG_VERSION}")),
+            "{after}"
+        );
+        assert!(!after.contains("job-folder"), "{after}");
+        // And it loads a second time without being migrated again.
+        let (_, migrated) = load_migrating(&path, false).unwrap();
+        assert_eq!(
+            migrated, None,
+            "it migrated a file that was already current"
+        );
+    }
+
+    /// Only the version is worth rewriting somebody's file over. Every other
+    /// error is their own edit, and they are far better placed to fix it.
+    #[test]
+    fn an_ordinary_mistake_in_a_current_file_is_reported_rather_than_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let broken = format!("version = {CONFIG_VERSION}\n[[mapping]]\nname = \"x\"\n");
+        std::fs::write(&path, &broken).unwrap();
+
+        assert!(load_migrating(&path, false).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "a file with an ordinary mistake in it was rewritten"
+        );
+    }
+
+    /// A version this cannot upgrade from is still a refusal, and the file is
+    /// left exactly as it was.
+    #[test]
+    fn a_version_from_the_future_is_refused_and_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let future = "version = 99\n";
+        std::fs::write(&path, future).unwrap();
+
+        assert!(load_migrating(&path, false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), future);
     }
 
     // --- updates ------------------------------------------------------------
