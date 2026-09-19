@@ -408,6 +408,23 @@ fn settings(
         }
     }
 
+    heading(ui, theme, "Updates");
+    row(
+        ui,
+        theme,
+        "This version",
+        &crate::update::Version::current().to_string(),
+    );
+    match &settings.update_from {
+        Some(folder) => row(ui, theme, "Looking in", &folder.display().to_string()),
+        None => row(
+            ui,
+            theme,
+            "Looking in",
+            "Nowhere \u{b7} set update_from to be told about new versions",
+        ),
+    }
+
     heading(ui, theme, "Configuration file");
     let config = crate::config::file::default_config_path();
     match &config {

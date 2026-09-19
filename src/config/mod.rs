@@ -838,6 +838,13 @@ pub struct Settings {
     /// there would be a regression, so this is reported by `--doctor` and
     /// surfaced as a toast instead.
     pub pdf_viewer: Option<PathBuf>,
+    /// The folder to look in for a newer version.
+    ///
+    /// Unset means the whole feature is inert: no thread, no round trip and
+    /// nothing on screen. That matters, because this ships to machines where
+    /// no such share exists and to laptops that are off the domain half the
+    /// week.
+    pub update_from: Option<PathBuf>,
 
     /// Whether a configuration file was actually read.
     ///
@@ -940,6 +947,7 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             pdf_viewer: None,
+            update_from: None,
             // Assume not, and let `load` say otherwise once it knows there
             // is a file. Defaulting the other way would make every test
             // fixture and every `--no-config` session claim it could save.
@@ -1103,6 +1111,11 @@ impl Settings {
         {
             self.pdf_viewer = Some(v.clone());
         }
+        if env_str("FILES_UPDATE_FROM").is_none()
+            && let Some(v) = &f.update_from
+        {
+            self.update_from = Some(v.clone());
+        }
         if env_str("FILES_THEME").is_none()
             && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
         {
@@ -1192,6 +1205,9 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_PDF_VIEWER") {
             s.pdf_viewer = Some(PathBuf::from(v));
+        }
+        if let Some(v) = env_str("FILES_UPDATE_FROM") {
+            s.update_from = Some(PathBuf::from(v));
         }
         // Commas as well as spaces, because `db,js,lnk` is how anybody would
         // write this one. An empty value means "hide nothing", which is the

@@ -208,6 +208,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "hotkey",
     "viewer",
     "pdf_viewer",
+    "update_from",
     "theme",
     "hide_extensions",
     "hide_system_files",
@@ -232,6 +233,7 @@ pub struct FileSettings {
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
+    pub update_from: Option<PathBuf>,
     pub theme: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
@@ -833,6 +835,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 out.viewer = raw.map(str::to_string);
             }
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
+            "update_from" => out.update_from = value.and_then(Value::as_str).map(PathBuf::from),
             "hide_system_files" => out.hide_system_files = bool_at(ctx, key, item),
             "hide_extensions" => {
                 // One extension may be written bare rather than as an array
@@ -1869,6 +1872,32 @@ enable = false
     fn a_missing_explicit_file_is_an_error() {
         let errs = load_file(Path::new(r"C:\definitely-not-here-8812.toml"), true).unwrap_err();
         assert!(messages(&errs).contains("could not be read"));
+    }
+
+    // --- updates ------------------------------------------------------------
+
+    #[test]
+    fn an_update_folder_is_read_as_a_path() {
+        // A raw string, so what is written here is exactly what lands in the
+        // file - and the file uses a TOML *literal* string, where a backslash
+        // is a backslash. That is what the header of the shipped config warns
+        // about, and getting it wrong here would be testing the wrong path.
+        let text = format!(
+            "{MINIMAL}\n[settings]\n{}\n",
+            r"update_from = '\\server\software\files'"
+        );
+        assert_eq!(
+            parse_ok(&text).settings.update_from.as_deref(),
+            Some(Path::new(r"\\server\software\files"))
+        );
+    }
+
+    /// Unset is the shipped state, and it has to mean "do nothing at all"
+    /// rather than "look somewhere sensible".
+    #[test]
+    fn no_update_folder_is_the_default() {
+        assert_eq!(parse_ok(MINIMAL).settings.update_from, None);
+        assert_eq!(parse_ok(DEFAULT_CONFIG_TOML).settings.update_from, None);
     }
 
     // --- aliases ------------------------------------------------------------

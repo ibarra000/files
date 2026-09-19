@@ -290,6 +290,34 @@ hide_extensions = ['db', 'js', 'lnk', 'ini', 'tmp', 'bak', 'url', 'exe', 'dll', 
 hide_system_files = true
 
 
+# Where to look for a newer version of this program.
+#
+# A folder on a share that everybody can read, holding one small file called
+# latest.toml and the installer it names:
+#
+#   \\fileserver\software\files\
+#       latest.toml
+#       files-0.3.0-x64.msi
+#
+# and latest.toml itself:
+#
+#   version = "0.3.0"
+#   msi     = "files-0.3.0-x64.msi"
+#   sha256  = "9f2c..."                  # optional
+#   notes   = "What changed."            # optional
+#
+# `tools/make_msi.ps1 -Publish <folder>` writes both, from the version it
+# just built, so the manifest and the installer beside it cannot disagree.
+#
+# A share rather than a web address, because this program already reads
+# nothing but shares, and because it means no server to run, no certificate to
+# renew and no second password: whoever may read the folder may take the
+# update. `files --doctor` says what it can see there.
+#
+# Left unset, none of this happens at all - no checking, nothing on screen.
+# update_from = '\\fileserver\software\files'
+
+
 # ---------------------------------------------------------------------------
 # Aliases. Short names for the codes you type every day.
 #

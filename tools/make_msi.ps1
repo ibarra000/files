@@ -20,7 +20,14 @@
 [CmdletBinding()]
 param(
     # Skip `cargo build --release`, for when the binaries are already current.
-    [switch]$NoBuild
+    [switch]$NoBuild,
+
+    # Copy the installer to this folder and write the manifest beside it, so
+    # every running copy is offered the version that was just built. Both are
+    # written from the same $version, so the manifest and the installer it
+    # names cannot disagree - which is the whole reason this lives here rather
+    # than in somebody`s notes.
+    [string]$Publish
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +63,30 @@ try {
 
     if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
     Write-Host "wrote $out"
+
+    if ($Publish) {
+        if (-not (Test-Path $Publish)) { throw "no such folder: $Publish" }
+
+        $name = Split-Path -Leaf $out
+        # The installer first, and the manifest only once it has landed. The
+        # other order leaves a window in which every client is told about a
+        # version whose installer is not there yet - and they would all try.
+        Copy-Item -Path $out -Destination (Join-Path $Publish $name) -Force
+
+        $hash = (Get-FileHash -Path $out -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifest = @"
+version = "$version"
+msi     = "$name"
+sha256  = "$hash"
+"@
+        # Written to a temporary name and moved into place, so nobody reads a
+        # half-written manifest off the share.
+        $tmp = Join-Path $Publish "latest.toml.tmp"
+        Set-Content -Path $tmp -Value $manifest -Encoding utf8 -NoNewline
+        Move-Item -Path $tmp -Destination (Join-Path $Publish "latest.toml") -Force
+
+        Write-Host "published $version to $Publish"
+    }
 }
 finally {
     Pop-Location

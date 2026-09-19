@@ -166,6 +166,7 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
     report_quick_search(settings, out);
     let _ = writeln!(out);
     report_viewer(settings, out);
+    report_updates(settings, out);
     report_recommendations(settings, out);
 }
 
@@ -702,6 +703,51 @@ fn directory_size(dir: &Path) -> (usize, u64) {
         .filter_map(|e| e.metadata().ok())
         .filter(|m| m.is_file())
         .fold((0, 0), |(n, bytes), m| (n + 1, bytes + m.len()))
+}
+
+/// Whether a newer version is published, and whether this machine can see it.
+///
+/// Reads the share, which is why it is here and not on a timer: --doctor is
+/// already the place that touches every configured path and reports what it
+/// found. Silent when no update folder is configured, because then there is
+/// nothing to be right or wrong about.
+fn report_updates(settings: &Settings, out: &mut dyn Write) {
+    let Some(folder) = &settings.update_from else {
+        return;
+    };
+    let _ = writeln!(out, "UPDATES");
+    let _ = writeln!(out, "  looking in          {}", folder.display());
+    let _ = writeln!(
+        out,
+        "  running             {}",
+        crate::update::Version::current()
+    );
+
+    match crate::update::look(folder, crate::update::Version::current()) {
+        crate::update::Found::Available { manifest, msi } => {
+            let _ = writeln!(out, "  available           {}", manifest.version);
+            let _ = writeln!(out, "  installer           {}", msi.display());
+            let _ = writeln!(
+                out,
+                "  installer found     {}",
+                if msi.is_file() {
+                    "yes"
+                } else {
+                    "NO - the manifest names a file that is not there"
+                }
+            );
+            if let Some(notes) = &manifest.notes {
+                let _ = writeln!(out, "  notes               {notes}");
+            }
+        }
+        crate::update::Found::UpToDate => {
+            let _ = writeln!(out, "  available           nothing newer");
+        }
+        crate::update::Found::Unavailable { detail } => {
+            let _ = writeln!(out, "  available           unknown - {detail}");
+        }
+    }
+    let _ = writeln!(out);
 }
 
 fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
