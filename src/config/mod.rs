@@ -701,6 +701,12 @@ pub enum ConfigChoice {
 pub struct Settings {
     /// The routing table. Immutable once loaded, shared by every thread.
     pub routes: Arc<Routes>,
+    /// The short names configured for codes typed often.
+    ///
+    /// Shared for the same reason [`Self::routes`] is: `Settings` is cloned
+    /// into the backend and every worker, and an alias table is read on a
+    /// keystroke rather than copied on one.
+    pub aliases: Arc<crate::alias::Aliases>,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
     /// Server-side wildcard filtering. Ships **off** so it can be enabled only
@@ -839,6 +845,7 @@ impl Settings {
     pub fn with_routes(routes: Arc<Routes>, tweak: impl FnOnce(Self) -> Self) -> Self {
         tweak(Self {
             routes,
+            aliases: Arc::new(crate::alias::Aliases::default()),
             enum_strategy: EnumStrategy::default(),
             matcher: MatcherKind::default(),
             server_filter: false,
@@ -938,6 +945,7 @@ impl Settings {
         };
 
         let mut s = Self::from_env_with(parsed.routes);
+        s.aliases = Arc::new(parsed.aliases);
         s.apply_file_settings(&parsed.settings);
         // The environment outranks the file, so saving into the file while
         // `FILES_VIEWER` is set would report success and change nothing.

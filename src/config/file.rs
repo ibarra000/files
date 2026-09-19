@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{ImDocument, Item, Value};
 
+use crate::alias::{Alias, Aliases};
 use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
 use crate::util::winpath;
 
@@ -61,7 +62,13 @@ pub struct ConfigError {
     pub path: PathBuf,
     /// One-based line and column, when the problem has a single location.
     pub loc: Option<(usize, usize)>,
-    pub mapping: Option<String>,
+    /// Which entry the problem is in, and what to call that kind of entry:
+    /// `("mapping", "jobs")`, `("alias", "pw")`.
+    ///
+    /// Carries its own noun because the file has two kinds of repeated table
+    /// in it now, and an alias reported as a mapping sends somebody to the
+    /// wrong half of their own configuration.
+    pub entry: Option<(&'static str, String)>,
     pub rule: Option<usize>,
     pub message: String,
     /// The offending text, echoed so a rule index rarely has to be counted.
@@ -76,8 +83,8 @@ impl fmt::Display for ConfigError {
         }
         writeln!(f)?;
         write!(f, "  ")?;
-        if let Some(name) = &self.mapping {
-            write!(f, "mapping {name:?}")?;
+        if let Some((kind, name)) = &self.entry {
+            write!(f, "{kind} {name:?}")?;
             if let Some(rule) = self.rule {
                 write!(f, ", rule {rule}")?;
             }
@@ -138,7 +145,7 @@ impl Ctx<'_> {
     fn err(
         &mut self,
         span: Option<std::ops::Range<usize>>,
-        mapping: Option<&str>,
+        entry: Option<(&'static str, &str)>,
         rule: Option<usize>,
         message: impl Into<String>,
         snippet: Option<String>,
@@ -147,7 +154,7 @@ impl Ctx<'_> {
         self.errors.push(ConfigError {
             path: self.path.clone(),
             loc,
-            mapping: mapping.map(str::to_string),
+            entry: entry.map(|(k, n)| (k, n.to_string())),
             rule,
             message: message.into(),
             snippet,
@@ -205,7 +212,8 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "hide_extensions",
     "hide_system_files",
 ];
-const ROOT_KEYS: &[&str] = &["version", "mapping", "settings"];
+const ALIAS_KEYS: &[&str] = &["name", "code", "note"];
+const ROOT_KEYS: &[&str] = &["version", "mapping", "settings", "alias"];
 
 /// Global options a config file may carry. Applied under the environment.
 #[derive(Debug, Clone, Default)]
@@ -234,6 +242,7 @@ pub struct FileSettings {
 pub struct ParsedConfig {
     pub routes: Routes,
     pub settings: FileSettings,
+    pub aliases: Aliases,
 }
 
 /// Parses configuration text.
@@ -262,7 +271,7 @@ pub fn parse(
             return Err(vec![ConfigError {
                 path: path.to_path_buf(),
                 loc,
-                mapping: None,
+                entry: None,
                 rule: None,
                 message: e.message().to_string(),
                 snippet: None,
@@ -326,6 +335,7 @@ pub fn parse(
 
     let mappings = parse_mappings(&doc, &mut ctx);
     let settings = parse_settings(&doc, &mut ctx);
+    let aliases = parse_aliases(&doc, &mut ctx);
 
     if mappings.iter().filter(|m| m.enabled).count() == 0 {
         ctx.err(
@@ -410,6 +420,7 @@ pub fn parse(
         Ok(ParsedConfig {
             routes: Routes::new(mappings, source),
             settings,
+            aliases: Aliases::new(aliases),
         })
     } else {
         Err(ctx.errors)
@@ -442,7 +453,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         if name.is_empty() {
             ctx.err(
                 span.clone(),
-                Some(&label),
+                Some(("mapping", &label)),
                 None,
                 "missing or empty `name`",
                 None,
@@ -450,7 +461,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         } else if seen.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
             ctx.err(
                 span.clone(),
-                Some(&label),
+                Some(("mapping", &label)),
                 None,
                 "duplicate mapping name",
                 None,
@@ -462,7 +473,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
             if !MAPPING_KEYS.contains(&key) {
                 ctx.err(
                     item.span(),
-                    Some(&label),
+                    Some(("mapping", &label)),
                     None,
                     format!("unknown key {key:?}"),
                     None,
@@ -478,7 +489,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         if raw_path.is_empty() {
             ctx.err(
                 span.clone(),
-                Some(&label),
+                Some(("mapping", &label)),
                 None,
                 "missing or empty `path`",
                 None,
@@ -491,7 +502,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                 None => {
                     ctx.err(
                         table.get("kind").and_then(Item::span),
-                        Some(&label),
+                        Some(("mapping", &label)),
                         None,
                         format!("unknown kind {k:?} (expected \"flat\", \"tree\" or \"live\")"),
                         None,
@@ -502,7 +513,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
             None => {
                 ctx.err(
                     span.clone(),
-                    Some(&label),
+                    Some(("mapping", &label)),
                     None,
                     "missing `kind` (expected \"flat\", \"tree\" or \"live\")",
                     None,
@@ -526,7 +537,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
             Some(item) if !kind.is_live() => {
                 ctx.err(
                     item.span(),
-                    Some(&label),
+                    Some(("mapping", &label)),
                     None,
                     "`depth` applies only to a live mapping",
                     None,
@@ -538,7 +549,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                 _ => {
                     ctx.err(
                         item.span(),
-                        Some(&label),
+                        Some(("mapping", &label)),
                         None,
                         format!(
                             "`depth` must be a whole number from 1 to {}",
@@ -556,7 +567,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
         {
             ctx.err(
                 item.span(),
-                Some(&label),
+                Some(("mapping", &label)),
                 None,
                 "`refresh` applies only to an indexed mapping; a live share is read when it is searched and at no other time",
                 None,
@@ -570,7 +581,7 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
                 None => {
                     ctx.err(
                         item.span(),
-                        Some(&label),
+                        Some(("mapping", &label)),
                         None,
                         "`refresh` must be \"auto\" or \"manual\"",
                         None,
@@ -591,6 +602,143 @@ fn parse_mappings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Mapping> {
     }
 
     mappings
+}
+
+/// Reads `[[alias]]`, of which a file may have none.
+///
+/// Optional, unlike `[[mapping]]`: a configuration with no aliases in it is
+/// the ordinary case and the shipped one, so their absence is silence rather
+/// than an error.
+///
+/// The rules below all exist to make one promise: that an alias which loaded
+/// is an alias that will work. An alias is typed by somebody in a hurry who
+/// expects results, so the moment to refuse a broken one is while its owner is
+/// looking at the file that defines it - not silently, on the keystroke.
+fn parse_aliases(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Alias> {
+    let Some(tables) = doc.get("alias").and_then(Item::as_array_of_tables) else {
+        return Vec::new();
+    };
+
+    let mut aliases: Vec<Alias> = Vec::with_capacity(tables.len());
+    let mut seen: Vec<String> = Vec::new();
+
+    for (index, table) in tables.iter().enumerate() {
+        let span = table.span();
+        let name = table
+            .get("name")
+            .and_then(Item::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let label = if name.is_empty() {
+            format!("#{index}")
+        } else {
+            name.clone()
+        };
+
+        for (key, item) in table.iter() {
+            if !ALIAS_KEYS.contains(&key) {
+                ctx.err(
+                    item.span(),
+                    Some(("alias", &label)),
+                    None,
+                    format!("unknown key {key:?}"),
+                    None,
+                );
+            }
+        }
+
+        if name.is_empty() {
+            ctx.err(
+                span.clone(),
+                Some(("alias", &label)),
+                None,
+                "missing or empty `name`",
+                None,
+            );
+        } else if !name.is_ascii() {
+            // The same reason `search::pattern` refuses a non-ASCII query: the
+            // case folding this is matched with is ASCII, so a name outside it
+            // would resolve on one machine and not on the next.
+            ctx.err(
+                span.clone(),
+                Some(("alias", &label)),
+                None,
+                "an alias name must be ASCII",
+                None,
+            );
+        } else if name.chars().any(char::is_whitespace) {
+            // An alias is matched against the whole line, so a name with a
+            // space in it is still reachable - but it reads as two words and
+            // nobody would guess it has to be typed exactly.
+            ctx.err(
+                span.clone(),
+                Some(("alias", &label)),
+                None,
+                "an alias name cannot contain a space",
+                None,
+            );
+        } else if seen.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+            // Refused rather than letting the last one win, because which of
+            // two identically named aliases is in force is not a thing anybody
+            // should have to work out by reading the file top to bottom.
+            ctx.err(
+                span.clone(),
+                Some(("alias", &label)),
+                None,
+                "duplicate alias name",
+                None,
+            );
+        }
+        seen.push(name.clone());
+
+        let code = table
+            .get("code")
+            .and_then(Item::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if code.is_empty() {
+            ctx.err(
+                span.clone(),
+                Some(("alias", &label)),
+                None,
+                "missing or empty `code`",
+                None,
+            );
+        } else if let Err(reject) = crate::search::query::Query::parse(&code).check() {
+            // Checked against the very same judgement the matcher applies, so
+            // an alias can never expand into a line the search would then turn
+            // down. This is what lets a two-letter *name* exist without
+            // lowering `MIN_QUERY_LEN` for anybody: the name is short, the
+            // line it stands for is not.
+            ctx.err(
+                table.get("code").and_then(Item::span).or(span.clone()),
+                Some(("alias", &label)),
+                None,
+                format!(
+                    "`code` is not something this can search for: {}",
+                    reject.detail()
+                ),
+                Some(code.clone()),
+            );
+        }
+
+        let note = table
+            .get("note")
+            .and_then(Item::as_str)
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(Into::into);
+
+        aliases.push(Alias {
+            name: name.into(),
+            code: code.into(),
+            note,
+        });
+    }
+
+    aliases
 }
 
 fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
@@ -816,7 +964,7 @@ pub fn load_file(path: &Path, explicit: bool) -> Result<ParsedConfig, Vec<Config
         vec![ConfigError {
             path: path.to_path_buf(),
             loc: None,
-            mapping: None,
+            entry: None,
             rule: None,
             message: format!("could not be read: {e}"),
             snippet: None,
@@ -1721,5 +1869,110 @@ enable = false
     fn a_missing_explicit_file_is_an_error() {
         let errs = load_file(Path::new(r"C:\definitely-not-here-8812.toml"), true).unwrap_err();
         assert!(messages(&errs).contains("could not be read"));
+    }
+
+    // --- aliases ------------------------------------------------------------
+
+    fn with_alias(body: &str) -> String {
+        format!("{MINIMAL}\n[[alias]]\n{body}\n")
+    }
+
+    /// The shipped case: no `[[alias]]` at all is silence, not an error.
+    #[test]
+    fn a_configuration_with_no_aliases_is_perfectly_ordinary() {
+        assert!(parse_ok(MINIMAL).aliases.is_empty());
+        assert!(parse_ok(DEFAULT_CONFIG_TOML).aliases.is_empty());
+    }
+
+    #[test]
+    fn an_alias_is_read_back_with_its_code_and_note() {
+        let parsed = parse_ok(&with_alias(
+            "name = \"pw\"\ncode = \"11-D-0704\"\nnote = \"Powerwall bracket\"",
+        ));
+        let alias = parsed.aliases.resolve("pw").expect("pw should resolve");
+        assert_eq!(alias.code.as_ref(), "11-D-0704");
+        assert_eq!(alias.note.as_deref(), Some("Powerwall bracket"));
+    }
+
+    #[test]
+    fn a_note_is_optional_and_an_empty_one_is_no_note() {
+        let parsed = parse_ok(&with_alias(
+            "name = \"pw\"\ncode = \"11-D-0704\"\nnote = \"  \"",
+        ));
+        assert_eq!(parsed.aliases.resolve("pw").unwrap().note, None);
+    }
+
+    /// The rule the whole feature rests on. A code the matcher would turn down
+    /// is an alias that resolves and then finds nothing, which is worse than
+    /// one that never loaded.
+    #[test]
+    fn an_alias_whose_code_is_too_short_to_search_for_is_refused() {
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        let text = messages(&errs);
+        assert!(text.contains("alias \"pw\""), "{text}");
+        assert!(text.contains("not something this can search for"), "{text}");
+        assert!(text.contains("at least 3 characters"), "{text}");
+    }
+
+    #[test]
+    fn an_alias_may_stand_for_a_line_that_carries_syntax() {
+        let parsed = parse_ok(&with_alias("name = \"inv\"\ncode = \"ext:pdf inverter\""));
+        assert_eq!(
+            parsed.aliases.resolve("inv").unwrap().code.as_ref(),
+            "ext:pdf inverter"
+        );
+    }
+
+    #[test]
+    fn two_aliases_of_the_same_name_are_refused_rather_than_one_winning() {
+        let text = format!(
+            "{MINIMAL}\n[[alias]]\nname = \"pw\"\ncode = \"11-D-0704\"\n\
+             \n[[alias]]\nname = \"PW\"\ncode = \"11-D-0705\"\n"
+        );
+        assert!(messages(&parse_err(&text)).contains("duplicate alias name"));
+    }
+
+    #[test]
+    fn an_alias_needs_both_a_name_and_a_code() {
+        assert!(messages(&parse_err(&with_alias("code = \"11-D-0704\""))).contains("empty `name`"));
+        assert!(messages(&parse_err(&with_alias("name = \"pw\""))).contains("empty `code`"));
+    }
+
+    #[test]
+    fn an_alias_name_with_a_space_in_it_is_refused() {
+        let errs = parse_err(&with_alias("name = \"p w\"\ncode = \"11-D-0704\""));
+        assert!(messages(&errs).contains("cannot contain a space"));
+    }
+
+    #[test]
+    fn a_non_ascii_alias_name_is_refused_rather_than_folded_inconsistently() {
+        let errs = parse_err(&with_alias("name = \"pü\"\ncode = \"11-D-0704\""));
+        assert!(messages(&errs).contains("must be ASCII"));
+    }
+
+    #[test]
+    fn an_unknown_key_in_an_alias_is_an_error_like_anywhere_else() {
+        let errs = parse_err(&with_alias(
+            "name = \"pw\"\ncode = \"11-D-0704\"\ncolour = \"red\"",
+        ));
+        assert!(messages(&errs).contains("unknown key \"colour\""));
+    }
+
+    /// `alias` has to be a root key, or every file using one would be refused
+    /// wholesale by the allowlist.
+    #[test]
+    fn alias_is_accepted_at_the_root() {
+        assert!(ROOT_KEYS.contains(&"alias"));
+    }
+
+    /// An alias is reported as an alias. The label used to be hardcoded to
+    /// "mapping", which would have sent somebody to the wrong half of a file
+    /// they were already confused by.
+    #[test]
+    fn an_alias_error_calls_it_an_alias_and_not_a_mapping() {
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        let text = messages(&errs);
+        assert!(text.contains("alias \"pw\""), "{text}");
+        assert!(!text.contains("mapping \"pw\""), "{text}");
     }
 }

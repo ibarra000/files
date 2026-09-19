@@ -5,6 +5,7 @@
 //! without the network drives, those tests are most of the verification
 //! there is.
 
+pub mod alias;
 pub mod app;
 pub mod cli;
 pub mod clipboard;

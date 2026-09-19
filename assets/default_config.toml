@@ -288,3 +288,47 @@ hide_extensions = ['db', 'js', 'lnk', 'ini', 'tmp', 'bak', 'url', 'exe', 'dll', 
 # Folders are never hidden by this, whatever they are marked - some servers
 # mark a whole share system, and honouring that would hide the share.
 hide_system_files = true
+
+
+# ---------------------------------------------------------------------------
+# Aliases. Short names for the codes you type every day.
+#
+# A job code is something to read off a drawing, which is fine for the one in
+# front of you and poor for the six you open every morning. An alias gives one
+# of those a name you chose:
+#
+#   [[alias]]
+#   name = "pw"
+#   code = "11-D-0704"
+#   note = "Powerwall bracket"      # optional, and only for you to read
+#
+# Type `pw` and you get the results for `11-D-0704`, on the second keystroke.
+# The panel shows you which alias fired and what it stood for, every time - an
+# alias is a shortcut you wrote down, so watching it work is the confirmation,
+# and watching it fire when you did not mean it is how you find out.
+#
+# The whole line has to be the alias, case aside. `pw` resolves; `pwx` and
+# `pw 11` are searched for as they are. That way an alias can never hide the
+# results for a longer code that happens to contain it.
+#
+# `code` is a search *line*, not just a code, so the syntax you can type works
+# here too:
+#
+#   [[alias]]
+#   name = "inv"
+#   code = "ext:pdf inverter"
+#
+# What the checker enforces, all so that an alias which loads is one that
+# works:
+#
+#   * `name` is ASCII, has no spaces, and is not shared with another alias;
+#   * `code` is something this could actually search for - which means at
+#     least 3 characters, the same minimum the search line has.
+#
+# A two-letter *name* is the whole point and is perfectly fine. It is the
+# *search* that has a minimum, and the code above it is what has to meet it.
+# ---------------------------------------------------------------------------
+# [[alias]]
+# name = "pw"
+# code = "11-D-0704"
+# note = "Powerwall bracket"
