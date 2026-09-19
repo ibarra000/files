@@ -2455,3 +2455,140 @@ fn a_configuration_of_only_live_shares_still_accepts_a_query() {
         "a live-only configuration was treated as having no drives"
     );
 }
+
+// --- aliases ---------------------------------------------------------------
+
+/// A state whose configuration carries one alias.
+fn aliased_state() -> (AppState, Instant) {
+    let aliases = files::alias::Aliases::new(vec![files::alias::Alias {
+        name: "pw".into(),
+        code: "11-D-0704".into(),
+        note: None,
+    }]);
+    let settings = Settings {
+        aliases: Arc::new(aliases),
+        ..Default::default()
+    };
+    let now = Instant::now();
+    (AppState::new(settings, now), now)
+}
+
+fn searched_for(r: &Response) -> Option<String> {
+    r.cmds.iter().find_map(|c| match c {
+        Cmd::Search { query, .. } => Some(query.term().to_string()),
+        _ => None,
+    })
+}
+
+/// The whole point: two characters, and the code they stand for is searched
+/// for without waiting out the pause meant for somebody still typing.
+#[test]
+fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
+    let (mut s, now) = aliased_state();
+    let r = type_in(&mut s, "pw", now);
+
+    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
+    assert_eq!(s.query().term(), "11-D-0704");
+}
+
+/// Below `MIN_QUERY_LEN`, and searched anyway, because what reaches the index
+/// is the expansion rather than the name.
+#[test]
+fn an_alias_shorter_than_the_minimum_is_still_searched_for() {
+    let (mut s, now) = aliased_state();
+    assert!("pw".chars().count() < MIN_QUERY_LEN);
+
+    type_in(&mut s, "pw", now);
+    assert!(
+        !matches!(s.phase, QueryPhase::TooShort { .. }),
+        "an alias was judged as though it were the search"
+    );
+}
+
+/// And the minimum is untouched for everything that is not an alias.
+#[test]
+fn a_short_line_that_is_not_an_alias_is_still_too_short() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "zz", now);
+
+    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    assert!(s.expansion().is_none());
+}
+
+/// The line stays exactly as it was typed. Rewriting the field under somebody
+/// mid-edit would fight their caret and their selection.
+#[test]
+fn an_alias_does_not_rewrite_what_was_typed() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "pw", now);
+
+    assert_eq!(s.input.text(), "pw");
+    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
+}
+
+/// An alias that fired and said nothing is the program searching for
+/// something nobody typed.
+#[test]
+fn an_alias_reports_what_it_stood_for() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "pw", now);
+
+    let alias = s.expansion().expect("the expansion must be readable");
+    assert_eq!(alias.name.as_ref(), "pw");
+    assert_eq!(alias.describe(), "pw \u{b7} 11-D-0704");
+}
+
+/// Typing on past an alias is an ordinary search again, or every longer code
+/// beginning with one would be unreachable.
+#[test]
+fn typing_past_an_alias_goes_back_to_searching_for_what_is_on_the_line() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_some());
+
+    let r = type_in(&mut s, "xyz", now);
+    assert!(s.expansion().is_none(), "the expansion outlived the alias");
+    assert_eq!(s.query().term(), "pwxyz");
+    assert!(searched_for(&r).is_none_or(|q| q == "pwxyz"));
+}
+
+/// Backspacing back onto an alias resolves it again.
+#[test]
+fn an_alias_resolves_again_when_the_line_becomes_one() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "pwx", now);
+    assert!(s.expansion().is_none());
+
+    s.update(press(Key::Backspace), now);
+    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
+}
+
+/// Case is not part of the name. Somebody who types it capitalised meant it.
+#[test]
+fn an_alias_resolves_whatever_case_it_is_typed_in() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "PW", now);
+    assert_eq!(s.query().term(), "11-D-0704");
+}
+
+/// Clearing the line clears the expansion with it.
+#[test]
+fn emptying_the_line_forgets_the_alias() {
+    let (mut s, now) = aliased_state();
+    type_in(&mut s, "pw", now);
+    s.update(ctrl(Key::Char('u')), now);
+
+    assert!(s.expansion().is_none());
+    assert!(matches!(s.phase, QueryPhase::Idle));
+}
+
+/// A configuration with no aliases behaves exactly as it did before they
+/// existed.
+#[test]
+fn a_configuration_without_aliases_is_unchanged() {
+    let (mut s, now) = state();
+    type_in(&mut s, "pw", now);
+
+    assert!(s.expansion().is_none());
+    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+}

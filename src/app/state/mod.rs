@@ -196,6 +196,14 @@ pub struct AppState {
     /// it to underline the right characters, and of `OpenRequest`, which needs
     /// it to gather a drawing set.
     query: Query,
+    /// The alias the line turned out to be, if it was one.
+    ///
+    /// Kept beside the parsed query rather than derived on demand because it
+    /// answers a question the query cannot: `query` holds what is being
+    /// searched for, and this holds *why* - which is the difference between a
+    /// panel that shows its working and one that quietly searches for
+    /// something nobody typed.
+    expansion: Option<crate::alias::Alias>,
     last_verified_query: Option<Query>,
     /// Which result the pointer is over, if any.
     ///
@@ -276,6 +284,7 @@ impl AppState {
             // index, which needs an actor to have answered.
             last_frame_wall: SystemTime::UNIX_EPOCH,
             query: Query::default(),
+            expansion: None,
             last_verified_query: None,
             preview: None,
             preview_target_path: None,
@@ -291,6 +300,15 @@ impl AppState {
     /// both the *term*, not the line, so both read it from here.
     pub fn query(&self) -> &Query {
         &self.query
+    }
+
+    /// The alias the line turned out to be, if it was one.
+    ///
+    /// Read by the renderer, and it has to be: an alias that fired without
+    /// saying so is the program searching for something other than what is on
+    /// the line. See [`crate::alias`].
+    pub fn expansion(&self) -> Option<&crate::alias::Alias> {
+        self.expansion.as_ref()
     }
 
     pub fn query_epoch(&self) -> u64 {
@@ -601,7 +619,24 @@ impl AppState {
         self.verify_watchdog_at = None;
         self.last_verified_query = None;
 
-        self.query = Query::parse(self.input.text());
+        // Resolved before anything is judged, because an alias decides what
+        // the rest of this function is even looking at. The line the user
+        // typed is kept exactly as they typed it - rewriting the field under
+        // somebody mid-edit would fight their caret and their selection - so
+        // what an alias replaces is the *query*, not the text.
+        let expansion = self.settings.aliases.resolve(self.input.text()).cloned();
+        self.query = Query::parse(match &expansion {
+            Some(alias) => alias.code.as_ref(),
+            None => self.input.text(),
+        });
+        // An alias is not somebody typing. The line was finished the moment it
+        // resolved, so it runs now rather than waiting out a pause meant for a
+        // person still reading a code off a drawing.
+        let urgency = match expansion {
+            Some(_) => Urgency::Complete,
+            None => urgency,
+        };
+        self.expansion = expansion;
 
         if self.input.text().trim().is_empty() {
             self.phase = QueryPhase::Idle;

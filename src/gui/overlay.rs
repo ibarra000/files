@@ -410,10 +410,46 @@ fn draw_field(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<I
 
     let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), fade(theme.input));
 
+    // What an alias stood for, at the right-hand end of the field.
+    //
+    // Here rather than on the status line because this is where the eye
+    // already is, and because that line is a slot other things legitimately
+    // claim - a toast, a drive that cannot be reached - which would leave an
+    // alias firing with nothing on screen to say so. An alias that fires
+    // silently is the program searching for something nobody typed. See
+    // [`crate::alias`].
+    let expansion = state
+        .expansion()
+        .map(|alias| format!("\u{2192} {}", alias.code));
+    let expansion_galley = expansion.as_ref().map(|shown| {
+        painter.layout_no_wrap(
+            shown.clone(),
+            theme::font(theme::SIZE_ROW, Weight::Regular),
+            fade(theme.dim),
+        )
+    });
+    // The code gives up the room the expansion takes, rather than running
+    // under it: two overlapping strings in a search box is worse than a code
+    // that scrolls slightly sooner.
+    let reserved = expansion_galley
+        .as_ref()
+        .map(|g| g.rect.width() + theme::PAD_X)
+        .unwrap_or(0.0);
+    if let Some(shown) = expansion_galley {
+        painter.galley(
+            pos2(
+                rect.right() - theme::PAD_X - shown.rect.width(),
+                rect.center().y - shown.rect.height() / 2.0,
+            ),
+            shown,
+            fade(theme.dim),
+        );
+    }
+
     // How much of the code there is room for.
     let window = Rect::from_min_max(
         pos2(text_left, rect.top()),
-        pos2(rect.right() - theme::PAD_X, rect.bottom()),
+        pos2(rect.right() - theme::PAD_X - reserved, rect.bottom()),
     );
 
     // How far the code is scrolled under that window.
@@ -464,16 +500,16 @@ fn draw_field(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<I
     // The field is the one thing on the panel somebody is *editing*, so it is
     // announced whether or not there is anything in it - a search box that
     // reads as empty is still a search box.
-    announce(
-        ui,
-        rect,
-        "field",
-        if text.is_empty() {
-            "Type a job code, for example 11-D-0704"
-        } else {
-            text
-        },
-    );
+    //
+    // The expansion goes in with it. A screen reader hearing `pw` and being
+    // read a list of drawings for a code it never said is the same failure as
+    // the silent one, reached by the ear instead of the eye.
+    let spoken = match (&expansion, text.is_empty()) {
+        (Some(shown), _) => format!("{text} {shown}"),
+        (None, true) => "Type a job code, for example 11-D-0704".to_string(),
+        (None, false) => text.to_string(),
+    };
+    announce(ui, rect, "field", &spoken);
 
     // Solid rather than blinking. A caret that blinks is a repaint twice a
     // second for as long as the panel is up, and this one is never the only
