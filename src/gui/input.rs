@@ -187,6 +187,10 @@ fn chord(key: egui::Key) -> Option<Key> {
         E::E => Key::Char('e'),
         E::O => Key::Char('o'),
         E::K => Key::Char('k'),
+        // The arrows and the search box, for a hand on the home row.
+        E::P => Key::Char('p'),
+        E::N => Key::Char('n'),
+        E::L => Key::Char('l'),
         // Ctrl+, opens the settings, which is what this operating system uses
         // the chord for everywhere else. It belongs here rather than in
         // `binding` for the same reason the letters do: a bare comma is text,

@@ -233,6 +233,16 @@ pub struct AppState {
     help_scroll: u16,
 }
 
+/// Whether a move that runs off the end comes back on at the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wrap {
+    /// A step: Up from the first row is the last, and Down from the last is
+    /// the first. What Ueli's arrows do.
+    Around,
+    /// A page: the ends hold. See [`AppState::move_selection`].
+    Stop,
+}
+
 impl AppState {
     pub fn new(settings: Settings, now: Instant) -> Self {
         let viewer = settings.viewer;
@@ -940,18 +950,25 @@ impl AppState {
 
     /// Moves the selection by `delta` ranks.
     ///
-    /// Every relative move goes through here - Up and Down, PageUp and PageDown
-    /// by a screen, and a clicked arrow chip - so the ends of the list behave
-    /// the same way whichever of them was pressed. The wheel used to be on that
-    /// list, and columns before that; both are gone. They did not before:
-    /// a step by one wrapped while a step by a column clamped, because the two
-    /// were separate copies of the same arithmetic.
+    /// Every relative move goes through here - Up and Down, PageUp and
+    /// PageDown by a screen, and the same two under Ctrl - so the ends of the
+    /// list behave the same way whichever of them was pressed. They did not
+    /// always: a step by one wrapped while a step by a column clamped,
+    /// because the two were separate copies of the same arithmetic.
     ///
-    /// Both ends stop. The list used to be circular, so a step off the foot
-    /// landed back on rank 0 and the page snapped back to the first screen -
-    /// the results already read reappeared at the end, and returning to where
-    /// someone was meant walking the whole list again. Stopping means the way
-    /// back is the way they came.
+    /// **A step wraps and a page does not**, which is a smaller rule than it
+    /// sounds. Ueli's arrows wrap, and the reason this program's stopped is
+    /// worth restating: the panel drew a twelve-row window over the list, so
+    /// a step off the foot landed back on rank 0 and *the page snapped back
+    /// to the first screen* - the results already read reappeared at the end,
+    /// and getting back meant walking the whole list again. The content band
+    /// is a scroller now; wrapping scrolls it to the top, which is where
+    /// rank 0 is, and Up from the first row is the quickest way to the last.
+    ///
+    /// A page that wrapped would be a different matter, and Ueli has no page
+    /// key to appeal to. Six rows is not a landmark, so a `PageDown` that
+    /// came out somewhere near the top would be indistinguishable from one
+    /// that had not moved.
     /// How far a page key moves.
     ///
     /// A screenful, which is a different number of rows in each layout. Read
@@ -962,7 +979,7 @@ impl AppState {
         self.settings.result_layout.rows_per_page() as isize
     }
 
-    fn move_selection(&mut self, delta: isize) -> Response {
+    fn move_selection(&mut self, delta: isize, wrap: Wrap) -> Response {
         if self.hits.is_empty() {
             return Response::none();
         }
@@ -974,7 +991,13 @@ impl AppState {
             let row = if delta > 0 { 0 } else { self.hits.len() - 1 };
             return self.jump_selection(row);
         };
-        let target = (current + delta).clamp(0, len - 1);
+        let target = match wrap {
+            // `rem_euclid` rather than `%`, which in Rust keeps the sign of
+            // the left operand - so Up from rank zero would ask for rank
+            // minus one and land back on zero.
+            Wrap::Around => (current + delta).rem_euclid(len),
+            Wrap::Stop => (current + delta).clamp(0, len - 1),
+        };
         if target == current {
             // Against the edge. The keypress still says "I am working in this
             // list", so it pins, but the frame it would produce is the one

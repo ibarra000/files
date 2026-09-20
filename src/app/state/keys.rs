@@ -17,7 +17,7 @@ use std::time::Instant;
 
 use crate::app::key::{Key, KeyEvent};
 
-use super::{AppState, Severity, Urgency};
+use super::{AppState, Severity, Urgency, Wrap};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
 use crate::config::ViewerKind;
 
@@ -153,6 +153,25 @@ impl AppState {
                 self.actions_open = !self.actions_open;
                 Response::redraw()
             }
+            // The arrows, for a hand that does not want to leave the home
+            // row. Ueli's, and routed through the same two handlers rather
+            // than to `move_selection` directly - so they step into the
+            // recent codes and out of the drive picker exactly as Up and
+            // Down do, and there is one rule rather than two.
+            Key::Char('p') if ctrl && !alt => self.on_up(now),
+            Key::Char('n') if ctrl && !alt => self.on_down(),
+            // Select the whole code, which is what focusing a search box
+            // does everywhere else on this machine.
+            //
+            // The same act as `Ctrl+A`, and said plainly rather than
+            // apologised for: the field here never loses the keyboard, so
+            // the "focus" half of what this key means elsewhere has already
+            // happened, and what is left is the selection. It is bound
+            // because `Ctrl+L` is the key a hand reaches for.
+            Key::Char('l') if ctrl && !alt => {
+                self.input.select_all();
+                Response::redraw()
+            }
 
             // AltGr arrives as Ctrl+Alt on Windows, and on a German, Polish
             // or French layout that is how `@`, `{`, `[` and the accented
@@ -214,8 +233,8 @@ impl AppState {
             // each layout - a detailed row is half as tall again, so four of
             // them fill the band where six compact ones do. Paging by the
             // wrong one would scroll past rows nobody saw.
-            Key::PageDown => self.move_selection(self.rows_per_page()),
-            Key::PageUp => self.move_selection(-self.rows_per_page()),
+            Key::PageDown => self.move_selection(self.rows_per_page(), Wrap::Stop),
+            Key::PageUp => self.move_selection(-self.rows_per_page(), Wrap::Stop),
 
             Key::Up => self.on_up(now),
             Key::Down => self.on_down(),
@@ -419,13 +438,12 @@ impl AppState {
         if self.can_begin_recall() {
             return self.begin_recall();
         }
-        match self.selected_row() {
-            // The top holds rather than wrapping. There is nowhere to hand
-            // focus back to any more - the field never lost it - so a further
-            // Up is simply a key that has run out of list.
-            Some(0) | None => Response::none(),
-            Some(_) => self.move_selection(-1),
-        }
+        // Off the top and round to the bottom, which is Ueli's arrow and is
+        // the quickest way to the end of three hundred results. It used to
+        // hold here, and the argument was about the *page* snapping back to
+        // the first screen rather than about the cursor - see
+        // `AppState::move_selection`.
+        self.move_selection(-1, Wrap::Around)
     }
 
     fn on_down(&mut self) -> Response {
@@ -445,7 +463,7 @@ impl AppState {
         // Moves rather than landing on row 0: the top row is already
         // highlighted before the first Down is pressed, so stepping onto it
         // would look like the key did nothing.
-        self.move_selection(1)
+        self.move_selection(1, Wrap::Around)
     }
 
     /// Drops a hover highlight the pointer has moved on from.

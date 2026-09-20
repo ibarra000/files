@@ -619,15 +619,17 @@ fn the_first_result_is_selected_by_default() {
     assert_eq!(s.selected_row(), Some(0));
 }
 
-/// Neither end of the list wraps. Wrapping would throw the eye from the row
-/// someone was reading to the far end of the list, and the way back is the way
-/// they came.
+/// Both ends of the list wrap, which is Ueli's arrow.
 ///
-/// Up at the top used to hand focus back to the search box, which was what made
-/// a further Up reach the recalled codes. The field never gives up the keyboard
-/// now, so the top simply holds.
+/// This used to assert the opposite, and the argument was not about the
+/// cursor: the panel drew a twelve-row window over the list, so a step off
+/// the foot landed on rank 0 and *the page* snapped back to the first
+/// screen. The results already read reappeared, and getting back meant
+/// walking the whole list again. The content band is a scroller now.
+/// Wrapping scrolls it to where rank 0 is, and Up from the first row is the
+/// quickest way to the three-hundredth.
 #[test]
-fn neither_end_of_the_list_wraps() {
+fn both_ends_of_the_list_wrap() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(
@@ -639,28 +641,38 @@ fn neither_end_of_the_list_wraps() {
     assert_eq!(s.selected_row(), Some(1));
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(2));
-    let r = s.update(press(Key::Down), now);
-    assert_eq!(s.selected_row(), Some(2), "down from the bottom stays put");
+    s.update(press(Key::Down), now);
     assert_eq!(
-        r.redraw,
-        Redraw::No,
-        "and does not redraw an identical frame"
+        s.selected_row(),
+        Some(0),
+        "down from the bottom comes round"
     );
 
-    // The way back is the way they came.
     s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(1));
-    s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0));
-
-    let r = s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0), "up from the top stays put");
-    assert_eq!(
-        r.redraw,
-        Redraw::No,
-        "and does not redraw an identical frame"
-    );
+    assert_eq!(s.selected_row(), Some(2), "and up from the top goes back");
     assert!(!s.should_quit);
+}
+
+/// A page does not, and Ueli has no page key to appeal to either way.
+///
+/// Six rows is not a landmark. A `PageDown` that came out somewhere near the
+/// top would be indistinguishable from one that had not moved at all, which
+/// is the failure wrapping a *step* cannot have - a step is one row, and one
+/// row is always visibly one row.
+#[test]
+fn a_page_stops_at_the_ends_rather_than_wrapping() {
+    let (mut s, now) = state();
+    with_results(&mut s, now, 40);
+
+    for _ in 0..20 {
+        s.update(press(Key::PageDown), now);
+    }
+    assert_eq!(s.selected_row(), Some(39), "PageDown wrapped");
+
+    for _ in 0..20 {
+        s.update(press(Key::PageUp), now);
+    }
+    assert_eq!(s.selected_row(), Some(0), "PageUp wrapped");
 }
 
 /// The specific annoyance this design exists to avoid.
@@ -1556,10 +1568,13 @@ fn down_walks_the_list_and_stops_at_the_end() {
     assert_eq!(s.selected_row(), Some(3), "walked off the end");
 }
 
-/// And the head of the list holds, because there is nowhere to hand the
-/// keyboard back to: the search field never gave it up.
+/// And the head of the list comes round to its foot.
+///
+/// The keyboard is not handed anywhere: the search field never gave it up,
+/// so Up at the top has always been a key with nothing above it. It is the
+/// way to the end of the list now rather than a key that does nothing.
 #[test]
-fn up_at_the_top_of_the_list_holds_rather_than_leaving_it() {
+fn up_at_the_top_of_the_list_comes_round_to_the_end() {
     let (mut s, now) = state();
     with_results(&mut s, now, 4);
 
@@ -1568,12 +1583,43 @@ fn up_at_the_top_of_the_list_holds_rather_than_leaving_it() {
     assert_eq!(s.selected_row(), Some(0));
 
     let again = s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0), "the top row must hold");
-    assert_eq!(
-        again.redraw,
-        Redraw::No,
-        "and holding still draws no new frame"
-    );
+    assert_eq!(s.selected_row(), Some(3), "the top must come round");
+    assert_eq!(again.redraw, Redraw::Yes, "and it is a new frame");
+}
+
+/// Ctrl+P and Ctrl+N are the arrows, for a hand that does not want to leave
+/// the home row - and they are the *same* arrows, not a second copy of the
+/// arithmetic.
+#[test]
+fn the_home_row_arrows_are_the_arrows() {
+    for (chord, arrow) in [(Key::Char('n'), Key::Down), (Key::Char('p'), Key::Up)] {
+        let (mut chorded, now) = state();
+        let (mut arrowed, _) = state();
+        with_results(&mut chorded, now, 6);
+        with_results(&mut arrowed, now, 6);
+
+        for _ in 0..8 {
+            chorded.update(ctrl(chord), now);
+            arrowed.update(press(arrow), now);
+        }
+        assert_eq!(
+            chorded.selected_row(),
+            arrowed.selected_row(),
+            "{chord:?} is not {arrow:?}"
+        );
+    }
+}
+
+/// And Ctrl+L selects the code, which is what focusing a search box does
+/// everywhere else on this machine.
+#[test]
+fn ctrl_l_selects_the_whole_code() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    assert!(s.input.selection().is_none(), "the fixture selected text");
+
+    s.update(ctrl(Key::Char('l')), now);
+    assert_eq!(s.input.selected_text(), Some("11-D-0704"));
 }
 
 /// The arrows move the selection; the caret keys move the caret. There is no
@@ -1719,17 +1765,19 @@ fn holding_down_walks_the_whole_list_rather_than_freezing_on_one_row() {
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS));
 
-    // All the way to the end, where it stops rather than running off it.
-    for _ in 0..300 {
+    // All the way to the end. Exactly to it, because the arrows wrap now and
+    // an overshoot would come round rather than pile up against the foot.
+    for _ in 0..(199 - VISIBLE_ROWS) {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(199));
 
-    // Back up, and it comes with you.
-    for _ in 0..300 {
-        s.update(press(Key::Up), now);
-    }
-    assert_eq!(s.selected_row(), Some(0));
+    // One more brings it round to the top, and the way back is the way it
+    // came.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(0), "the foot did not come round");
+    s.update(press(Key::Up), now);
+    assert_eq!(s.selected_row(), Some(199));
 }
 
 /// A list that shrinks under a cursor near its end must not leave the cursor
@@ -1765,9 +1813,9 @@ fn far_more_than_one_screenful_of_results_is_reachable() {
     let (mut s, now) = state();
     with_results(&mut s, now, files::config::MAX_RESULTS);
 
-    for _ in 0..files::config::MAX_RESULTS + 10 {
-        s.update(press(Key::Down), now);
-    }
+    // One Up, which wraps straight onto the last of them. The arrows used to
+    // stop at both ends, so this walked the whole list down to get here.
+    s.update(press(Key::Up), now);
     assert_eq!(
         s.selected_row(),
         Some(files::config::MAX_RESULTS - 1),
