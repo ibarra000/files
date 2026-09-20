@@ -5,7 +5,7 @@
 //! remembered.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId};
-use super::{BACKDROPS, Field, THEMES, VIEWERS, index_of, row};
+use super::{BACKDROPS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
 use crate::app::state::AppState;
 use crate::config::Settings;
 use crate::config::write::SettingKey;
@@ -163,6 +163,21 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                     Field::Choice {
                         options: BACKDROPS,
                         current: index_of(BACKDROPS, settings.backdrop.name()),
+                    },
+                )])],
+            },
+            Group {
+                heading: Some("How a result is listed"),
+                blocks: vec![Block::Rows(vec![row(
+                    settings,
+                    SettingKey::ResultLayout,
+                    "Rows",
+                    "Compact fits six results on screen and shows the name and the \
+                     drive. Detailed fits four and puts the folder under each name, \
+                     which is how you tell two drawings with the same name apart.",
+                    Field::Choice {
+                        options: LAYOUTS,
+                        current: index_of(LAYOUTS, settings.result_layout.name()),
                     },
                 )])],
             },

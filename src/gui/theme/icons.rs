@@ -67,11 +67,22 @@ pub enum Icon {
     Browse,
     Reset,
     External,
+
+    // On a result row, chosen by the file's extension. Six marks rather than
+    // one per type: a vocabulary somebody has to learn is worse than no
+    // vocabulary at all, and these are the distinctions that actually matter
+    // to somebody looking for a drawing. See [`crate::gui::panel::icons`].
+    FilePdf,
+    FileDrawing,
+    FileImage,
+    FileDocument,
+    FileArchive,
+    File,
 }
 
 impl Icon {
     /// Every one, for the test that proves the machine can draw them.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 20] = [
         Self::Gear,
         Self::Palette,
         Self::Drive,
@@ -86,6 +97,12 @@ impl Icon {
         Self::Browse,
         Self::Reset,
         Self::External,
+        Self::FilePdf,
+        Self::FileDrawing,
+        Self::FileImage,
+        Self::FileDocument,
+        Self::FileArchive,
+        Self::File,
     ];
 
     /// The code point, with the name Microsoft gives it.
@@ -111,6 +128,13 @@ impl Icon {
             Self::Browse => '\u{E838}',   // FolderOpen
             Self::Reset => '\u{E7A7}',    // Undo
             Self::External => '\u{E8A7}', // OpenInNewWindow
+
+            Self::FilePdf => '\u{EA90}',      // PDF
+            Self::FileDrawing => '\u{EB3C}',  // Design
+            Self::FileImage => '\u{E91B}',    // Photo
+            Self::FileDocument => '\u{E8A5}', // Document
+            Self::FileArchive => '\u{E7B8}',  // Package
+            Self::File => '\u{E7C3}',         // Page
         }
     }
 

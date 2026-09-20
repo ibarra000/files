@@ -269,6 +269,17 @@ refresh = "manual"
 # which it works out by asking rather than by checking a version.
 # backdrop      = "acrylic"          # acrylic | mica | tabbed | none
 
+# How much of itself a result row shows.
+#
+# "compact" is one line - an icon, the name, and the drive it came off - and
+# six of them fit on the panel. "detailed" puts the folder under the name and
+# fits four.
+#
+# Compact is the default, which is worth knowing about: two drawings called
+# GA.pdf in different job folders look identical in it, and the folder is
+# what tells them apart. The path is on the tooltip either way.
+# result_layout = "compact"          # compact | detailed
+
 # How the panel is coloured.
 #
 # "light" is a warm, bright panel and is what you get if this is not set.

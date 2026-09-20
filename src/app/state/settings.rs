@@ -147,6 +147,15 @@ impl AppState {
                     self.settings.theme = theme;
                 }
             }
+            SettingKey::ResultLayout => {
+                if let Scalar::Str(name) = value
+                    && let Some(layout) = crate::config::ResultLayout::parse(name)
+                {
+                    // Read on the frame the list is drawn, and by nothing
+                    // else - so the next one is already the new shape.
+                    self.settings.result_layout = layout;
+                }
+            }
             SettingKey::Viewer => {
                 if let Scalar::Str(name) = value
                     && let Some(viewer) = ViewerKind::parse(name)

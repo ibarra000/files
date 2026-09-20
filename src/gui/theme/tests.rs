@@ -548,29 +548,26 @@ fn the_bands_add_up_to_the_panel() {
     );
 }
 
-/// A full list, under its heading, has to fit the content band.
+/// A full page of rows, under its caption, has to fit the content band.
 ///
-/// The same arithmetic the `const` assertion beside `MAX_ROWS` runs. The
-/// window used to be created tall enough for whatever the row count asked
-/// for; the row count is now what has to fit the window, and this is the
-/// direction that can be got wrong.
+/// The same arithmetic the `const` assertions beside the row heights run,
+/// said out loud with the numbers in the failure message, and for both
+/// layouts - because each has a page size of its own and the taller rows are
+/// the ones that would overrun.
 #[test]
-fn a_full_list_fits_the_content_band() {
-    let wanted = BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32;
-    assert!(
-        wanted <= CONTENT_H,
-        "{MAX_ROWS} rows want {wanted}pt of a {CONTENT_H}pt band"
-    );
-}
-
-/// And they have to fit *well*. A row count that left a hundred points of
-/// nothing under the list would mean `PageDown` moved less than a screen,
-/// which is the one thing the number is still load-bearing for.
-#[test]
-fn a_full_list_very_nearly_fills_the_content_band() {
-    let wanted = BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32;
-    assert!(
-        CONTENT_H - wanted < ROW_H,
-        "another row would fit: {wanted}pt of {CONTENT_H}pt used"
-    );
+fn a_full_page_fits_the_content_band() {
+    for (layout, rows) in [
+        (ResultLayout::Compact, crate::config::VISIBLE_ROWS),
+        (ResultLayout::Detailed, crate::config::VISIBLE_ROWS_DETAILED),
+    ] {
+        let wanted = BAND_PAD * 2.0 + HEADING_H + row_pitch(layout) * rows as f32 - ROW_GAP;
+        assert!(
+            wanted <= CONTENT_H,
+            "{rows} {layout:?} rows want {wanted}pt of a {CONTENT_H}pt band"
+        );
+        assert!(
+            CONTENT_H - wanted < row_h(layout),
+            "another {layout:?} row would fit: {wanted}pt of {CONTENT_H}pt used"
+        );
+    }
 }

@@ -40,7 +40,9 @@
 
 pub mod field;
 pub mod footer;
+pub mod icons;
 pub mod list;
+pub mod row;
 
 use eframe::egui::{Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use std::time::{Instant, SystemTime};

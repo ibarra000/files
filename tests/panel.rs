@@ -34,7 +34,7 @@ use egui_kittest::kittest::NodeT;
 use files::app::event::{AppEvent, IndexMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
-use files::config::{Settings, ViewerKind};
+use files::config::{ResultLayout, Settings, VISIBLE_ROWS, VISIBLE_ROWS_DETAILED, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Theme};
 use files::index::store::{IndexStatus, Origin};
@@ -418,6 +418,59 @@ fn something_worth_saying_brings_the_footer_back() {
     );
 }
 
+/// The taller rows show fewer of themselves, which is the whole of what the
+/// setting does to the list.
+///
+/// Counted off the accessibility tree rather than off the arithmetic: the
+/// rows past the clip rectangle are culled before they are laid out, so how
+/// many are in the tree *is* how many are on screen.
+#[test]
+fn detailed_rows_fit_fewer_to_a_screen() {
+    let drawn = |layout| {
+        let (mut s, now) = state();
+        s.settings.result_layout = layout;
+        with_results(&mut s, "11-D-0704", many(300), 300, now);
+        let h = harness(s);
+        let root = h.root();
+        root.children_recursive()
+            .filter(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.contains(".pdf, in "))
+            })
+            .count()
+    };
+
+    let compact = drawn(ResultLayout::Compact);
+    let detailed = drawn(ResultLayout::Detailed);
+    assert!(compact >= VISIBLE_ROWS, "only {compact} compact rows");
+    assert!(
+        detailed >= VISIBLE_ROWS_DETAILED,
+        "only {detailed} detailed rows"
+    );
+    assert!(
+        detailed < compact,
+        "{detailed} detailed rows against {compact} compact ones - the          setting changed nothing"
+    );
+}
+
+/// Whichever layout is on, a row says the whole truth about itself to a
+/// reader. Compact does not draw the folder, and a screen reader that was
+/// given only what was drawn would be worse off than the tooltip.
+#[test]
+fn a_compact_row_still_names_the_folder_it_is_in() {
+    let (mut s, now) = state();
+    s.settings.result_layout = ResultLayout::Compact;
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(
+        screen.contains(r"11-D-0704-00.pdf, in R:\11d\11-D-0704"),
+        "a compact row told a reader less than it knows:\n{screen}"
+    );
+}
+
 /// The list is a group with a caption over it, which is Ueli's shape.
 #[test]
 fn the_results_are_captioned() {
@@ -624,9 +677,9 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     // before they are laid out, so the exact number is the scroller's
     // business rather than this test's.
     assert!(
-        seen >= theme::MAX_ROWS,
+        seen >= files::config::VISIBLE_ROWS,
         "only {seen} rows were drawn, of a screenful of {}",
-        theme::MAX_ROWS
+        files::config::VISIBLE_ROWS
     );
 }
 
@@ -691,6 +744,16 @@ snapshot!(looks_right_picking_a_drive, || {
 // the footer exists for.
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s
+});
+
+// The other row layout: the folder under the name, a larger mark, and four of
+// them where there were six. The one setting on the Appearance page whose
+// effect cannot be described in words as well as it can be shown.
+snapshot!(looks_right_with_detailed_rows, || {
+    let (mut s, now) = state();
+    s.settings.result_layout = ResultLayout::Detailed;
     with_results(&mut s, "11-D-0704", many(300), 300, now);
     s
 });

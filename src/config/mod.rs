@@ -63,10 +63,18 @@ pub const MAX_RESULTS: usize = 300;
 /// footer have taken theirs. It was twelve while the window grew to fit the
 /// list. `gui::theme` asserts the arithmetic so the two cannot drift.
 ///
-/// This is the page size the arrows move by and the window the state machine
-/// keeps over the results. It stops being the *drawn* row count once the list
-/// is a scroll area.
+/// This is the page size the arrows move by, and no longer the window the
+/// state machine keeps over the results: the content band is a scroll area
+/// and owns its own offset. What is left of the number is how far `PageDown`
+/// goes, which has to be one screen.
 pub const VISIBLE_ROWS: usize = 6;
+
+/// And four, when the rows are the taller kind.
+///
+/// See [`ResultLayout`]. A detailed row is fifty-two points where a compact
+/// one is thirty-six, so a screen is four of them rather than six - and a
+/// `PageDown` that moved six would scroll past two rows nobody saw.
+pub const VISIBLE_ROWS_DETAILED: usize = 4;
 
 /// Arena bytes in the first segment a walk publishes.
 ///
@@ -545,6 +553,69 @@ pub enum ViewerKind {
     Avwin,
 }
 
+/// How much of itself a result row shows.
+///
+/// Ueli's two, and its default. A compact row is an icon, a name and a badge
+/// on one line; a detailed row puts the folder under the name and is half as
+/// tall again, so four fit where six did.
+///
+/// **The default is worth arguing about, and it ships as Ueli has it.** Ueli's
+/// rows are installed applications, whose names are unique - so the folder
+/// under them would be noise and compact is obviously right. Ours are files,
+/// and two drawings called `GA.pdf` in different job folders are the ordinary
+/// case rather than the odd one: compact shows them as two identical rows
+/// distinguished only by their drive badge. The instruction was to keep the
+/// experience Ueli's, so compact is the default and [`Self::Detailed`] is one
+/// switch away on the Appearance page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResultLayout {
+    /// One line: an icon, the name, the drive it came off.
+    #[default]
+    Compact,
+    /// Two: the name over the folder it is in.
+    Detailed,
+}
+
+impl ResultLayout {
+    pub const ALL: [Self; 2] = [Self::Compact, Self::Detailed];
+
+    /// The spelling written back to the config file, so it must be one
+    /// [`Self::parse`] accepts.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    /// How the settings window spells it.
+    pub const fn display(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Detailed => "Detailed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(text.trim()))
+    }
+
+    /// How far `PageUp` and `PageDown` move.
+    ///
+    /// A screen, which is a different number for each layout. Here rather
+    /// than in `gui::theme` because the state machine is what moves the
+    /// cursor; the geometry that makes these two numbers true is asserted
+    /// beside the row heights.
+    pub const fn rows_per_page(self) -> usize {
+        match self {
+            Self::Compact => VISIBLE_ROWS,
+            Self::Detailed => VISIBLE_ROWS_DETAILED,
+        }
+    }
+}
+
 /// Which palette the panel is drawn in.
 ///
 /// A setting rather than a follow of the Windows theme, which is what it used
@@ -837,6 +908,8 @@ pub struct Settings {
     /// window handle once, and the shell re-applies it on a theme change and
     /// nowhere else. See [`crate::gui::window::Material`].
     pub backdrop: crate::gui::window::Material,
+    /// How much of itself a result row shows.
+    pub result_layout: ResultLayout,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -964,6 +1037,7 @@ impl Settings {
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
             backdrop: crate::gui::window::Material::default(),
+            result_layout: ResultLayout::default(),
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1164,6 +1238,11 @@ impl Settings {
         {
             self.backdrop = v;
         }
+        if env_str("FILES_RESULT_LAYOUT").is_none()
+            && let Some(v) = f.result_layout.as_deref().and_then(ResultLayout::parse)
+        {
+            self.result_layout = v;
+        }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
             // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
@@ -1250,6 +1329,9 @@ impl Settings {
             env_str("FILES_BACKDROP").and_then(|v| crate::gui::window::Material::parse(&v))
         {
             s.backdrop = v;
+        }
+        if let Some(v) = env_str("FILES_RESULT_LAYOUT").and_then(|v| ResultLayout::parse(&v)) {
+            s.result_layout = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

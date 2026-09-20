@@ -101,10 +101,11 @@ pub enum SettingKey {
     UpdateFrom,
     IndexLog,
     Backdrop,
+    ResultLayout,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -120,6 +121,7 @@ impl SettingKey {
         Self::UpdateFrom,
         Self::IndexLog,
         Self::Backdrop,
+        Self::ResultLayout,
     ];
 
     /// The spelling in the file.
@@ -140,6 +142,7 @@ impl SettingKey {
             Self::UpdateFrom => "update_from",
             Self::IndexLog => "index_log",
             Self::Backdrop => "backdrop",
+            Self::ResultLayout => "result_layout",
         }
     }
 
@@ -165,6 +168,7 @@ impl SettingKey {
             Self::UpdateFrom => "FILES_UPDATE_FROM",
             Self::IndexLog => "FILES_INDEX_LOG",
             Self::Backdrop => "FILES_BACKDROP",
+            Self::ResultLayout => "FILES_RESULT_LAYOUT",
         }
     }
 
@@ -199,6 +203,7 @@ impl SettingKey {
         matches!(
             self,
             Self::Theme
+                | Self::ResultLayout
                 | Self::Viewer
                 | Self::History
                 | Self::StaleNotices
@@ -601,6 +606,7 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .as_ref()
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
         SettingKey::Backdrop => s.backdrop.clone().map(Scalar::Str),
+        SettingKey::ResultLayout => s.result_layout.clone().map(Scalar::Str),
     }
 }
 
@@ -742,6 +748,7 @@ mod tests {
             SettingKey::UpdateFrom => Typed::Text(r"\\fileserver\software\files".into()),
             SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
             SettingKey::Backdrop => Typed::Text("mica".into()),
+            SettingKey::ResultLayout => Typed::Text("detailed".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             SettingKey::DevMode | SettingKey::AutoHide => Typed::Flag(true),
             SettingKey::History

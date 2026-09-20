@@ -39,11 +39,11 @@ use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align, Align2, Id, Layout, Rect, ScrollArea, Sense, Ui, UiBuilder, pos2, vec2};
 use std::time::SystemTime;
 
+use super::row;
 use crate::app::state::AppState;
 use crate::app::state::pointer::Intent;
 use crate::gui::anim::Content;
-use crate::gui::row;
-use crate::gui::theme::{self, Theme, Weight};
+use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::{self, Emphasis, Run};
 
 /// How tall one line of the empty state is.
@@ -113,10 +113,11 @@ pub fn show(
                     .max_rect(inner)
                     .layout(Layout::top_down(Align::Min)),
             );
-            // A row is exactly `ROW_H` tall and the next one starts where it
-            // ends. The toolkit's default is three points of air between
-            // allocated items, which is right for a form and wrong for a
-            // list.
+            // The air between rows is allocated between them rather than
+            // left to the toolkit, because `gap` means *between*: egui's
+            // `item_spacing` would also put five points under the caption,
+            // which already carries its own, and five under the last row on
+            // top of the band's padding.
             body.spacing_mut().item_spacing.y = 0.0;
 
             // Allocated rather than `add_space`d, both ends: a space only
@@ -124,7 +125,7 @@ pub fn show(
             // rectangle everything was allocated in. The bottom pad would
             // have been the difference between a last row clear of the rule
             // and one touching it.
-            pad(&mut body);
+            space(&mut body, theme::BAND_PAD);
             if let Some(text) = heading_of(content) {
                 heading(&mut body, theme, text);
             }
@@ -139,7 +140,7 @@ pub fn show(
                 // content band at all.
                 Content::Empty | Content::Quiet => Vec::new(),
             };
-            pad(&mut body);
+            space(&mut body, theme::BAND_PAD);
 
             ui.advance_cursor_after_rect(body.min_rect());
         });
@@ -147,9 +148,14 @@ pub fn show(
     intents
 }
 
-/// The band's padding, above the caption and below the last row.
-fn pad(ui: &mut Ui) {
-    ui.allocate_exact_size(vec2(ui.available_width(), theme::BAND_PAD), Sense::hover());
+/// Air in the list, allocated rather than skipped over.
+///
+/// `Ui::add_space` only moves the cursor, and what the scroller measures is
+/// the rectangle everything was *allocated* in - so a space at the foot of
+/// the list would be the difference between a last row clear of the rule and
+/// one touching it.
+fn space(ui: &mut Ui, amount: f32) {
+    ui.allocate_exact_size(vec2(ui.available_width(), amount), Sense::hover());
 }
 
 /// The caption over a group.
@@ -210,17 +216,28 @@ const fn discriminant(content: Content) -> u8 {
 fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let mut intents = Vec::new();
 
-    // The term, not the line: `report ext:pdf` is fourteen bytes and the
-    // match is six. `view::row::highlight` answers an out-of-range length by
-    // returning a plain name, so the symptom would be an underline quietly
-    // never appearing rather than anything louder.
-    let query_len = state.query().term().len();
+    let style = row::Style {
+        theme,
+        layout: state.settings.result_layout,
+        routes: &state.settings.routes,
+        // Once, rather than once per row: the answer goes through the font
+        // atlas and is the same for all three hundred of them.
+        icons: theme::has_icon(ui.ctx(), Icon::File),
+        // The term, not the line: `report ext:pdf` is fourteen bytes and the
+        // match is six. `view::row::highlight` answers an out-of-range length
+        // by returning a plain name, so the symptom would be an underline
+        // quietly never appearing rather than anything louder.
+        query_len: state.query().term().len(),
+    };
     let selected = state.selected_row();
     let follow = selection_changed(ui, "results", selected);
     let mut hovered = None;
 
     for (rank, hit) in state.hits.iter().enumerate() {
-        let response = row::show(ui, theme, hit, query_len, selected == Some(rank));
+        if rank > 0 {
+            space(ui, theme::ROW_GAP);
+        }
+        let response = row::show(ui, &style, hit, selected == Some(rank));
         if selected == Some(rank) && follow {
             bring_into_view(ui, response.rect);
         }
@@ -251,8 +268,13 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let follow = selection_changed(ui, "recent", cursor);
 
     for (rank, entry) in state.history.entries().iter().enumerate() {
-        let (rect, response) =
-            ui.allocate_exact_size(vec2(ui.available_width(), theme::ROW_H), Sense::click());
+        if rank > 0 {
+            space(ui, theme::ROW_GAP);
+        }
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), theme::ROW_COMPACT_H),
+            Sense::click(),
+        );
         if !ui.is_rect_visible(rect) && cursor != Some(rank) {
             continue;
         }
@@ -307,8 +329,13 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
     let follow = selection_changed(ui, "shares", Some(chosen));
 
     for (rank, id) in state.share_ids().iter().enumerate() {
-        let (rect, _) =
-            ui.allocate_exact_size(vec2(ui.available_width(), theme::ROW_H), Sense::hover());
+        if rank > 0 {
+            space(ui, theme::ROW_GAP);
+        }
+        let (rect, _) = ui.allocate_exact_size(
+            vec2(ui.available_width(), theme::ROW_COMPACT_H),
+            Sense::hover(),
+        );
         if rank == chosen {
             ui.painter()
                 .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
@@ -484,18 +511,5 @@ mod tests {
         assert!(heading_of(Content::Shares).is_some());
         assert!(heading_of(Content::Empty).is_none());
         assert!(heading_of(Content::Quiet).is_none());
-    }
-
-    /// A full list under its caption has to fit the band, or `PageDown` moves
-    /// further than the screen shows.
-    #[test]
-    fn a_full_page_of_rows_fits_under_its_caption() {
-        let wanted =
-            theme::BAND_PAD * 2.0 + theme::HEADING_H + theme::ROW_H * theme::MAX_ROWS as f32;
-        assert!(
-            wanted <= theme::CONTENT_H,
-            "{wanted}pt of a {}pt band",
-            theme::CONTENT_H
-        );
     }
 }

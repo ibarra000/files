@@ -18,7 +18,6 @@ use crate::app::key::{Key, KeyEvent};
 
 use super::{AppState, Severity, Urgency};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
-use crate::config::VISIBLE_ROWS;
 
 impl AppState {
     pub(super) fn on_key(&mut self, key: KeyEvent, now: Instant) -> Response {
@@ -168,11 +167,12 @@ impl AppState {
                 Response::redraw()
             }
 
-            // A listful at a time. The list is at most a screenful, so this
-            // reaches either end in one press - which is what makes it worth
-            // having at all now that there is no grid to page through.
-            Key::PageDown => self.move_selection(VISIBLE_ROWS as isize),
-            Key::PageUp => self.move_selection(-(VISIBLE_ROWS as isize)),
+            // A screenful at a time, which is a different number of rows in
+            // each layout - a detailed row is half as tall again, so four of
+            // them fill the band where six compact ones do. Paging by the
+            // wrong one would scroll past rows nobody saw.
+            Key::PageDown => self.move_selection(self.rows_per_page()),
+            Key::PageUp => self.move_selection(-self.rows_per_page()),
 
             Key::Up => self.on_up(now),
             Key::Down => self.on_down(),

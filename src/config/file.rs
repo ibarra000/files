@@ -213,6 +213,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "update_from",
     "theme",
     "backdrop",
+    "result_layout",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -241,6 +242,7 @@ pub struct FileSettings {
     pub update_from: Option<PathBuf>,
     pub theme: Option<String>,
     pub backdrop: Option<String>,
+    pub result_layout: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -816,12 +818,32 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                         None,
                         None,
                         format!(
-                            "unknown backdrop {v:?}                              (expected \"acrylic\", \"mica\", \"tabbed\" or \"none\")"
+                            "unknown backdrop {v:?} (expected \"acrylic\", \"mica\", \"tabbed\" or \"none\")"
                         ),
                         None,
                     );
                 }
                 out.backdrop = raw.map(str::to_string);
+            }
+            "result_layout" => {
+                let raw = value.and_then(Value::as_str);
+                // Refused rather than ignored, for the third time and the
+                // same reason: a misspelling that fell back silently leaves
+                // somebody looking at the layout they were trying to change.
+                if let Some(v) = raw
+                    && crate::config::ResultLayout::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!(
+                            "unknown result_layout {v:?} (expected \"compact\" or \"detailed\")"
+                        ),
+                        None,
+                    );
+                }
+                out.result_layout = raw.map(str::to_string);
             }
             _ => {}
         }

@@ -23,6 +23,7 @@
 use eframe::egui::epaint::Shadow;
 use eframe::egui::{Color32, CornerRadius, FontId, Rect};
 
+use crate::config::ResultLayout;
 use crate::view::Emphasis;
 use crate::view::status::Tone;
 
@@ -66,39 +67,61 @@ pub const DIVIDER: f32 = 1.0;
 /// A group's caption, and the air under it.
 pub const HEADING_H: f32 = 21.0;
 
-/// One result.
-pub const ROW_H: f32 = 40.0;
+/// One result, on one line: an icon, a name and a badge.
+pub const ROW_COMPACT_H: f32 = 36.0;
+/// One result, with the folder under the name.
+pub const ROW_DETAILED_H: f32 = 52.0;
 /// The gap between a row's edge and its text.
 pub const ROW_PAD_X: f32 = 12.0;
+
+/// How tall a row is, in the layout that is switched on.
+pub const fn row_h(layout: ResultLayout) -> f32 {
+    match layout {
+        ResultLayout::Compact => ROW_COMPACT_H,
+        ResultLayout::Detailed => ROW_DETAILED_H,
+    }
+}
+
+/// What one row costs the list, including the air under it.
+pub const fn row_pitch(layout: ResultLayout) -> f32 {
+    row_h(layout) + ROW_GAP
+}
 
 /// Everything between the two hairlines: the scroller, and nothing else.
 pub const CONTENT_H: f32 = PANEL_H - HEADER_H - FOOTER_H - DIVIDER * 2.0;
 
-/// The most rows shown at once.
+/// A full page of rows, under its caption, has to fit the content band.
 ///
-/// Re-exported rather than defined here: this is also how far `PageDown`
-/// moves, and the state machine owns that. See [`crate::config::VISIBLE_ROWS`].
+/// The direction of this used to be the other way round: the window was made
+/// as tall as the row count asked for, so it could not be wrong. Fixed, the
+/// two are independent, and a page size one too large is a `PageDown` that
+/// scrolls past rows nobody saw. Checked at compile time so it cannot be.
 ///
-/// No longer a cap on what is *drawn* - the content band is a scroller and
-/// holds the whole list. It is how many are on screen at once, which is what
-/// a page has to be worth.
-pub use crate::config::VISIBLE_ROWS as MAX_ROWS;
+/// The gap is counted between rows and not after the last one, which is what
+/// `gap` means.
+const fn page_h(layout: ResultLayout, rows: usize) -> f32 {
+    BAND_PAD * 2.0 + HEADING_H + row_pitch(layout) * rows as f32 - ROW_GAP
+}
 
-/// A full list, under its heading, has to fit the content band.
-///
-/// A constant now that the window is one. While it grew, the height was
-/// derived from the row count and this direction could not be wrong; fixed,
-/// the two are independent and a row count one too large would mean a page
-/// that scrolls further than the screen shows. Checked at compile time so it
-/// cannot.
-const _: () = assert!(BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32 <= CONTENT_H);
+const _: () = assert!(page_h(ResultLayout::Compact, crate::config::VISIBLE_ROWS) <= CONTENT_H);
+const _: () =
+    assert!(page_h(ResultLayout::Detailed, crate::config::VISIBLE_ROWS_DETAILED) <= CONTENT_H);
+
+/// And they have to fit *well*: a page that left a row's worth of nothing
+/// under it would mean `PageDown` moved less than a screen.
+const _: () =
+    assert!(CONTENT_H - page_h(ResultLayout::Compact, crate::config::VISIBLE_ROWS) < ROW_COMPACT_H);
+const _: () = assert!(
+    CONTENT_H - page_h(ResultLayout::Detailed, crate::config::VISIBLE_ROWS_DETAILED)
+        < ROW_DETAILED_H
+);
 
 /// The accent bar down the selected row.
 pub const MARKER_W: f32 = 3.0;
 
 /// Matches the radius Windows 11 gives an ordinary window.
 pub const PANEL_RADIUS: u8 = 8;
-pub const ROW_RADIUS: u8 = 6;
+pub const ROW_RADIUS: u8 = 4;
 pub const CHIP_RADIUS: u8 = 4;
 
 // -- type -------------------------------------------------------------------

@@ -28,7 +28,6 @@ pub mod fonts;
 pub mod frame;
 pub mod input;
 pub mod panel;
-pub mod row;
 pub mod settings;
 pub mod theme;
 #[cfg(windows)]

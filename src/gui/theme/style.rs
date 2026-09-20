@@ -19,7 +19,12 @@ pub const CONTROL_RADIUS: u8 = 4;
 pub const CARD_RADIUS: u8 = 4;
 pub const CARD_PAD: f32 = 12.0;
 
-/// Between one setting and the next.
+/// Between one row and the next: two settings, or two results.
+///
+/// Five, which is what Ueli gives a list of results and what a stack of
+/// setting tiles wanted independently. Rows that touch read as a table; five
+/// points of ground showing between them reads as a list of things, and is
+/// what makes a rounded corner visible at all.
 pub const ROW_GAP: f32 = 5.0;
 /// Between one group of settings and the next. Large, and that is the point:
 /// it is the only thing separating two groups, because a group heading is

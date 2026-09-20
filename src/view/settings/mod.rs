@@ -144,6 +144,17 @@ pub(super) const BACKDROPS: &[Choice] = &[
     },
 ];
 
+pub(super) const LAYOUTS: &[Choice] = &[
+    Choice {
+        value: "compact",
+        label: "Compact",
+    },
+    Choice {
+        value: "detailed",
+        label: "Detailed",
+    },
+];
+
 pub(super) const THEMES: &[Choice] = &[
     Choice {
         value: "light",

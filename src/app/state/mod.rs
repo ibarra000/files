@@ -951,6 +951,16 @@ impl AppState {
     /// the results already read reappeared at the end, and returning to where
     /// someone was meant walking the whole list again. Stopping means the way
     /// back is the way they came.
+    /// How far a page key moves.
+    ///
+    /// A screenful, which is a different number of rows in each layout. Read
+    /// off the settings rather than off a constant so that switching the
+    /// layout in the settings window changes the page on the next press, the
+    /// same frame the rows change shape.
+    fn rows_per_page(&self) -> isize {
+        self.settings.result_layout.rows_per_page() as isize
+    }
+
     fn move_selection(&mut self, delta: isize) -> Response {
         if self.hits.is_empty() {
             return Response::none();
