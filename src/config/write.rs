@@ -92,20 +92,23 @@ pub enum SettingKey {
     PdfViewer,
     HideExtensions,
     HideSystemFiles,
-    // Appended rather than slotted in beside their neighbours, because
-    // `bit()` is the variant's position and `Settings::cli_pinned` is a
-    // bitmask of it. Inserting one in the middle would silently renumber
-    // every key after it.
-    AutoHide,
+    // Appended rather than slotted in beside their neighbours. `bit()` is
+    // the variant's position and `Settings::cli_pinned` is a bitmask of it -
+    // built from the command line at startup and never written down, so a
+    // renumbering costs nothing at rest and everything mid-run. Appending is
+    // how that stays true without anybody having to check.
     PdfReadOnly,
     UpdateFrom,
     IndexLog,
     Backdrop,
     ResultLayout,
+    HideOnBlur,
+    HideAfterOpening,
+    HideOnEscape,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -116,12 +119,14 @@ impl SettingKey {
         Self::PdfViewer,
         Self::HideExtensions,
         Self::HideSystemFiles,
-        Self::AutoHide,
         Self::PdfReadOnly,
         Self::UpdateFrom,
         Self::IndexLog,
         Self::Backdrop,
         Self::ResultLayout,
+        Self::HideOnBlur,
+        Self::HideAfterOpening,
+        Self::HideOnEscape,
     ];
 
     /// The spelling in the file.
@@ -137,12 +142,14 @@ impl SettingKey {
             Self::PdfViewer => "pdf_viewer",
             Self::HideExtensions => "hide_extensions",
             Self::HideSystemFiles => "hide_system_files",
-            Self::AutoHide => "auto_hide",
             Self::PdfReadOnly => "pdf_read_only",
             Self::UpdateFrom => "update_from",
             Self::IndexLog => "index_log",
             Self::Backdrop => "backdrop",
             Self::ResultLayout => "result_layout",
+            Self::HideOnBlur => "hide_on_blur",
+            Self::HideAfterOpening => "hide_after_opening",
+            Self::HideOnEscape => "hide_on_escape",
         }
     }
 
@@ -163,12 +170,14 @@ impl SettingKey {
             Self::PdfViewer => "FILES_PDF_VIEWER",
             Self::HideExtensions => "FILES_HIDE_EXTENSIONS",
             Self::HideSystemFiles => "FILES_HIDE_SYSTEM_FILES",
-            Self::AutoHide => "FILES_AUTO_HIDE",
             Self::PdfReadOnly => "FILES_PDF_READ_ONLY",
             Self::UpdateFrom => "FILES_UPDATE_FROM",
             Self::IndexLog => "FILES_INDEX_LOG",
             Self::Backdrop => "FILES_BACKDROP",
             Self::ResultLayout => "FILES_RESULT_LAYOUT",
+            Self::HideOnBlur => "FILES_HIDE_ON_BLUR",
+            Self::HideAfterOpening => "FILES_HIDE_AFTER_OPENING",
+            Self::HideOnEscape => "FILES_HIDE_ON_ESCAPE",
         }
     }
 
@@ -184,8 +193,14 @@ impl SettingKey {
     }
 
     /// Its position, for the bitmask in [`crate::config::Settings`].
-    pub const fn bit(self) -> u16 {
-        1 << (self as u16)
+    ///
+    /// Thirty-two bits for eighteen keys, and the width is checked rather
+    /// than assumed: it was a `u16` and the eighteenth key overflowed the
+    /// shift, which in debug is a panic in every test that builds a
+    /// `Settings` and in release is a pin silently landing on the wrong key.
+    pub const fn bit(self) -> u32 {
+        const _: () = assert!(SettingKey::ALL.len() <= u32::BITS as usize);
+        1 << (self as u32)
     }
 
     /// Whether a change is picked up without restarting.
@@ -208,7 +223,9 @@ impl SettingKey {
                 | Self::History
                 | Self::StaleNotices
                 | Self::DevMode
-                | Self::AutoHide
+                | Self::HideOnBlur
+                | Self::HideAfterOpening
+                | Self::HideOnEscape
         )
     }
 }
@@ -595,7 +612,9 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
         SettingKey::HideExtensions => s.hide_extensions.clone().map(Scalar::List),
         SettingKey::HideSystemFiles => s.hide_system_files.map(Scalar::Bool),
-        SettingKey::AutoHide => s.auto_hide.map(Scalar::Bool),
+        SettingKey::HideOnBlur => s.hide_on_blur.map(Scalar::Bool),
+        SettingKey::HideAfterOpening => s.hide_after_opening.map(Scalar::Bool),
+        SettingKey::HideOnEscape => s.hide_on_escape.map(Scalar::Bool),
         SettingKey::PdfReadOnly => s.pdf_read_only.map(Scalar::Bool),
         SettingKey::UpdateFrom => s
             .update_from
@@ -750,11 +769,14 @@ mod tests {
             SettingKey::Backdrop => Typed::Text("mica".into()),
             SettingKey::ResultLayout => Typed::Text("detailed".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
-            SettingKey::DevMode | SettingKey::AutoHide => Typed::Flag(true),
+            SettingKey::DevMode => Typed::Flag(true),
             SettingKey::History
             | SettingKey::StaleNotices
             | SettingKey::LiveUpdates
             | SettingKey::PdfReadOnly
+            | SettingKey::HideOnBlur
+            | SettingKey::HideAfterOpening
+            | SettingKey::HideOnEscape
             | SettingKey::HideSystemFiles => Typed::Flag(false),
         }
     }

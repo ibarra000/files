@@ -531,7 +531,19 @@ impl eframe::App for Shell {
 
         // Keystrokes first, so a character typed this frame is searched for on
         // this frame rather than on the next one.
+        //
+        // A lost focus is dropped while a window of ours has the keyboard,
+        // and this is the only place that can be known: the settings window
+        // is a viewport of this one, so opening it *is* the panel losing
+        // focus - and a panel that dismissed itself over that would take
+        // away the window the user had just clicked into. The state machine
+        // cannot make the distinction, because which windows are open is
+        // deliberately not something it is asked to be right about.
+        let guard_blur = self.windows.any_open();
         for event in ctx.input(input::translate) {
+            if guard_blur && matches!(event, AppEvent::WindowFocus(false)) {
+                continue;
+            }
             self.app.feed(event, now);
         }
 

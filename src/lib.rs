@@ -16,6 +16,7 @@ pub mod history;
 pub mod hotkey;
 pub mod index;
 pub mod log;
+pub mod notify;
 pub mod open;
 pub mod paths;
 pub mod placement;

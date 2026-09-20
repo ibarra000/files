@@ -73,6 +73,14 @@ pub fn translate(input: &egui::InputState) -> Vec<AppEvent> {
                 }
             }
             egui::Event::Paste(text) => out.push(AppEvent::Paste(text.clone())),
+            // How the panel learns that somebody clicked on something else,
+            // which is not a thing the hotkey thread can hear about: it owns
+            // the window, not the desktop. Passed through as a fact rather
+            // than acted on here - whether losing focus puts the panel away
+            // is a setting, and settings live one layer up.
+            egui::Event::WindowFocused(has_focus) => {
+                out.push(AppEvent::WindowFocus(*has_focus));
+            }
             // The toolkit ate these keystrokes before they could become keys,
             // so hand back the chord each one stood for. See the module note.
             egui::Event::Copy => {

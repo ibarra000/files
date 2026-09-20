@@ -835,8 +835,34 @@ pub struct Settings {
     /// what makes opening a second code a keystroke rather than a hotkey.
     ///
     /// On for anyone who wants the old behaviour. Escape and the hotkey close
-    /// the panel either way: this is about the times it decides for itself.
-    pub auto_hide: bool,
+    /// Whether clicking on something else puts the panel away.
+    ///
+    /// On, which is what a launcher does and what Ueli does. The panel is
+    /// summoned over somebody's work and is in the way until it is not
+    /// wanted; a launcher that had to be dismissed by hand would be one more
+    /// window to manage.
+    pub hide_on_blur: bool,
+    /// Whether the panel goes away once a file is on its way.
+    ///
+    /// On, and it used to be off. The objection was specific and correct: an
+    /// open is answered on another thread, so "Opened 11 of 13 pages", the
+    /// list of pages skipped and "Could not open …" all arrived at a window
+    /// that had already gone, and nobody ever read one. That is answered
+    /// rather than overruled - anything the open has to say that the user
+    /// must see now arrives in a message box. See [`crate::notify`].
+    ///
+    /// Per action rather than per open, which is the other half: a copy
+    /// leaves the panel up so its toast can be read, and only the opens and
+    /// the reveal take it away. See [`crate::view::actions::Action::hides`].
+    pub hide_after_opening: bool,
+    /// Whether Escape puts the panel away rather than clearing the box.
+    ///
+    /// On. Switched off, Escape clears the code and the shortcut is the way
+    /// out - which is the arrangement somebody who lives in the panel may
+    /// want, and is not the one to default to: a window covering somebody's
+    /// work has to be dismissable without them working out which layer they
+    /// are on.
+    pub hide_on_escape: bool,
     /// Whether an assembled document is handed to the viewer read-only.
     ///
     /// On by default, and the reason is the cache rather than the share. A
@@ -947,7 +973,7 @@ pub struct Settings {
     /// because it cannot change while this runs. A flag leaves nothing to ask,
     /// so it is recorded here as it is applied. One bit per
     /// [`write::SettingKey`]; see [`Self::pin`].
-    pub cli_pinned: u16,
+    pub cli_pinned: u32,
     /// The files that are never shown, however well they match.
     ///
     /// One derived value rather than the two settings it is built from, so
@@ -1025,7 +1051,9 @@ impl Settings {
             persist: true,
             stale_notices: true,
             dev_mode: false,
-            auto_hide: false,
+            hide_on_blur: true,
+            hide_after_opening: true,
+            hide_on_escape: true,
             pdf_read_only: true,
             max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
             cache_dir: default_cache_dir(),
@@ -1160,10 +1188,20 @@ impl Settings {
         {
             self.dev_mode = v;
         }
-        if env_bool("FILES_AUTO_HIDE").is_none()
-            && let Some(v) = f.auto_hide
+        if env_bool("FILES_HIDE_ON_BLUR").is_none()
+            && let Some(v) = f.hide_on_blur
         {
-            self.auto_hide = v;
+            self.hide_on_blur = v;
+        }
+        if env_bool("FILES_HIDE_AFTER_OPENING").is_none()
+            && let Some(v) = f.hide_after_opening
+        {
+            self.hide_after_opening = v;
+        }
+        if env_bool("FILES_HIDE_ON_ESCAPE").is_none()
+            && let Some(v) = f.hide_on_escape
+        {
+            self.hide_on_escape = v;
         }
         if env_bool("FILES_PDF_READ_ONLY").is_none()
             && let Some(v) = f.pdf_read_only
@@ -1298,8 +1336,14 @@ impl Settings {
         if let Some(v) = env_bool("FILES_DEV_MODE") {
             s.dev_mode = v;
         }
-        if let Some(v) = env_bool("FILES_AUTO_HIDE") {
-            s.auto_hide = v;
+        if let Some(v) = env_bool("FILES_HIDE_ON_BLUR") {
+            s.hide_on_blur = v;
+        }
+        if let Some(v) = env_bool("FILES_HIDE_AFTER_OPENING") {
+            s.hide_after_opening = v;
+        }
+        if let Some(v) = env_bool("FILES_HIDE_ON_ESCAPE") {
+            s.hide_on_escape = v;
         }
         if let Some(v) = env_bool("FILES_PDF_READ_ONLY") {
             s.pdf_read_only = v;
@@ -1768,7 +1812,7 @@ mod tests {
     /// One bit each, or two settings would pin each other.
     #[test]
     fn every_writable_key_has_a_bit_of_its_own() {
-        let mut seen = 0u16;
+        let mut seen = 0u32;
         for key in SettingKey::ALL {
             assert_eq!(seen & key.bit(), 0, "{} shares a bit", key.name());
             seen |= key.bit();

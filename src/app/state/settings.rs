@@ -186,11 +186,22 @@ impl AppState {
                     self.settings.dev_mode = *on;
                 }
             }
-            // Read on the keystroke that opens something, off the `Settings`
-            // this struct owns, so the next open sees the new answer.
-            SettingKey::AutoHide => {
+            // Read on the keystroke that opens something, or on the frame
+            // the window loses focus, off the `Settings` this struct owns -
+            // so the next one sees the new answer.
+            SettingKey::HideOnBlur => {
                 if let Scalar::Bool(on) = value {
-                    self.settings.auto_hide = *on;
+                    self.settings.hide_on_blur = *on;
+                }
+            }
+            SettingKey::HideAfterOpening => {
+                if let Scalar::Bool(on) = value {
+                    self.settings.hide_after_opening = *on;
+                }
+            }
+            SettingKey::HideOnEscape => {
+                if let Scalar::Bool(on) = value {
+                    self.settings.hide_on_escape = *on;
                 }
             }
             // Deliberately not applied, which is a stronger statement than

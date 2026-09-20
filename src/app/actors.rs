@@ -401,6 +401,10 @@ impl Actors {
                                 }));
                     }
                 }
+                // Blocking, on the dispatch thread, and deliberately: the
+                // alternative is a box that appears behind whatever just
+                // opened, which is a box nobody sees.
+                Cmd::Announce { title, detail } => crate::notify::tell(&title, &detail),
                 Cmd::Copy(text) => clipboard::copy_async(text, self.events.clone()),
                 Cmd::ReadClipboard => clipboard::read_async(self.events.clone()),
                 Cmd::SaveHistory(entries) => {

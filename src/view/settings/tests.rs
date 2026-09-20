@@ -259,11 +259,14 @@ fn a_setting_that_applies_at_once_says_nothing_at_all() {
 /// silent change to a function.
 #[test]
 fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
-    const HOME: [(SettingKey, PageId); 14] = [
+    const HOME: [(SettingKey, PageId); 17] = [
         (SettingKey::Hotkey, PageId::General),
         (SettingKey::History, PageId::General),
-        (SettingKey::AutoHide, PageId::General),
+        (SettingKey::HideOnBlur, PageId::General),
+        (SettingKey::HideAfterOpening, PageId::General),
+        (SettingKey::HideOnEscape, PageId::General),
         (SettingKey::Theme, PageId::Appearance),
+        (SettingKey::ResultLayout, PageId::Appearance),
         (SettingKey::LiveUpdates, PageId::Drives),
         (SettingKey::StaleNotices, PageId::Drives),
         (SettingKey::HideExtensions, PageId::Searching),

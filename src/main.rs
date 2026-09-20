@@ -90,26 +90,7 @@ fn main() -> io::Result<()> {
 /// program, and both of which would otherwise be a process that starts and
 /// vanishes with nothing on screen at all.
 fn tell(message: &str) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-
-        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-        let text = wide(message);
-        let title = wide("files");
-        // SAFETY: two live NUL-terminated wide strings and a null owner window,
-        // which is the documented way to show a message box with no parent.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
-    }
-    #[cfg(not(windows))]
-    eprintln!("files: {message}");
+    files::notify::tell("files", message);
 }
 
 fn source_for(args: &cli::Args, settings: &Settings) -> Arc<dyn DirSource> {

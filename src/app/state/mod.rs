@@ -556,6 +556,7 @@ impl AppState {
             AppEvent::Aliases(list) => self.on_aliases(list, now),
             AppEvent::Drives(list) => self.on_drives(list),
             AppEvent::Paste(text) => self.on_paste(&text, now),
+            AppEvent::WindowFocus(has_focus) => self.on_focus(has_focus),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),
             AppEvent::Verify(msg) => self.on_verify(msg, now),
@@ -922,18 +923,20 @@ impl AppState {
             response = response.with(cmd);
         }
 
-        // The overlay used to be got rid of here unconditionally, on the
-        // reasoning that the drawing is opening so the search is over. What
-        // that actually did was throw away every word the open had to say: the
-        // worker answers on its own thread, and `Opening...`, the count of
-        // pages it skipped and `Could not open ...` all arrived at a window
-        // that had already gone. Staying up is what makes those readable, and
-        // what makes a second code a keystroke rather than a hotkey.
+        // On by default now, and it was not. The objection was specific and
+        // correct: the worker answers on its own thread, so `Opening…`, the
+        // count of pages it skipped and `Could not open …` all arrived at a
+        // window that had already gone, and nobody ever read one.
+        //
+        // That is answered rather than overruled - anything the open has to
+        // say that the user must see arrives in a message box instead, from
+        // `on_open` below. See `crate::notify`, and the note on
+        // `Settings::hide_after_opening`.
         //
         // `request_dismiss` re-runs the gate and finds this code already at
         // the head of the list, so no second write happens.
         if self.overlay_up {
-            if self.settings.auto_hide {
+            if self.settings.hide_after_opening {
                 response.merge(self.request_dismiss());
             } else {
                 // Staying up, so leave the field the way a summon does: the
@@ -1513,6 +1516,26 @@ impl AppState {
         }
     }
 
+    /// The window gained or lost the keyboard.
+    ///
+    /// Losing it is how a launcher knows to get out of the way: the user has
+    /// clicked on something else, and the panel is over it. Gaining it is
+    /// nothing - the hotkey thread reports a summon as
+    /// [`HotkeyMsg::Summoned`], which is a stronger fact and arrives first.
+    ///
+    /// Guarded three ways, and each guard is a bug that would otherwise be
+    /// reachable. `overlay_up` because a window nobody summoned has nothing
+    /// to dismiss. The setting because it is a setting. And the shell drops
+    /// the event entirely while an auxiliary window of ours has the keyboard,
+    /// because the settings window *is* somewhere else to click and closing
+    /// the panel would take it with them.
+    fn on_focus(&mut self, has_focus: bool) -> Response {
+        if has_focus || !self.overlay_up || !self.settings.hide_on_blur {
+            return Response::none();
+        }
+        self.request_dismiss()
+    }
+
     fn on_open(&mut self, msg: OpenMsg, now: Instant) -> Response {
         match msg {
             // A document that opened whole says nothing. One that lost pages
@@ -1546,18 +1569,14 @@ impl AppState {
                     text.push_str(" \u{b7} skipped ");
                     text.push_str(&skipped.join(", "));
                 }
-                self.set_toast(text, Severity::Warn, now);
-                Response::redraw()
+                self.set_toast(text.clone(), Severity::Warn, now);
+                self.also_say("Opened, but not whole", text)
             }
             OpenMsg::Failed { path, detail } => {
                 let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
-                self.set_toast_detailed(
-                    format!("Could not open {name}"),
-                    detail,
-                    Severity::Error,
-                    now,
-                );
-                Response::redraw()
+                let title = format!("Could not open {name}");
+                self.set_toast_detailed(title.clone(), detail.clone(), Severity::Error, now);
+                self.also_say(&title, detail)
             }
             OpenMsg::ViewerSaved { viewer } => {
                 // `display`, not `name`: the latter is the config spelling
@@ -1594,6 +1613,28 @@ impl AppState {
                 Response::redraw()
             }
         }
+    }
+
+    /// Raises a message box as well as the toast, when there is no panel to
+    /// read the toast on.
+    ///
+    /// The whole of what makes `hide_after_opening` safe to ship switched on.
+    /// An open is answered on another thread, long after the panel has gone,
+    /// and a document quietly missing page seven is the worst outcome this
+    /// program can produce - nothing on screen would ever reveal it. So the
+    /// panel is allowed to leave and the message follows the user instead.
+    ///
+    /// The toast is still raised, and that is not redundant: the panel may
+    /// have been summoned again by the time this lands, in which case there
+    /// *is* somewhere to read it and `overlay_up` says so.
+    fn also_say(&self, title: impl Into<String>, detail: impl Into<String>) -> Response {
+        if self.overlay_up {
+            return Response::redraw();
+        }
+        Response::redraw().with(Cmd::Announce {
+            title: title.into(),
+            detail: detail.into(),
+        })
     }
 
     // --- timers -----------------------------------------------------------

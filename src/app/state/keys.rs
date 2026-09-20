@@ -645,7 +645,15 @@ impl AppState {
             self.set_toast("Nothing to show".into(), Severity::Info, now);
             return Response::redraw();
         };
-        Response::none().with(Cmd::Reveal(Arc::clone(&hit.path)))
+        let mut response = Response::none().with(Cmd::Reveal(Arc::clone(&hit.path)));
+        // On the same terms an open is, and for the same reason: an Explorer
+        // window has just been asked for, and the panel is over where it is
+        // about to appear. `view::actions::Action::hides` says so too, and
+        // `every_hiding_action_hides` is what keeps the two in step.
+        if self.overlay_up && self.settings.hide_after_opening {
+            response.merge(self.request_dismiss());
+        }
+        response
     }
 
     /// Copy, then remove what was copied.
@@ -692,13 +700,17 @@ impl AppState {
         // `on_key` intercepts Escape while it is up and closes it instead. It
         // advertises that in its own key hints, and a list that cannot be shut
         // without taking the panel with it would be a trap.
-        if self.overlay_up {
+        //
+        // A setting since this became one of Ueli's three. Switched off,
+        // Escape falls through to the clearing path below and the shortcut
+        // is the way out - which is what somebody who lives in the panel may
+        // want, and is not what to default to.
+        if self.overlay_up && self.settings.hide_on_escape {
             return self.request_dismiss();
         }
 
-        // Not summoned - which now only happens in a test, since the panel is
-        // only ever on screen because something summoned it. Escape still
-        // undoes rather than quitting.
+        // Not summoned, or summoned with Escape switched off. Escape undoes
+        // rather than quitting.
         if self.input.has_selection() {
             self.input.clear_selection();
             return Response::redraw();

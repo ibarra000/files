@@ -164,7 +164,7 @@ impl Ctx<'_> {
 
 /// A boolean, or an error against the line that is not one.
 ///
-/// `and_then(Item::as_bool)` on its own turns `auto_hide = "true"` into
+/// `and_then(Item::as_bool)` on its own turns `hide_on_blur = "true"` into
 /// `None`, which is indistinguishable here from the key being absent - so the
 /// setting silently keeps its default, and the only symptom is a program that
 /// does not do what the file plainly says. The quoting mistake is the likely
@@ -201,7 +201,9 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "max_concurrent_scans",
     "stale_notices",
     "dev_mode",
-    "auto_hide",
+    "hide_on_blur",
+    "hide_after_opening",
+    "hide_on_escape",
     "pdf_read_only",
     "live_updates",
     "cache_dir",
@@ -230,7 +232,9 @@ pub struct FileSettings {
     pub max_concurrent_scans: Option<usize>,
     pub stale_notices: Option<bool>,
     pub dev_mode: Option<bool>,
-    pub auto_hide: Option<bool>,
+    pub hide_on_blur: Option<bool>,
+    pub hide_after_opening: Option<bool>,
+    pub hide_on_escape: Option<bool>,
     pub pdf_read_only: Option<bool>,
     pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
@@ -673,7 +677,9 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "persist" => out.persist = bool_at(ctx, key, item),
             "stale_notices" => out.stale_notices = bool_at(ctx, key, item),
             "dev_mode" => out.dev_mode = bool_at(ctx, key, item),
-            "auto_hide" => out.auto_hide = bool_at(ctx, key, item),
+            "hide_on_blur" => out.hide_on_blur = bool_at(ctx, key, item),
+            "hide_after_opening" => out.hide_after_opening = bool_at(ctx, key, item),
+            "hide_on_escape" => out.hide_on_escape = bool_at(ctx, key, item),
             "pdf_read_only" => out.pdf_read_only = bool_at(ctx, key, item),
             "max_concurrent_scans" => {
                 // Rejected rather than clamped. A zero here means "index
@@ -1636,10 +1642,10 @@ hide_system_files = false
     #[test]
     fn a_setting_that_should_be_a_boolean_is_rejected_when_it_is_not_one() {
         for value in ["\"true\"", "\"yes\"", "1", "0"] {
-            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            let text = format!("{MINIMAL}\n[settings]\nhide_on_blur = {value}\n");
             let errs = parse_err(&text);
             assert!(
-                messages(&errs).contains("auto_hide must be true or false"),
+                messages(&errs).contains("hide_on_blur must be true or false"),
                 "{value} was accepted or ignored: {:?}",
                 messages(&errs)
             );
@@ -1647,7 +1653,7 @@ hide_system_files = false
 
         // And the two spellings that are booleans still load.
         for value in ["true", "false"] {
-            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            let text = format!("{MINIMAL}\n[settings]\nhide_on_blur = {value}\n");
             parse(&text, p(), ConfigSource::BuiltIn).expect(value);
         }
     }

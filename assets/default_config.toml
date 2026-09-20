@@ -176,22 +176,43 @@ refresh = "manual"
 # still there on F5, which they only see by asking.
 # stale_notices = true
 
-# Whether the panel ever puts itself away.
+# When the panel puts itself away.
 #
-# Off by default, and that is a reversal. The panel used to vanish the moment
-# Enter opened something, which also threw away everything the open had to
-# say: the answer comes back a moment later - how many pages were skipped, or
-# that the file could not be opened at all - and it was arriving at a window
-# that had already gone. Nobody ever read one.
+# Three settings, all on, which is what a launcher does and what Ueli does.
+# Each is about a different moment, so they are three rather than one.
+
+# Put the panel away when you click on something else.
 #
-# Staying up also means a second code is a keystroke rather than a hotkey: the
-# one just opened is selected, so typing replaces it. The viewer opens behind
-# the panel and the keyboard stays here; Escape puts the panel away and brings
-# the viewer forward.
+# This is the one that makes it a launcher rather than a window: it is
+# summoned over whatever you were doing and is in the way until it is not
+# wanted. Turn it off and it stays until Escape or the shortcut.
+# hide_on_blur = true
+
+# Put the panel away once a file is on its way.
 #
-# Turn it on for the old behaviour. Escape and the hotkey close the panel
-# either way - this is only about the times it decides for itself.
-# auto_hide = false
+# On by default, and that is a reversal of a reversal, so the history is
+# worth having. It used to be on, then it was turned off, because an open is
+# answered on another thread: "Opened 11 of 13 pages", the list of pages
+# skipped and "Could not open ..." all arrived at a window that had already
+# gone, and nobody ever read one. A document quietly missing page seven is
+# the worst outcome this program can produce.
+#
+# It is on again because that is now answered rather than lived with.
+# Anything the open has to say that you must see arrives in a message box
+# instead, which follows you to whatever the viewer put in front of you.
+#
+# Only the opens. Copying leaves the panel up, whatever this says, because
+# the whole of what a copy reports is a line on the panel.
+# hide_after_opening = true
+
+# Escape puts the panel away rather than clearing the box.
+#
+# Turn it off and Escape clears the code instead - first the selection, then
+# the text - and the shortcut becomes the only way out. That suits somebody
+# who keeps the panel up and searches from it all day, and is not what to
+# default to: a window over somebody else's work has to be dismissable
+# without them working out which layer they are on.
+# hide_on_escape = true
 
 # Whether an assembled document opens read-only.
 #

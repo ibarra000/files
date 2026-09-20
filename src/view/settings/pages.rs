@@ -74,18 +74,40 @@ fn general(settings: &Settings) -> Page {
             },
             Group {
                 heading: Some("When the panel puts itself away"),
-                blocks: vec![Block::Rows(vec![row(
-                    settings,
-                    SettingKey::AutoHide,
-                    "Close the panel when something opens",
-                    "Leave this off and the panel stays up, so whatever the open has to \
-                     say is somewhere you can still read it and a second code is a \
-                     keystroke rather than the shortcut again. Escape and the shortcut \
-                     close the panel either way.",
-                    Field::Toggle {
-                        on: settings.auto_hide,
-                    },
-                )])],
+                blocks: vec![Block::Rows(vec![
+                    row(
+                        settings,
+                        SettingKey::HideOnBlur,
+                        "When it loses focus",
+                        "Put the panel away when you click on something else. This is \
+                         what a launcher normally does.",
+                        Field::Toggle {
+                            on: settings.hide_on_blur,
+                        },
+                    ),
+                    row(
+                        settings,
+                        SettingKey::HideAfterOpening,
+                        "After something opens",
+                        "Put the panel away once a file is on its way. Anything the \
+                         open has to say arrives in a message box instead, so nothing \
+                         is lost with the window. Copying leaves the panel up either \
+                         way, so you can see that it worked.",
+                        Field::Toggle {
+                            on: settings.hide_after_opening,
+                        },
+                    ),
+                    row(
+                        settings,
+                        SettingKey::HideOnEscape,
+                        "When Escape is pressed",
+                        "Escape puts the panel away rather than clearing the box. \
+                         Turn it off and the shortcut is the only way out.",
+                        Field::Toggle {
+                            on: settings.hide_on_escape,
+                        },
+                    ),
+                ])],
             },
             Group {
                 heading: Some("Configuration file"),

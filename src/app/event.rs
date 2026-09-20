@@ -37,6 +37,18 @@ pub enum AppEvent {
     /// The drive list was changed in the settings window.
     Drives(Vec<crate::paths::Mapping>),
     Paste(String),
+    /// The window gained or lost the keyboard.
+    ///
+    /// Only ever `false` matters, and only when the panel is up: it is how a
+    /// launcher knows to get out of the way. It arrives from the toolkit
+    /// rather than from the hotkey thread, because the hotkey thread does
+    /// not hear about a click on somebody else's window.
+    ///
+    /// The shell drops it while an auxiliary window of ours is open - see
+    /// `gui::Shell::ui` - because the settings window takes the keyboard
+    /// from the panel, and a panel that dismissed itself over that would
+    /// close the window the user had just clicked into.
+    WindowFocus(bool),
     Search(SearchMsg),
     Verify(VerifyMsg),
     /// One live share answered. Sent once per share, not once per search.
@@ -279,6 +291,16 @@ pub enum Cmd {
     },
     /// Put text on the system clipboard.
     Copy(String),
+    /// Say something the user has to see, with no panel to say it on.
+    ///
+    /// A native message box. Raised only when the panel has already gone and
+    /// the thing to say is a warning or worse - see [`crate::notify`] for why
+    /// that case exists at all, and why an open that went perfectly stays
+    /// silent.
+    Announce {
+        title: String,
+        detail: String,
+    },
     /// Open Explorer with this file already picked out.
     ///
     /// `explorer.exe /select,"<path>"`, which is what "Show in folder" does
