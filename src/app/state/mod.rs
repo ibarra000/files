@@ -407,6 +407,40 @@ impl AppState {
         self.last_frame_wall = wall;
     }
 
+    /// How to describe a drive failure to whoever is looking at it.
+    ///
+    /// Two differences, and both are the same decision. In dev mode the drive
+    /// is named by its *path*, because `path_label` exists on the argument
+    /// that "jobs" says nothing about which drive letter to go and reconnect -
+    /// and the code is appended, because that is what a support call asks for.
+    /// Otherwise it is named by the name its owner gave it and the sentence
+    /// stops there.
+    ///
+    /// One function rather than the same two lines at five call sites: they
+    /// were five copies of one policy, and a policy in five places is one that
+    /// is about to be four.
+    pub(crate) fn describe_drive_error(
+        &self,
+        id: MappingId,
+        err: crate::index::errors::EnumError,
+    ) -> String {
+        let dev = self.settings.dev_mode;
+        let target = if dev {
+            self.settings.routes.path_label(id)
+        } else {
+            self.settings.routes.label(id).to_string()
+        };
+        err.describe_for(&target, dev)
+    }
+
+    /// The technical half of a message, when there is somebody to read it.
+    ///
+    /// `None` outside dev mode, so a caller writes `plain` and lets this
+    /// decide whether anything is joined onto it.
+    pub(crate) fn technical(&self, detail: impl Into<String>) -> Option<String> {
+        self.settings.dev_mode.then(|| detail.into())
+    }
+
     /// Nothing to show but the box to type in.
     ///
     /// What the panel looks like before anybody has typed: one band, the
@@ -572,10 +606,12 @@ impl AppState {
             AppEvent::Hotkey(msg) => self.on_hotkey(msg, now),
             AppEvent::ActorDied { actor, detail } => {
                 self.clear_verifying();
-                self.set_toast(
-                    // The actor's own name, uncapitalised: it is an internal
-                    // name that appears verbatim in the log beside this.
-                    format!("{actor} stopped unexpectedly \u{b7} {detail}"),
+                // The actor's own name is an internal one and means nothing to
+                // the person reading it, so it goes with the detail rather
+                // than into the sentence.
+                self.set_toast_detailed(
+                    "Something stopped working \u{b7} searching may be incomplete",
+                    format!("{actor}: {detail}"),
                     Severity::Error,
                     now,
                 );
@@ -632,7 +668,12 @@ impl AppState {
                 self.on_input_changed(now, Urgency::Complete)
             }
             ClipboardMsg::Failed { detail } => {
-                self.set_toast(format!("Clipboard \u{b7} {detail}"), Severity::Warn, now);
+                self.set_toast_detailed(
+                    "The clipboard could not be read",
+                    detail,
+                    Severity::Warn,
+                    now,
+                );
                 Response::redraw()
             }
         }
@@ -1126,6 +1167,16 @@ impl AppState {
         if msg.epoch != self.query_epoch {
             return Response::none(); // superseded
         }
+        // Worked out before `self.live` is borrowed, because describing a
+        // failure reads the settings and the routing table. Cheap, and only
+        // when there is one to describe.
+        let failure = match &*msg.outcome {
+            crate::search::live::LiveOutcome::Failed(err) => {
+                Some(self.describe_drive_error(msg.mapping, *err))
+            }
+            _ => None,
+        };
+
         let Some(progress) = self.live.as_mut() else {
             // The field was cleared while this was in flight, which means the
             // query it answers is no longer on the line.
@@ -1147,9 +1198,10 @@ impl AppState {
                 progress.skipped.push((msg.mapping, skip));
                 Vec::new()
             }
-            crate::search::live::LiveOutcome::Failed(err) => {
-                let label = self.settings.routes.path_label(msg.mapping);
-                progress.failed.push((msg.mapping, err.describe(&label)));
+            crate::search::live::LiveOutcome::Failed(_) => {
+                progress
+                    .failed
+                    .push((msg.mapping, failure.unwrap_or_default()));
                 Vec::new()
             }
         };
@@ -1246,7 +1298,7 @@ impl AppState {
             Some((id, crate::index::Health::Unreachable { err, .. })) if searched == 0 => {
                 EmptyReason::IndexUnavailable {
                     // The share that actually failed, not the first flat one.
-                    detail: err.describe(&self.settings.routes.path_label(id)),
+                    detail: self.describe_drive_error(id, *err),
                 }
             }
             _ => EmptyReason::NoMatches { searched },
@@ -1447,18 +1499,13 @@ impl AppState {
                 // that is the share this failure belongs to. Naming it beats
                 // the old `flat_label()`, which named the first flat mapping
                 // whatever had actually been checked.
-                let target = self
-                    .settings
-                    .routes
-                    .flat()
-                    .next()
-                    .map(|m| self.settings.routes.path_label(m.id))
+                let said = match self.settings.routes.flat().next().map(|m| m.id) {
+                    Some(id) => self.describe_drive_error(id, err),
                     // "Drive", because this reaches a status line. The code
                     // says share and the screen says drive.
-                    .unwrap_or_else(|| "the drive".into());
-                self.phase = QueryPhase::VerifyFailed {
-                    detail: err.describe(&target),
+                    None => err.describe_for("the drive", self.settings.dev_mode),
                 };
+                self.phase = QueryPhase::VerifyFailed { detail: said };
                 Response::redraw()
             }
         }
@@ -1505,13 +1552,15 @@ impl AppState {
                 error,
             } => {
                 let text = match error {
-                    // The path, because this is a failure the user is expected
-                    // to go and fix, and a chosen name does not say which
-                    // drive letter is missing.
-                    Some(err) => format!(
-                        "Refresh failed \u{b7} {}",
-                        err.describe(&self.settings.routes.path_label(id))
-                    ),
+                    // Named by its *path* in dev mode: this is a failure the
+                    // user is expected to go and fix, and a chosen name does
+                    // not say which drive letter is missing.
+                    Some(err) => {
+                        format!(
+                            "Refresh failed \u{b7} {}",
+                            self.describe_drive_error(id, err)
+                        )
+                    }
                     // The name, because this is scope rather than failure and
                     // the path would add nothing.
                     None => format!(
@@ -1570,8 +1619,9 @@ impl AppState {
             }
             OpenMsg::Failed { path, detail } => {
                 let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
-                self.set_toast(
-                    format!("Could not open {name} \u{b7} {detail}"),
+                self.set_toast_detailed(
+                    format!("Could not open {name}"),
+                    detail,
                     Severity::Error,
                     now,
                 );
@@ -1592,8 +1642,9 @@ impl AppState {
             // message says what did and did not happen rather than implying
             // nothing did.
             OpenMsg::SettingSaveFailed { label, detail } => {
-                self.set_toast(
-                    format!("{label} changed for this session only \u{b7} {detail}"),
+                self.set_toast_detailed(
+                    format!("{label} changed for this session only"),
+                    detail,
                     Severity::Warn,
                     now,
                 );
@@ -1602,8 +1653,9 @@ impl AppState {
             // Not fatal, and not silent: the toggle still applies to this
             // session, so the message says what did and did not happen.
             OpenMsg::ViewerSaveFailed { detail } => {
-                self.set_toast(
-                    format!("Viewer changed for this session only \u{b7} {detail}"),
+                self.set_toast_detailed(
+                    "Viewer changed for this session only",
+                    detail,
                     Severity::Warn,
                     now,
                 );
@@ -1761,6 +1813,28 @@ impl AppState {
         while self.statuses.len() < wanted {
             self.statuses.push(Arc::new(IndexStatus::default()));
         }
+    }
+
+    /// A message whose second half is only for somebody debugging.
+    ///
+    /// Outside dev mode the caller's sentence is the whole message. Inside it,
+    /// the detail is joined on with ` · ` like any other independent fact.
+    /// Written this way round - plain first, detail supplied separately -
+    /// because the alternative is a `format!` at the call site that has to be
+    /// taken apart again, and one of them would eventually not be.
+    fn set_toast_detailed(
+        &mut self,
+        plain: impl Into<String>,
+        detail: impl Into<String>,
+        severity: Severity,
+        now: Instant,
+    ) {
+        let plain = plain.into();
+        let text = match self.technical(detail) {
+            Some(detail) => format!("{plain} \u{b7} {detail}"),
+            None => plain,
+        };
+        self.set_toast(text, severity, now);
     }
 
     fn set_toast(&mut self, text: String, severity: Severity, now: Instant) {

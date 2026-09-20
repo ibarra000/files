@@ -91,7 +91,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         return StatusLine {
             text: format!(
                 "{} · {when} · F5 to retry now",
-                err.describe(&state.settings.routes.path_label(id))
+                state.describe_drive_error(id, *err)
             ),
             tone: Tone::Bad,
         };
@@ -519,6 +519,18 @@ mod tests {
         )
     }
 
+    /// The same, in developer mode - which is what puts the drive's path and
+    /// the operating system's code on the line.
+    ///
+    /// Several tests below are *about* that detail reaching the screen, so
+    /// they have to ask for it. What the ordinary user sees is asserted
+    /// separately, by `a_drive_failure_is_a_sentence_until_somebody_asks`.
+    fn dev_state_at(now: Instant) -> AppState {
+        let mut s = state_at(now);
+        s.settings.dev_mode = true;
+        s
+    }
+
     /// Two shares, for the rendering that only exists when there are several.
     fn state_with_two_shares(now: Instant) -> AppState {
         AppState::new(Settings::default(), now)
@@ -758,7 +770,7 @@ mod tests {
     #[test]
     fn an_unreachable_drive_says_so_and_when_it_will_retry() {
         let now = Instant::now();
-        let mut s = state_at(now);
+        let mut s = dev_state_at(now);
         with_index(&mut s, now, |st| {
             st.health = Health::Unreachable {
                 err: EnumError::Transient(53),
@@ -984,6 +996,7 @@ mod tests {
     fn an_unreachable_tree_names_the_tree_not_the_flat_share() {
         let now = Instant::now();
         let mut s = state_with_two_shares(now);
+        s.settings.dev_mode = true;
         // Mapping 1 is the tree in the shipped table.
         publish(
             &mut s,
@@ -1010,7 +1023,7 @@ mod tests {
     #[test]
     fn an_error_never_renders_with_an_empty_target() {
         let now = Instant::now();
-        let mut s = state_at(now);
+        let mut s = dev_state_at(now);
         publish(
             &mut s,
             MappingId(0),
@@ -1382,9 +1395,23 @@ mod tests {
     /// nobody configured. So the rule is applied to the lines this module
     /// writes end to end, and the named ones are checked for the shape they
     /// do have.
+    ///
+    /// Two shapes now, not one. `jobs: no live updates` is the older; the
+    /// other is `custompro unreachable`, which is what a drive failure reads
+    /// as outside developer mode - it used to lead with the drive's *path*,
+    /// and a path starts with a capital letter by accident rather than by
+    /// design.
     #[test]
     fn every_status_line_starts_the_way_a_line_should() {
+        let configured: Vec<String> = ["custompro", "jobs"]
+            .iter()
+            .map(|n| format!("{n} "))
+            .collect();
+
         for line in every_line() {
+            if configured.iter().any(|name| line.starts_with(name)) {
+                continue;
+            }
             if let Some((name, rest)) = line.split_once(": ") {
                 // A name leading the line, which happens only with several
                 // drives configured. Everything after it stays lowercase.

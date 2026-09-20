@@ -169,6 +169,14 @@ impl AppState {
                     self.settings.stale_notices = *on;
                 }
             }
+            // Gates rendering and nothing else, so nothing has captured it and
+            // it moves at once. The next message drawn carries its detail, or
+            // stops carrying it.
+            SettingKey::DevMode => {
+                if let Scalar::Bool(on) = value {
+                    self.settings.dev_mode = *on;
+                }
+            }
             // Captured at startup by something that cannot be told. The form
             // says these apply when files next starts.
             SettingKey::Hotkey

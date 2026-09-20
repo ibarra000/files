@@ -751,6 +751,17 @@ pub struct Settings {
     /// it - the ages are still there in the share list, which they only see by
     /// asking for it.
     pub stale_notices: bool,
+    /// Whether a message may carry the technical detail behind it.
+    ///
+    /// Off, so an ordinary failure reads as a sentence: "jobs cannot be
+    /// reached" rather than "V:\Documents\custpro unreachable (os error
+    /// 53)". The second is the more useful of the two to exactly one person,
+    /// and they can turn it on.
+    ///
+    /// `--doctor` is not gated by this and never will be. It is the report a
+    /// support call asks for, and a report that has to be switched on first is
+    /// a report nobody has when they need it.
+    pub dev_mode: bool,
     /// Whether the panel ever puts itself away.
     ///
     /// Off by default, which is a reversal. The panel used to vanish the
@@ -942,6 +953,7 @@ impl Settings {
             live_updates: true,
             persist: true,
             stale_notices: true,
+            dev_mode: false,
             auto_hide: false,
             pdf_read_only: true,
             max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
@@ -1070,6 +1082,11 @@ impl Settings {
         {
             self.stale_notices = v;
         }
+        if env_bool("FILES_DEV_MODE").is_none()
+            && let Some(v) = f.dev_mode
+        {
+            self.dev_mode = v;
+        }
         if env_bool("FILES_AUTO_HIDE").is_none()
             && let Some(v) = f.auto_hide
         {
@@ -1186,6 +1203,9 @@ impl Settings {
         }
         if let Some(v) = env_bool("FILES_STALE_NOTICES") {
             s.stale_notices = v;
+        }
+        if let Some(v) = env_bool("FILES_DEV_MODE") {
+            s.dev_mode = v;
         }
         if let Some(v) = env_bool("FILES_AUTO_HIDE") {
             s.auto_hide = v;

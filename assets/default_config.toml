@@ -290,6 +290,18 @@ hide_extensions = ['db', 'js', 'lnk', 'ini', 'tmp', 'bak', 'url', 'exe', 'dll', 
 hide_system_files = true
 
 
+# Show the technical detail behind a message.
+#
+# Off. A drive that cannot be reached reads as "jobs cannot be reached" rather
+# than "V:\Documents\custpro unreachable (os error 53)". The second is the more
+# useful of the two to exactly one person, and this is how they ask for it -
+# the settings window has the same switch under Troubleshooting.
+#
+# `files --doctor` is not affected either way. It is the report to send when
+# you are asking for help, and a report you have to switch on first is one
+# nobody has when they need it.
+# dev_mode = false
+
 # Where to look for a newer version of this program.
 #
 # A folder on a share that everybody can read, holding one small file called

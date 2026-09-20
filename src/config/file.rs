@@ -200,6 +200,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "persist",
     "max_concurrent_scans",
     "stale_notices",
+    "dev_mode",
     "auto_hide",
     "pdf_read_only",
     "live_updates",
@@ -225,6 +226,7 @@ pub struct FileSettings {
     pub persist: Option<bool>,
     pub max_concurrent_scans: Option<usize>,
     pub stale_notices: Option<bool>,
+    pub dev_mode: Option<bool>,
     pub auto_hide: Option<bool>,
     pub pdf_read_only: Option<bool>,
     pub live_updates: Option<bool>,
@@ -664,6 +666,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "server_filter" => out.server_filter = bool_at(ctx, key, item),
             "persist" => out.persist = bool_at(ctx, key, item),
             "stale_notices" => out.stale_notices = bool_at(ctx, key, item),
+            "dev_mode" => out.dev_mode = bool_at(ctx, key, item),
             "auto_hide" => out.auto_hide = bool_at(ctx, key, item),
             "pdf_read_only" => out.pdf_read_only = bool_at(ctx, key, item),
             "max_concurrent_scans" => {

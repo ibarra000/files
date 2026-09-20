@@ -1051,7 +1051,7 @@ fn an_unchanged_directory_verifies_without_touching_the_results() {
 
 #[test]
 fn a_failed_verification_keeps_the_local_results_on_screen() {
-    let (mut s, now) = state();
+    let (mut s, now) = dev_state();
     type_in(&mut s, "11-D-0704", now);
     s.update(search_result(&view(&s), vec![hit("a.pdf")], 1, 5), now);
 
@@ -1128,7 +1128,7 @@ fn an_audit_failure_warns_the_user() {
 
 #[test]
 fn an_unreachable_drive_explains_itself_instead_of_showing_nothing() {
-    let (mut s, now) = state();
+    let (mut s, now) = dev_state();
     let status = IndexStatus {
         health: Health::Unreachable {
             err: EnumError::Transient(53),
@@ -1400,7 +1400,7 @@ fn a_saved_viewer_is_confirmed_on_screen() {
 /// than a failure of the keypress.
 #[test]
 fn a_failed_viewer_save_warns_rather_than_ending_the_session() {
-    let (mut s, now) = state();
+    let (mut s, now) = dev_state();
     s.update(
         AppEvent::Open(OpenMsg::ViewerSaveFailed {
             detail: "access is denied".into(),
@@ -2589,6 +2589,15 @@ fn a_configuration_without_aliases_is_unchanged() {
 use files::app::state::SettingChange;
 use files::config::write::{Edit, Scalar, SettingKey, Typed};
 
+/// The same as `state()`, with the technical half of every message switched
+/// on. Several tests below are *about* a diagnostic reaching the screen, so
+/// they have to ask for it; what an ordinary user sees is asserted separately.
+fn dev_state() -> (AppState, Instant) {
+    let (mut s, now) = state();
+    s.settings.dev_mode = true;
+    (s, now)
+}
+
 fn saveable() -> (AppState, Instant) {
     let settings = Settings {
         have_file: true,
@@ -2781,6 +2790,9 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
             SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
+            // The one flag that ships off, so `false` would be no change at
+            // all and this test would pass by moving nothing.
+            SettingKey::DevMode => Typed::Flag(true),
             SettingKey::History
             | SettingKey::StaleNotices
             | SettingKey::LiveUpdates
@@ -2791,11 +2803,12 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
     /// Everything `apply_live` is allowed to touch, read back off `Settings`.
     fn snapshot(s: &AppState) -> String {
         format!(
-            "{:?}|{:?}|{}|{}|{:?}|{}|{:?}|{:?}|{}",
+            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}",
             s.settings.theme,
             s.settings.viewer,
             s.settings.history,
             s.settings.stale_notices,
+            s.settings.dev_mode,
             s.settings.hotkey,
             s.settings.live_updates,
             s.settings.pdf_viewer,
@@ -3064,4 +3077,96 @@ fn the_status_list_keeps_pace_with_the_drive_list() {
             mapping.name
         );
     }
+}
+
+// --- what an ordinary user is shown -----------------------------------------
+
+/// The point of the setting. A drive failure reads as a sentence naming the
+/// drive, and stops there.
+#[test]
+fn a_drive_failure_is_a_sentence_until_somebody_asks() {
+    fn reported(dev: bool) -> String {
+        let (mut s, now) = state();
+        s.settings.dev_mode = dev;
+        s.update(
+            AppEvent::Verify(VerifyMsg {
+                epoch: s.query_epoch(),
+                query: Query::parse(""),
+                elapsed: Duration::from_millis(20),
+                outcome: VerifyOutcome::Failed(EnumError::Transient(53)),
+            }),
+            now,
+        );
+        match &s.phase {
+            QueryPhase::VerifyFailed { detail } => detail.clone(),
+            other => panic!("expected a reported failure, got {other:?}"),
+        }
+    }
+
+    let plain = reported(false);
+    assert!(
+        !plain.contains("53"),
+        "an os error code reached an ordinary user: {plain}"
+    );
+    assert!(
+        !plain.contains(r"\"),
+        "a filesystem path reached an ordinary user: {plain}"
+    );
+    assert!(
+        plain.contains("custompro") || plain.contains("jobs"),
+        "the drive is not named at all: {plain}"
+    );
+
+    // The same failure, for whoever is being telephoned about it.
+    let technical = reported(true);
+    assert!(technical.contains("53"), "{technical}");
+}
+
+/// A toast is the same bargain: the sentence somebody can act on, and the
+/// detail only when it was asked for.
+#[test]
+fn a_toast_carries_its_detail_only_in_developer_mode() {
+    fn toast(dev: bool) -> String {
+        let (mut s, now) = state();
+        s.settings.dev_mode = dev;
+        s.update(
+            AppEvent::Open(OpenMsg::Failed {
+                path: Arc::from(r"R:\11d\drawing.pdf"),
+                detail: "the handle is invalid (os error 6)".into(),
+            }),
+            now,
+        );
+        s.toast
+            .as_ref()
+            .expect("a failure must say so")
+            .text
+            .clone()
+    }
+
+    let plain = toast(false);
+    assert!(plain.contains("drawing.pdf"), "{plain}");
+    assert!(
+        !plain.contains("os error"),
+        "an os error code reached an ordinary user: {plain}"
+    );
+
+    assert!(toast(true).contains("os error 6"));
+}
+
+/// Switching it on is felt immediately, because it gates nothing but the
+/// drawing - there is no worker holding a copy of it.
+#[test]
+fn developer_mode_changes_the_next_message_drawn() {
+    let (mut s, now) = saveable();
+    assert!(!s.settings.dev_mode);
+
+    s.update(
+        AppEvent::Setting(SettingChange {
+            key: SettingKey::DevMode,
+            typed: Typed::Flag(true),
+            label: "Show technical detail",
+        }),
+        now,
+    );
+    assert!(s.settings.dev_mode, "it waited for a restart");
 }

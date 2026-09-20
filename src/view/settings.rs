@@ -275,6 +275,20 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
             ],
         },
         Section {
+            heading: "Troubleshooting",
+            rows: vec![row(
+                settings,
+                SettingKey::DevMode,
+                "Show technical detail",
+                "Add the error codes and folder paths behind a message. Useful when \
+                 somebody is helping you; noise the rest of the time. Diagnostics has \
+                 them either way.",
+                Field::Toggle {
+                    on: settings.dev_mode,
+                },
+            )],
+        },
+        Section {
             heading: "What is left out of results",
             rows: vec![
                 row(

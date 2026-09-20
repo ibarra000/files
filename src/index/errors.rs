@@ -144,12 +144,24 @@ impl EnumError {
         }
     }
 
-    /// A message for the status line, naming the drive involved.
+    /// A message naming the drive involved, with the raw code on the end.
     ///
-    /// Always carries the raw code: an error nobody can diagnose is worse
-    /// than an ugly one.
+    /// The full form, for `--doctor` and for anything else whose job is to be
+    /// complete. The panel asks for [`Self::describe_for`] instead and decides
+    /// by `dev_mode` - an error nobody can diagnose is worse than an ugly one,
+    /// but an ugly one in front of somebody who cannot act on it is not much
+    /// better, and the two audiences are different people.
     pub fn describe(self, target: &str) -> String {
-        let detail = |s: String| match self.raw() {
+        self.describe_for(target, true)
+    }
+
+    /// The same, with the code included only when somebody asked for it.
+    ///
+    /// The sentence is identical either way. What `dev` adds is `(os error
+    /// 53)` on the end, which is the part that means nothing to the person
+    /// searching and everything to the person they telephone.
+    pub fn describe_for(self, target: &str, dev: bool) -> String {
+        let detail = |s: String| match self.raw().filter(|_| dev) {
             Some(c) => format!("{s} (os error {c})"),
             None => s,
         };

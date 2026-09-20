@@ -87,6 +87,7 @@ pub enum SettingKey {
     Hotkey,
     History,
     StaleNotices,
+    DevMode,
     LiveUpdates,
     PdfViewer,
     HideExtensions,
@@ -94,12 +95,13 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
         Self::History,
         Self::StaleNotices,
+        Self::DevMode,
         Self::LiveUpdates,
         Self::PdfViewer,
         Self::HideExtensions,
@@ -114,6 +116,7 @@ impl SettingKey {
             Self::Hotkey => "hotkey",
             Self::History => "history",
             Self::StaleNotices => "stale_notices",
+            Self::DevMode => "dev_mode",
             Self::LiveUpdates => "live_updates",
             Self::PdfViewer => "pdf_viewer",
             Self::HideExtensions => "hide_extensions",
@@ -133,6 +136,7 @@ impl SettingKey {
             Self::Hotkey => "FILES_HOTKEY",
             Self::History => "FILES_HISTORY",
             Self::StaleNotices => "FILES_STALE_NOTICES",
+            Self::DevMode => "FILES_DEV_MODE",
             Self::LiveUpdates => "FILES_LIVE_UPDATES",
             Self::PdfViewer => "FILES_PDF_VIEWER",
             Self::HideExtensions => "FILES_HIDE_EXTENSIONS",
@@ -170,7 +174,7 @@ impl SettingKey {
     pub const fn applies_at_once(self) -> bool {
         matches!(
             self,
-            Self::Theme | Self::Viewer | Self::History | Self::StaleNotices
+            Self::Theme | Self::Viewer | Self::History | Self::StaleNotices | Self::DevMode
         )
     }
 }
@@ -516,6 +520,7 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
         }),
         SettingKey::History => s.history.map(Scalar::Bool),
         SettingKey::StaleNotices => s.stale_notices.map(Scalar::Bool),
+        SettingKey::DevMode => s.dev_mode.map(Scalar::Bool),
         SettingKey::LiveUpdates => s.live_updates.map(Scalar::Bool),
         SettingKey::PdfViewer => s
             .pdf_viewer
