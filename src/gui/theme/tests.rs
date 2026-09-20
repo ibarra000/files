@@ -533,10 +533,30 @@ fn the_surface_is_translucent_in_both_themes() {
     }
 }
 
-/// The height the window is created at has to hold everything the panel
-/// can grow to, or the bottom of a full list is clipped by the window.
+/// The rows have to fit between the field and the footer.
+///
+/// The same arithmetic the `const` assertion beside `MAX_ROWS` runs, said
+/// out loud with the numbers in the failure message. The window used to be
+/// created tall enough for whatever the row count asked for; the row count
+/// is now what has to fit the window, and this is the direction that can be
+/// got wrong.
 #[test]
-fn the_panel_can_never_want_more_room_than_the_window_has() {
-    let tallest = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0;
-    assert!(PANEL_MAX_H >= tallest, "{PANEL_MAX_H} < {tallest}");
+fn a_full_list_fits_between_the_field_and_the_footer() {
+    let wanted = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0;
+    assert!(
+        wanted <= PANEL_H,
+        "{MAX_ROWS} rows want {wanted}pt of a {PANEL_H}pt panel"
+    );
+}
+
+/// And they have to fit *well*: a row count that left a hundred points of
+/// nothing under the list would mean the panel was the wrong size for its
+/// own content.
+#[test]
+fn a_full_list_very_nearly_fills_the_panel() {
+    let wanted = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0;
+    assert!(
+        PANEL_H - wanted < ROW_H,
+        "another row would fit: {wanted}pt of {PANEL_H}pt used"
+    );
 }

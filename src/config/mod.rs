@@ -58,11 +58,15 @@ pub const MAX_RESULTS: usize = 300;
 /// `gui::theme` for this, which is a dependency pointing the wrong way - the
 /// interaction model is meant to be drawable by anything.
 ///
-/// Twelve rows of forty points is most of a laptop's vertical half. Past that
-/// the panel stops being an overlay and starts being a file manager, which is a
-/// different program; below it, a broad code spends too much of its time being
-/// scrolled.
-pub const VISIBLE_ROWS: usize = 12;
+/// Six, and no longer a free choice: the panel is a fixed four hundred points
+/// tall, and six forty-point rows is what is left once the field and the
+/// footer have taken theirs. It was twelve while the window grew to fit the
+/// list. `gui::theme` asserts the arithmetic so the two cannot drift.
+///
+/// This is the page size the arrows move by and the window the state machine
+/// keeps over the results. It stops being the *drawn* row count once the list
+/// is a scroll area.
+pub const VISIBLE_ROWS: usize = 6;
 
 /// Arena bytes in the first segment a walk publishes.
 ///

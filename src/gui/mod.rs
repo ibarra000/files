@@ -49,7 +49,7 @@ use crate::placement;
 use crate::view::settings::{ActionId, PageId};
 use windows::Windows;
 
-pub use theme::{PANEL_MAX_H, PANEL_W};
+pub use theme::{PANEL_H, PANEL_W};
 
 /// What the panel asks the compositor for.
 ///
@@ -123,7 +123,7 @@ pub fn run(settings: Settings, source: Arc<dyn DirSource>) -> eframe::Result<()>
             // is read by the shell when a window is *first shown*, so being
             // hidden here is also what makes `hide_from_taskbar` stick.
             .with_visible(false)
-            .with_inner_size([PANEL_W, PANEL_MAX_H]),
+            .with_inner_size([PANEL_W, PANEL_H]),
         // We place the window ourselves on every summon; restoring the last
         // session's rectangle would fight that.
         persist_window: false,
@@ -380,7 +380,7 @@ impl Shell {
     /// foreground change from. This only notices the change and tells the
     /// animator, which is why a summon and a dismiss cannot get out of step
     /// with what the rest of the program thinks is happening.
-    fn follow_overlay(&mut self, ctx: &egui::Context) {
+    fn follow_overlay(&mut self) {
         let up = self.app.state.overlay_up;
         if up == self.up {
             return;
@@ -388,13 +388,6 @@ impl Shell {
         self.up = up;
         if up {
             self.parked = false;
-            // Chosen here and nowhere else, which is the whole of why it is
-            // stable: this runs once, on the transition into being up, so the
-            // panel cannot change width while somebody is looking at it. A
-            // monitor that is unplugged mid-session is answered on the next
-            // summon rather than mid-keystroke.
-            let monitor = ctx.input(|i| i.viewport().monitor_size.map(|s| s.x));
-            self.frame.set_layout(theme::Layout::for_monitor(monitor));
             self.frame.motion.summon();
         } else {
             self.frame.motion.dismiss();
@@ -467,20 +460,6 @@ impl Shell {
     ///
     /// The entrance is the *window* arriving, not the content moving inside
     /// it, and that is forced rather than chosen: [`overlay::show`] paints into
-    /// `ui.max_rect()`, so the window's height is the panel's height and there
-    /// is nowhere else for a transition to happen. Driving the window means the
-    /// edge, the surface and the content are one object at every instant.
-    ///
-    /// The decision itself is [`frame::Frame::resize`], which is pure and is
-    /// therefore checkable: a viewport command is a round trip to the window
-    /// system and a swapchain reconfigure behind it, and how many of them one
-    /// keystroke costs is a number a test can hold us to.
-    fn resize(&mut self, ctx: &egui::Context, visual: &anim::Visual) {
-        if let Some(size) = self.frame.resize(visual) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        }
-    }
-
     /// Moves the panel with the pointer, and remembers where it was left.
     ///
     /// `response` is the interaction over the panel's whole rectangle.
@@ -578,7 +557,7 @@ impl eframe::App for Shell {
         let _ = self.app.pump(now);
 
         self.serve_requests();
-        self.follow_overlay(ctx);
+        self.follow_overlay();
 
         // Every deadline in `next_deadline` is anchored on the last frame, so a
         // turn that does not draw still has to say a turn happened - or the age
@@ -654,7 +633,6 @@ impl eframe::App for Shell {
         let dt = ui.input(|i| i.stable_dt);
         let visual = self.frame.advance(&self.app.state, dt);
 
-        self.resize(&ui.ctx().clone(), &visual);
         self.park();
 
         // Before the panel, so an auxiliary window that wants the keyboard is

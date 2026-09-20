@@ -36,7 +36,7 @@ use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
 use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
 use files::gui::frame::Frame;
-use files::gui::theme::{self, Layout, Theme};
+use files::gui::theme::{self, Theme};
 use files::index::store::{IndexStatus, Origin};
 use files::paths::MappingId;
 use files::search::matcher::{Hit, SearchOutcome};
@@ -105,9 +105,8 @@ struct Panel {
 }
 
 impl Panel {
-    fn new(state: AppState, now: Instant, layout: Layout) -> Self {
+    fn new(state: AppState, now: Instant) -> Self {
         let mut frame = Frame::new();
-        frame.set_layout(layout);
         frame.motion.summon();
         Self {
             state,
@@ -130,10 +129,6 @@ impl Panel {
 /// one where the panel paints its own surface, which is what there is to look
 /// at.
 fn harness(state: AppState) -> Harness<'static, Panel> {
-    harness_in(state, Layout::List)
-}
-
-fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
     let now = Instant::now();
     let mut harness = Harness::builder()
         // The harness frames whatever it is given in an eight-point outer
@@ -141,8 +136,8 @@ fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
         // so the window is grown to match and the panel gets exactly the
         // rectangle it gets in the real program.
         .with_size(egui::vec2(
-            layout.width() + HARNESS_MARGIN * 2.0,
-            theme::PANEL_MAX_H + HARNESS_MARGIN * 2.0,
+            theme::PANEL_W + HARNESS_MARGIN * 2.0,
+            theme::PANEL_H + HARNESS_MARGIN * 2.0,
         ))
         // Points, not pixels: the panel is laid out in points and a snapshot
         // taken at whatever the machine's scaling happens to be is a snapshot
@@ -167,7 +162,6 @@ fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
                     return;
                 }
                 let visual = panel.frame.advance(&panel.state, DT);
-                panel.frame.resize(&visual);
                 files::gui::overlay::show(
                     ui,
                     &panel.state,
@@ -178,7 +172,7 @@ fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
                     panel.wall,
                 );
             },
-            Panel::new(state, now, layout),
+            Panel::new(state, now),
         );
 
     // Past the entrance, so nothing here is a test of a half-arrived panel.
@@ -470,7 +464,7 @@ fn a_very_long_code_stays_inside_the_panel() {
     // true when a pasted code ran off the edge and took the caret with it.
     let panel = egui::Rect::from_min_size(
         egui::pos2(HARNESS_MARGIN, HARNESS_MARGIN),
-        egui::vec2(theme::PANEL_W, theme::PANEL_MAX_H),
+        egui::vec2(theme::PANEL_W, theme::PANEL_H),
     );
     let root = h.root();
     for node in root.children_recursive() {
@@ -495,13 +489,13 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
-    // The band the rows are given, in the harness's coordinates. Taken from
-    // the same `measure` the animator is driven by, so this asserts that what
-    // is *drawn* agrees with what was *measured* - which is exactly what
-    // stopped being true when the rows picked up three points of spacing each
-    // and a full list stood twenty-four points taller than its band.
-    let measured = files::gui::overlay::measure(&h.state().state, files::gui::theme::Layout::List);
-    let footer_top = HARNESS_MARGIN + measured.height - theme::PAD_Y - theme::FOOTER_H;
+    // The band the rows are given, in the harness's coordinates. Arithmetic
+    // off the fixed panel now rather than off a measured height: the window
+    // is always four hundred points tall, so the footer is always in the same
+    // place and a row past it is a row drawn through the status line. That is
+    // exactly what happened when the rows picked up three points of spacing
+    // each and a full list stood twenty-four points taller than its band.
+    let footer_top = HARNESS_MARGIN + theme::PANEL_H - theme::PAD_Y - theme::FOOTER_H;
 
     let root = h.root();
     let mut seen = 0;
@@ -536,14 +530,11 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
 /// library is built for, and it also means a failure names itself.
 macro_rules! snapshot {
     ($name:ident, $build:expr) => {
-        snapshot!($name, $build, Layout::List);
-    };
-    ($name:ident, $build:expr, $layout:expr) => {
         #[test]
         #[cfg_attr(not(feature = "ui-snapshots"), ignore = "needs a GPU adapter")]
         fn $name() {
             let build: fn() -> AppState = $build;
-            harness_in(build(), $layout).snapshot(stringify!($name));
+            harness(build()).snapshot(stringify!($name));
         }
     };
 }

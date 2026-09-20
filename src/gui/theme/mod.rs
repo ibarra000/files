@@ -28,9 +28,15 @@ use crate::view::status::Tone;
 
 // -- measurements -----------------------------------------------------------
 
-/// How wide the panel is, in points. Wide enough for a long job-code filename
-/// and its folder side by side, narrow enough to read in one fixation.
-pub const PANEL_W: f32 = 720.0;
+/// The panel, in points, and it never changes.
+///
+/// Ueli's launcher window, to the point. It used to be 720 wide and as tall
+/// as the result count made it, which is what paid for `Frame::resize`, the
+/// deadband, the resize budgets in `tests/jitter.rs` and the whole
+/// measure-then-retarget-then-ask-the-window-system loop. A window that holds
+/// still needs none of that, and the list scrolls inside it instead.
+pub const PANEL_W: f32 = 600.0;
+pub const PANEL_H: f32 = 400.0;
 
 /// The search field.
 pub const FIELD_H: f32 = 64.0;
@@ -46,6 +52,14 @@ pub const FOOTER_H: f32 = 44.0;
 /// where the state machine can reach it. See [`crate::config::VISIBLE_ROWS`].
 pub use crate::config::VISIBLE_ROWS as MAX_ROWS;
 
+/// The rows have to fit between the field and the footer.
+///
+/// A constant now that the window is one. While it grew, the height was
+/// derived from the row count and this direction could not be wrong; fixed,
+/// the two are independent and a row count one too large would draw the last
+/// row through the footer. Checked at compile time so it cannot.
+const _: () = assert!(FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0 <= PANEL_H);
+
 /// Breathing room at the panel's edge.
 pub const PAD_X: f32 = 16.0;
 pub const PAD_Y: f32 = 8.0;
@@ -59,75 +73,6 @@ pub const MARKER_W: f32 = 3.0;
 pub const PANEL_RADIUS: u8 = 8;
 pub const ROW_RADIUS: u8 = 6;
 pub const CHIP_RADIUS: u8 = 4;
-
-/// The tallest the panel ever gets: field, a full list, footer and the rules
-/// between them.
-pub const PANEL_MAX_H: f32 = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0 + 2.0;
-
-/// The pane beside the list that says what a result is.
-///
-/// Narrower than half the list, deliberately. It holds a file name, two short
-/// facts and a handful of page names, and giving it more room would only let
-/// the folder line run on - while taking width from the column the names
-/// themselves are read in, which is the one that has to stay legible.
-pub const PREVIEW_W: f32 = 380.0;
-
-/// The panel with the pane attached.
-pub const PANEL_WIDE_W: f32 = PANEL_W + PREVIEW_W;
-
-/// The narrowest monitor that gets the pane rather than the popup.
-///
-/// The wide panel plus a margin, so the pane is only offered where the panel
-/// still reads as something summoned over the work rather than something that
-/// has taken the screen over. Below this the same words arrive as a popup
-/// beside the row instead, which costs no width at all.
-///
-/// Measured against the monitor rather than the work area because it is a
-/// question about the display, and a taskbar moving does not change whether a
-/// 1920-wide screen can hold an 1100-wide panel.
-pub const ROOM_FOR_PANE: f32 = PANEL_WIDE_W + 260.0;
-
-/// How the panel is laid out, decided once per summon.
-///
-/// Per summon rather than per frame, and the difference is the whole reason
-/// this is a stored decision rather than a function of the current width:
-/// recomputed every frame it would flip while the panel is up, and recomputed
-/// per selection it would change the *window's* width as the pointer moved,
-/// which is the class of jitter `gui::frame` and `tests/jitter.rs` exist to
-/// refuse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Layout {
-    /// List only. A hover brings the pane up over the rows.
-    #[default]
-    List,
-    /// List with the pane permanently beside it.
-    Pane,
-}
-
-impl Layout {
-    /// Which layout a monitor of this width gets.
-    ///
-    /// `None` - no monitor reported - takes [`Layout::List`], which is the
-    /// answer that fits everywhere.
-    pub fn for_monitor(width: Option<f32>) -> Self {
-        match width {
-            Some(w) if w >= ROOM_FOR_PANE => Self::Pane,
-            _ => Self::List,
-        }
-    }
-
-    /// How wide the panel is in this layout.
-    pub const fn width(self) -> f32 {
-        match self {
-            Self::List => PANEL_W,
-            Self::Pane => PANEL_WIDE_W,
-        }
-    }
-
-    pub const fn has_pane(self) -> bool {
-        matches!(self, Self::Pane)
-    }
-}
 
 // -- type -------------------------------------------------------------------
 

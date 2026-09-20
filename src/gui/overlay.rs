@@ -52,22 +52,21 @@ const CARET_MARGIN: f32 = 12.0;
 /// What the panel will be, before it is drawn.
 ///
 /// Measured separately from drawing because the animator has to be told the
-/// target *before* it is asked what this frame looks like, and the height it is
-/// moving towards is a property of the content rather than of the paint.
+/// target *before* it is asked what this frame looks like.
+///
+/// It used to carry a height and a width too, which is what the window was
+/// resized to. The window is a constant six hundred by four hundred now, so
+/// what is left is which body belongs on screen and where the highlight goes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Measured {
     pub content: Content,
     pub rows: usize,
-    /// How wide the panel is in the layout it was measured for. Constant for
-    /// the life of a summon - see [`theme::Layout`].
-    pub width: f32,
-    pub height: f32,
     /// Top of the selected row, in points from the top of the list.
     pub selection_y: Option<f32>,
 }
 
-/// Which body belongs on screen, and how tall the panel wants to be.
-pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
+/// Which body belongs on screen.
+pub fn measure(state: &AppState) -> Measured {
     let content = body_of(state);
     let rows = match content {
         Content::Shares => state.share_ids().len(),
@@ -77,16 +76,9 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
         Content::Quiet => 0,
     };
 
-    // Eight rows is a scroll-free glance. Past that the panel stops being an
-    // overlay and starts being a file manager, which is a different program.
+    // What fits between the field and the footer. `gui::theme` asserts that
+    // it does.
     let shown = rows.min(theme::MAX_ROWS);
-    let body_h = match content {
-        Content::Results | Content::Recent | Content::Shares => shown as f32 * theme::ROW_H,
-        Content::Empty => shown as f32 * LINE_H + theme::PAD_Y * 2.0,
-        // Not even the padding. An untouched panel is the field and nothing
-        // else, so there is no band here to give room to.
-        Content::Quiet => 0.0,
-    };
 
     // Relative to the window, not to the list. This used to be
     // `rank.min(shown - 1)`, which pinned the highlight to the last visible row
@@ -114,19 +106,6 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
     Measured {
         content,
         rows: shown,
-        width: layout.width(),
-        // The footer is a band like the others, and a quiet panel has none of
-        // them: no chips to draw and - by `AppState::is_quiet` - nothing
-        // standing to say. Leaving its height in would put an empty strip
-        // under the box for no reason anybody could see.
-        height: theme::FIELD_H
-            + body_h
-            + if content == Content::Quiet {
-                0.0
-            } else {
-                theme::FOOTER_H
-            }
-            + theme::PAD_Y * 2.0,
         selection_y,
     }
 }
@@ -188,7 +167,7 @@ pub fn show(
     wall: SystemTime,
 ) -> Vec<Intent> {
     let mut intents = Vec::new();
-    let rect = panel_rect(ui, visual, backdrop);
+    let rect = panel_rect(ui);
 
     paint_surface(ui, theme, rect, backdrop);
 
@@ -263,23 +242,16 @@ fn announce(ui: &Ui, rect: Rect, what: impl std::hash::Hash + std::fmt::Debug, t
 /// one per frame; the panel easing down inside it is what makes that look like
 /// a transition rather than a jump. See [`crate::gui::frame::Frame::resize`].
 ///
-/// Clamped to the window, because the two can disagree for a frame: a resize
-/// is a round trip, and the frame that asked for a taller window is drawn
-/// before it arrives. Clamping means the footer is briefly closer to the
-/// caption than it should be, which is invisible; not clamping would draw it
-/// past the bottom edge, which is not.
+/// The whole window, always.
 ///
-/// The acrylic path keeps the whole window. A compositor backdrop is a
-/// property of the window, so anything the panel did not cover would be a
-/// blurred band with nothing in it - and the shell knows that, which is why it
-/// does not decouple the two sizes on that path either.
-fn panel_rect(ui: &Ui, visual: &Visual, backdrop: Option<Backdrop>) -> Rect {
-    let full = ui.max_rect();
-    if backdrop == Some(Backdrop::Acrylic) {
-        return full;
-    }
-    let height = visual.height.min(full.height()).max(1.0);
-    Rect::from_min_size(full.min, vec2(full.width(), height))
+/// This used to clamp a measured height against the window's, because the
+/// two disagreed for one frame whenever the panel resized: a viewport command
+/// is a round trip and the frame that asked for a taller window is drawn
+/// before it arrives. The window is a constant six hundred by four hundred
+/// now, so the panel is simply all of it and there is nothing left to
+/// arbitrate.
+fn panel_rect(ui: &Ui) -> Rect {
+    ui.max_rect()
 }
 
 /// The panel's own background.
@@ -1107,10 +1079,7 @@ mod tests {
     /// gets the onboarding block rather than an empty list.
     #[test]
     fn an_empty_field_with_no_history_shows_the_first_run_block() {
-        assert_eq!(
-            measure(&state(), theme::Layout::List).content,
-            Content::Empty
-        );
+        assert_eq!(measure(&state()).content, Content::Empty);
     }
 
     /// Recall stops being a mode: with nothing typed, the list *is* your
@@ -1123,31 +1092,25 @@ mod tests {
         // Unasked for. These used to be what an empty field showed, so every
         // summon of an empty panel put the job codes this person had looked up
         // in front of whoever was standing behind them.
-        assert_eq!(measure(&state, theme::Layout::List).content, Content::Empty);
+        assert_eq!(measure(&state).content, Content::Empty);
 
         state.update(
             AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)),
             std::time::Instant::now(),
         );
-        assert_eq!(
-            measure(&state, theme::Layout::List).content,
-            Content::Recent
-        );
+        assert_eq!(measure(&state).content, Content::Recent);
     }
 
     #[test]
     fn typing_something_that_matches_shows_the_results() {
-        assert_eq!(
-            measure(&with_hits(3), theme::Layout::List).content,
-            Content::Results
-        );
+        assert_eq!(measure(&with_hits(3)).content, Content::Results);
     }
 
     #[test]
     fn typing_something_that_matches_nothing_shows_why() {
         let mut state = state();
         state.input.set_text("zzzz");
-        assert_eq!(measure(&state, theme::Layout::List).content, Content::Empty);
+        assert_eq!(measure(&state).content, Content::Empty);
     }
 
     /// The drive picker replaces the body rather than floating over it, which
@@ -1155,66 +1118,54 @@ mod tests {
     #[test]
     fn the_drive_picker_replaces_whatever_was_there() {
         let mut state = with_hits(3);
-        assert_eq!(
-            measure(&state, theme::Layout::List).content,
-            Content::Results
-        );
+        assert_eq!(measure(&state).content, Content::Results);
 
         state.picking_share = true;
-        assert_eq!(
-            measure(&state, theme::Layout::List).content,
-            Content::Shares
-        );
+        assert_eq!(measure(&state).content, Content::Shares);
     }
 
-    /// Eight rows is a glance. A search that matched four hundred files must
-    /// not produce a panel taller than the screen.
+    /// A search that matched four hundred files still asks for a list that
+    /// fits. The window cannot grow to meet it any more.
     #[test]
-    fn the_panel_never_grows_past_its_ceiling() {
+    fn the_panel_never_asks_for_more_rows_than_it_has_room_for() {
         for n in [0, 1, 7, 8, 9, 400] {
-            let measured = measure(&with_hits(n), theme::Layout::List);
+            let measured = measure(&with_hits(n));
             assert!(
                 measured.rows <= theme::MAX_ROWS,
                 "{n} hits asked for {} rows",
                 measured.rows
-            );
-            assert!(
-                measured.height <= theme::PANEL_MAX_H,
-                "{n} hits asked for {}pt, ceiling is {}",
-                measured.height,
-                theme::PANEL_MAX_H
             );
         }
     }
 
     /// An untouched panel is the field and nothing else.
     ///
-    /// Not a body of zero rows with the padding still in it, and not an empty
-    /// footer: both bands are gone, so the window is one band tall. The old
-    /// first screen was 260 points of instructions.
+    /// Nothing in the body at all, which is what `Content::Quiet` is for.
+    ///
+    /// This used to assert the window was one band tall, because the panel
+    /// was the window and a quiet one dropped the body and the footer
+    /// entirely. The window is a fixed four hundred points now, so what is
+    /// left of the claim - and it is the part that was ever visible - is that
+    /// there is nothing in it. The old first screen was 260 points of
+    /// instructions.
     #[test]
-    fn a_quiet_panel_is_one_band_tall() {
+    fn an_untouched_panel_has_nothing_in_its_body() {
         let mut state = state();
         settle_index(&mut state);
         assert!(state.is_quiet(), "the fixture is not quiet");
 
-        let m = measure(&state, theme::Layout::List);
+        let m = measure(&state);
         assert_eq!(m.content, Content::Quiet);
         assert_eq!(m.rows, 0);
-        assert!(
-            (m.height - (theme::FIELD_H + theme::PAD_Y * 2.0)).abs() < 0.01,
-            "expected just the field, got {}",
-            m.height
-        );
     }
 
-    /// And anything worth saying puts the footer back, because a band of no
-    /// height is a message nobody sees.
+    /// And anything worth saying takes the panel out of quiet, because a
+    /// message nobody can see is a message nobody gets.
     #[test]
-    fn something_to_say_puts_the_footer_back() {
+    fn something_to_say_is_not_a_quiet_panel() {
         let mut state = state();
         settle_index(&mut state);
-        let quiet = measure(&state, theme::Layout::List).height;
+        assert_eq!(measure(&state).content, Content::Quiet);
 
         // A real one, raised the way the program raises it.
         state.update(
@@ -1225,26 +1176,19 @@ mod tests {
         );
         assert!(state.toast.is_some(), "the fixture raised no toast");
         assert!(!state.is_quiet(), "a toast left the panel quiet");
-
-        let loud = measure(&state, theme::Layout::List).height;
-        assert!(
-            loud >= quiet + theme::FOOTER_H,
-            "the footer did not come back: {quiet} then {loud}"
-        );
+        assert_ne!(measure(&state).content, Content::Quiet);
     }
 
-    /// One row at a time, and always enough for the field and the footer.
+    /// One row per result, up to what the panel has room for.
     #[test]
-    fn the_panel_grows_by_exactly_one_row_per_result() {
-        let one = measure(&with_hits(1), theme::Layout::List).height;
-        let two = measure(&with_hits(2), theme::Layout::List).height;
-        assert!((two - one - theme::ROW_H).abs() < 0.01, "{one} then {two}");
-
-        let none = measure(&with_hits(0), theme::Layout::List);
-        assert!(
-            none.height >= theme::FIELD_H + theme::FOOTER_H,
-            "a panel with no results still has a field and a footer"
-        );
+    fn the_list_shows_one_row_per_result_up_to_what_fits() {
+        for n in [0, 1, 2, theme::MAX_ROWS - 1, theme::MAX_ROWS, 300] {
+            assert_eq!(
+                measure(&with_hits(n)).rows,
+                n.min(theme::MAX_ROWS),
+                "{n} hits"
+            );
+        }
     }
 
     /// The highlight is positioned by the animator, which needs a point, not a
@@ -1258,18 +1202,13 @@ mod tests {
     fn the_selection_is_reported_as_a_point_inside_the_window() {
         let mut state = with_hits(VISIBLE_ROWS * 3);
         select(&mut state, 3);
-        assert_eq!(
-            measure(&state, theme::Layout::List).selection_y,
-            Some(3.0 * theme::ROW_H)
-        );
+        assert_eq!(measure(&state).selection_y, Some(3.0 * theme::ROW_H));
 
         // Far down the list: the window has followed, so the point is still
         // inside it - and is not pinned to the bottom row.
         let last = state.hits.len() - 1;
         select(&mut state, last);
-        let far = measure(&state, theme::Layout::List)
-            .selection_y
-            .expect("still selected");
+        let far = measure(&state).selection_y.expect("still selected");
         assert!(
             (0.0..=(VISIBLE_ROWS - 1) as f32 * theme::ROW_H).contains(&far),
             "the highlight was placed at {far}, outside the window"
@@ -1284,15 +1223,12 @@ mod tests {
     /// Nothing selected is not row zero selected.
     #[test]
     fn a_body_with_no_selection_places_no_highlight() {
-        assert_eq!(
-            measure(&with_hits(3), theme::Layout::List).selection_y,
-            None
-        );
+        assert_eq!(measure(&with_hits(3)).selection_y, None);
 
         let mut state = state();
         state.history.record("11-D-0704");
         assert_eq!(
-            measure(&state, theme::Layout::List).selection_y,
+            measure(&state).selection_y,
             None,
             "the recent list is not the result list"
         );
@@ -1323,9 +1259,7 @@ mod tests {
             assert_eq!(window.len(), VISIBLE_ROWS, "step {step}: short window");
 
             // And the band is drawn inside the panel rather than below it.
-            let y = measure(&state, theme::Layout::List)
-                .selection_y
-                .expect("a highlighted row");
+            let y = measure(&state).selection_y.expect("a highlighted row");
             assert!(
                 (0.0..VISIBLE_ROWS as f32 * theme::ROW_H).contains(&y),
                 "step {step}: the highlight is at {y}, off the list"

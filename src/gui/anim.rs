@@ -144,7 +144,6 @@ impl Hold {
 /// Everything the view measured this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Target {
-    pub height: f32,
     pub content: Content,
     /// Top of the selected row, in points from the top of the list, or `None`
     /// when nothing is selected.
@@ -155,18 +154,8 @@ pub struct Target {
 /// on it with no window, no context and no GPU.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Visual {
-    pub height: f32,
     pub content: Content,
     pub selection_y: Option<f32>,
-    /// Whether the pane beside the list is in play.
-    ///
-    /// Carried on the frame rather than passed to `overlay::show` beside it,
-    /// because it is decided by the same thing that decides the height and at
-    /// the same moment - and a renderer that had to be told twice is a renderer
-    /// that can be told two different things. Set by
-    /// [`crate::gui::frame::Frame::advance`]; never animated, because a width
-    /// that eased would be a `SetWindowPos` per frame of the ease.
-    pub layout: crate::gui::theme::Layout,
 }
 
 /// The panel's motion, such as it is.
@@ -187,7 +176,6 @@ impl Default for Motion {
 impl Motion {
     pub fn new() -> Self {
         let start = Target {
-            height: 0.0,
             content: Content::Recent,
             selection_y: None,
         };
@@ -208,12 +196,7 @@ impl Motion {
         self.want = target;
     }
 
-    /// `layout` is carried through rather than decided here: it is not
-    /// animated - a width that eased would be one `SetWindowPos` per frame of
-    /// the ease - but it belongs on the `Visual`, which is the whole of what a
-    /// frame is drawn from. Passing it in keeps that true without giving this
-    /// module an opinion about monitors.
-    pub fn advance(&mut self, dt: f32, layout: crate::gui::theme::Layout) -> Visual {
+    pub fn advance(&mut self, dt: f32) -> Visual {
         // A non-finite `dt` would poison the gate permanently - a body waiting
         // to go empty with no frame able to let it. The toolkit should never
         // hand one over; the cost of not depending on that is one comparison.
@@ -226,10 +209,8 @@ impl Motion {
         let target = self.hold.admit(self.want, dt);
 
         Visual {
-            height: target.height,
             content: target.content,
             selection_y: target.selection_y,
-            layout,
         }
     }
 
