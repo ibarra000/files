@@ -212,6 +212,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "pdf_viewer",
     "update_from",
     "theme",
+    "backdrop",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -239,6 +240,7 @@ pub struct FileSettings {
     pub pdf_viewer: Option<PathBuf>,
     pub update_from: Option<PathBuf>,
     pub theme: Option<String>,
+    pub backdrop: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -799,6 +801,27 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     );
                 }
                 out.theme = raw.map(str::to_string);
+            }
+            "backdrop" => {
+                let raw = value.and_then(Value::as_str);
+                // Refused rather than ignored, exactly as the theme above is
+                // and for the same reason: a misspelling that fell back
+                // silently would leave somebody looking at a panel that is
+                // still the material they were trying to change.
+                if let Some(v) = raw
+                    && crate::gui::window::Material::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!(
+                            "unknown backdrop {v:?}                              (expected \"acrylic\", \"mica\", \"tabbed\" or \"none\")"
+                        ),
+                        None,
+                    );
+                }
+                out.backdrop = raw.map(str::to_string);
             }
             _ => {}
         }

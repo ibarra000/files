@@ -51,27 +51,18 @@ use windows::Windows;
 
 pub use theme::{PANEL_H, PANEL_W};
 
-/// What the panel asks the compositor for.
-///
-/// [`window::Backdrop::Painted`], which is the deliberate answer to something
-/// that was measured rather than assumed. The panel is the window - it grows
-/// and shrinks to fit its results - and `DWMWA_SYSTEMBACKDROP_TYPE` describes a
-/// *region* that does not follow a window as it resizes. On this machine a
-/// panel that went from two rows to eight kept the compositor's acrylic over
-/// the old rectangle and had none over the rest: two different backgrounds
-/// meeting along a horizontal line through the middle of the list. Re-stating
-/// the region after the resize lands moves the seam without removing it.
-///
-/// So the panel paints its own translucent surface instead. It follows the
-/// window exactly, because we are the ones drawing it; it can be faded, which
-/// acrylic cannot; and it behaves identically in both themes and on every
-/// Windows. The cost is a real blur, which is worth less than a panel that is
-/// the same colour all the way down.
-///
-/// The acrylic path is kept, tested and one constant away - it is the right
-/// answer for a window that never changes size, which a future help or
-/// settings window is.
-const WANT_BACKDROP: window::Backdrop = window::Backdrop::Painted;
+// The panel used to ask for nothing and paint its own translucent surface,
+// and there was a good reason: `DWMWA_SYSTEMBACKDROP_TYPE` describes a
+// *region* that does not follow a window as it resizes, and the panel grew
+// and shrank with its result count. On this machine a panel that went from
+// two rows to eight kept the compositor's acrylic over the old rectangle and
+// had none over the rest - two backgrounds meeting along a line through the
+// middle of the list.
+//
+// The window is a fixed six hundred by four hundred now. There is no resize
+// for the region to fall behind, so the material is a setting, it defaults to
+// real acrylic, and the painted fill is what `Material::None` and an old
+// Windows get. See `window::Material`.
 
 /// Something outside the frame loop asking for the program's attention.
 ///
@@ -253,7 +244,7 @@ impl Shell {
         let hwnd = hwnd_of(cc);
         let backdrop = hwnd.map(|hwnd| {
             window::hide_from_taskbar(hwnd);
-            window::apply(hwnd, dark, WANT_BACKDROP)
+            window::apply(hwnd, dark, settings.backdrop)
         });
         let system_fonts = fonts::install(&cc.egui_ctx);
         // After the fonts, because the style names families by the names
@@ -346,7 +337,7 @@ impl Shell {
         // several hundred bytes and the theme moves about twice a day.
         theme::apply_style(ctx, &self.theme);
         if let Some(hwnd) = self.hwnd {
-            self.backdrop = Some(window::apply(hwnd, dark, WANT_BACKDROP));
+            self.backdrop = Some(window::apply(hwnd, dark, self.app.state.settings.backdrop));
         }
     }
 

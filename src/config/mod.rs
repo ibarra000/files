@@ -831,6 +831,12 @@ pub struct Settings {
     pub viewer: ViewerKind,
     /// Which palette the panel is drawn in.
     pub theme: ThemeChoice,
+    /// What the compositor is asked to put behind the panel.
+    ///
+    /// Only readable at startup: `DWMWA_SYSTEMBACKDROP_TYPE` is set on the
+    /// window handle once, and the shell re-applies it on a theme change and
+    /// nowhere else. See [`crate::gui::window::Material`].
+    pub backdrop: crate::gui::window::Material,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -957,6 +963,7 @@ impl Settings {
             hotkey: crate::hotkey::spec::HotkeySpec::default(),
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
+            backdrop: crate::gui::window::Material::default(),
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1149,6 +1156,14 @@ impl Settings {
         {
             self.theme = v;
         }
+        if env_str("FILES_BACKDROP").is_none()
+            && let Some(v) = f
+                .backdrop
+                .as_deref()
+                .and_then(crate::gui::window::Material::parse)
+        {
+            self.backdrop = v;
+        }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
             // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
@@ -1230,6 +1245,11 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_THEME").and_then(|v| ThemeChoice::parse(&v)) {
             s.theme = v;
+        }
+        if let Some(v) =
+            env_str("FILES_BACKDROP").and_then(|v| crate::gui::window::Material::parse(&v))
+        {
+            s.backdrop = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

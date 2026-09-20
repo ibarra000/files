@@ -204,7 +204,12 @@ impl AppState {
             SettingKey::UpdateFrom => {}
             // Captured at startup by something that cannot be told. The form
             // says these apply when files next starts.
-            SettingKey::Hotkey
+            // The material is set on the window handle once, by
+            // `window::apply`. The shell re-applies it when the theme moves
+            // and nowhere else, so a change here would not reach the
+            // compositor until the next start.
+            SettingKey::Backdrop
+            | SettingKey::Hotkey
             | SettingKey::LiveUpdates
             | SettingKey::PdfViewer
             | SettingKey::PdfReadOnly

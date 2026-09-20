@@ -5,7 +5,7 @@
 //! remembered.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId};
-use super::{Field, THEMES, VIEWERS, index_of, row};
+use super::{BACKDROPS, Field, THEMES, VIEWERS, index_of, row};
 use crate::app::state::AppState;
 use crate::config::Settings;
 use crate::config::write::SettingKey;
@@ -146,6 +146,23 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                     Field::Choice {
                         options: THEMES,
                         current: index_of(THEMES, settings.theme.name()),
+                    },
+                )])],
+            },
+            Group {
+                heading: Some("What shows through"),
+                blocks: vec![Block::Rows(vec![row(
+                    settings,
+                    SettingKey::Backdrop,
+                    "Behind the panel",
+                    "Acrylic blurs the window underneath, which is what the panel is \
+                     usually over. Mica samples the desktop wallpaper instead, so it \
+                     shows the wallpaper wherever the panel happens to be. None lets \
+                     the panel paint its own, which is what an older Windows gives \
+                     you whatever you pick here.",
+                    Field::Choice {
+                        options: BACKDROPS,
+                        current: index_of(BACKDROPS, settings.backdrop.name()),
                     },
                 )])],
             },

@@ -125,6 +125,25 @@ pub struct Section {
     pub rows: Vec<Row>,
 }
 
+pub(super) const BACKDROPS: &[Choice] = &[
+    Choice {
+        value: "acrylic",
+        label: "Acrylic",
+    },
+    Choice {
+        value: "mica",
+        label: "Mica",
+    },
+    Choice {
+        value: "tabbed",
+        label: "Tabbed",
+    },
+    Choice {
+        value: "none",
+        label: "None",
+    },
+];
+
 pub(super) const THEMES: &[Choice] = &[
     Choice {
         value: "light",

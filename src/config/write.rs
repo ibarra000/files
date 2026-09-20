@@ -100,10 +100,11 @@ pub enum SettingKey {
     PdfReadOnly,
     UpdateFrom,
     IndexLog,
+    Backdrop,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -118,6 +119,7 @@ impl SettingKey {
         Self::PdfReadOnly,
         Self::UpdateFrom,
         Self::IndexLog,
+        Self::Backdrop,
     ];
 
     /// The spelling in the file.
@@ -137,6 +139,7 @@ impl SettingKey {
             Self::PdfReadOnly => "pdf_read_only",
             Self::UpdateFrom => "update_from",
             Self::IndexLog => "index_log",
+            Self::Backdrop => "backdrop",
         }
     }
 
@@ -161,6 +164,7 @@ impl SettingKey {
             Self::PdfReadOnly => "FILES_PDF_READ_ONLY",
             Self::UpdateFrom => "FILES_UPDATE_FROM",
             Self::IndexLog => "FILES_INDEX_LOG",
+            Self::Backdrop => "FILES_BACKDROP",
         }
     }
 
@@ -596,6 +600,7 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .index_log
             .as_ref()
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
+        SettingKey::Backdrop => s.backdrop.clone().map(Scalar::Str),
     }
 }
 
@@ -736,6 +741,7 @@ mod tests {
             // string rather than a basic one.
             SettingKey::UpdateFrom => Typed::Text(r"\\fileserver\software\files".into()),
             SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
+            SettingKey::Backdrop => Typed::Text("mica".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             SettingKey::DevMode | SettingKey::AutoHide => Typed::Flag(true),
             SettingKey::History

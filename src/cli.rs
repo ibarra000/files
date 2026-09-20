@@ -244,7 +244,7 @@ ENVIRONMENT:
     FILES_HISTORY, FILES_HOTKEY, FILES_THEME, FILES_STALE_NOTICES,
     FILES_LIVE_UPDATES, FILES_HIDE_EXTENSIONS, FILES_HIDE_SYSTEM_FILES,
     FILES_AUTO_HIDE, FILES_PDF_READ_ONLY, FILES_MAX_CONCURRENT_SCANS,
-    FILES_UPDATE_FROM, FILES_DEV_MODE
+    FILES_UPDATE_FROM, FILES_DEV_MODE, FILES_BACKDROP
 
     Any of these outranks the configuration file, so a setting changed in the
     settings window applies for the session and is not saved - the window says

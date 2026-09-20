@@ -252,6 +252,23 @@ refresh = "manual"
 # the key itself.
 # hotkey        = "ctrl+shift+space"
 
+# What the compositor puts behind the panel.
+#
+# "acrylic" is the material Windows uses for a flyout: it blurs whatever
+# window the panel is over, which on a drawing office machine is usually the
+# drawing. That is the default and is almost always the one you want.
+#
+# "mica" samples the desktop wallpaper instead of the window behind, so a
+# panel over a full-screen drawing shows the wallpaper through it - and
+# because Mica does not follow a window that moves, dragging the panel drags
+# a stale patch of it around. "tabbed" is Mica's variant for a document
+# window and behaves the same way.
+#
+# "none" asks for nothing and lets the panel paint its own translucent fill.
+# That is also what a Windows older than 11 22H2 gets whatever is set here,
+# which it works out by asking rather than by checking a version.
+# backdrop      = "acrylic"          # acrylic | mica | tabbed | none
+
 # How the panel is coloured.
 #
 # "light" is a warm, bright panel and is what you get if this is not set.

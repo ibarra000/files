@@ -263,7 +263,7 @@ fn panel_rect(ui: &Ui) -> Rect {
 fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>) {
     let painter = ui.painter();
     let radius = theme::radius(theme::PANEL_RADIUS);
-    if backdrop != Some(Backdrop::Acrylic) {
+    if backdrop != Some(Backdrop::Compositor) {
         painter.rect_filled(rect, radius, theme.surface);
     }
     // The hairline stays on both paths: Windows draws its own border around a

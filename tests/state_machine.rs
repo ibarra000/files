@@ -2791,6 +2791,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
             SettingKey::UpdateFrom => Typed::Text(r"\\server\share\files".into()),
             SettingKey::IndexLog => Typed::Text(r"C:\index.log".into()),
+            SettingKey::Backdrop => Typed::Text("mica".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             // The two flags that ship off, so `false` would be no change at
             // all and this test would pass by moving nothing.
@@ -2806,7 +2807,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
     /// Everything `apply_live` is allowed to touch, read back off `Settings`.
     fn snapshot(s: &AppState) -> String {
         format!(
-            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{:?}",
+            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{:?}|{:?}",
             s.settings.theme,
             s.settings.viewer,
             s.settings.history,
@@ -2821,6 +2822,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             s.settings.pdf_read_only,
             s.settings.update_from,
             s.settings.index_log,
+            s.settings.backdrop,
         )
     }
 
