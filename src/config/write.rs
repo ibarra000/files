@@ -679,7 +679,16 @@ mod tests {
         let once = with_viewer(DEFAULT_CONFIG_TOML, ViewerKind::Avwin).unwrap();
         let twice = with_viewer(&once, ViewerKind::Pdf).unwrap();
 
-        assert_eq!(twice.matches("viewer = ").count(), 1);
+        // Whole lines that are actually the key, rather than every
+        // occurrence of the text. A substring count also matched the `#
+        // pdf_viewer = ...` the shipped file documents the override with,
+        // which is a comment about a different setting and not a duplicate
+        // of this one.
+        let written = twice
+            .lines()
+            .filter(|l| l.trim_start().starts_with("viewer ="))
+            .count();
+        assert_eq!(written, 1, "the viewer was written twice");
         assert_eq!(reload(&twice).settings.viewer.as_deref(), Some("pdf"));
     }
 

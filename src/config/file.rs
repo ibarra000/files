@@ -205,6 +205,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "pdf_read_only",
     "live_updates",
     "cache_dir",
+    "index_log",
     "history",
     "hotkey",
     "viewer",
@@ -231,6 +232,7 @@ pub struct FileSettings {
     pub pdf_read_only: Option<bool>,
     pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
+    pub index_log: Option<PathBuf>,
     pub history: Option<bool>,
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
@@ -687,6 +689,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             }
             "live_updates" => out.live_updates = bool_at(ctx, key, item),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
+            "index_log" => out.index_log = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = bool_at(ctx, key, item),
             "hotkey" => {
                 // Rejected here rather than ignored later, for the same reason
@@ -1339,6 +1342,26 @@ hide_system_files = false
                 mapping.kind.is_indexed(),
                 "{:?} is not indexed",
                 mapping.name
+            );
+        }
+    }
+
+    /// Every setting the loader accepts is one the shipped file mentions.
+    ///
+    /// The file somebody is handed on their first run is also the only
+    /// documentation most people will read, and a key that is accepted and
+    /// undocumented is a key nobody finds. `index_log` was exactly that for
+    /// the whole of its life: parseable from the environment, invisible
+    /// everywhere else.
+    ///
+    /// Mentioned rather than uncommented - almost all of these ship
+    /// commented out, which is the point.
+    #[test]
+    fn every_setting_the_loader_accepts_is_one_the_shipped_file_mentions() {
+        for key in SETTINGS_KEYS {
+            assert!(
+                DEFAULT_CONFIG_TOML.contains(key),
+                "{key} is accepted and undocumented"
             );
         }
     }

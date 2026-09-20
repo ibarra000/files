@@ -207,6 +207,29 @@ refresh = "manual"
 # writable as it is on the drive, because nothing here writes to a share.
 # pdf_read_only = true
 
+# Where the index, the assembled documents and a staged update are kept.
+#
+# Defaults to the local application data folder, which is the right place: it
+# is per-machine rather than roaming, so a file list of several hundred
+# thousand entries is not copied across the network every time somebody signs
+# in. Set it only to move that cache off a small system drive.
+#
+# Nothing here is precious. Deleting the folder costs one cold start.
+# cache_dir = 'D:\files-cache'
+
+# Where to record why each drive is read again, if anywhere.
+#
+# Off, and it should stay off. It exists because the bug that produced it -
+# a drive being read again every minute instead of every hour - is invisible
+# from the outside: the status line shows that the index is rebuilding, and
+# by the time anybody looks it has finished. One line per decision turns "it
+# reloads at random" into a sequence with timings and reasons, on the machine
+# that has the problem, without a debugger and without a new build.
+#
+# The file is appended to and never rotated, so set it when somebody asks you
+# to and clear it out afterwards.
+# index_log = 'C:\Users\Public\files-index.log'
+
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
 # server_filter = false              # turn on only after `files --bench` passes
@@ -259,6 +282,23 @@ viewer = "auto"                      # auto | pdf | avwin
 #       .dwg still opens in avwin.
 # avwin always hands the one selected file to avwin, whatever it is - which is
 #       how to see a .pdf there rather than in the PDF viewer.
+
+# Which program opens an assembled document.
+#
+# Unset, and it should usually stay unset: an assembled document is a PDF,
+# and whatever this machine already opens PDFs with is almost always the
+# right answer. Set it to send them somewhere else - a viewer with better
+# printing, say - without changing what a double-click in Explorer does.
+#
+# Reaches assembled documents only. A single file opened straight off the
+# drive still goes wherever Windows sends it.
+#
+# Not checked when it is read, unlike every other path here. A mistyped drive
+# is silent and so `files` refuses to start on one; a missing program is
+# loud the first time it is used, and this same file follows people onto
+# laptops where that program legitimately is not installed. `files --doctor`
+# reports it either way.
+# pdf_viewer = 'C:\Program Files\Tracker Software\PDF Viewer\PDFXCview.exe'
 
 # Files that are never offered, however well they match.
 #

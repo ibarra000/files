@@ -1147,6 +1147,11 @@ impl Settings {
         {
             self.update_from = Some(v.clone());
         }
+        if env_str("FILES_INDEX_LOG").is_none()
+            && let Some(v) = &f.index_log
+        {
+            self.index_log = Some(v.clone());
+        }
         if env_str("FILES_THEME").is_none()
             && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
         {
@@ -1351,6 +1356,46 @@ mod tests {
         let mut s = Settings::default();
         s.apply_file_settings(&f);
         s
+    }
+
+    /// The index log used to be reachable only from a flag or a variable,
+    /// which put the one diagnostic for "the drives reload at random" out of
+    /// reach of anybody who could not be talked through a command line.
+    #[test]
+    fn the_index_log_can_be_set_in_the_configuration_file() {
+        let s = applied(file::FileSettings {
+            index_log: Some(PathBuf::from(r"C:\temp\files.log")),
+            ..Default::default()
+        });
+        assert_eq!(s.index_log, Some(PathBuf::from(r"C:\temp\files.log")));
+    }
+
+    /// And obeys the same layering as every other path: the environment sits
+    /// over the file, so a variable set for one run is not quietly overruled
+    /// by what the file says.
+    #[test]
+    fn an_index_log_in_the_environment_outranks_the_file() {
+        const ENV: &str = "FILES_INDEX_LOG";
+        let _guard = lock();
+
+        // SAFETY: as in the test below - the lock is what makes the write
+        // safe, and both calls happen before the guard is dropped.
+        unsafe { std::env::set_var(ENV, r"C:\temp\from-env.log") };
+
+        let mut s = Settings::from_env_with(default_routes());
+        s.apply_file_settings(&file::FileSettings {
+            index_log: Some(PathBuf::from(r"C:\temp\from-file.log")),
+            ..Default::default()
+        });
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(ENV) };
+
+        assert_eq!(
+            s.index_log,
+            Some(PathBuf::from(r"C:\temp\from-env.log")),
+            "the file overrode the environment"
+        );
     }
 
     /// An empty `FILES_HIDE_EXTENSIONS` is the deliberate one-variable way to
