@@ -204,7 +204,7 @@ struct Shell {
     /// Whether the real Segoe UI was found. Kept for the diagnostics panel:
     /// "the text looks wrong" is a support call, and this is the answer to it.
     #[allow(dead_code)]
-    system_fonts: bool,
+    system_fonts: fonts::Found,
     /// The panel's motion, and the size the window was last asked for.
     frame: frame::Frame,
     theme: theme::Theme,

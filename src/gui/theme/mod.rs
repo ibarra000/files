@@ -606,7 +606,9 @@ impl Weight {
     }
 }
 
+pub mod icons;
 pub mod style;
+pub use icons::{ICON_INLINE, ICON_NAV, Icon, has_icon, icon_font};
 pub use style::{
     CARD_PAD, CARD_RADIUS, CONTENT_PAD, CONTROL_H, CONTROL_RADIUS, GROUP_GAP, NAV_W, ROW_GAP,
     apply_style,
