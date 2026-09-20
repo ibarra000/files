@@ -36,7 +36,7 @@ use crate::app::state::pointer::Intent;
 use crate::app::state::{AppState, EmptyReason};
 use crate::gui::anim::{Content, Visual};
 use crate::gui::theme::{self, Theme, Weight};
-use crate::gui::{preview, row, window::Backdrop};
+use crate::gui::{row, window::Backdrop};
 use crate::view::{self, Emphasis, Run};
 
 /// How tall one line of the empty state or the help list is.
@@ -66,18 +66,6 @@ pub struct Measured {
     pub selection_y: Option<f32>,
 }
 
-/// The fewest rows the list is given when the pane is beside it.
-///
-/// The pane holds a name, two facts, a page heading, four page names and a
-/// folder: nine lines, which is more than a two-result list is tall. Without a
-/// floor the pane would be clipped to the height of whatever the search
-/// happened to return, so searching a code with one page would show a pane with
-/// room for its name and nothing else.
-///
-/// Eight rather than nine because the field and the footer are outside the
-/// body, and both add room the pane can draw into.
-const PANE_MIN_ROWS: usize = 8;
-
 /// Which body belongs on screen, and how tall the panel wants to be.
 pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
     let content = body_of(state);
@@ -98,16 +86,6 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
         // Not even the padding. An untouched panel is the field and nothing
         // else, so there is no band here to give room to.
         Content::Quiet => 0.0,
-    };
-
-    // The pane needs a height of its own, and the list is the only thing that
-    // has one. Applied to the results body alone: the drive picker and the
-    // empty states have no file to describe, so the pane is not drawn beside
-    // them and would only be padding them out.
-    let body_h = if layout.has_pane() && content == Content::Results {
-        body_h.max(PANE_MIN_ROWS as f32 * theme::ROW_H)
-    } else {
-        body_h
     };
 
     // Relative to the window, not to the list. This used to be
@@ -233,16 +211,6 @@ pub fn show(
         intents.extend(draw_footer(ui, state, theme, footer, now, wall));
     }
 
-    // The pane takes its column off the right before the body is given what is
-    // left, so the list is laid out inside a narrower rectangle rather than
-    // being drawn full width and covered up. A row that reaches under the pane
-    // is a row whose folder column is unreadable and whose click lands on
-    // something else.
-    let pane = preview::pane_rect(rect, visual.layout, cursor);
-    if let Some(pane) = pane {
-        cursor = Rect::from_min_max(cursor.min, pos2(pane.left(), cursor.max.y));
-    }
-
     // One pass. The body used to be drawn twice while one cross-faded into the
     // other - which is why everything below took an alpha, and why the outgoing
     // pass had to be told not to accept clicks.
@@ -256,38 +224,7 @@ pub fn show(
         wall,
     ));
 
-    // After the body, so the pane sits over the surface rather than under the
-    // rows, and so the popup below is drawn on top of the list it describes.
-    match pane {
-        Some(pane) => preview::draw_pane(ui, state, theme, pane, wall),
-        None => {
-            if visual.content == Content::Results
-                && let Some(anchor) = hovered_row_rect(state, cursor)
-            {
-                preview::draw_popup(ui, state, theme, anchor, cursor, wall);
-            }
-        }
-    }
-
     intents
-}
-
-/// Where the row under the pointer is, for the popup to hang from.
-///
-/// Derived from the measurement, exactly as `visual.selection_y` is, rather
-/// than read back off a row's rectangle: it is the same arithmetic, and one
-/// place to be wrong about it is better than two.
-fn hovered_row_rect(state: &AppState, list: Rect) -> Option<Rect> {
-    let rank = state.hovered()?;
-    let y = rank.checked_sub(state.scroll_top())? as f32 * theme::ROW_H;
-    let top = list.top() + y;
-    if top + theme::ROW_H > list.bottom() {
-        return None;
-    }
-    Some(Rect::from_min_size(
-        pos2(list.left() + theme::PAD_X, top),
-        vec2(list.width() - theme::PAD_X * 2.0, theme::ROW_H),
-    ))
 }
 
 /// Tells the accessibility tree that `text` is at `rect`.

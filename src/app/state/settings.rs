@@ -1,7 +1,7 @@
 //! Changing a setting from the window.
 //!
 //! A child module rather than a free-standing one so it can reach the private
-//! fields the live half depends on, exactly as `overlay` and `preview` do.
+//! fields the live half depends on, exactly as `overlay` does.
 //!
 //! # Applied here, not on the way back
 //!
@@ -15,13 +15,13 @@
 //! `OpenMsg::SettingSaveFailed` says "for this session only" rather than
 //! implying nothing occurred.
 //!
-//! # Why only four settings move
+//! # Why only five settings move
 //!
 //! [`crate::config::Settings`] is cloned into the backend, both workers and
 //! every index actor. A field one of them captured cannot be changed
 //! underneath it - there would be two truths, and the stale one would win
-//! wherever it was being read. Four settings are read where they are used
-//! rather than captured at startup, and those are the four that move.
+//! wherever it was being read. Five settings are read where they are used
+//! rather than captured at startup, and those are the five that move.
 //!
 //! The rest are written and wait for the next start, which the form says in
 //! so many words. That is a smaller promise than live reload and it is one

@@ -28,7 +28,6 @@ pub mod fonts;
 pub mod frame;
 pub mod input;
 pub mod overlay;
-pub mod preview;
 pub mod row;
 pub mod settings;
 pub mod theme;

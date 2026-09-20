@@ -57,12 +57,6 @@ pub struct Actors {
     /// the rest: assembling a document reads every page off the share, which
     /// is far too much work to spawn a thread for per keypress.
     opener: open::worker::Opener,
-    /// Says what the file under the pointer is, for the pane beside the list.
-    ///
-    /// `None` when its thread would not start. Optional for the same reason
-    /// `history` is: a search tool that will not run because it could not tell
-    /// you a file's size is a worse tool than one without the pane.
-    previewer: Option<crate::preview::worker::Previewer>,
     /// Looks at the update folder now and then.
     ///
     /// `None` when no folder is configured, which is what ships - so the
@@ -218,12 +212,6 @@ impl Actors {
         }
         let opener = open::worker::spawn(Arc::clone(&backend), tx.clone())?;
 
-        // Best effort, unlike the opener above, and the asymmetry is the
-        // point: Enter failing is a keystroke that did nothing, while the pane
-        // failing is a pane that says nothing. Only one of those is worth
-        // refusing to start over.
-        let previewer = crate::preview::worker::spawn(Arc::clone(&backend), tx.clone()).ok();
-
         // Only when there is somewhere to look. Best effort beyond that, like
         // the history writer: a thread that would not start must cost the
         // checking and never the program.
@@ -264,7 +252,6 @@ impl Actors {
                 live,
                 indexes,
                 opener,
-                previewer,
                 updates,
                 history,
                 hotkey,
@@ -393,15 +380,6 @@ impl Actors {
                         })
                     },
                 ),
-                // Best effort, and silently so. The previewer is absent only
-                // when its thread would not start, and a panel that refuses to
-                // search because it could not tell you a file's size is a worse
-                // panel than one whose side pane stays empty.
-                Cmd::Preview(request) => {
-                    if let Some(previewer) = &self.previewer {
-                        previewer.request(request);
-                    }
-                }
                 Cmd::Copy(text) => clipboard::copy_async(text, self.events.clone()),
                 Cmd::ReadClipboard => clipboard::read_async(self.events.clone()),
                 Cmd::SaveHistory(entries) => {
@@ -468,17 +446,9 @@ impl Actors {
             clean &= index.join(deadline);
         }
         clean &= self.opener.shutdown(budget);
-        // Unbudgeted, and it does not contribute to `clean`. The worst this
-        // can be waiting on is one `metadata` call, which returns when the
-        // server answers or when the connection gives up - and unlike an
-        // abandoned index write there is nothing on disk for it to leave half
-        // finished.
-        if let Some(previewer) = &mut self.previewer {
-            previewer.shutdown();
-        }
-        // Budgeted, unlike the previewer: the worst this can be waiting on is
-        // one read of a small file, and there is nothing half-written for an
-        // abandoned one to leave behind.
+        // Budgeted: the worst this can be waiting on is one read of a small
+        // file, and there is nothing half-written for an abandoned one to
+        // leave behind.
         if let Some(updates) = &mut self.updates {
             clean &= updates.shutdown(budget);
         }

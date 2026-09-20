@@ -34,7 +34,6 @@ use egui_kittest::kittest::NodeT;
 use files::app::event::{AppEvent, IndexMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
-use files::app::state::pointer::Intent;
 use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Layout, Theme};
@@ -132,11 +131,6 @@ impl Panel {
 /// at.
 fn harness(state: AppState) -> Harness<'static, Panel> {
     harness_in(state, Layout::List)
-}
-
-/// The same panel, laid out for a monitor with room for the pane beside it.
-fn harness_wide(state: AppState) -> Harness<'static, Panel> {
-    harness_in(state, Layout::Pane)
 }
 
 fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
@@ -582,171 +576,6 @@ snapshot!(looks_right_showing_recent_codes, || {
     s
 });
 
-// --- the pane beside the list ----------------------------------------------
-
-/// The facts a preview carries, the way the worker would have gathered them.
-fn previewed(state: &mut AppState, now: Instant, rank: usize) {
-    use files::app::event::PreviewMsg;
-    use files::preview::{Facts, Pages, Preview};
-
-    state.update(AppEvent::Intent(Intent::Hover(Some(rank))), now);
-    let hit = state.hits[rank].clone();
-    state.update(
-        AppEvent::Preview(PreviewMsg::Ready(std::sync::Arc::new(Preview {
-            path: hit.path.clone(),
-            name: hit.name.clone(),
-            facts: Facts {
-                bytes: Some(2_411_724),
-                // Against the harness's pinned `UNIX_EPOCH` wall clock, so the
-                // age readout is the same on every machine.
-                modified: Some(std::time::SystemTime::UNIX_EPOCH),
-                share: Some("jobs".into()),
-                folder: Some(r"R:\11d\11-D-0704".into()),
-                missing: false,
-            },
-            pages: Some(Pages {
-                total: 13,
-                named: vec![
-                    std::sync::Arc::from("11-D-0704.pdf"),
-                    std::sync::Arc::from("11-D-0704-01.pdf"),
-                ],
-                capped: false,
-            }),
-        }))),
-        now,
-    );
-    assert!(state.preview.is_some(), "the fixture stored no preview");
-}
-
-/// The pane is painted rather than built from widgets, so without `announce`
-/// it is an empty rectangle to a screen reader - which is exactly the gap
-/// `tests/panel.rs` was written for when the toast band went missing.
-#[test]
-fn what_the_pane_says_is_in_the_accessibility_tree() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-    previewed(&mut s, now, 2);
-
-    let screen = on_screen(&harness_wide(s));
-    assert!(
-        screen.contains("2.3 MiB"),
-        "no size in the pane:
-{screen}"
-    );
-    assert!(
-        screen.contains("On jobs"),
-        "no drive in the pane:
-{screen}"
-    );
-    assert!(
-        screen.contains("13 pages in this set"),
-        "no page count in the pane:
-{screen}"
-    );
-}
-
-/// And the popup says the same things on a monitor with no room for a pane.
-#[test]
-fn the_popup_says_what_the_pane_would_have() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-    previewed(&mut s, now, 1);
-
-    let screen = on_screen(&harness(s));
-    assert!(
-        screen.contains("2.3 MiB"),
-        "no size in the popup:
-{screen}"
-    );
-    assert!(
-        screen.contains("13 pages in this set"),
-        "no page count in the popup:
-{screen}"
-    );
-}
-
-/// With nothing under the pointer the pane explains itself rather than sitting
-/// as a blank column beside a full list.
-#[test]
-fn an_empty_pane_says_why_it_is_empty() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-
-    let screen = on_screen(&harness_wide(s));
-    assert!(screen.contains("Point at a result"), "{screen}");
-}
-
-/// The popup is the opposite: with nothing hovered there must be no card at
-/// all, because a card that appears to say it has nothing to say is worse than
-/// no card.
-#[test]
-fn there_is_no_popup_until_something_is_pointed_at() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-
-    let screen = on_screen(&harness(s));
-    assert!(!screen.contains("Point at a result"), "{screen}");
-    assert!(
-        !screen.contains("MiB"),
-        "a popup appeared unbidden:
-{screen}"
-    );
-}
-
-/// Everything the panel laid out stays inside the wider panel. The generalised
-/// form of `a_very_long_code_stays_inside_the_panel`, and the check that the
-/// list really did give its column up rather than being drawn under the pane.
-#[test]
-fn nothing_in_the_wide_panel_reaches_past_its_edge() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
-    previewed(&mut s, now, 3);
-
-    let h = harness_wide(s);
-    let right = HARNESS_MARGIN + theme::PANEL_WIDE_W;
-    let root = h.root();
-    for node in root.children_recursive() {
-        let Some(bounds) = node.accesskit_node().bounding_box() else {
-            continue;
-        };
-        assert!(
-            bounds.x1 <= right as f64 + 1.0,
-            "something reaches {:.0}pt, past the panel's {right:.0}pt edge",
-            bounds.x1
-        );
-    }
-}
-
-/// A row must not run under the pane. Before the list was inset, the folder
-/// column was drawn full width and the pane was painted over the end of it.
-#[test]
-fn a_result_row_stops_where_the_pane_begins() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(12), 12, now);
-
-    let h = harness_wide(s);
-    let pane_left = HARNESS_MARGIN + theme::PANEL_WIDE_W - theme::PREVIEW_W;
-    let root = h.root();
-    let mut seen = 0;
-    for node in root.children_recursive() {
-        let Some(bounds) = node.accesskit_node().bounding_box() else {
-            continue;
-        };
-        let label = node.accesskit_node().label().unwrap_or_default();
-        if !label.contains(".pdf, in ") {
-            continue;
-        }
-        seen += 1;
-        assert!(
-            bounds.x1 <= pane_left as f64 + 1.0,
-            "{label} reaches {:.0}pt, under the pane at {pane_left:.0}pt",
-            bounds.x1
-        );
-    }
-    // Without this the loop passes by matching nothing at all.
-    assert_eq!(seen, theme::MAX_ROWS, "the rows were not found");
-}
-
 // The drive picker: the one body that had never been photographed, along with
 // the hover and text-selection colours it is the only place to see.
 snapshot!(looks_right_picking_a_drive, || {
@@ -761,27 +590,5 @@ snapshot!(looks_right_picking_a_drive, || {
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
-    s
-});
-
-// The pane, on a monitor with room for it. The one picture that says whether
-// the list really gave its column up, rather than being drawn under it.
-snapshot!(
-    looks_right_with_the_preview_pane,
-    || {
-        let (mut s, now) = state();
-        with_results(&mut s, "11-D-0704", many(6), 47, now);
-        previewed(&mut s, now, 2);
-        s
-    },
-    Layout::Pane
-);
-
-// And the popup, which is the same words drawn over the list instead of beside
-// it - so the two pictures together are what stops the layouts drifting.
-snapshot!(looks_right_with_a_hover_preview, || {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 47, now);
-    previewed(&mut s, now, 2);
     s
 });
