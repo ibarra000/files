@@ -11,21 +11,22 @@
 //!   order, so a duplicate does not fail to compile - it shadows, and the
 //!   binding that lost is simply dead. That is how `Ctrl+W` once came to type
 //!   a literal `w`.
-//! - A hint that outlives the key it names. The hint bar is the only
-//!   documentation most people will read, and a chip for a binding that has
-//!   been renamed is worse than no chip: it teaches a key that does nothing,
-//!   and the reader concludes the program is broken rather than the line.
+//! - A shortcut that outlives the key it names. The actions menu is the only
+//!   documentation most people will read, and a row naming a binding that
+//!   has been renamed is worse than no row: it teaches a key that does
+//!   nothing, and the reader concludes the program is broken rather than the
+//!   menu.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use files::app::event::{AppEvent, HotkeyMsg, Redraw, SearchMsg};
+use files::app::event::{AppEvent, Cmd, HotkeyMsg, Redraw, SearchMsg};
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
-use files::view::hints;
+use files::view::actions;
 
 /// Where the panel is when a key is pressed.
 ///
@@ -98,6 +99,30 @@ fn table() -> Vec<Binding> {
             CTRL,
             Searching,
             "show or hide the settings window",
+        ),
+        b(
+            Key::Char('d'),
+            CTRL,
+            Searching,
+            "open the selection as one document",
+        ),
+        b(
+            Key::Char('e'),
+            CTRL,
+            Searching,
+            "open the selection in avwin",
+        ),
+        b(
+            Key::Char('o'),
+            CTRL,
+            Searching,
+            "show the selection in Explorer",
+        ),
+        b(
+            Key::Char('k'),
+            CTRL,
+            Searching,
+            "show or hide the actions menu",
         ),
         anymod(Key::F(2), Searching, "switch viewer"),
         anymod(
@@ -262,7 +287,7 @@ fn snapshot(s: &AppState) -> Snapshot {
         toast: s.toast.as_ref().map(|t| t.text.clone()),
         quit: s.should_quit,
         epoch: s.query_epoch(),
-        menu: false,
+        menu: s.actions_open,
     }
 }
 
@@ -379,6 +404,10 @@ fn pressed_with_ctrl(c: char) -> Option<eframe::egui::Event> {
         'q' => E::Q,
         'u' => E::U,
         'w' => E::W,
+        'd' => E::D,
+        'e' => E::E,
+        'o' => E::O,
+        'k' => E::K,
         ',' => E::Comma,
         'c' | 'x' | 'v' => return None,
         other => panic!("no egui key written down for Ctrl+{other}; add one"),
@@ -409,32 +438,28 @@ fn translated(events: Vec<eframe::egui::Event>) -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Every chip in the hint bar names a key that does something.
+/// Every shortcut the menu advertises is a key that does something.
 ///
-/// The bar is the only documentation most people will read. A chip left
+/// The menu is the only documentation most people will read. A row left
 /// pointing at a renamed binding teaches a key that does nothing, and the
-/// reader concludes the program is broken rather than the line.
+/// reader concludes the program is broken rather than the menu.
 #[test]
 fn every_advertised_key_is_a_live_binding() {
-    for compact in [false, true] {
-        for at in [Where::Searching, Where::Recent, Where::Picking] {
-            let (s, now) = fixture_in(at, compact);
-            for chip in hints::hints(hints::Context::of(&s)) {
-                let Some(code) = key_of(chip.key) else {
-                    // Arrow clusters like `↑↓` are covered by the table above,
-                    // which names each direction separately.
-                    continue;
-                };
-                let mut probe = fixture_in(at, compact).0;
-                let before = snapshot(&probe);
-                let r = probe.update(AppEvent::Key(KeyEvent::new(code, mods_of(chip.key))), now);
-                assert!(
-                    r.redraw == Redraw::Yes || !r.cmds.is_empty() || snapshot(&probe) != before,
-                    "{at:?} (compact {compact}) advertises {:?} ({}), which does nothing",
-                    chip.key,
-                    chip.label
-                );
-            }
+    for at in [Where::Searching, Where::Recent, Where::Picking] {
+        let (s, now) = fixture(at);
+        for action in actions::actions(&s) {
+            let Some(shortcut) = action.shortcut else {
+                continue;
+            };
+            let (code, mods) = key_of(shortcut);
+            let mut probe = fixture(at).0;
+            let before = snapshot(&probe);
+            let r = probe.update(AppEvent::Key(KeyEvent::new(code, mods)), now);
+            assert!(
+                r.redraw == Redraw::Yes || !r.cmds.is_empty() || snapshot(&probe) != before,
+                "{at:?} advertises {shortcut} ({}), which does nothing",
+                action.description
+            );
         }
     }
 }
@@ -444,22 +469,66 @@ fn every_advertised_key_is_a_live_binding() {
 #[test]
 fn nothing_is_advertised_that_the_table_has_never_heard_of() {
     let all = table();
-    for (compact, at) in [false, true]
-        .into_iter()
-        .flat_map(|c| [Where::Searching, Where::Recent, Where::Picking].map(|a| (c, a)))
-    {
-        let (s, _) = fixture_in(at, compact);
-        for chip in hints::hints(hints::Context::of(&s)) {
-            let Some(code) = key_of(chip.key) else {
+    for at in [Where::Searching, Where::Recent, Where::Picking] {
+        let (s, _) = fixture(at);
+        for action in actions::actions(&s) {
+            let Some(shortcut) = action.shortcut else {
                 continue;
             };
+            let (code, _) = key_of(shortcut);
             assert!(
                 all.iter().any(|b| b.code == code),
-                "{at:?} advertises {:?}, which is in no binding",
-                chip.key
+                "{at:?} advertises {shortcut}, which is in no binding"
             );
         }
     }
+}
+
+/// The actions menu is a mode, and Escape is how you get out of one.
+///
+/// Without this the only way back would be the key that opened it, and
+/// Escape - which everybody presses first - would take the whole panel with
+/// it.
+#[test]
+fn escape_shuts_the_actions_menu_rather_than_the_panel() {
+    let (mut s, now) = fixture(Where::Searching);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Char('k'), CTRL)), now);
+    assert!(s.actions_open, "Ctrl+K did not open the menu");
+
+    let r = s.update(AppEvent::Key(KeyEvent::new(Key::Esc, NONE)), now);
+    assert!(!s.actions_open, "Escape left the menu up");
+    assert!(
+        r.cmds.is_empty(),
+        "Escape took the panel with it: {:?}",
+        r.cmds
+    );
+}
+
+/// And a second Ctrl+K shuts it, because a toggle that only opens is a key
+/// somebody presses twice and then reaches for the mouse.
+#[test]
+fn the_actions_key_is_a_toggle() {
+    let (mut s, now) = fixture(Where::Searching);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Char('k'), CTRL)), now);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Char('k'), CTRL)), now);
+    assert!(!s.actions_open);
+}
+
+/// A shortcut pressed while the menu is up runs and puts the menu away.
+///
+/// The menu is a list of keys; leaving it open over the thing one of them
+/// just did would be a menu that has to be dismissed twice.
+#[test]
+fn a_shortcut_pressed_in_the_menu_closes_it() {
+    let (mut s, now) = fixture(Where::Searching);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Char('k'), CTRL)), now);
+    let r = s.update(AppEvent::Key(KeyEvent::new(Key::Char('o'), CTRL)), now);
+    assert!(!s.actions_open, "the menu stayed up");
+    assert!(
+        r.cmds.iter().any(|c| matches!(c, Cmd::Reveal(_))),
+        "and the key did not run: {:?}",
+        r.cmds
+    );
 }
 
 /// Only the function keys ignore their modifiers, and that is a decision.
@@ -618,49 +687,36 @@ fn a_key_release_is_not_a_second_keystroke() {
     assert_eq!(s.input.text(), "11-D");
 }
 
-/// The chip labels are written for somebody who does not use a terminal by
-/// choice, so none of them may be a bare key name with no verb in it.
+/// The menu is written for somebody who does not use a terminal by choice,
+/// so no row may be a bare key name with no verb in it.
 #[test]
-fn every_chip_says_what_its_key_does() {
-    for (compact, at) in [false, true]
-        .into_iter()
-        .flat_map(|c| [Where::Searching, Where::Recent, Where::Picking].map(|a| (c, a)))
-    {
-        let (s, _) = fixture_in(at, compact);
-        for chip in hints::hints(hints::Context::of(&s)) {
+fn every_action_says_what_its_key_does() {
+    for at in [Where::Searching, Where::Recent, Where::Picking] {
+        let (s, _) = fixture(at);
+        for action in actions::actions(&s) {
             assert!(
-                chip.label.len() >= 4 && chip.label.contains(char::is_alphabetic),
-                "{at:?} advertises {:?} with the unhelpful label {:?}",
-                chip.key,
-                chip.label
+                action.description.len() >= 4 && action.description.contains(char::is_alphabetic),
+                "{at:?} offers {:?}, which says nothing",
+                action.description
             );
         }
     }
 }
 
-/// Maps a chip's key name back to the key it stands for.
-fn key_of(name: &str) -> Option<Key> {
-    match name {
-        "Enter" => Some(Key::Enter),
-        "Esc" => Some(Key::Esc),
-        "F3" => Some(Key::F(3)),
-        "F4" => Some(Key::F(4)),
-        "F2" => Some(Key::F(2)),
-        "F5" => Some(Key::F(5)),
-        "Ctrl+Q" => Some(Key::Char('q')),
-        "Ctrl+C" => Some(Key::Char('c')),
-        "\u{2191}" => Some(Key::Up),
-        "\u{2193}" => Some(Key::Down),
-        // A cluster like `↑↓` or `←→` names two keys at once; the table covers
-        // each of them separately.
-        _ => None,
-    }
-}
-
-fn mods_of(name: &str) -> Mods {
-    if name.starts_with("Ctrl+") {
-        CTRL
-    } else {
-        NONE
+/// Maps a shortcut string back to the key it stands for.
+///
+/// Written out rather than parsed, and deliberately a second list: its only
+/// purpose is to disagree with `view::actions` when somebody changes a
+/// shortcut there and nowhere else.
+fn key_of(shortcut: &str) -> (Key, Mods) {
+    match shortcut {
+        "Enter" => (Key::Enter, NONE),
+        "F5" => (Key::F(5), NONE),
+        "Ctrl+C" => (Key::Char('c'), CTRL),
+        "Ctrl+D" => (Key::Char('d'), CTRL),
+        "Ctrl+E" => (Key::Char('e'), CTRL),
+        "Ctrl+O" => (Key::Char('o'), CTRL),
+        "Ctrl+," => (Key::Char(','), CTRL),
+        other => panic!("no key written down for {other:?}; add one"),
     }
 }

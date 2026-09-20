@@ -38,6 +38,8 @@
 //! it and `showing_recent` used to be two answers to that question and they
 //! disagreed.
 
+pub mod actions;
+pub mod chip;
 pub mod field;
 pub mod footer;
 pub mod icons;
@@ -53,7 +55,7 @@ use crate::gui::anim::Content;
 use crate::gui::theme::{self, Theme};
 use crate::gui::window::Backdrop;
 
-/// Which of the five bodies the state calls for.
+/// Which of the four bodies the state calls for.
 ///
 /// The one thing the view still measures. There used to be a `Measured`
 /// alongside it carrying a height, a row count and the y of the selected row;
@@ -73,12 +75,6 @@ pub fn body_of(state: &AppState) -> Content {
     // field nobody had pressed Up on.
     if state.showing_recent() {
         return Content::Recent;
-    }
-    // Nothing typed and nothing to say about it. See `AppState::is_quiet`,
-    // which owns the question because the footer's presence depends on the
-    // same answer its contents do.
-    if state.is_quiet() {
-        return Content::Quiet;
     }
     if state.input.text().is_empty() {
         return Content::Empty;
@@ -143,20 +139,6 @@ pub fn show(
     let header = take(&mut cursor, theme::HEADER_H);
     let mut intents = field::show(ui, state, theme, header);
 
-    // A quiet panel is the header and nothing else - not an empty one. There
-    // is no footer to rule off and no body to rule it from, so both hairlines
-    // go with them; a rule under the header with four hundred points of
-    // nothing beneath it is a panel that looks broken rather than empty.
-    //
-    // Safe only because `AppState::is_quiet` has already established there is
-    // nothing to put in either: no toast, and nothing standing about a drive.
-    // Skipping a band that had something in it is the one way this could lose
-    // a message, and the predicate exists to make that impossible rather than
-    // unlikely.
-    if content == Content::Quiet {
-        return intents;
-    }
-
     let upper = take(&mut cursor, theme::DIVIDER);
     let band = take_bottom(&mut cursor, theme::FOOTER_H);
     let lower = take_bottom(&mut cursor, theme::DIVIDER);
@@ -166,6 +148,9 @@ pub fn show(
 
     intents.extend(footer::show(ui, state, theme, band, now, wall));
     intents.extend(list::show(ui, state, theme, cursor, content, wall));
+    // Last, and over everything: the menu floats above the footer that opens
+    // it and the list it is about.
+    intents.extend(actions::show(ui, state, theme, rect));
     intents
 }
 
@@ -382,22 +367,29 @@ mod tests {
         }
     }
 
-    /// An untouched panel is the header and nothing else.
+    /// An untouched panel has nothing in its body.
+    ///
+    /// There used to be a `Content::Quiet` for this, which dropped the
+    /// footer as well. What makes the first screen empty now is one step
+    /// further out: `view::empty` answers `NoQuery` with no blocks at all,
+    /// so the body is `Empty` and there is nothing in it.
     #[test]
     fn an_untouched_panel_has_nothing_in_its_body() {
         let mut state = state();
         settle_index(&mut state);
-        assert!(state.is_quiet(), "the fixture is not quiet");
-        assert_eq!(body_of(&state), Content::Quiet);
+        assert_eq!(body_of(&state), Content::Empty);
+        assert!(
+            crate::view::empty::view(&empty_reason(&state), state.input.text()).is_empty(),
+            "the first screen has something on it"
+        );
     }
 
-    /// And anything worth saying takes the panel out of quiet, because a
-    /// message nobody can see is a message nobody gets.
+    /// And something worth saying still reaches the footer, which is what
+    /// the quiet panel used to be able to swallow.
     #[test]
-    fn something_to_say_is_not_a_quiet_panel() {
+    fn something_to_say_is_not_lost() {
         let mut state = state();
         settle_index(&mut state);
-        assert_eq!(body_of(&state), Content::Quiet);
 
         // A real one, raised the way the program raises it.
         state.update(
@@ -407,8 +399,7 @@ mod tests {
             Instant::now(),
         );
         assert!(state.toast.is_some(), "the fixture raised no toast");
-        assert!(!state.is_quiet(), "a toast left the panel quiet");
-        assert_ne!(body_of(&state), Content::Quiet);
+        assert_eq!(body_of(&state), Content::Empty);
     }
 
     /// Selecting a row does not change which body is on screen, which is the

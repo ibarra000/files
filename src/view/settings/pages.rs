@@ -16,7 +16,7 @@ use crate::view::status::Tone;
 /// Three arguments rather than one because three things are being described:
 /// the settings, the runtime state the About page reads, and the remembered
 /// window position, which is neither. The same shape `view::status::render`
-/// and `view::hints::Hints::of` already have.
+/// and `view::actions::actions` already have.
 pub fn pages(state: &AppState, settings: &Settings, placement: Option<(i32, i32)>) -> Vec<Page> {
     vec![
         general(settings),

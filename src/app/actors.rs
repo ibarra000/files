@@ -380,6 +380,27 @@ impl Actors {
                         })
                     },
                 ),
+                // On the spot rather than on a worker. Explorer either
+                // starts or it does not; there is no share to read and
+                // nothing to merge, so the round trip through a thread would
+                // buy a frame of latency and no safety.
+                //
+                // It hands the foreground over on the same terms an open
+                // does: what comes up is a window the user asked for and
+                // wants in front of them.
+                Cmd::Reveal(path) => {
+                    if handing_over {
+                        crate::open::launch::allow_foreground_handover();
+                    }
+                    if let Err(e) = crate::open::launch::reveal(&path) {
+                        let _ =
+                            self.events
+                                .send(AppEvent::Open(crate::app::event::OpenMsg::Failed {
+                                    path,
+                                    detail: e.detail(),
+                                }));
+                    }
+                }
                 Cmd::Copy(text) => clipboard::copy_async(text, self.events.clone()),
                 Cmd::ReadClipboard => clipboard::read_async(self.events.clone()),
                 Cmd::SaveHistory(entries) => {

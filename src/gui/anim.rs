@@ -68,14 +68,18 @@ pub enum Content {
     /// screen otherwise.
     Recent,
     Results,
-    /// A reason there are none.
-    Empty,
-    /// Nothing at all: the field and no band under it.
+    /// A reason there are none, which on an untouched panel is no reason at
+    /// all.
     ///
-    /// What an untouched panel is. Distinct from [`Self::Empty`], which is a
-    /// body with a sentence in it explaining why the list is short - this one
-    /// has no body and no footer, because there is nothing to explain yet.
-    Quiet,
+    /// There used to be a `Quiet` beside this one, for a panel with nothing
+    /// typed and nothing to say: it drew no body *and no footer*, because a
+    /// footer whose height depended on its contents could disagree with them.
+    /// The footer is a fixed forty points now and holds a gear whatever else
+    /// is going on, so there is nothing left for the distinction to protect -
+    /// and `view::empty` already answers `NoQuery` with no blocks at all, so
+    /// an untouched panel is still a search box and nothing else, by
+    /// construction rather than by a special case.
+    Empty,
     /// The drive picker, which is the one thing that still borrows the body.
     /// Help used to be here too, and is a window of its own now.
     Shares,
@@ -114,10 +118,9 @@ impl Hold {
     }
 
     fn admit(&mut self, want: Content, dt: f32) -> Content {
-        // Held the same way, because they fail the same way: backspacing to
-        // an empty field and typing again would otherwise flap the window
-        // between one band and five, twice per keystroke.
-        let settling = |c: Content| matches!(c, Content::Empty | Content::Quiet);
+        // Backspacing to an empty field and typing again would otherwise
+        // flap the body between a list and a sentence, twice per keystroke.
+        let settling = |c: Content| c == Content::Empty;
         // Already there, or not asking to be: nothing to hold.
         if !settling(want) || settling(self.granted) {
             self.waited = 0.0;

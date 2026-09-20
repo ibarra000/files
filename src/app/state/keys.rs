@@ -12,12 +12,14 @@
 //! there is no clean shutdown to flush anything at, which is why history is
 //! written as it is recorded rather than on the way out.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::app::key::{Key, KeyEvent};
 
 use super::{AppState, Severity, Urgency};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
+use crate::config::ViewerKind;
 
 impl AppState {
     pub(super) fn on_key(&mut self, key: KeyEvent, now: Instant) -> Response {
@@ -58,6 +60,31 @@ impl AppState {
                 _ => {
                     leaving = self.close_shares();
                 }
+            }
+        }
+
+        // The actions menu is the same kind of exception the drive picker
+        // and the recall list are, and comes first because it is drawn on top
+        // of both: a menu that could not be shut without taking the panel
+        // with it would be a trap, and a menu left open under a panel that
+        // has gone away would be open again on the next summon.
+        if self.actions_open {
+            match key.key {
+                Key::Esc => {
+                    self.actions_open = false;
+                    return Response::redraw();
+                }
+                // The key that opened it is the key that shuts it, and its
+                // own arm below does that - closing here as well would shut
+                // the menu and let the toggle put it straight back.
+                Key::Char('k') if ctrl => {}
+                // Any other key runs whatever it is bound to and puts the
+                // menu away with it, which is what a menu of shortcuts is
+                // for. Modifiers arrive on their own as Windows repeats
+                // them; closing on one would shut the menu under the hand
+                // reaching for its second key.
+                Key::Char(_) | Key::Enter | Key::F(_) => self.actions_open = false,
+                _ => {}
             }
         }
 
@@ -110,6 +137,22 @@ impl AppState {
             // see `gui::input::chord`, and the test in `tests/bindings.rs`
             // that now drives the real input layer rather than this function.
             Key::Char(',') if ctrl && !alt => Response::redraw().with(Cmd::ToggleSettings),
+
+            // The three that act on the selected row without changing the
+            // mode. `OpenRequest` has carried its viewer since it was
+            // written, so each of these is one open with a different one -
+            // not a mode change, an open, and a mode change back.
+            Key::Char('d') if ctrl && !alt => self.act_on_selection(ViewerKind::Pdf, now),
+            Key::Char('e') if ctrl && !alt => self.act_on_selection(ViewerKind::Avwin, now),
+            Key::Char('o') if ctrl && !alt => self.reveal_selection(now),
+            // Everything there is to do with the row, in one press. Ueli's
+            // key, and the reason the footer can be two buttons rather than
+            // a row of chips: nothing has to be advertised along the bottom
+            // if there is one key that lists it.
+            Key::Char('k') if ctrl && !alt => {
+                self.actions_open = !self.actions_open;
+                Response::redraw()
+            }
 
             // AltGr arrives as Ctrl+Alt on Windows, and on a German, Polish
             // or French layout that is how `@`, `{`, `[` and the accented
@@ -514,17 +557,77 @@ impl AppState {
 
     // --- clipboard and escape ---------------------------------------------
 
+    /// Copies the run selected in the search box, or the path of the row the
+    /// cursor is on.
+    ///
+    /// Two meanings for one key, and the collision is deliberate rather than
+    /// tolerated. `Ctrl+C` has always copied the text selection here; Ueli
+    /// binds it to copying the file path. Neither should lose, and neither
+    /// has to: a text selection is something the user made a moment ago and
+    /// is unambiguously what they meant, and with no selection the only other
+    /// thing on screen worth copying is the path.
+    ///
+    /// It also retires a toast whose whole content was "nothing happened".
+    /// `view::actions` advertises the key on "Copy the path" only while there
+    /// is no text selection, so nothing on screen ever names a key that would
+    /// do the other thing.
     fn copy_selection(&mut self, now: Instant) -> Response {
-        match self.input.selected_text() {
-            Some(text) => Response::none().with(Cmd::Copy(text.to_string())),
-            None => {
-                // Nothing selected is worth saying: this is the key that used
-                // to quit, so silence here reads as "the program ignored me"
-                // to anyone expecting the old behaviour.
-                self.set_toast("Nothing selected to copy".into(), Severity::Info, now);
-                Response::redraw()
-            }
+        if let Some(text) = self.input.selected_text() {
+            return Response::none().with(Cmd::Copy(text.to_string()));
         }
+        if let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) {
+            return Response::none().with(Cmd::Copy(hit.path.to_string()));
+        }
+        // Nothing selected and nothing found is worth saying: this is the key
+        // that used to quit, so silence reads as "the program ignored me" to
+        // anyone expecting the old behaviour.
+        self.set_toast("Nothing to copy".into(), Severity::Info, now);
+        Response::redraw()
+    }
+
+    /// Copies the path of the row the cursor is on, whatever is selected in
+    /// the search box.
+    ///
+    /// What the actions menu runs, and deliberately not a synthetic
+    /// `Ctrl+C`: that key copies a text selection when there is one, so the
+    /// menu row would do something other than what it says.
+    pub(super) fn copy_path(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to copy".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        Response::none().with(Cmd::Copy(hit.path.to_string()))
+    }
+
+    /// Copies the name of the row the cursor is on.
+    ///
+    /// No key of its own, and that is not an oversight: it is in the actions
+    /// menu because somebody pasting a filename into an email wants it once a
+    /// week, and a chord for that is a chord nobody remembers.
+    pub(super) fn copy_name(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to copy".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        Response::none().with(Cmd::Copy(hit.name.to_string()))
+    }
+
+    /// Opens the row the cursor is on with a viewer other than the current
+    /// one, for this press only.
+    pub(super) fn act_on_selection(&mut self, viewer: ViewerKind, now: Instant) -> Response {
+        if self.hits.is_empty() {
+            return Response::none();
+        }
+        self.open_with(viewer, now)
+    }
+
+    /// Explorer, with the row the cursor is on already picked out.
+    pub(super) fn reveal_selection(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to show".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        Response::none().with(Cmd::Reveal(Arc::clone(&hit.path)))
     }
 
     /// Copy, then remove what was copied.

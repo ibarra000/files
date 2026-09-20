@@ -136,9 +136,8 @@ pub fn show(
                     shares(&mut body, state, theme, wall);
                     Vec::new()
                 }
-                // Drawn above, without a scroller; and a quiet panel has no
-                // content band at all.
-                Content::Empty | Content::Quiet => Vec::new(),
+                // Drawn above, without a scroller.
+                Content::Empty => Vec::new(),
             };
             space(&mut body, theme::BAND_PAD);
 
@@ -192,7 +191,7 @@ const fn heading_of(content: Content) -> Option<&'static str> {
         Content::Results => Some("Results"),
         Content::Recent => Some("Recent codes"),
         Content::Shares => Some("Drives"),
-        Content::Empty | Content::Quiet => None,
+        Content::Empty => None,
     }
 }
 
@@ -207,7 +206,6 @@ const fn discriminant(content: Content) -> u8 {
         Content::Recent => 1,
         Content::Shares => 2,
         Content::Empty => 3,
-        Content::Quiet => 4,
     }
 }
 
@@ -492,14 +490,13 @@ mod tests {
             Content::Recent,
             Content::Shares,
             Content::Empty,
-            Content::Quiet,
         ]
         .into_iter()
         .map(discriminant)
         .collect();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), 5, "two bodies share a scroll offset");
+        assert_eq!(seen.len(), 4, "two bodies share a scroll offset");
     }
 
     /// The two bodies that are lists of somebody's own things get a caption;
@@ -510,6 +507,5 @@ mod tests {
         assert!(heading_of(Content::Recent).is_some());
         assert!(heading_of(Content::Shares).is_some());
         assert!(heading_of(Content::Empty).is_none());
-        assert!(heading_of(Content::Quiet).is_none());
     }
 }

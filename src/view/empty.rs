@@ -6,10 +6,14 @@
 //! broken.
 //!
 //! It is no longer the *first* screen. An untouched panel shows the search box
-//! and nothing under it - see [`crate::app::state::AppState::is_quiet`] - so
-//! `NoQuery` produces no blocks at all. It used to produce five, which is a
-//! page of instructions in front of somebody who summoned a search box to
-//! search.
+//! and nothing under it, and this is where that happens: `NoQuery` produces
+//! no blocks at all. It used to produce five, which is a page of instructions
+//! in front of somebody who summoned a search box to search.
+//!
+//! There was a `Content::Quiet` beside it for a while, which dropped the body
+//! *and the footer* on the same condition. It is gone: the footer is a fixed
+//! forty points and holds a gear whatever else is happening, so the empty
+//! block list below is the whole of what makes the first screen empty.
 //!
 //! Every variant has the same three-part shape - what happened, a fact about
 //! it, then the thing to do - so the eye learns where to look once and then

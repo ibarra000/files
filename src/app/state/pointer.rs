@@ -20,8 +20,9 @@
 //! * **A hover is never a selection.** Enter opens the selection; a highlight
 //!   that could be mistaken for it is a highlight that gets a file opened by
 //!   accident.
-//! * **A hint chip does exactly what its key does**, by going through the key
-//!   handler rather than by reimplementing it.
+//! * **A control does exactly what its key does**, by going through the key
+//!   handler rather than by reimplementing it. The chips this was written
+//!   about are gone; the actions menu is what keeps the rule.
 //!
 //! Two things genuinely improve. The old `hovered` field carried this comment:
 //! *"a terminal reports no 'the pointer left the window' event, and a hover
@@ -37,7 +38,8 @@ use std::time::Instant;
 use crate::app::event::Response;
 use crate::app::key::{Key, KeyEvent, Mods};
 use crate::app::state::AppState;
-use crate::view::hints::Action;
+use crate::config::ViewerKind;
+use crate::view::actions::ActionId;
 
 /// What the pointer did, already resolved against the layout that drew it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,8 +52,6 @@ pub enum Intent {
     Activate(usize),
     /// A click in the search field, at this byte offset into the text.
     Caret { byte: usize, extend: bool },
-    /// A key hint in the footer was clicked, so do what the key does.
-    Hint(Action),
     /// A remembered code was clicked: take that one.
     ///
     /// Its own variant rather than a reuse of [`Intent::Activate`], which
@@ -59,10 +59,25 @@ pub enum Intent {
     /// which body is up would put a "which body is on screen" decision back
     /// inside the state machine, which is what `Intent` exists to keep out.
     ///
-    /// The rank is the thing that matters and the thing the old
-    /// `Hint(Action::Recall)` threw away - a click on the fifth code used to
-    /// step one entry *older*, because the only tool it had was the Up arrow.
+    /// The rank is the thing that matters and the thing a click on the old
+    /// recall *chip* threw away - it was the Up arrow with the rank dropped,
+    /// so clicking the fifth code stepped one entry older.
     Recall(usize),
+    /// A row of the actions menu, or the button that names the default one.
+    ///
+    /// Named by what it *is* rather than by the key it happens to share,
+    /// because two of these have no key at all and one - copying the path -
+    /// has a key that means something else while there is a text selection.
+    /// See [`crate::view::actions`].
+    Act(crate::view::actions::ActionId),
+    /// The `⋮` button, or a press anywhere the open menu is not.
+    ///
+    /// Carries the state it is asking for rather than saying "toggle",
+    /// because the two callers know different things: the button knows it is
+    /// a toggle, and a press outside knows only that the menu should be shut.
+    /// A toggle from the second would reopen the menu the first had just
+    /// closed, on the same press.
+    ShowActions(bool),
 }
 
 impl AppState {
@@ -87,8 +102,15 @@ impl AppState {
                 self.input.set_caret(byte, extend);
                 Response::redraw()
             }
-            Intent::Hint(action) => self.run_hint(action, now),
             Intent::Recall(rank) => self.recall_row(rank, now),
+            Intent::Act(action) => self.run_action(action, now),
+            Intent::ShowActions(open) => {
+                if self.actions_open == open {
+                    return Response::none();
+                }
+                self.actions_open = open;
+                Response::redraw()
+            }
         }
     }
 
@@ -108,19 +130,40 @@ impl AppState {
         self.accept_recall(now)
     }
 
-    /// A key hint in the footer, clicked rather than pressed.
+    /// Runs one entry of the actions menu.
     ///
-    /// Routed through the key handler rather than reimplemented, so a chip and
-    /// the key it names cannot drift apart - which is the only way a hint bar
-    /// is ever wrong.
-    pub(super) fn run_hint(&mut self, action: Action, now: Instant) -> Response {
-        let key = match action {
-            Action::Open => Key::Enter,
-            Action::Recall => Key::Up,
-            Action::Results => Key::Down,
-            Action::Refresh => Key::F(5),
+    /// Through the real key where the action has one, so that a control and
+    /// its shortcut cannot come to mean different things. That invariant is
+    /// the reason this dispatches rather than each caller building its own
+    /// `Cmd`: a menu row that assembled a command by hand would be a second
+    /// copy of what the key does, and the two would part company the first
+    /// time one of them was corrected.
+    ///
+    /// Three are direct, and each for a reason rather than for convenience.
+    /// Copying the path has a key, `Ctrl+C`, whose meaning depends on whether
+    /// there is a text selection - so a synthetic press would copy the
+    /// selection and not the path, which is not what the row says. Copying
+    /// the name and opening with Windows have no key at all.
+    pub(super) fn run_action(&mut self, action: ActionId, now: Instant) -> Response {
+        // Whatever it was, the menu has served its purpose. Before the action
+        // runs, so a `Cmd::DismissOverlay` cannot leave a menu open behind a
+        // hidden panel.
+        let closing = std::mem::replace(&mut self.actions_open, false);
+        let mut response = match action {
+            ActionId::Open => self.on_key(KeyEvent::new(Key::Enter, Mods::NONE), now),
+            ActionId::OpenAsDocument => self.open_with(ViewerKind::Pdf, now),
+            ActionId::OpenInAvwin => self.open_with(ViewerKind::Avwin, now),
+            ActionId::OpenWithWindows => self.open_with(ViewerKind::Auto, now),
+            ActionId::Reveal => self.reveal_selection(now),
+            ActionId::CopyPath => self.copy_path(now),
+            ActionId::CopyName => self.copy_name(now),
+            ActionId::Refresh => self.on_key(KeyEvent::new(Key::F(5), Mods::NONE), now),
+            ActionId::Settings => self.on_key(KeyEvent::new(Key::Char(','), Mods::CTRL), now),
         };
-        self.on_key(KeyEvent::new(key, Mods::NONE), now)
+        if closing {
+            response.redraw = crate::app::event::Redraw::Yes;
+        }
+        response
     }
 
     /// Moves the highlight to a row the pointer named.
@@ -287,25 +330,74 @@ mod tests {
         assert_eq!(state.input.selection(), Some((3, 7)));
     }
 
-    /// A chip and the key it names must do the same thing, or the hint bar is
-    /// lying about the keyboard.
+    /// A menu row and the key it names must do the same thing, or the menu
+    /// is lying about the keyboard.
+    ///
+    /// Through the whole list rather than one entry: every action that
+    /// advertises a shortcut is a claim, and a claim that only holds for the
+    /// one somebody remembered to test is not an invariant.
     #[test]
-    fn a_clicked_hint_does_what_the_key_it_names_does() {
+    fn every_advertised_action_does_what_its_key_does() {
         let now = Instant::now();
-        let mut clicked = state_with_hits(3);
-        let mut pressed = state_with_hits(3);
+        for action in crate::view::actions::actions(&state_with_hits(3)) {
+            let Some(shortcut) = action.shortcut else {
+                continue;
+            };
+            let Some(key) = key_of(shortcut) else {
+                continue;
+            };
+            let mut clicked = state_with_hits(3);
+            let mut pressed = state_with_hits(3);
+            let from_menu = clicked.on_intent(Intent::Act(action.id), now);
+            let from_key = pressed.on_key(key, now);
 
-        clicked.on_intent(Intent::Hint(Action::Results), now);
-        pressed.on_key(KeyEvent::new(Key::Down, Mods::NONE), now);
+            assert_eq!(
+                from_menu.cmds, from_key.cmds,
+                "{:?} ({shortcut}) does something other than its key",
+                action.id
+            );
+            assert_eq!(clicked.selected_row(), pressed.selected_row());
+        }
+    }
 
-        assert_eq!(clicked.selected_row(), pressed.selected_row());
+    /// The key a shortcut string names, for the test above.
+    ///
+    /// Written out rather than parsed, and deliberately a second list: its
+    /// only purpose is to disagree with `view::actions` when a shortcut is
+    /// changed there and nowhere else.
+    fn key_of(shortcut: &str) -> Option<KeyEvent> {
+        Some(match shortcut {
+            "Enter" => KeyEvent::new(Key::Enter, Mods::NONE),
+            "F5" => KeyEvent::new(Key::F(5), Mods::NONE),
+            "Ctrl+D" => KeyEvent::new(Key::Char('d'), Mods::CTRL),
+            "Ctrl+E" => KeyEvent::new(Key::Char('e'), Mods::CTRL),
+            "Ctrl+O" => KeyEvent::new(Key::Char('o'), Mods::CTRL),
+            "Ctrl+," => KeyEvent::new(Key::Char(','), Mods::CTRL),
+            // Copies the text selection when there is one, so the menu row
+            // deliberately does *not* go through it. `view::actions` stops
+            // advertising the key in that case, which is the claim
+            // `the_copy_key_is_advertised_only_when_it_copies_the_path`
+            // makes over there.
+            "Ctrl+C" => return None,
+            other => panic!("no key written down for {other:?}; add one"),
+        })
+    }
+
+    /// The menu shuts when something on it is chosen, whatever that was.
+    #[test]
+    fn running_an_action_puts_the_menu_away() {
+        let now = Instant::now();
+        let mut state = state_with_hits(3);
+        state.actions_open = true;
+        state.on_intent(Intent::Act(crate::view::actions::ActionId::CopyName), now);
+        assert!(!state.actions_open, "the menu stayed up");
     }
 
     /// A click takes the code that was clicked, not the one next to it.
     ///
-    /// This used to push `Intent::Hint(Action::Recall)`, which is the Up arrow
-    /// with the rank thrown away - so clicking the fifth remembered code
-    /// stepped one entry older than wherever the cursor already was.
+    /// This used to push a hint-chip intent, which is the Up arrow with the
+    /// rank thrown away - so clicking the fifth remembered code stepped one
+    /// entry older than wherever the cursor already was.
     #[test]
     fn clicking_a_remembered_code_takes_that_one() {
         let now = Instant::now();

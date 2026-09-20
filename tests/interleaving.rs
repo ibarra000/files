@@ -89,12 +89,18 @@ fn an_intent() -> impl Strategy<Value = Step> {
         2 => (0usize..=40, any::<bool>())
                 .prop_map(|(byte, extend)| Intent::Caret { byte, extend }),
         1 => prop_oneof![
-            Just(files::view::hints::Action::Open),
-            Just(files::view::hints::Action::Recall),
-            Just(files::view::hints::Action::Results),
-            Just(files::view::hints::Action::Refresh),
+            Just(files::view::actions::ActionId::Open),
+            Just(files::view::actions::ActionId::OpenAsDocument),
+            Just(files::view::actions::ActionId::OpenInAvwin),
+            Just(files::view::actions::ActionId::OpenWithWindows),
+            Just(files::view::actions::ActionId::Reveal),
+            Just(files::view::actions::ActionId::CopyPath),
+            Just(files::view::actions::ActionId::CopyName),
+            Just(files::view::actions::ActionId::Refresh),
+            Just(files::view::actions::ActionId::Settings),
         ]
-        .prop_map(Intent::Hint),
+        .prop_map(Intent::Act),
+        1 => any::<bool>().prop_map(Intent::ShowActions),
     ]
     .prop_map(Step::Point)
 }

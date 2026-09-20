@@ -67,6 +67,8 @@ pub enum Icon {
     Browse,
     Reset,
     External,
+    /// Everything that did not fit: the panel's actions menu.
+    More,
 
     // On a result row, chosen by the file's extension. Six marks rather than
     // one per type: a vocabulary somebody has to learn is worse than no
@@ -82,7 +84,7 @@ pub enum Icon {
 
 impl Icon {
     /// Every one, for the test that proves the machine can draw them.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Gear,
         Self::Palette,
         Self::Drive,
@@ -97,6 +99,7 @@ impl Icon {
         Self::Browse,
         Self::Reset,
         Self::External,
+        Self::More,
         Self::FilePdf,
         Self::FileDrawing,
         Self::FileImage,
@@ -128,6 +131,7 @@ impl Icon {
             Self::Browse => '\u{E838}',   // FolderOpen
             Self::Reset => '\u{E7A7}',    // Undo
             Self::External => '\u{E8A7}', // OpenInNewWindow
+            Self::More => '\u{E712}',     // More
 
             Self::FilePdf => '\u{EA90}',      // PDF
             Self::FileDrawing => '\u{EB3C}',  // Design

@@ -87,6 +87,14 @@ pub struct AppState {
     /// keyboard; this is the one thing that borrows the *body*, and it borrows
     /// it for one keystroke at a time.
     pub picking_share: bool,
+    /// Whether the actions menu is up.
+    ///
+    /// Here rather than in the renderer because Escape has to close it, and
+    /// which key means what is the state machine's business. It is a *flag*
+    /// and not a cursor: the menu is keyboard-reachable through the shortcut
+    /// each row names, so there is nothing to walk. See
+    /// [`crate::view::actions`].
+    pub actions_open: bool,
     pub hits: Vec<Hit>,
     pub matched: u32,
     pub total: u32,
@@ -242,6 +250,7 @@ impl AppState {
             history: History::new(),
             overlay_up: false,
             picking_share: false,
+            actions_open: false,
             // Replaced by the real size before the first frame; a sane default
             // means mouse arithmetic is never done against a zero rect.
             hits: Vec::new(),
@@ -419,31 +428,6 @@ impl AppState {
     /// decide whether anything is joined onto it.
     pub(crate) fn technical(&self, detail: impl Into<String>) -> Option<String> {
         self.settings.dev_mode.then(|| detail.into())
-    }
-
-    /// Nothing to show but the box to type in.
-    ///
-    /// What the panel looks like before anybody has typed: one band, the
-    /// field, and no body or footer under it. It used to be five lines of
-    /// instructions and four chips, which is a great deal of furniture to put
-    /// in front of somebody who summoned a search box to search.
-    ///
-    /// The last two terms are what stop this being a hole rather than a
-    /// feature. A toast such as "Copied 9 characters", and a standing notice
-    /// about a drive, are exactly the things the footer exists to carry, and a
-    /// footer of no height would swallow them without a sound. So a panel with
-    /// anything to say is not a quiet one.
-    ///
-    /// The wall clock is the one the renderer handed over on the last frame,
-    /// because staleness is the one standing notice that arrives with no event
-    /// behind it. `note_frame` runs before the panel is measured, so it is the
-    /// same instant the footer would be drawn against.
-    pub fn is_quiet(&self) -> bool {
-        self.input.text().is_empty()
-            && !self.picking_share
-            && !self.showing_recent()
-            && self.toast.is_none()
-            && !self.has_standing_notice(self.last_frame_wall)
     }
 
     /// Whether the status line would say something without being asked.
@@ -837,12 +821,29 @@ impl AppState {
             });
         }
 
-        self.open_selection(now)
+        self.open_selection(self.viewer, now)
     }
 
     /// Opens the row the selection is on. The second half of [`Self::on_enter`],
     /// split out because a deferred Enter re-enters it from `on_search`.
-    fn open_selection(&mut self, now: Instant) -> Response {
+    /// Opens the row the selection is on with a viewer other than the
+    /// current one, without changing which one is current.
+    ///
+    /// Public to the module so `keys` and `pointer` can both reach it: the
+    /// three viewer-specific actions are a keystroke *and* a menu row, and
+    /// the two have to be the same act.
+    pub(super) fn open_with(&mut self, viewer: ViewerKind, now: Instant) -> Response {
+        self.open_selection(viewer, now)
+    }
+
+    /// Opens the row the selection is on, with the viewer named.
+    ///
+    /// The viewer is a parameter rather than `self.viewer` because three of
+    /// the actions in [`crate::view::actions`] are the same open with a
+    /// different one - and `OpenRequest` has carried the viewer per request
+    /// since it was written, precisely so this could be a parameter rather
+    /// than a mode change followed by an open followed by a mode change back.
+    fn open_selection(&mut self, viewer: ViewerKind, now: Instant) -> Response {
         // Never blocks on the network: if the file turns out to be gone, that
         // is reported afterwards.
         let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
@@ -876,7 +877,7 @@ impl AppState {
         let code = self.query.term().to_string();
         // Decided before the path is moved into the request, and kept, because
         // the answer is wanted again below.
-        let route = crate::open::route_of(self.viewer, &path);
+        let route = crate::open::route_of(viewer, &path);
         let request = crate::open::OpenRequest {
             path,
             // The typed code, not the selected row: the page set is rebuilt
@@ -884,7 +885,7 @@ impl AppState {
             // match position, so a long document would arrive truncated and
             // out of order.
             query: code.clone(),
-            viewer: self.viewer,
+            viewer,
         };
         let mut response = Response::none().with(Cmd::Open(request));
 
@@ -1032,7 +1033,7 @@ impl AppState {
                 let mut response = Response::redraw();
                 if std::mem::take(&mut self.enter_pending) {
                     self.enter_watchdog_at = None;
-                    response.merge(self.open_selection(now));
+                    response.merge(self.open_selection(self.viewer, now));
                 }
                 response
             }

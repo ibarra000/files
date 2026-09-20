@@ -267,10 +267,38 @@ fn ctrl_c_copies_the_selected_text() {
     assert!(!s.should_quit);
 }
 
-/// With nothing selected it says so. Silence would read as the program
+/// With no text selected it copies the path of the row the cursor is on,
+/// which is Ueli's binding for the same key.
+///
+/// Neither meaning loses. A text selection is something the user made a
+/// moment ago and is unambiguously what they meant; with none, the only
+/// other thing on screen worth copying is the path. `view::actions` only
+/// advertises `Ctrl+C` on "Copy the path" while there is no selection, so
+/// nothing on screen ever names the key doing the other thing.
+#[test]
+fn ctrl_c_with_no_text_selected_copies_the_path() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    let v = view(&s);
+    s.update(search_result(&v, many_hits(3), 3, 9_000), now);
+    assert!(s.input.selection().is_none(), "the fixture selected text");
+
+    let r = s.update(ctrl(Key::Char('c')), now);
+    assert!(!s.should_quit);
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Copy(text) if text.contains(".pdf"))),
+        "{:?}",
+        r.cmds
+    );
+    assert_eq!(s.input, "11-D-0704", "the code must survive");
+}
+
+/// And with nothing at all it says so. Silence would read as the program
 /// ignoring the key, to anyone who remembers when it quit.
 #[test]
-fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
+fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
 
@@ -279,7 +307,7 @@ fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
     assert!(
         s.toast
             .as_ref()
-            .is_some_and(|t| t.text.contains("Nothing selected")),
+            .is_some_and(|t| t.text.contains("Nothing to copy")),
         "{:?}",
         s.toast
     );

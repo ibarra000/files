@@ -19,6 +19,8 @@
 //! takes the path as a parameter rather than as text to be re-parsed, so there
 //! is nothing to quote and nothing to escape.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -186,6 +188,45 @@ pub fn allow_foreground_handover() {}
 #[cfg(windows)]
 pub fn shell_open(path: &str) -> Result<(), LaunchError> {
     shell_execute(path, None)
+}
+
+/// Opens Explorer with `path` already picked out.
+///
+/// `explorer.exe /select,"<path>"`, which is what "Show in folder" does
+/// everywhere else on this machine and is the documented way to ask for it.
+///
+/// Not through [`shell_execute`], because that quotes the whole argument
+/// string and the argument here is *not* one path - it is a switch and a path
+/// stuck together. `explorer.exe` parses `/select,` itself, and a version of
+/// this that quoted the lot opened the user's Documents folder with nothing
+/// selected, silently, which is the one wrong answer that looks like it
+/// worked.
+///
+/// The quotes go round the path and nowhere else. A Windows file name cannot
+/// contain a double quote, so that is safe rather than hopeful.
+///
+/// Explorer's exit code is famously not a report of anything, so the only
+/// failure this can honestly detect is not being able to start it at all.
+#[cfg(windows)]
+pub fn reveal(path: &str) -> Result<(), LaunchError> {
+    Command::new("explorer.exe")
+        .raw_arg(format!("/select,\"{path}\""))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => LaunchError::ViewerNotFound("explorer.exe".into()),
+            _ => LaunchError::Io(e.to_string()),
+        })
+}
+
+/// Off Windows there is no Explorer to ask.
+#[cfg(not(windows))]
+pub fn reveal(path: &str) -> Result<(), LaunchError> {
+    let _ = path;
+    Err(LaunchError::ViewerNotFound("explorer.exe".into()))
 }
 
 /// `ShellExecuteW`, with an optional command line for the thing being run.

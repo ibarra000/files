@@ -189,9 +189,8 @@ fn state() -> (AppState, Instant) {
 /// reported in healthy.
 ///
 /// `state()` is not that. A fresh one has no index yet, which is a standing
-/// notice - "No file list yet" - and a panel with something to say keeps its
-/// footer. That is the intended behaviour and it is asserted below; this
-/// fixture is for the other half.
+/// notice - "No file list yet" - and that notice is a real screen somebody
+/// sees. This fixture is for the other half.
 fn quiet_state() -> (AppState, Instant) {
     let (mut s, now) = state();
     let status = IndexStatus {
@@ -207,9 +206,13 @@ fn quiet_state() -> (AppState, Instant) {
         }),
         now,
     );
+    // Read off the line the footer would draw, which is the only public
+    // answer to "has this panel anything to say" now that `is_quiet` has
+    // gone with `Content::Quiet`.
+    let said = files::view::status::render(&s, now, SystemTime::UNIX_EPOCH).text;
     assert!(
-        s.is_quiet(),
-        "the fixture is not quiet, so it proves nothing"
+        said.is_empty(),
+        "the fixture has something to say - {said:?} - so it proves nothing"
     );
     (s, now)
 }
@@ -301,35 +304,86 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     let screen = on_screen(&h);
     assert!(
         !screen.contains("Results"),
-        "a caption over a list that is not there:
-{screen}"
+        "a caption over a list that is not there:\n{screen}"
     );
-    // The viewer is still there: it is a fact about the program rather than
-    // about the list, so it does not come and go with one.
-    assert!(screen.contains("Viewer: Auto"), "{screen}");
+    // And offers no way to open anything, because there is nothing to open.
+    // The button that names the default action is what carries that now: it
+    // is simply not drawn.
+    assert!(
+        !screen.contains("\u{b7} Enter"),
+        "the footer offered to open nothing:\n{screen}"
+    );
+    // The gear and the menu are still there. They are about the program
+    // rather than about the list, so they do not come and go with one - and
+    // between them they are the only thing left advertising F5 and Ctrl+,.
+    assert!(screen.contains("Settings"), "{screen}");
 }
 
-/// F2 changes what Enter does. With the confirming toast drawn nowhere and no
-/// label anywhere on the panel, pressing it produced no visible effect at all.
+/// F2 changes what Enter does, and the footer says so in words.
+///
+/// It used to be a chip reading `Viewer: PDF`, at `Priority::Normal` - so at
+/// the shipped width it was the first thing the hint bar dropped, and the one
+/// key whose whole job is to change a mode gave no sign of which mode it was
+/// in. It is the label on the button Enter runs now, which cannot be dropped
+/// because it is the button.
 #[test]
-fn the_footer_names_the_viewer_enter_will_use() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
-
-    let h = harness(s);
-    assert!(on_screen(&h).contains("Viewer: Auto"), "{}", on_screen(&h));
-
-    // Every mode, so one that the footer cannot name is a failure here.
+fn the_footer_says_what_enter_will_do() {
     for (viewer, label) in [
-        (ViewerKind::Pdf, "Viewer: PDF"),
-        (ViewerKind::Avwin, "Viewer: avwin"),
+        (ViewerKind::Auto, "Open"),
+        (ViewerKind::Pdf, "Open as one document"),
+        (ViewerKind::Avwin, "Open with avwin"),
     ] {
         let (mut s, now) = state();
         with_results(&mut s, "11-D-0704", many(3), 3, now);
         s.viewer = viewer;
         let h = harness(s);
-        assert!(on_screen(&h).contains(label), "{}", on_screen(&h));
+        let screen = on_screen(&h);
+        assert!(
+            screen.contains(&format!("{label} \u{b7} Enter")),
+            "{viewer:?} is not named on the footer:\n{screen}"
+        );
     }
+}
+
+/// And Ctrl+K opens the rest of them, which is the whole reason the footer
+/// can be two buttons rather than a row of chips.
+#[test]
+fn the_actions_menu_lists_everything_else() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    s.actions_open = true;
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    for offered in [
+        "Open \u{b7} Enter",
+        "Open as one document \u{b7} Ctrl D",
+        "Open with avwin \u{b7} Ctrl E",
+        "Show it in Explorer \u{b7} Ctrl O",
+        "Copy the path \u{b7} Ctrl C",
+        "Copy the name",
+        "Read a drive again \u{b7} F5",
+        "Settings \u{b7} Ctrl ,",
+    ] {
+        assert!(
+            screen.contains(offered),
+            "the menu does not offer {offered:?}:\n{screen}"
+        );
+    }
+}
+
+/// With nothing found it offers nothing to do with a file, and still offers
+/// the two that are about the program.
+#[test]
+fn the_actions_menu_with_nothing_selected_offers_no_file() {
+    let (mut s, _) = state();
+    s.actions_open = true;
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(!screen.contains("Copy the path"), "{screen}");
+    assert!(!screen.contains("Show it in Explorer"), "{screen}");
+    assert!(screen.contains("Read a drive again"), "{screen}");
 }
 
 /// Choosing the viewer that is not installed used to fail silently, at the
@@ -745,6 +799,15 @@ snapshot!(looks_right_picking_a_drive, || {
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s
+});
+
+// The one key that replaced the whole hint bar, and the only place the
+// program teaches its own chords now.
+snapshot!(looks_right_with_the_actions_menu_open, || {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(6), 47, now);
+    s.actions_open = true;
     s
 });
 

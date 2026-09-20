@@ -279,6 +279,14 @@ pub enum Cmd {
     },
     /// Put text on the system clipboard.
     Copy(String),
+    /// Open Explorer with this file already picked out.
+    ///
+    /// `explorer.exe /select,"<path>"`, which is what "Show in folder" does
+    /// everywhere else on this machine. Its own command rather than an
+    /// [`Self::Open`] with a fourth route, because it does not open the file
+    /// at all - it opens the folder, and the two fail for different reasons
+    /// and report differently.
+    Reveal(Arc<str>),
     /// Fetch the clipboard, to be inserted at the caret.
     ReadClipboard,
     /// Store the recalled codes.
