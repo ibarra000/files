@@ -198,7 +198,7 @@ const fn rgb(hex: u32) -> Color32 {
 /// picked and written down. `Color32` stores them premultiplied, and writing
 /// the premultiplied form by hand is how a surface ends up brighter than its
 /// own alpha allows - which is not a colour at all.
-fn tint(hex: u32, alpha: u8) -> Color32 {
+pub fn tint(hex: u32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
 

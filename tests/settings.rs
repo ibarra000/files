@@ -40,6 +40,8 @@ struct Window {
     /// Everything the frames so far produced, for the assertions to read.
     changed: Vec<SettingChange>,
     actions: Vec<ActionId>,
+    /// The drive list as the last frame said it should be, if it said.
+    mappings: Option<Vec<files::paths::Mapping>>,
 }
 
 fn window(page: PageId, dark: bool, have_file: bool) -> Window {
@@ -58,6 +60,7 @@ fn window(page: PageId, dark: bool, have_file: bool) -> Window {
         drive: DriveDraft::default(),
         changed: Vec::new(),
         actions: Vec::new(),
+        mappings: None,
     }
 }
 
@@ -84,7 +87,7 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                 let page = w.page;
                 let mut changed = Vec::new();
                 let mut actions = Vec::new();
-                let chosen = {
+                let (chosen, mappings) = {
                     let mut form = Form {
                         editing: &mut w.editing,
                         draft: &mut w.draft,
@@ -94,7 +97,7 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         aliases: None,
                         mappings: None,
                     };
-                    settings::show(
+                    let out = settings::show(
                         ui,
                         &theme,
                         &w.state,
@@ -103,7 +106,9 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         page,
                         REPORT,
                         &mut form,
-                    )
+                    );
+                    let mappings = form.mappings;
+                    (out, mappings)
                 };
                 w.page = chosen;
                 // Accumulated rather than replaced. A click lands on one
@@ -112,6 +117,9 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                 // mattered.
                 w.changed.extend(changed);
                 w.actions.extend(actions);
+                if mappings.is_some() {
+                    w.mappings = mappings;
+                }
             },
             start,
         );
@@ -291,6 +299,71 @@ fn pressing_a_button_reports_which_one_it_was() {
     let mut harness = harness_on(PageId::Diagnostics, false);
     click(&mut harness, "Copy to clipboard");
     assert_eq!(harness.state().actions, vec![ActionId::CopyReport]);
+}
+
+// --- the one question the window asks --------------------------------------
+
+/// Removing a drive asks first, because it is the one control here that
+/// cannot be undone by pressing it again.
+#[test]
+fn removing_a_drive_asks_before_it_does_it() {
+    let mut harness = harness_on(PageId::Drives, false);
+    assert!(
+        !spoken(&harness)
+            .iter()
+            .any(|s| s.contains("Stop searching")),
+        "the question was up before anybody asked for it"
+    );
+
+    click(&mut harness, "Remove");
+    let spoken = spoken(&harness);
+    assert!(
+        spoken
+            .iter()
+            .any(|s| s.contains("Stop searching this drive?")),
+        "the drive went without a word: {spoken:#?}"
+    );
+    assert!(spoken.iter().any(|s| s == "Remove it"));
+    assert!(spoken.iter().any(|s| s == "Keep it"));
+    assert!(
+        harness.state().mappings.is_none(),
+        "the drive was removed before the question was answered"
+    );
+}
+
+/// And backing out leaves the list alone.
+#[test]
+fn keeping_a_drive_takes_the_question_away_and_changes_nothing() {
+    let mut harness = harness_on(PageId::Drives, false);
+    click(&mut harness, "Remove");
+    click(&mut harness, "Keep it");
+
+    assert!(
+        !spoken(&harness)
+            .iter()
+            .any(|s| s.contains("Stop searching")),
+        "the question is still up"
+    );
+    assert!(
+        harness.state().mappings.is_none(),
+        "keeping a drive removed it"
+    );
+}
+
+/// Going ahead does what it said it would.
+#[test]
+fn removing_a_drive_for_real_takes_it_off_the_list() {
+    let mut harness = harness_on(PageId::Drives, false);
+    let before = harness.state().settings.routes.all().len();
+    click(&mut harness, "Remove");
+    click(&mut harness, "Remove it");
+
+    let after = harness
+        .state()
+        .mappings
+        .as_ref()
+        .expect("the drive list was not changed");
+    assert_eq!(after.len(), before - 1);
 }
 
 // --- the pictures ----------------------------------------------------------

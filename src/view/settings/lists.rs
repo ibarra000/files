@@ -63,10 +63,14 @@ pub struct DriveWords {
     pub needs_name: &'static str,
     pub needs_path: &'static str,
     pub name_taken: &'static str,
+    /// Asked before a drive is taken off the list.
+    pub confirm: &'static str,
+    pub confirm_go: &'static str,
+    pub confirm_keep: &'static str,
 }
 
 impl DriveWords {
-    pub const fn lines(&self) -> [&'static str; 10] {
+    pub const fn lines(&self) -> [&'static str; 13] {
         [
             self.help,
             self.name_hint,
@@ -78,6 +82,9 @@ impl DriveWords {
             self.needs_name,
             self.needs_path,
             self.name_taken,
+            self.confirm,
+            self.confirm_go,
+            self.confirm_keep,
         ]
     }
 }
@@ -99,4 +106,13 @@ pub const DRIVES: DriveWords = DriveWords {
     needs_name: "a drive needs a name",
     needs_path: "a drive needs a folder to search",
     name_taken: "that name is already a drive",
+    // The one question this window asks. A form that confirms everything
+    // teaches people to dismiss the question without reading it, so this is
+    // spent on the one action that cannot be undone: the path is the part
+    // nobody remembers, and rewriting the drive list costs the comments
+    // around it in the configuration file.
+    confirm: "Stop searching this drive? The folder it points at is not touched, but \
+              getting it back means typing the path again.",
+    confirm_go: "Remove it",
+    confirm_keep: "Keep it",
 };

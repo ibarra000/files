@@ -15,6 +15,7 @@ use eframe::egui;
 
 use crate::config::Settings;
 use crate::gui::settings::page::Form;
+use crate::gui::settings::widgets;
 use crate::gui::theme::{self, Theme, Weight};
 use crate::view;
 use crate::view::settings::{ALIASES, DRIVES};
@@ -24,6 +25,11 @@ pub struct DriveDraft {
     path: String,
     kind: crate::paths::MappingKind,
     problem: Option<String>,
+    /// The drive whose removal is waiting on an answer.
+    ///
+    /// Same category as the boxes above: the state a control has while it
+    /// is being used, and not a copy of the drive list.
+    confirming: Option<crate::paths::MappingId>,
 }
 
 impl Default for DriveDraft {
@@ -35,6 +41,7 @@ impl Default for DriveDraft {
             // walk rather than a round trip per search.
             kind: crate::paths::MappingKind::Tree,
             problem: None,
+            confirming: None,
         }
     }
 }
@@ -111,14 +118,12 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                     .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
                     .color(theme.dim),
             );
+            // Asked rather than done. This is the one control in the
+            // window that cannot be undone by pressing it again: the path
+            // is the part nobody remembers, and the rewrite costs the
+            // comments around the drive list in the configuration file.
             if ui.button(DRIVES.remove).clicked() {
-                form.mappings = Some(
-                    current
-                        .iter()
-                        .filter(|m| m.id != mapping.id)
-                        .cloned()
-                        .collect(),
-                );
+                form.drive.confirming = Some(mapping.id);
             }
         });
 
@@ -170,6 +175,24 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
             }
         }
     });
+
+    if let Some(id) = form.drive.confirming {
+        match widgets::confirm(
+            ui.ctx(),
+            theme,
+            "files-remove-drive",
+            DRIVES.confirm,
+            DRIVES.confirm_go,
+            DRIVES.confirm_keep,
+        ) {
+            Some(true) => {
+                form.mappings = Some(current.iter().filter(|m| m.id != id).cloned().collect());
+                form.drive.confirming = None;
+            }
+            Some(false) => form.drive.confirming = None,
+            None => {}
+        }
+    }
 
     if let Some(problem) = &form.drive.problem {
         ui.label(

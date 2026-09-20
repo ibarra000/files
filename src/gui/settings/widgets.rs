@@ -606,6 +606,71 @@ pub mod width {
     pub const TEXT_WITH_BUTTON: f32 = TEXT + super::ICON_BTN + 4.0;
 }
 
+/// Asks before doing something that cannot be undone.
+///
+/// The only one in this window, and deliberately: a form that confirms
+/// everything trains people to dismiss the question without reading it.
+/// Removing a drive earns it because the path is the part nobody remembers,
+/// and because the configuration file loses its comments around the drive
+/// list when it is rewritten.
+///
+/// Returns `Some(true)` when the user went ahead, `Some(false)` when they
+/// backed out, and `None` while the question is still up. Escape and a click
+/// on the backdrop both count as backing out - `egui::Modal` consumes the key
+/// itself, which is also what stops it reaching the window behind and
+/// closing that instead.
+pub fn confirm(
+    ctx: &egui::Context,
+    theme: &Theme,
+    id: &str,
+    question: &str,
+    go: &str,
+    cancel: &str,
+) -> Option<bool> {
+    let response = egui::Modal::new(egui::Id::new(id))
+        .frame(
+            egui::Frame::new()
+                .fill(theme.card)
+                .corner_radius(theme::radius(theme::PANEL_RADIUS))
+                .inner_margin(20.0),
+        )
+        .backdrop_color(theme::tint(0x000000, 0x80))
+        .show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.label(
+                egui::RichText::new(question)
+                    .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                    .color(theme.text),
+            );
+            ui.add_space(16.0);
+            // The two buttons on the right, which is where a dialog puts
+            // them and the one place `Sides` is exactly the right tool: both
+            // halves are one line tall, so the objection in
+            // `super::measure` does not apply.
+            egui::Sides::new()
+                .show(
+                    ui,
+                    |_| {},
+                    |ui| {
+                        // Right to left, so the primary ends up rightmost.
+                        let went = primary_button(ui, theme, go).clicked();
+                        let backed = button(ui, cancel).clicked();
+                        (went, backed)
+                    },
+                )
+                .1
+        });
+
+    let (went, backed) = response.inner;
+    if went {
+        Some(true)
+    } else if backed || response.should_close() {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
