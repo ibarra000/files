@@ -31,13 +31,15 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::NodeT;
 
-use files::app::event::{AppEvent, SearchMsg};
+use files::app::event::{AppEvent, IndexMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
 use files::app::state::pointer::Intent;
 use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Layout, Theme};
+use files::index::store::{IndexStatus, Origin};
+use files::paths::MappingId;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 
@@ -195,6 +197,35 @@ fn state() -> (AppState, Instant) {
     (AppState::new(Settings::default(), now), now)
 }
 
+/// A state with nothing at all to say: nothing typed, and an index that has
+/// reported in healthy.
+///
+/// `state()` is not that. A fresh one has no index yet, which is a standing
+/// notice - "No file list yet" - and a panel with something to say keeps its
+/// footer. That is the intended behaviour and it is asserted below; this
+/// fixture is for the other half.
+fn quiet_state() -> (AppState, Instant) {
+    let (mut s, now) = state();
+    let status = IndexStatus {
+        origin: Some(Origin::Network),
+        entries: 10,
+        built_at: Some(SystemTime::UNIX_EPOCH),
+        ..Default::default()
+    };
+    s.update(
+        AppEvent::Index(IndexMsg::Status {
+            id: MappingId(0),
+            status: Arc::new(status),
+        }),
+        now,
+    );
+    assert!(
+        s.is_quiet(),
+        "the fixture is not quiet, so it proves nothing"
+    );
+    (s, now)
+}
+
 /// Everything the panel put on screen, as one string.
 ///
 /// The accessibility tree rather than the pixels: it is derived from the same
@@ -350,18 +381,47 @@ fn browsing_the_recent_codes_says_where_you_are_in_them() {
     );
 }
 
-/// The first screen anybody sees has to teach three things: what to type, what
-/// one looks like, and that there is more to find.
+/// The first screen anybody sees is a search box and nothing else.
+///
+/// It used to teach three things - what to type, what a code looks like, and
+/// that there was more to find - across five lines of body text and four
+/// chips. That is a page of instructions in front of somebody who summoned a
+/// search box to search, every time they summon it.
 #[test]
-fn the_first_screen_teaches_what_to_type() {
+fn the_first_screen_is_a_search_box_and_nothing_else() {
+    let (s, _) = quiet_state();
+    let h = harness(s);
+    let screen = on_screen(&h);
+
+    assert!(screen.contains("Search"), "no placeholder:\n{screen}");
+    for gone in [
+        "Type a job code",
+        "11-D-0704",
+        "Recent codes",
+        "Viewer:",
+        "Quit",
+        "Esc",
+    ] {
+        assert!(
+            !screen.contains(gone),
+            "{gone:?} is still on the first screen:\n{screen}"
+        );
+    }
+}
+
+/// A standing notice brings the footer back, because that is what the footer
+/// is for. The panel is quiet when there is nothing to say - not when nothing
+/// may be said.
+#[test]
+fn something_worth_saying_brings_the_footer_back() {
+    // No index yet, which is the one standing notice a fresh start has.
     let (s, _) = state();
     let h = harness(s);
     let screen = on_screen(&h);
-    assert!(screen.contains("Type a job code"), "{screen}");
-    assert!(screen.contains("11-D-0704"), "no example:\n{screen}");
+
     assert!(
-        screen.contains("F1"),
-        "nothing points at the keys:\n{screen}"
+        screen.contains("No file list yet"),
+        "a notice was swallowed by the quiet panel:\n{screen}"
     );
 }
 
@@ -500,8 +560,12 @@ snapshot!(looks_right_with_results, || {
     s
 });
 
-snapshot!(looks_right_when_empty, || {
-    let (s, _) = state();
+// The first screen, and the whole of it: a search box, nothing under it, and
+// no footer. Built from `quiet_state` rather than `state` because a fresh one
+// has no index yet and therefore has something to say - which is a real screen
+// somebody sees, and a different one from this.
+snapshot!(looks_right_when_quiet, || {
+    let (s, _) = quiet_state();
     s
 });
 

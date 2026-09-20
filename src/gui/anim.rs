@@ -70,6 +70,12 @@ pub enum Content {
     Results,
     /// A reason there are none.
     Empty,
+    /// Nothing at all: the field and no band under it.
+    ///
+    /// What an untouched panel is. Distinct from [`Self::Empty`], which is a
+    /// body with a sentence in it explaining why the list is short - this one
+    /// has no body and no footer, because there is nothing to explain yet.
+    Quiet,
     /// The drive picker, which is the one thing that still borrows the body.
     /// Help used to be here too, and is a window of its own now.
     Shares,
@@ -108,8 +114,12 @@ impl Hold {
     }
 
     fn admit(&mut self, want: Target, dt: f32) -> Target {
-        // Already empty, or not asking to be: nothing to hold.
-        if want.content != Content::Empty || self.granted.content == Content::Empty {
+        // Held the same way, because they fail the same way: backspacing to
+        // an empty field and typing again would otherwise flap the window
+        // between one band and five, twice per keystroke.
+        let settling = |c: Content| matches!(c, Content::Empty | Content::Quiet);
+        // Already there, or not asking to be: nothing to hold.
+        if !settling(want.content) || settling(self.granted.content) {
             self.waited = 0.0;
             self.granted = want;
             return want;

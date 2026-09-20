@@ -392,6 +392,15 @@ fn busy_scan_reason(state: &AppState) -> Option<crate::index::schedule::ScanReas
 /// `None` when the index is healthy, which is what makes a healthy footer
 /// quiet.
 fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
+    // Whether there is anything to say is asked of the state, because the
+    // panel asks the same question before it decides whether to leave room for
+    // this line - and a footer whose height and contents disagree is a message
+    // drawn into a band of no height. This function owns the words; it does
+    // not own the question.
+    if !state.has_standing_notice(wall) {
+        return None;
+    }
+
     let status = &state.index;
     if status.origin.is_none() {
         return Some("No file list yet".into());

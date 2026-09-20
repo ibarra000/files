@@ -86,6 +86,7 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
         Content::Recent => state.recent_rows().len(),
         Content::Results => state.hits.len(),
         Content::Empty => empty_lines(state),
+        Content::Quiet => 0,
     };
 
     // Eight rows is a scroll-free glance. Past that the panel stops being an
@@ -94,6 +95,9 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
     let body_h = match content {
         Content::Results | Content::Recent | Content::Shares => shown as f32 * theme::ROW_H,
         Content::Empty => shown as f32 * LINE_H + theme::PAD_Y * 2.0,
+        // Not even the padding. An untouched panel is the field and nothing
+        // else, so there is no band here to give room to.
+        Content::Quiet => 0.0,
     };
 
     // The pane needs a height of its own, and the list is the only thing that
@@ -126,14 +130,25 @@ pub fn measure(state: &AppState, layout: theme::Layout) -> Measured {
                 .cursor()
                 .map(|c| c.saturating_sub(window.start) as f32 * theme::ROW_H)
         }
-        Content::Empty | Content::Shares => None,
+        Content::Empty | Content::Quiet | Content::Shares => None,
     };
 
     Measured {
         content,
         rows: shown,
         width: layout.width(),
-        height: theme::FIELD_H + body_h + theme::FOOTER_H + theme::PAD_Y * 2.0,
+        // The footer is a band like the others, and a quiet panel has none of
+        // them: no chips to draw and - by `AppState::is_quiet` - nothing
+        // standing to say. Leaving its height in would put an empty strip
+        // under the box for no reason anybody could see.
+        height: theme::FIELD_H
+            + body_h
+            + if content == Content::Quiet {
+                0.0
+            } else {
+                theme::FOOTER_H
+            }
+            + theme::PAD_Y * 2.0,
         selection_y,
     }
 }
@@ -154,11 +169,13 @@ fn body_of(state: &AppState) -> Content {
     if state.showing_recent() {
         return Content::Recent;
     }
+    // Nothing typed and nothing to say about it. See `AppState::is_quiet`,
+    // which owns the question because the footer's height depends on the same
+    // answer its contents do.
+    if state.is_quiet() {
+        return Content::Quiet;
+    }
     if state.input.text().is_empty() {
-        // Nothing typed and nothing asked for: the onboarding block, which says
-        // what to type, shows one, and points at the Up arrow and F1. It used
-        // to be reachable only on a fresh install; it is the standard empty
-        // state now.
         return Content::Empty;
     }
     if state.hits.is_empty() {
@@ -201,9 +218,20 @@ pub fn show(
     let field = take(&mut cursor, theme::FIELD_H);
     intents.extend(draw_field(ui, state, theme, field));
 
-    let footer = take_bottom(&mut cursor, theme::FOOTER_H);
-    rule(ui, theme, footer.top(), rect);
-    intents.extend(draw_footer(ui, state, theme, footer, now, wall));
+    // A quiet panel has no footer at all - not an empty one. `measure` gave it
+    // no height, so taking the band anyway would take it out of the body's
+    // rectangle and draw the rule across the bottom of the field.
+    //
+    // Safe to skip only because `AppState::is_quiet` has already established
+    // there is nothing to put in it: no toast, and nothing standing about a
+    // drive. Drawing a message into a band of no height is the one way this
+    // could lose something, and the predicate exists to make that impossible
+    // rather than unlikely.
+    if visual.content != Content::Quiet {
+        let footer = take_bottom(&mut cursor, theme::FOOTER_H);
+        rule(ui, theme, footer.top(), rect);
+        intents.extend(draw_footer(ui, state, theme, footer, now, wall));
+    }
 
     // The pane takes its column off the right before the body is given what is
     // left, so the list is laid out inside a narrower rectangle rather than
@@ -584,6 +612,9 @@ fn draw_body(
     match content {
         Content::Results => draw_results(ui, state, theme, rect, visual),
         Content::Recent => draw_recent(ui, state, theme, rect),
+        // Nothing, and no rectangle to put it in: `measure` gave this body no
+        // height at all.
+        Content::Quiet => Vec::new(),
         Content::Empty => {
             draw_blocks(
                 ui,
@@ -1103,6 +1134,24 @@ mod tests {
         AppState::new(Settings::default(), Instant::now())
     }
 
+    /// Reports a healthy index, which is what stops a fresh state having the
+    /// one standing notice every fresh state has: "No file list yet".
+    fn settle_index(state: &mut AppState) {
+        let status = crate::index::store::IndexStatus {
+            origin: Some(crate::index::store::Origin::Network),
+            entries: 10,
+            built_at: Some(SystemTime::UNIX_EPOCH),
+            ..Default::default()
+        };
+        state.update(
+            crate::app::event::AppEvent::Index(crate::app::event::IndexMsg::Status {
+                id: crate::paths::MappingId(0),
+                status: std::sync::Arc::new(status),
+            }),
+            Instant::now(),
+        );
+    }
+
     fn with_hits(n: usize) -> AppState {
         let mut state = state();
         state.input.set_text("11-D");
@@ -1199,6 +1248,52 @@ mod tests {
                 theme::PANEL_MAX_H
             );
         }
+    }
+
+    /// An untouched panel is the field and nothing else.
+    ///
+    /// Not a body of zero rows with the padding still in it, and not an empty
+    /// footer: both bands are gone, so the window is one band tall. The old
+    /// first screen was 260 points of instructions.
+    #[test]
+    fn a_quiet_panel_is_one_band_tall() {
+        let mut state = state();
+        settle_index(&mut state);
+        assert!(state.is_quiet(), "the fixture is not quiet");
+
+        let m = measure(&state, theme::Layout::List);
+        assert_eq!(m.content, Content::Quiet);
+        assert_eq!(m.rows, 0);
+        assert!(
+            (m.height - (theme::FIELD_H + theme::PAD_Y * 2.0)).abs() < 0.01,
+            "expected just the field, got {}",
+            m.height
+        );
+    }
+
+    /// And anything worth saying puts the footer back, because a band of no
+    /// height is a message nobody sees.
+    #[test]
+    fn something_to_say_puts_the_footer_back() {
+        let mut state = state();
+        settle_index(&mut state);
+        let quiet = measure(&state, theme::Layout::List).height;
+
+        // A real one, raised the way the program raises it.
+        state.update(
+            crate::app::event::AppEvent::Clipboard(crate::app::event::ClipboardMsg::Copied {
+                chars: 9,
+            }),
+            Instant::now(),
+        );
+        assert!(state.toast.is_some(), "the fixture raised no toast");
+        assert!(!state.is_quiet(), "a toast left the panel quiet");
+
+        let loud = measure(&state, theme::Layout::List).height;
+        assert!(
+            loud >= quiet + theme::FOOTER_H,
+            "the footer did not come back: {quiet} then {loud}"
+        );
     }
 
     /// One row at a time, and always enough for the field and the footer.

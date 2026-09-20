@@ -407,6 +407,50 @@ impl AppState {
         self.last_frame_wall = wall;
     }
 
+    /// Nothing to show but the box to type in.
+    ///
+    /// What the panel looks like before anybody has typed: one band, the
+    /// field, and no body or footer under it. It used to be five lines of
+    /// instructions and four chips, which is a great deal of furniture to put
+    /// in front of somebody who summoned a search box to search.
+    ///
+    /// The last two terms are what stop this being a hole rather than a
+    /// feature. A toast such as "Copied 9 characters", and a standing notice
+    /// about a drive, are exactly the things the footer exists to carry, and a
+    /// footer of no height would swallow them without a sound. So a panel with
+    /// anything to say is not a quiet one.
+    ///
+    /// The wall clock is the one the renderer handed over on the last frame,
+    /// because staleness is the one standing notice that arrives with no event
+    /// behind it. `note_frame` runs before the panel is measured, so it is the
+    /// same instant the footer would be drawn against.
+    pub fn is_quiet(&self) -> bool {
+        self.input.text().is_empty()
+            && !self.picking_share
+            && !self.showing_recent()
+            && self.toast.is_none()
+            && !self.has_standing_notice(self.last_frame_wall)
+    }
+
+    /// Whether the status line would say something without being asked.
+    ///
+    /// Kept beside the state it reads rather than in `view::status`, which
+    /// draws the same facts: the panel has to know whether to leave room for
+    /// the line *before* it asks what the line says, and two answers to that
+    /// would be a footer whose height and contents disagree. `index_warning`
+    /// is the other half and calls this one, so there is no second opinion to
+    /// drift - only the words are over there.
+    ///
+    /// Takes the clock rather than reading `last_frame_wall`, because the
+    /// renderer has a fresher one and staleness is the one notice that arrives
+    /// with no event behind it. `is_quiet` passes the stored one, which is set
+    /// by `note_frame` before the panel is measured.
+    pub(crate) fn has_standing_notice(&self, wall: SystemTime) -> bool {
+        self.index.origin.is_none()
+            || self.index.degraded().is_some()
+            || (self.settings.stale_notices && self.index.stale_at(wall).is_some())
+    }
+
     /// True when something on screen goes stale on its own.
     ///
     /// The counterpart to [`Self::wants_animation`]: that one is about work in

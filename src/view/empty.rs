@@ -1,9 +1,15 @@
 //! What the results pane says when it has no results.
 //!
-//! This is the first screen anybody sees, and for somebody whose code found
-//! nothing it is the only screen that can say what to do next. It gets the
-//! whole pane rather than the top corner of it: a twelve-row box holding one
-//! grey sentence reads as a program that has broken.
+//! For somebody whose code found nothing this is the only screen that can say
+//! what to do next. It gets the whole pane rather than the top corner of it: a
+//! twelve-row box holding one grey sentence reads as a program that has
+//! broken.
+//!
+//! It is no longer the *first* screen. An untouched panel shows the search box
+//! and nothing under it - see [`crate::app::state::AppState::is_quiet`] - so
+//! `NoQuery` produces no blocks at all. It used to produce five, which is a
+//! page of instructions in front of somebody who summoned a search box to
+//! search.
 //!
 //! Every variant has the same three-part shape - what happened, a fact about
 //! it, then the thing to do - so the eye learns where to look once and then
@@ -44,13 +50,10 @@ fn blank() -> Block {
 /// The message, as blocks.
 pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
     match reason {
-        EmptyReason::NoQuery => vec![
-            say("Type a job code to see its files."),
-            blank(),
-            vec![Run::dim("For example: "), Run::accent("11-D-0704")],
-            blank(),
-            aside("Press \u{2191} for codes you used before, or F1 for every key."),
-        ],
+        // Nothing. The panel has no body at all before anything is typed, and
+        // a reason for an empty list is not something to say when nobody has
+        // asked for a list yet.
+        EmptyReason::NoQuery => Vec::new(),
 
         EmptyReason::LiveIncomplete {
             name,
@@ -235,9 +238,17 @@ mod tests {
 
     /// A blank pane with no explanation is the state this whole type exists to
     /// make unreachable.
+    ///
+    /// `NoQuery` is exempt and it is not an exception to the rule: there is no
+    /// pane. An untouched panel draws the field and stops, so there is nothing
+    /// blank to explain. Every reason that *does* get a pane still has to fill
+    /// it.
     #[test]
     fn every_reason_says_something() {
         for reason in every_reason() {
+            if reason == EmptyReason::NoQuery {
+                continue;
+            }
             let t = text(&reason, "11-D-0704");
             assert!(
                 t.lines().any(|l| l.trim().len() > 8),
@@ -246,16 +257,15 @@ mod tests {
         }
     }
 
-    /// The screen the office sees every morning has to teach three things:
-    /// what to type, what one looks like, and that there is more to find.
+    /// The screen the office sees every morning is a search box and nothing
+    /// else. It used to be five lines teaching what a job code looks like,
+    /// which is a page of instructions in front of somebody who summoned a
+    /// search box to search.
     #[test]
-    fn the_first_screen_shows_what_to_type_and_an_example_of_it() {
-        let t = text(&EmptyReason::NoQuery, "");
-        assert!(t.contains("Type a job code"), "{t}");
-        assert!(t.contains("11-D-0704"), "the example is missing:\n{t}");
+    fn the_first_screen_says_nothing_at_all() {
         assert!(
-            t.contains("F1"),
-            "nothing points at the rest of the keys:\n{t}"
+            view(&EmptyReason::NoQuery, "").is_empty(),
+            "the untouched panel drew a body"
         );
     }
 
