@@ -612,9 +612,9 @@ fn ctrl_q_still_quits_from_inside_the_overlay() {
 
 /// The headline case, and the one a phase-only gate gets wrong.
 ///
-/// The local matcher waits out `SEARCH_DEBOUNCE`, which is 300ms - an ordinary
-/// pause between syllables - so `inv` reaches `QueryPhase::Local` while
-/// somebody is still reading the rest of the code off a drawing. Gating on "a
+/// The local matcher waits out `SEARCH_DEBOUNCE`, which is shorter than an
+/// ordinary pause between syllables - so `inv` reaches `QueryPhase::Local`
+/// while somebody is still reading the rest of the code off a drawing. Gating on "a
 /// search resolved" would therefore remember every prefix typed on the way to a
 /// code, which is the entire thing this feature was asked not to do.
 #[test]

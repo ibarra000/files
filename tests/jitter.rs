@@ -47,8 +47,14 @@ const CODE: &str = "11-D-0704";
 /// Long enough for a typed code to be searched for and answered.
 ///
 /// `SEARCH_DEBOUNCE` plus slack. Typing at `KEYSTROKE_GAP` never reaches it -
-/// 120ms between characters against a 300ms pause - which is the whole point:
+/// 120ms between characters against a 180ms pause - which is the whole point:
 /// a burst dispatches nothing until it stops.
+///
+/// The margin is 60ms where it used to be 180ms, which is exactly what the
+/// shorter debounce bought and exactly what it costs. The budget below still
+/// holds at a hundred and twenty; it would not at two hundred, and a reader
+/// who pauses that long between the groups of a code will now spend one
+/// extra sweep over an index this process owns.
 const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 
 // --- the rig ---------------------------------------------------------------

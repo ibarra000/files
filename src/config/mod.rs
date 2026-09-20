@@ -158,18 +158,22 @@ pub const LIVE_DEADLINE: Duration = Duration::from_millis(1_200);
 
 /// Quiet period after the last keystroke before a live share is asked.
 ///
-/// Twice [`SEARCH_DEBOUNCE`], and the doubling is the justification. That one
-/// is paced by what a *reader* can use, because the match itself is free. This
-/// one is paced by what somebody else's file server can afford: a leading `*`
-/// defeats the NTFS index, so the server walks its own directory to answer and
-/// the answer costs it real CPU rather than a seek.
+/// Paced by what somebody else's file server can afford, where
+/// [`SEARCH_DEBOUNCE`] is paced by what a reader can use: a leading `*`
+/// defeats the NTFS index, so the server walks its own directory to answer
+/// and the answer costs it real CPU rather than a seek.
 ///
 /// Somebody reading a code off a drawing pauses about 200-300 ms between
-/// groups, which is what 300 ms was chosen to sit just past. Six hundred
-/// clears the pause between a code and the modifier after it as well, so
-/// `11-D-0704` costs one query rather than the two that 300 ms lets through -
-/// halving the load across the fleet for 300 ms nobody notices, because the
-/// local results are already on screen by then.
+/// groups. Six hundred clears the pause between a code and the modifier after
+/// it as well, so `11-D-0704` costs one query rather than two - halving the
+/// load across the fleet for a delay nobody notices, because the local
+/// results are already on screen by then.
+///
+/// This is deliberately *not* tied to [`SEARCH_DEBOUNCE`]. It used to be
+/// twice it, and the doubling read as the justification; it is not. This
+/// number answers a question about a file server and that one answers a
+/// question about a screen, and when the second was shortened this one had
+/// no reason to move.
 pub const LIVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// Floor between two queries of the same share, whatever asks for them.
@@ -218,9 +222,41 @@ pub const JOB_CACHE_CAPACITY: usize = 64;
 /// Answering every prefix meant a result set, a body change and a window resize
 /// per character, for answers nobody reads.
 ///
-/// Equal to [`VERIFY_DEBOUNCE`] deliberately: one pause, one answer, one server
-/// check. `AppState::on_tick` fires them in that order and relies on it.
-pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// **A hundred and eighty, and it was three hundred.** Three hundred was
+/// chosen to sit just past the 200-300 ms pause somebody makes between the
+/// groups of a code, so that `11-D-0704` cost one sweep rather than three.
+/// That is the thing being traded away here and it is worth saying plainly:
+/// at a hundred and eighty, a slow reader's pause between `11-` and `D-` will
+/// sometimes dispatch a sweep nobody reads.
+///
+/// Two of the three costs that bought have since gone. A result set arriving
+/// no longer resizes the window - it is a fixed six hundred by four hundred -
+/// and it no longer empties the list on the way, because `on_input_changed`
+/// keeps the previous results on screen until the next ones land. What is
+/// left is one in-memory sweep and one list swap, both local, and the server
+/// is untouched either way: [`VERIFY_DEBOUNCE`] and [`LIVE_DEBOUNCE`] are
+/// what pace the network and neither moves.
+///
+/// What it buys is the list appearing a hundred and twenty milliseconds
+/// sooner after the typing stops, every single time. Ueli searches on every
+/// keystroke against an in-memory index and feels instant; this cannot do
+/// that against a network index, and this is how close it gets.
+///
+/// No longer equal to [`VERIFY_DEBOUNCE`], and that is an improvement rather
+/// than a thing to watch: they used to fall due on the same tick, and
+/// `AppState::on_tick` had to run the matcher first so the verification was
+/// checked against a fresh local answer. Now the local answer has been back
+/// for over a hundred milliseconds by the time the check is asked for. The
+/// ordering in `on_tick` stays, because a burst can still land both on one
+/// tick after a long stall.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// The local match answers before the server is asked, always.
+///
+/// The invariant `on_tick`'s ordering used to carry on its own. Checked here
+/// so that raising one of the two without the other is a build error rather
+/// than a verification run against the previous code's results.
+const _: () = assert!(SEARCH_DEBOUNCE.as_millis() <= VERIFY_DEBOUNCE.as_millis());
 
 /// Quiet period after the last keystroke before the authoritative server-side
 /// verification runs. A leading `*` defeats the NTFS index, so this costs real
