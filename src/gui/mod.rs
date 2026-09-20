@@ -255,6 +255,9 @@ impl Shell {
             window::apply(hwnd, dark, WANT_BACKDROP)
         });
         let system_fonts = fonts::install(&cc.egui_ctx);
+        // After the fonts, because the style names families by the names
+        // `fonts::install` registers them under.
+        theme::apply_style(&cc.egui_ctx, &theme::Theme::of(dark));
 
         // What the workers call after posting. See the module note.
         let wake = {
@@ -336,6 +339,11 @@ impl Shell {
             return;
         }
         self.theme = theme::Theme::of(dark);
+        // The widgets in the settings window take their colours from the
+        // toolkit's own style rather than from `self.theme`, so they need
+        // telling too. Here rather than every frame: a style is a clone of
+        // several hundred bytes and the theme moves about twice a day.
+        theme::apply_style(ctx, &self.theme);
         if let Some(hwnd) = self.hwnd {
             self.backdrop = Some(window::apply(hwnd, dark, WANT_BACKDROP));
         }
