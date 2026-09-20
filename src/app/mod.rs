@@ -139,9 +139,8 @@ impl App {
         // Latched on the way past, because `pending` does not survive the
         // `pump` that `logic` performs before `ui` ever asks.
         for cmd in &response.cmds {
-            match cmd {
-                event::Cmd::ToggleSettings => self.requested.settings = true,
-                _ => {}
+            if cmd == &event::Cmd::ToggleSettings {
+                self.requested.settings = true;
             }
         }
         self.pending.extend(response.cmds);
