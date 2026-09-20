@@ -1587,6 +1587,90 @@ fn up_at_the_top_of_the_list_comes_round_to_the_end() {
     assert_eq!(again.redraw, Redraw::Yes, "and it is a new frame");
 }
 
+/// Down is the way into the shortcuts, as Up is the way into the codes used
+/// before. One sentence: up is what you looked for, down is what you set up.
+#[test]
+fn down_steps_into_the_shortcuts_and_enter_takes_one() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    assert!(s.showing_aliases(), "the fixture shows no shortcuts");
+    assert_eq!(s.alias_cursor(), None, "and nobody has stepped onto one");
+
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(1));
+    // A handful of entries, so the far end is one press away either way.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0), "the list did not come round");
+    s.update(press(Key::Up), now);
+    assert_eq!(s.alias_cursor(), Some(1));
+
+    // Enter puts the *name* in the box, because that is what a user would
+    // have typed - so the expansion fires the ordinary way.
+    s.update(press(Key::Enter), now);
+    assert_eq!(s.input.text(), "gd");
+    assert_eq!(s.alias_cursor(), None, "the list stayed up under the code");
+}
+
+/// Escape steps off the list rather than taking the panel with it, which is
+/// the same exception the drive picker and the recall list get.
+#[test]
+fn escape_steps_off_the_shortcuts_first() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    s.update(
+        AppEvent::Hotkey(files::app::event::HotkeyMsg::Summoned),
+        now,
+    );
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+
+    let r = s.update(press(Key::Esc), now);
+    assert_eq!(s.alias_cursor(), None);
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::DismissOverlay)),
+        "Escape took the panel with it: {:?}",
+        r.cmds
+    );
+
+    // And a second press does put it away.
+    let r = s.update(press(Key::Esc), now);
+    assert!(r.cmds.iter().any(|c| matches!(c, Cmd::DismissOverlay)));
+}
+
+/// Typing steps off the list, whichever way the line was changed.
+#[test]
+fn typing_steps_off_the_shortcuts() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+
+    s.update(press(Key::Char('1')), now);
+    assert_eq!(s.alias_cursor(), None);
+    assert!(!s.showing_aliases(), "the box is not empty any more");
+}
+
+/// Two shortcuts, so a cursor that moves has somewhere to move to.
+fn with_aliases() -> Settings {
+    Settings {
+        aliases: std::sync::Arc::new(files::alias::Aliases::new(vec![
+            files::alias::Alias {
+                name: "pw".into(),
+                code: "11-D-0704".into(),
+                note: Some("the pump house".into()),
+            },
+            files::alias::Alias {
+                name: "gd".into(),
+                code: "22-A-1234".into(),
+                note: None,
+            },
+        ])),
+        ..Settings::default()
+    }
+}
+
 /// Ctrl+P and Ctrl+N are the arrows, for a hand that does not want to leave
 /// the home row - and they are the *same* arrows, not a second copy of the
 /// arithmetic.

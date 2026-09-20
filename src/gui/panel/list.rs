@@ -132,6 +132,7 @@ pub fn show(
             intents = match content {
                 Content::Results => results(&mut body, state, theme),
                 Content::Recent => recent(&mut body, state, theme),
+                Content::Aliases => aliases(&mut body, state, theme),
                 Content::Shares => {
                     shares(&mut body, state, theme, wall);
                     Vec::new()
@@ -190,6 +191,7 @@ const fn heading_of(content: Content) -> Option<&'static str> {
     match content {
         Content::Results => Some("Results"),
         Content::Recent => Some("Recent codes"),
+        Content::Aliases => Some("Shortcuts"),
         Content::Shares => Some("Drives"),
         Content::Empty => None,
     }
@@ -206,6 +208,7 @@ const fn discriminant(content: Content) -> u8 {
         Content::Recent => 1,
         Content::Shares => 2,
         Content::Empty => 3,
+        Content::Aliases => 4,
     }
 }
 
@@ -308,6 +311,81 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         // one entry older.
         if response.clicked() {
             intents.push(Intent::Recall(rank));
+        }
+    }
+    intents
+}
+
+/// The shortcuts somebody configured, which is what an empty box shows.
+///
+/// Drawn like the recent codes and not like a result: the accent colour a
+/// code is typed in, because that is what taking one of these puts in the
+/// box. What is on the right is the code it stands for, dimmed - so the list
+/// reads as `pw \u{2192} 11-D-0704` and is its own documentation.
+fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
+    let mut intents = Vec::new();
+    let cursor = state.alias_cursor();
+    let follow = selection_changed(ui, "aliases", cursor);
+    let small = theme::font(theme::SIZE_SMALL, Weight::Regular);
+
+    for (rank, alias) in state.settings.aliases.all().iter().enumerate() {
+        if rank > 0 {
+            space(ui, theme::ROW_GAP);
+        }
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(ui.available_width(), theme::ROW_COMPACT_H),
+            Sense::click(),
+        );
+        if !ui.is_rect_visible(rect) && cursor != Some(rank) {
+            continue;
+        }
+        // The note as well, where there is one: it is what the person who
+        // wrote the list put there to remind themselves a year later, and a
+        // reader has no column width to be elided to.
+        let spoken = match &alias.note {
+            Some(note) => format!("{} \u{b7} {note}", alias.describe()),
+            None => alias.describe(),
+        };
+        response.widget_info(|| {
+            eframe::egui::WidgetInfo::selected(
+                eframe::egui::WidgetType::Button,
+                true,
+                cursor == Some(rank),
+                &spoken,
+            )
+        });
+
+        if cursor == Some(rank) {
+            theme::raise(ui.painter(), theme, rect, theme::ROW_RADIUS);
+            ui.painter()
+                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+            row::marker(ui, theme, rect);
+            if follow {
+                bring_into_view(ui, rect);
+            }
+        } else if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+        }
+
+        let painter = ui.painter().clone();
+        painter.text(
+            pos2(rect.left() + theme::ROW_PAD_X, rect.center().y),
+            Align2::LEFT_CENTER,
+            alias.name.as_ref(),
+            theme::font(theme::SIZE_ROW, theme.weight(Emphasis::Accent)),
+            theme.accent,
+        );
+        painter.text(
+            pos2(rect.right() - theme::ROW_PAD_X, rect.center().y),
+            Align2::RIGHT_CENTER,
+            alias.code.as_ref(),
+            small.clone(),
+            theme.dim,
+        );
+
+        if response.clicked() {
+            intents.push(Intent::UseAlias(rank));
         }
     }
     intents
@@ -490,13 +568,14 @@ mod tests {
             Content::Recent,
             Content::Shares,
             Content::Empty,
+            Content::Aliases,
         ]
         .into_iter()
         .map(discriminant)
         .collect();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), 4, "two bodies share a scroll offset");
+        assert_eq!(seen.len(), 5, "two bodies share a scroll offset");
     }
 
     /// The two bodies that are lists of somebody's own things get a caption;
@@ -506,6 +585,7 @@ mod tests {
         assert!(heading_of(Content::Results).is_some());
         assert!(heading_of(Content::Recent).is_some());
         assert!(heading_of(Content::Shares).is_some());
+        assert!(heading_of(Content::Aliases).is_some());
         assert!(heading_of(Content::Empty).is_none());
     }
 }

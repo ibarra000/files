@@ -87,6 +87,13 @@ pub struct AppState {
     /// keyboard; this is the one thing that borrows the *body*, and it borrows
     /// it for one keystroke at a time.
     pub picking_share: bool,
+    /// Where the keyboard is in the alias list, if it is in it at all.
+    ///
+    /// `None` means the list is on screen and nobody has stepped onto it -
+    /// which is the ordinary case, because an alias is two or three
+    /// characters and typing it is faster than walking to it. See
+    /// [`Self::showing_aliases`].
+    alias_cursor: Option<usize>,
     /// Whether the actions menu is up.
     ///
     /// Here rather than in the renderer because Escape has to close it, and
@@ -260,6 +267,7 @@ impl AppState {
             history: History::new(),
             overlay_up: false,
             picking_share: false,
+            alias_cursor: None,
             actions_open: false,
             // Replaced by the real size before the first frame; a sane default
             // means mouse arithmetic is never done against a zero rect.
@@ -453,6 +461,41 @@ impl AppState {
     /// renderer has a fresher one and staleness is the one notice that arrives
     /// with no event behind it. `is_quiet` passes the stored one, which is set
     /// by `note_frame` before the panel is measured.
+    /// Whether an empty box is showing the configured shortcuts.
+    ///
+    /// Ueli's favourites. Its empty screen lists them and that is the whole
+    /// point of having them; ours lists aliases, which are the same kind of
+    /// thing - configured, named, few, and a record of nothing.
+    ///
+    /// This is the one place the panel puts anything on an untouched screen,
+    /// and it is worth saying why that is not a reversal of b719a20, which
+    /// stripped the first screen to a search box and nothing else. What that
+    /// removed was five lines of *instructions* - what to type, what a code
+    /// looks like - in front of somebody who learned both on their first
+    /// day. A list somebody wrote themselves is not instructions, and a
+    /// machine with no aliases configured still gets a search box and
+    /// nothing else.
+    ///
+    /// The recent codes are deliberately *not* here, and that is the line:
+    /// they are a record of what this person looked up, and a panel summoned
+    /// over somebody's shoulder must not put that on screen unasked. Ueli
+    /// agrees - its search history is an opt-in dropdown rather than part of
+    /// the list - so the privacy decision and its shape do not have to
+    /// disagree. Up is still the only way in.
+    pub fn showing_aliases(&self) -> bool {
+        self.input.text().is_empty()
+            && !self.picking_share
+            && !self.showing_recent()
+            && !self.settings.aliases.is_empty()
+    }
+
+    /// Which shortcut the keyboard is on, if it has been stepped onto.
+    pub fn alias_cursor(&self) -> Option<usize> {
+        self.showing_aliases()
+            .then_some(self.alias_cursor)
+            .flatten()
+    }
+
     pub(crate) fn has_standing_notice(&self, wall: SystemTime) -> bool {
         self.index.origin.is_none()
             || self.index.degraded().is_some()
@@ -677,6 +720,10 @@ impl AppState {
         // were looking at. This is the one place it happens, so no key handler
         // has to remember to do it.
         self.leave_history();
+        // And steps off the shortcut list for the same reason. Kept here
+        // rather than in the key handlers because there are half a dozen
+        // ways to change the line and one of them would forget.
+        self.alias_cursor = None;
         self.query_epoch += 1;
         // Editing the code un-pins: the user is choosing a different code, not
         // holding a place in the list for this one. The selected *path* is kept
@@ -810,12 +857,15 @@ impl AppState {
     }
 
     fn on_enter(&mut self, now: Instant) -> Response {
-        // Enter takes the row you are on. On a remembered code that means
-        // filling the field and searching; on a file it means opening it. One
-        // rule, two kinds of row - and the rows look different enough that
-        // nobody has to be told which is which.
+        // Enter takes the row you are on. On a remembered code or a shortcut
+        // that means filling the field and searching; on a file it means
+        // opening it. One rule, three kinds of row - and the three look
+        // different enough that nobody has to be told which is which.
         if self.history.is_browsing() {
             return self.accept_recall(now);
+        }
+        if let Some(rank) = self.alias_cursor() {
+            return self.accept_alias(rank, now);
         }
 
         // Unless the match for what is on the line has not run yet, in which

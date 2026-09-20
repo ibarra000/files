@@ -88,6 +88,14 @@ impl AppState {
             }
         }
 
+        // The alias list peels the same way, and before the recall check
+        // because the two are mutually exclusive and this one is cheaper to
+        // ask about.
+        if self.alias_cursor().is_some() && key.key == Key::Esc {
+            self.alias_cursor = None;
+            return Response::redraw();
+        }
+
         // Escape peels the recall list the way it peels the drive picker, and
         // for the reason `on_escape` gives for that exception: "a list that
         // cannot be shut without taking the panel with it would be a trap."
@@ -438,6 +446,9 @@ impl AppState {
         if self.can_begin_recall() {
             return self.begin_recall();
         }
+        if self.alias_cursor().is_some() {
+            return self.move_alias(-1);
+        }
         // Off the top and round to the bottom, which is Ueli's arrow and is
         // the quickest way to the end of three hundred results. It used to
         // hold here, and the argument was about the *page* snapping back to
@@ -457,6 +468,17 @@ impl AppState {
         if self.history.is_browsing() {
             return self.history_newer();
         }
+        // Down is the way into the shortcuts, as Up is the way into the
+        // codes used before. One sentence, and it is the whole of what a
+        // user has to remember: up is what you looked for, down is what you
+        // set up.
+        //
+        // Down is free to mean this because on an empty box it meant
+        // nothing: it deliberately never *started* recall - see the note
+        // above - and with no code typed there is no result list to walk.
+        if self.showing_aliases() {
+            return self.move_alias(1);
+        }
         if self.hits.is_empty() {
             return Response::none();
         }
@@ -464,6 +486,41 @@ impl AppState {
         // highlighted before the first Down is pressed, so stepping onto it
         // would look like the key did nothing.
         self.move_selection(1, Wrap::Around)
+    }
+
+    /// Steps through the shortcuts, entering the list from the near end.
+    ///
+    /// Wraps, like the result list and for the same reason: these are a
+    /// handful of entries and the far end of a handful is one press away
+    /// whichever direction you go.
+    fn move_alias(&mut self, delta: isize) -> Response {
+        let len = self.settings.aliases.len() as isize;
+        if len == 0 {
+            return Response::none();
+        }
+        let next = match self.alias_cursor {
+            None if delta > 0 => 0,
+            None => len - 1,
+            Some(at) => (at as isize + delta).rem_euclid(len),
+        };
+        self.alias_cursor = Some(next as usize);
+        Response::redraw()
+    }
+
+    /// Puts the shortcut the cursor is on into the box, and searches for it.
+    ///
+    /// The *name*, not the code it stands for. Typing `pw` is what a user
+    /// does, so that is what this leaves behind - the expansion fires the
+    /// ordinary way, the field says what it stood for at its right-hand end,
+    /// and the box holds something they could have typed themselves.
+    pub(super) fn accept_alias(&mut self, rank: usize, now: Instant) -> Response {
+        let Some(alias) = self.settings.aliases.all().get(rank) else {
+            return Response::none();
+        };
+        let name = alias.name.to_string();
+        self.alias_cursor = None;
+        self.input.set_text(name);
+        self.on_input_changed(now, Urgency::Complete)
     }
 
     /// Drops a hover highlight the pointer has moved on from.

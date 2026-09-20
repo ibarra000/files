@@ -67,6 +67,9 @@ pub enum Content {
     /// The codes used before, while the Up arrow is browsing them. Never on
     /// screen otherwise.
     Recent,
+    /// The shortcuts somebody configured, which is what an empty box shows
+    /// when there are any. Ueli's favourites, under another name.
+    Aliases,
     Results,
     /// A reason there are none, which on an untouched panel is no reason at
     /// all.

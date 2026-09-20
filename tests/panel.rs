@@ -802,6 +802,25 @@ snapshot!(looks_right_with_more_than_it_can_show, || {
     s
 });
 
+// What an empty box shows when there is anything to show on it: Ueli's
+// favourites, which here are the shortcuts somebody configured.
+snapshot!(looks_right_showing_the_shortcuts, || {
+    let (mut s, _) = quiet_state();
+    s.settings.aliases = Arc::new(files::alias::Aliases::new(vec![
+        files::alias::Alias {
+            name: "pw".into(),
+            code: "11-D-0704".into(),
+            note: Some("the pump house".into()),
+        },
+        files::alias::Alias {
+            name: "gd".into(),
+            code: "22-A-1234".into(),
+            note: None,
+        },
+    ]));
+    s
+});
+
 // The one key that replaced the whole hint bar, and the only place the
 // program teaches its own chords now.
 snapshot!(looks_right_with_the_actions_menu_open, || {

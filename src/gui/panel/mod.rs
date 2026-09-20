@@ -76,6 +76,12 @@ pub fn body_of(state: &AppState) -> Content {
     if state.showing_recent() {
         return Content::Recent;
     }
+    // What an empty box shows, when there is anything to show on it. Ueli's
+    // favourites; see `AppState::showing_aliases` for why the recent codes
+    // are deliberately not here and this is.
+    if state.showing_aliases() {
+        return Content::Aliases;
+    }
     if state.input.text().is_empty() {
         return Content::Empty;
     }
@@ -382,6 +388,56 @@ mod tests {
             crate::view::empty::view(&empty_reason(&state), state.input.text()).is_empty(),
             "the first screen has something on it"
         );
+    }
+
+    /// An empty box shows the shortcuts somebody configured, and nothing at
+    /// all when there are none.
+    ///
+    /// Ueli's favourites. The second half is the important one: `b719a20`
+    /// stripped the first screen to a search box and nothing else, and what
+    /// it removed was five lines of *instructions*. A list somebody wrote
+    /// themselves is not instructions, and a machine with no aliases still
+    /// gets exactly what that commit left behind.
+    #[test]
+    fn an_empty_box_shows_the_shortcuts_and_only_if_there_are_any() {
+        let mut state = state();
+        settle_index(&mut state);
+        assert_eq!(body_of(&state), Content::Empty, "nothing is configured");
+
+        state.settings.aliases =
+            std::sync::Arc::new(crate::alias::Aliases::new(vec![crate::alias::Alias {
+                name: "pw".into(),
+                code: "11-D-0704".into(),
+                note: None,
+            }]));
+        assert_eq!(body_of(&state), Content::Aliases);
+    }
+
+    /// And the codes used before are still behind the Up arrow, whatever
+    /// else is on the first screen.
+    ///
+    /// The line this feature is drawn against: an alias is a record of
+    /// nothing and a search history is a record of everything this person
+    /// has looked for, and a panel summoned over somebody's shoulder must
+    /// not put the second on screen unasked.
+    #[test]
+    fn the_shortcuts_do_not_bring_the_recent_codes_with_them() {
+        let mut state = state();
+        settle_index(&mut state);
+        state.settings.aliases =
+            std::sync::Arc::new(crate::alias::Aliases::new(vec![crate::alias::Alias {
+                name: "pw".into(),
+                code: "11-D-0704".into(),
+                note: None,
+            }]));
+        state.history.record("22-A-1234");
+
+        assert_eq!(body_of(&state), Content::Aliases);
+        state.update(
+            AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)),
+            Instant::now(),
+        );
+        assert_eq!(body_of(&state), Content::Recent, "Up is still the way in");
     }
 
     /// And something worth saying still reaches the footer, which is what

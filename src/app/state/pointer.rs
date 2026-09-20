@@ -63,6 +63,14 @@ pub enum Intent {
     /// recall *chip* threw away - it was the Up arrow with the rank dropped,
     /// so clicking the fifth code stepped one entry older.
     Recall(usize),
+    /// A configured shortcut was clicked: put it in the box.
+    ///
+    /// Its own variant rather than a reuse of [`Intent::Recall`] for the
+    /// reason that one is not a reuse of [`Intent::Activate`]: they index
+    /// three different lists, and one variant meaning three things
+    /// depending on which body is up would put a "which body is on screen"
+    /// decision back inside the state machine.
+    UseAlias(usize),
     /// A row of the actions menu, or the button that names the default one.
     ///
     /// Named by what it *is* rather than by the key it happens to share,
@@ -103,6 +111,7 @@ impl AppState {
                 Response::redraw()
             }
             Intent::Recall(rank) => self.recall_row(rank, now),
+            Intent::UseAlias(rank) => self.accept_alias(rank, now),
             Intent::Act(action) => self.run_action(action, now),
             Intent::ShowActions(open) => {
                 if self.actions_open == open {
