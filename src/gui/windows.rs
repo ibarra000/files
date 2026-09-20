@@ -77,10 +77,6 @@ pub struct Asked {
 /// than stepping in and out with the length of each name.
 const KEY_COLUMN: f32 = 190.0;
 
-/// Wide enough for a path worth reading, and for the hint text under an empty
-/// box.
-const TEXT_WIDTH: f32 = 260.0;
-
 /// Which of the three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Window {
@@ -349,13 +345,8 @@ fn opaque(colour: egui::Color32) -> egui::Color32 {
 }
 
 fn heading(ui: &mut egui::Ui, theme: &Theme, text: &str) {
-    ui.add_space(10.0);
-    ui.label(
-        egui::RichText::new(text)
-            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
-            .color(theme.dim),
-    );
-    ui.add_space(4.0);
+    crate::gui::settings::widgets::group_gap(ui);
+    crate::gui::settings::widgets::group_heading(ui, theme, text);
 }
 
 fn row(ui: &mut egui::Ui, theme: &Theme, key: &str, what: &str) {
@@ -570,6 +561,7 @@ fn settings(
 /// way the setting is visible, its value is visible, and the line underneath
 /// names what is holding it.
 fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &mut Form<'_>) {
+    use crate::gui::settings::widgets::{self, width};
     use view::settings::Field;
 
     let changed = &mut *form.changed;
@@ -582,83 +574,70 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &m
         })
     };
 
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(KEY_COLUMN, 22.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(
-                    egui::RichText::new(row.label)
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
-                        .color(theme.accent),
-                );
-            },
-        );
+    let caveat = row.caveat();
+    let control_w = match &row.field {
+        Field::Choice { .. } => width::DROPDOWN,
+        Field::Toggle { .. } => width::SWITCH,
+        Field::Text { .. } => width::TEXT,
+    };
+    let spec = widgets::Row {
+        label: row.label,
+        help: row.help,
+        caveat: caveat.as_deref(),
+        // A setting the environment or a flag is holding is drawn disabled
+        // rather than hidden. Hiding it would answer "why can I not change
+        // the theme?" with silence; this way the setting is there, its value
+        // is there, and the line underneath names what is holding it.
+        enabled: row.pin.is_none(),
+        control_w,
+    };
 
-        ui.add_enabled_ui(row.pin.is_none(), |ui| match &row.field {
-            // Every option at once rather than a drop-down. There are two or
-            // three of them, they have to be read to be chosen between, and a
-            // menu that has to be opened to see what is in it is a menu that
-            // hides the answer to the question the window was opened to ask.
-            Field::Choice { options, current } => {
-                for (i, option) in options.iter().enumerate() {
-                    if ui.selectable_label(i == *current, option.label).clicked() && i != *current {
-                        push(Typed::Text(option.value.to_string()));
-                    }
+    widgets::setting_row(ui, theme, spec, |ui| match &row.field {
+        // A drop-down, where this used to show every option at once. That
+        // was the right answer in a 620-point column with the controls in a
+        // 190-point gutter: three words side by side cost nothing and saved
+        // a click. It is the wrong answer in a tile whose right-hand column
+        // is a fixed width, because three options of unequal length make
+        // three rows that do not line up with each other or with the
+        // switches above and below them.
+        Field::Choice { options, current } => {
+            let labels: Vec<&str> = options.iter().map(|o| o.label).collect();
+            let salt = format!("files-setting-{}", row.key.name());
+            if let Some(i) = widgets::dropdown(ui, &salt, *current, &labels, control_w) {
+                push(Typed::Text(options[i].value.to_string()));
+            }
+        }
+        Field::Toggle { on } => {
+            let mut value = *on;
+            if widgets::switch(ui, theme, &mut value, row.label).changed() {
+                push(Typed::Flag(value));
+            }
+        }
+        // Committed when the box gives up the keyboard, which is Enter and
+        // clicking away and is *not* Escape. Not per keystroke: every
+        // character of a path would otherwise be a write to a file on a
+        // network share, and half of them would name a program that does not
+        // exist yet.
+        Field::Text { value, placeholder } => {
+            let mut text = match &editing {
+                Some((key, buffer)) if *key == row.key => buffer.clone(),
+                _ => value.clone(),
+            };
+            let typed = widgets::text_field(ui, theme, &mut text, placeholder, control_w, None);
+            if typed.commit {
+                if text.trim() != value.trim() {
+                    push(Typed::Text(text));
                 }
+                *editing = None;
+            } else if typed.response.has_focus() {
+                *editing = Some((row.key, text));
+            } else if typed.response.lost_focus() {
+                // Escape. The draft is dropped and the box goes back to what
+                // the file says, which is the whole point of having a way
+                // out of a half-typed path.
+                *editing = None;
             }
-            Field::Toggle { on } => {
-                let mut value = *on;
-                if ui.checkbox(&mut value, "").changed() {
-                    push(Typed::Flag(value));
-                }
-            }
-            // Committed when the box gives up the keyboard, which is both
-            // Enter and clicking away. Not per keystroke: every character of a
-            // path would otherwise be a write to a file on a network share,
-            // and half of them would name a program that does not exist yet.
-            Field::Text { value, placeholder } => {
-                let mut text = match &editing {
-                    Some((key, buffer)) if *key == row.key => buffer.clone(),
-                    _ => value.clone(),
-                };
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut text)
-                        .hint_text(*placeholder)
-                        .desired_width(TEXT_WIDTH),
-                );
-                if response.lost_focus() {
-                    if text.trim() != value.trim() {
-                        push(Typed::Text(text));
-                    }
-                    *editing = None;
-                } else if response.has_focus() {
-                    *editing = Some((row.key, text));
-                }
-            }
-        });
-    });
-
-    // The sentence that says what the setting does, then whatever caveat it
-    // carries. Indented under the control rather than beside it, because at
-    // this width a sentence beside a checkbox is a sentence three words wide.
-    ui.horizontal(|ui| {
-        ui.add_space(KEY_COLUMN);
-        ui.vertical(|ui| {
-            ui.label(
-                egui::RichText::new(row.help)
-                    .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                    .color(theme.dim),
-            );
-            if let Some(caveat) = row.caveat() {
-                ui.label(
-                    egui::RichText::new(caveat)
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                        .color(theme.tone(view::status::Tone::Warn)),
-                );
-            }
-        });
+        }
     });
 }
 
