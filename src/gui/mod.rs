@@ -620,7 +620,23 @@ impl eframe::App for Shell {
 
         if self.windows.any_open() {
             // An ordinary window, driven by its own input.
-            ctx.request_repaint();
+            //
+            // Sixty a second rather than as fast as the display will go. The
+            // old unconditional `request_repaint` was written when this was a
+            // 620 by 480 read-only document; it is now a 940 by 700 form of
+            // real widgets, and on a 144 Hz monitor it was redrawing all of
+            // it a hundred and forty-four times a second to show a page that
+            // is not moving.
+            //
+            // Not narrowed further than that on purpose. The obvious next
+            // step is "only when something is animating", and the things
+            // that animate here - a switch knob, a hover, a scroll handle -
+            // already ask for their own frames through
+            // `animate_bool_responsive`. Which means the conditional version
+            // is probably correct and definitely not provable by anything in
+            // this repository, so it would be a change made on an argument
+            // rather than on a measurement.
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else if let Some(wait) = [animating, deadline].into_iter().flatten().min() {
             // A floor of a millisecond: `request_repaint_after(ZERO)` means
             // "again immediately", and a deadline already in the past would pin

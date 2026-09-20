@@ -59,7 +59,7 @@ use crate::app::state::{AppState, SettingChange};
 use crate::config::Settings;
 use crate::config::write::SettingKey;
 use crate::gui::settings::{self, Form, lists};
-use crate::gui::theme::{self, Theme};
+use crate::gui::theme::Theme;
 use crate::view::settings::{ActionId, PageId};
 
 const TITLE: &str = "files - settings";
@@ -282,14 +282,6 @@ fn show_one(ctx: &egui::Context, was_editing: bool, mut body: impl FnMut(&mut eg
     );
     open
 }
-
-/// The panel's surface without its transparency.
-pub fn opaque(colour: egui::Color32) -> egui::Color32 {
-    settings::opaque(colour)
-}
-
-#[allow(dead_code)]
-fn _theme_is_used(_: &theme::Theme) {}
 
 #[cfg(test)]
 mod tests {
