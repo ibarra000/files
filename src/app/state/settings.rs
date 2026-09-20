@@ -177,11 +177,38 @@ impl AppState {
                     self.settings.dev_mode = *on;
                 }
             }
+            // Read on the keystroke that opens something, off the `Settings`
+            // this struct owns, so the next open sees the new answer.
+            SettingKey::AutoHide => {
+                if let Scalar::Bool(on) = value {
+                    self.settings.auto_hide = *on;
+                }
+            }
+            // Deliberately not applied, which is a stronger statement than
+            // "captured at startup" and is the reason this arm is written
+            // out on its own.
+            //
+            // Nothing here holds a copy of `update_from`, so moving it would
+            // work. What holds a copy is the update checker's *thread*: the
+            // folder is moved into it at spawn, and the thread is only
+            // spawned at all when the setting was set at boot. So applying
+            // this live would make the About page read `Looking in <the new
+            // folder>` above a status the old folder produced, beside a
+            // "Check now" button wired to the old thread - or to nothing, if
+            // there was no folder at boot. Three controls, all lying.
+            //
+            // Leaving it alone keeps `settings.update_from` equal to the
+            // folder the checker is actually reading, for as long as this
+            // process runs. Anybody tempted to make this live has to move
+            // the thread first.
+            SettingKey::UpdateFrom => {}
             // Captured at startup by something that cannot be told. The form
             // says these apply when files next starts.
             SettingKey::Hotkey
             | SettingKey::LiveUpdates
             | SettingKey::PdfViewer
+            | SettingKey::PdfReadOnly
+            | SettingKey::IndexLog
             | SettingKey::HideExtensions
             | SettingKey::HideSystemFiles => {}
         }

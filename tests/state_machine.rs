@@ -2789,13 +2789,16 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::Viewer => Typed::Text("avwin".into()),
             SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
             SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
+            SettingKey::UpdateFrom => Typed::Text(r"\\server\share\files".into()),
+            SettingKey::IndexLog => Typed::Text(r"C:\index.log".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
-            // The one flag that ships off, so `false` would be no change at
+            // The two flags that ship off, so `false` would be no change at
             // all and this test would pass by moving nothing.
-            SettingKey::DevMode => Typed::Flag(true),
+            SettingKey::DevMode | SettingKey::AutoHide => Typed::Flag(true),
             SettingKey::History
             | SettingKey::StaleNotices
             | SettingKey::LiveUpdates
+            | SettingKey::PdfReadOnly
             | SettingKey::HideSystemFiles => Typed::Flag(false),
         }
     }
@@ -2803,7 +2806,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
     /// Everything `apply_live` is allowed to touch, read back off `Settings`.
     fn snapshot(s: &AppState) -> String {
         format!(
-            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}",
+            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{:?}",
             s.settings.theme,
             s.settings.viewer,
             s.settings.history,
@@ -2814,6 +2817,10 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             s.settings.pdf_viewer,
             s.settings.hidden.suffixes().collect::<Vec<_>>(),
             s.settings.hidden.hides_system(),
+            s.settings.auto_hide,
+            s.settings.pdf_read_only,
+            s.settings.update_from,
+            s.settings.index_log,
         )
     }
 

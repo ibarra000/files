@@ -220,6 +220,30 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
                         placeholder: "Whatever Windows uses",
                     },
                 ),
+                row(
+                    settings,
+                    SettingKey::PdfReadOnly,
+                    "Assembled documents open read-only",
+                    "An assembled document is named after a hash of its own contents, so a \
+                     viewer that saves into it leaves a file whose name no longer describes \
+                     it. Turn this off to annotate one and keep the result. A file opened \
+                     straight off the drive is untouched either way.",
+                    Field::Toggle {
+                        on: settings.pdf_read_only,
+                    },
+                ),
+                row(
+                    settings,
+                    SettingKey::AutoHide,
+                    "Close the panel when something opens",
+                    "Leave this off and the panel stays up, so whatever the open has to say \
+                     is somewhere you can still read it and a second code is a keystroke \
+                     rather than the shortcut again. Escape and the shortcut close the panel \
+                     either way.",
+                    Field::Toggle {
+                        on: settings.auto_hide,
+                    },
+                ),
             ],
         },
         Section {
@@ -275,18 +299,46 @@ pub fn sections(settings: &Settings) -> Vec<Section> {
             ],
         },
         Section {
-            heading: "Troubleshooting",
+            heading: "Updates",
             rows: vec![row(
                 settings,
-                SettingKey::DevMode,
-                "Show technical detail",
-                "Add the error codes and folder paths behind a message. Useful when \
-                 somebody is helping you; noise the rest of the time. Diagnostics has \
-                 them either way.",
-                Field::Toggle {
-                    on: settings.dev_mode,
+                SettingKey::UpdateFrom,
+                "Look for new versions in",
+                "A folder holding latest.toml and the installer beside it. Empty it and \
+                 no looking happens at all.",
+                Field::Text {
+                    value: path_of(settings.update_from.as_deref()),
+                    placeholder: "Nowhere, so nothing is checked",
                 },
             )],
+        },
+        Section {
+            heading: "Troubleshooting",
+            rows: vec![
+                row(
+                    settings,
+                    SettingKey::DevMode,
+                    "Show technical detail",
+                    "Add the error codes and folder paths behind a message. Useful when \
+                     somebody is helping you; noise the rest of the time. Diagnostics has \
+                     them either way.",
+                    Field::Toggle {
+                        on: settings.dev_mode,
+                    },
+                ),
+                row(
+                    settings,
+                    SettingKey::IndexLog,
+                    "Record why the drives are read again",
+                    "Append a line to a file each time the index decides whether to read a \
+                     drive again: what woke it, what the folder stamp said, and what it \
+                     did. Leave this empty unless somebody has asked you to turn it on.",
+                    Field::Text {
+                        value: path_of(settings.index_log.as_deref()),
+                        placeholder: "Nothing is recorded",
+                    },
+                ),
+            ],
         },
         Section {
             heading: "What is left out of results",
