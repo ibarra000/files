@@ -47,7 +47,8 @@ use crate::app::event::AppEvent;
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 use crate::placement;
-use windows::{Window, Windows};
+use crate::view::settings::{ActionId, PageId};
+use windows::Windows;
 
 pub use theme::{PANEL_MAX_H, PANEL_W};
 
@@ -362,8 +363,11 @@ impl Shell {
                 // taking the foreground and that is the one thread Windows will
                 // accept it from.
                 Request::Show => self.app.actors.summon_overlay(),
-                Request::Settings => self.windows.open(Window::Settings),
-                Request::Diagnostics => self.windows.open(Window::Diagnostics),
+                // A named menu item is a destination; the toggle key is a
+                // resumption. So this always names a page and
+                // `Cmd::ToggleSettings` never does.
+                Request::Settings => self.windows.open_at(PageId::General),
+                Request::Diagnostics => self.windows.open_at(PageId::Diagnostics),
                 Request::Quit => self.app.state.should_quit = true,
             }
         }
@@ -654,27 +658,26 @@ impl eframe::App for Shell {
                 || report(&settings),
             )
         };
-        if clicked.forget_placement {
-            self.forget_placement();
-        }
-        // Fed rather than sent, for the reason the pointer intents below are:
-        // these were produced on the drawing thread, and a send would go round
-        // the channel to arrive one frame later - which for a switch is a
-        // switch that moves after the click that moved it.
-        for change in clicked.changed {
-            self.app.feed(AppEvent::Setting(change), now);
-        }
-        if let Some(aliases) = clicked.aliases {
-            self.app.feed(AppEvent::Aliases(aliases), now);
-        }
-        if let Some(mappings) = clicked.mappings {
-            self.app.feed(AppEvent::Drives(mappings), now);
-        }
-        if clicked.asked.check_now {
-            self.app.actors.check_for_updates();
-        }
-        if clicked.asked.install {
-            self.install_update(now);
+        // One list rather than a bool and a pair of flags, and in the order
+        // they were pressed: two of these reach outside the window and one
+        // of them restarts the program.
+        for action in &clicked.actions {
+            match action {
+                ActionId::ForgetPlacement => self.forget_placement(),
+                ActionId::CheckForUpdates => self.app.actors.check_for_updates(),
+                ActionId::InstallUpdate => self.install_update(now),
+                ActionId::OpenConfigFile => {
+                    // Whatever the user has registered for .toml, which is
+                    // what "open" means everywhere else on this machine.
+                    #[cfg(windows)]
+                    if let Some(path) = crate::config::file::default_config_path() {
+                        let _ = crate::open::shell_open(&path.to_string_lossy());
+                    }
+                }
+                // Handled where it is pressed, because it needs the report
+                // text and nothing else. See `gui::settings::page`.
+                ActionId::CopyReport => {}
+            }
         }
 
         // Alt makes the whole panel a handle, because the chrome left over
@@ -720,7 +723,7 @@ impl eframe::App for Shell {
         }
         let requested = self.app.take_window_requests();
         if requested.settings {
-            self.windows.toggle(Window::Settings);
+            self.windows.toggle();
         }
         let _ = self.app.pump(now);
     }

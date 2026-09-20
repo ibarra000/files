@@ -19,6 +19,111 @@
 //! to say something a flat fill one step off the ground says for nothing.
 //!
 //! The panel keeps its shading, where two surfaces earn it.
+//!
+//! # Two columns, two scrolls
+//!
+//! A `SidePanel` and a `CentralPanel`, each with a `ScrollArea` of its own,
+//! so the nav does not move when a long page is scrolled and a short page
+//! does not leave the nav stranded. That is the arrangement Ueli has and it
+//! is the only one that behaves when the two columns differ in height, which
+//! they almost always do.
 
+pub mod lists;
 pub mod measure;
+pub mod nav;
+pub mod page;
 pub mod widgets;
+
+use eframe::egui;
+
+use crate::app::state::AppState;
+use crate::config::Settings;
+use crate::gui::theme::{self, Theme};
+use crate::view::settings::{self, PageId};
+
+pub use page::Form;
+
+/// Draws the whole window: the list of pages, and the page.
+///
+/// Takes the current page by value and returns the one that should show
+/// next, rather than taking `&mut`, so the caller keeps the only copy. The
+/// same reason the window returns a `Clicked` instead of reaching back into
+/// the shell.
+// Eight arguments, and clippy is right that it is a lot. They are not a
+// struct in disguise, though: five are borrowed from five different owners
+// for exactly this call, and bundling them would mean a type whose only
+// purpose is to be built one line above and destructured one line below.
+#[allow(clippy::too_many_arguments)]
+pub fn show(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    state: &AppState,
+    settings: &Settings,
+    placement: Option<(i32, i32)>,
+    current: PageId,
+    report: &str,
+    form: &mut Form<'_>,
+) -> PageId {
+    let pages = settings::pages(state, settings, placement);
+    let mut chosen = current;
+
+    egui::containers::Panel::left("files-settings-nav")
+        // `exact_size`, not `exact_width`: in 0.36 one `Panel` type serves
+        // all four edges and the setter is named for the edge it is on.
+        .exact_size(theme::NAV_W)
+        // Ueli's is neither, and there is nothing here to reveal.
+        .resizable(false)
+        .show_separator_line(true)
+        .frame(
+            egui::Frame::new()
+                .fill(opaque(theme.surface))
+                .inner_margin(egui::Margin::symmetric(8, 12)),
+        )
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("files-settings-nav-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    chosen = nav::show(ui, theme, current);
+                });
+        });
+
+    egui::CentralPanel::default()
+        .frame(
+            egui::Frame::new()
+                .fill(opaque(theme.surface))
+                .inner_margin(theme::CONTENT_PAD),
+        )
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                // Salted apart from the nav, or the two share an offset and
+                // the list jumps every time a long page is scrolled.
+                .id_salt("files-settings-content-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let Some(page) = page::find(&pages, current) else {
+                        return;
+                    };
+                    page::show(ui, theme, page, settings, report, form);
+                });
+        });
+
+    chosen
+}
+
+/// Whether the page showing needs the `doctor` report taken.
+pub fn wants_report(state: &AppState, settings: &Settings, current: PageId) -> bool {
+    settings::pages(state, settings, None)
+        .iter()
+        .find(|p| p.id == current)
+        .is_some_and(page::wants_report)
+}
+
+/// The panel's surface without its transparency.
+///
+/// This window is a document rather than an overlay: it sits over other
+/// programs for minutes at a time, and text on a translucent ground is
+/// harder to read the longer you read it.
+pub fn opaque(colour: egui::Color32) -> egui::Color32 {
+    egui::Color32::from_rgb(colour.r(), colour.g(), colour.b())
+}

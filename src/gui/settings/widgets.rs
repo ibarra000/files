@@ -144,24 +144,34 @@ pub fn setting_row<R>(
     let mut at = measure::prose_origin(tile);
     painter.galley(at, label.clone(), theme.text);
     at.y += label.rect.height() + measure::LABEL_GAP;
+    // The help's own height, taken before the galley is handed over, and
+    // *not* the caveat's. Advancing by the height of the line about to be
+    // drawn rather than the one just drawn painted the caveat on top of the
+    // second line of the help - which is legible in a picture and invisible
+    // in a one-line description, so the snapshot is what caught it.
+    let help_h = help.rect.height();
     painter.galley(at, help, theme.dim);
     if let Some(caveat) = caveat {
-        at.y += caveat.rect.height();
+        at.y += help_h + measure::LABEL_GAP;
         painter.galley(at, caveat, theme.tone(Tone::Warn));
     }
 
     // The whole row reads as one thing to a screen reader, because that is
     // what it is: a label that says nothing without the sentence under it.
     // The same argument `gui::row` makes for a result.
-    let label_text = row.label.to_owned();
-    let help_text = row.help.to_owned();
-    response.widget_info(|| {
-        WidgetInfo::labeled(
-            WidgetType::Other,
-            row.enabled,
-            format!("{label_text}. {help_text}"),
-        )
-    });
+    // The caveat is part of the name, not decoration. It is the line that
+    // says the setting will not save or will not apply yet, and somebody
+    // reading this window aloud needs it more than somebody looking at it,
+    // not less.
+    // Joined with a space rather than a stop: the help is a whole sentence
+    // and already ends in one, so a second gives a screen reader "either
+    // way.. Applies when files next starts".
+    let spoken = match row.caveat {
+        Some(caveat) => format!("{}. {} {caveat}", row.label, row.help),
+        None => format!("{}. {}", row.label, row.help),
+    };
+    let enabled = row.enabled;
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, enabled, &spoken));
 
     let slot = measure::control_slot(tile, row.control_w, control_h);
     let mut child = ui.new_child(
@@ -460,19 +470,43 @@ pub fn report_box(ui: &mut Ui, theme: &Theme, report: &str) {
 }
 
 /// A label that is read and not changed.
-pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str) {
-    setting_row(
-        ui,
-        theme,
-        Row {
-            label,
-            help: value,
-            caveat: None,
-            enabled: true,
-            control_w: 0.0,
-        },
-        |_| {},
+pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color32) {
+    let label_text = label.to_owned();
+    let value_text = value.to_owned();
+    let avail = ui.available_width();
+    let painter = ui.painter().clone();
+    let prose_w = measure::prose_width(avail, 0.0);
+
+    let label = truncated(
+        &painter,
+        label,
+        theme::font(theme::SIZE_ROW, Weight::Regular),
+        theme.text,
+        prose_w,
     );
+    let value = painter.layout(
+        value.to_owned(),
+        theme::font(theme::SIZE_SMALL, Weight::Regular),
+        colour,
+        prose_w,
+    );
+
+    let prose_h = label.rect.height() + measure::LABEL_GAP + value.rect.height();
+    let height = measure::tile_height(prose_h, 0.0);
+    let (tile, response) = ui.allocate_exact_size(vec2(avail, height), Sense::hover());
+
+    // Painted text is not in the accessibility tree by itself - only a
+    // widget is - so without this a version number, a path and a status
+    // line are on screen and unreadable to anything that is not a pair of
+    // eyes. The whole pair reads as one thing, the way a setting row does.
+    let spoken = format!("{label_text}. {value_text}");
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
+
+    painter.rect_filled(tile, theme::radius(theme::CARD_RADIUS), theme.card);
+    let mut at = measure::prose_origin(tile);
+    painter.galley(at, label.clone(), theme.text);
+    at.y += label.rect.height() + measure::LABEL_GAP;
+    painter.galley(at, value, colour);
 }
 
 /// Room between one group of settings and the next.

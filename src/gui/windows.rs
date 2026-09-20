@@ -1,29 +1,29 @@
-//! Settings and Diagnostics.
+//! The settings window.
 //!
-//! Two ordinary windows, reached from the tray menu. Ordinary is
-//! the point: they have a title bar, they can be moved and resized, and they
-//! stay where they were put. The panel is the thing that behaves unusually, and
-//! it earns that by being summoned and dismissed dozens of times an hour; a
-//! document somebody reads once does not.
+//! One ordinary window, reached from the tray menu and from Ctrl+comma.
+//! Ordinary is the point: it has a title bar, it can be moved and resized,
+//! and it stays where it was put. The panel is the thing that behaves
+//! unusually, and it earns that by being summoned and dismissed dozens of
+//! times an hour; a form somebody fills in once does not.
 //!
 //! # Immediate rather than deferred viewports
 //!
 //! egui offers both. A deferred viewport runs its own closure on its own
-//! schedule, which means the closure must own everything it draws - so every
-//! one of these would need a snapshot of the state, taken each frame, whether
-//! or not the window was open. An immediate viewport runs inline within the
-//! parent's pass and can simply borrow. For three windows that are shut almost
-//! all of the time, that is the difference between paying for them always and
-//! paying for them when they are open.
+//! schedule, which means the closure must own everything it draws - so it
+//! would need a snapshot of the state, taken each frame, whether or not the
+//! window was open. An immediate viewport runs inline within the parent's
+//! pass and can simply borrow. For a window that is shut almost all of the
+//! time, that is the difference between paying for it always and paying for
+//! it when it is open.
 //!
-//! ## These windows cannot outlive the panel, and deferring them will not help
+//! ## It cannot outlive the panel, and deferring will not help
 //!
-//! Worth writing down, because it looks like a bug and the obvious fix does not
-//! work. `Windows::show` is called from `eframe::App::ui`, so a window is only
-//! re-shown while the panel is being drawn - and dismissing the panel therefore
-//! takes every one of these with it.
+//! Worth writing down, because it looks like a bug and the obvious fix does
+//! not work. `Windows::show` is called from `eframe::App::ui`, so the window
+//! is only re-shown while the panel is being drawn - and dismissing the panel
+//! would therefore take it too.
 //!
-//! Making them deferred does **not** fix that. `Context::show_viewport_deferred`
+//! Making it deferred does **not** fix that. `Context::show_viewport_deferred`
 //! must still be called "each pass when the child viewport should exist", and
 //! `eframe::App::logic`'s own documentation says that while the window is
 //! hidden "eframe runs no egui pass at all" and that you "may NOT show any ui"
@@ -31,92 +31,63 @@
 //! could outlive the panel is to stop hiding the panel, which is the one thing
 //! a summoned overlay must do.
 //!
-//! So Escape closes the window that has the keyboard, and the panel taking its
-//! children with it is the documented consequence rather than an oversight.
+//! ## Which is why the panel does not park while it is open
 //!
-//! ## Which is why the panel does not park while one is open
+//! That consequence was tolerable while this was a document somebody read. It
+//! is not tolerable for a form somebody fills in: dismissing the panel
+//! mid-edit would take the window with it and discard whatever was half-typed.
+//! `gui::Shell::park` therefore refuses to park while [`Windows::any_open`],
+//! which is the one remaining way out named above - stop hiding the panel -
+//! taken deliberately and only for as long as the window is up.
 //!
-//! That consequence was tolerable while these were documents somebody read.
-//! It is not tolerable for a form somebody fills in: dismissing the panel
-//! mid-edit would take the settings window with it and discard whatever was
-//! half-typed. `gui::Shell::park` therefore refuses to park while
-//! [`Windows::any_open`], which is the one remaining way out named above -
-//! stop hiding the panel - taken deliberately and only for as long as a window
-//! is up.
+//! # Why the diagnostics are in here
 //!
-//! # Why Diagnostics exists at all
+//! `--doctor` prints the same report. But this program has no console, and a
+//! tray application whose diagnostics need a command prompt is not integrated
+//! with anything: the person who needs them is the one who cannot get it to
+//! work, which is the worst moment to ask somebody to open a terminal.
 //!
-//! `--doctor` already prints everything here. But this program is about to stop
-//! having a console, and a tray application whose diagnostics need a command
-//! prompt is not integrated with anything - the person who needs them is the
-//! one who cannot get it to work, which is the worst moment to ask somebody to
-//! open a terminal.
+//! It used to be a second window of its own. It is a page now, which is what
+//! Ueli does with its logs and is the arrangement that stops a program of
+//! this size having two windows to learn. The tray keeps its Diagnostics
+//! item and deep-links to the page, so nothing that was reachable stopped
+//! being reachable.
 
 use eframe::egui;
 
 use crate::app::state::{AppState, SettingChange};
 use crate::config::Settings;
-use crate::config::write::{SettingKey, Typed};
-use crate::gui::theme::{self, Theme, Weight};
-use crate::view;
+use crate::config::write::SettingKey;
+use crate::gui::settings::{self, Form, lists};
+use crate::gui::theme::{self, Theme};
+use crate::view::settings::{ActionId, PageId};
 
-/// What the update section was asked to do.
-///
-/// Its own type rather than two more bools on [`Clicked`], because these two
-/// are a pair: one asks a question and the other acts on its answer, and they
-/// are the only buttons here that reach outside the window.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Asked {
-    /// Look at the update folder now, rather than waiting for the timer.
-    pub check_now: bool,
-    /// Install what the last look found.
-    pub install: bool,
-}
+const TITLE: &str = "files - settings";
+const ID: &str = "files-settings";
 
-/// The label column, so every control in the form starts at one rule rather
-/// than stepping in and out with the length of each name.
-const KEY_COLUMN: f32 = 190.0;
+/// Wide enough for the nav plus a reading column, and short enough to open
+/// whole on a 1366 by 768 laptop once the taskbar has taken its share. Ueli
+/// uses 1000 by 800; the 800 is the part not to copy, because this
+/// configuration follows people onto laptops by design.
+const SIZE: [f32; 2] = [940.0, 700.0];
+const MIN_SIZE: [f32; 2] = [720.0, 480.0];
 
-/// Which of the three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Window {
-    Settings,
-    Diagnostics,
-}
-
-impl Window {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Settings => "files - settings",
-            Self::Diagnostics => "files - diagnostics",
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::Settings => "files-settings",
-            Self::Diagnostics => "files-diagnostics",
-        }
-    }
-
-    fn size(self) -> [f32; 2] {
-        match self {
-            Self::Settings => [620.0, 480.0],
-            Self::Diagnostics => [860.0, 620.0],
-        }
-    }
-}
-
-/// Which windows are open, and anything they had to compute to open.
-#[derive(Default)]
+/// The window, which page it is on, and anything it had to compute.
 pub struct Windows {
-    settings: bool,
-    diagnostics: bool,
-    /// The diagnostic report, taken once when the window is opened.
+    open: bool,
+    /// Which page is showing.
     ///
-    /// Not per frame: `doctor` touches the network shares, and running it sixty
-    /// times a second would turn a diagnostics window into a load test against
-    /// the thing being diagnosed.
+    /// Survives a close, so Ctrl+comma brings back the page you were last
+    /// on. A named menu item deliberately does not: see `Shell::serve_requests`.
+    page: PageId,
+    /// The diagnostic report, taken once per arrival on the page that shows
+    /// it.
+    ///
+    /// Not per frame, and not per opening of the window either: `doctor`
+    /// touches the network drives, so running it sixty times a second would
+    /// turn the page into a load test against the thing being diagnosed, and
+    /// running it because somebody opened the window on Appearance would
+    /// charge them for a page they never looked at.
     report: Option<String>,
     /// The text box being typed in, and what is in it.
     ///
@@ -125,94 +96,77 @@ pub struct Windows {
     /// text box has to have. One, because only one can have the keyboard.
     editing: Option<(SettingKey, String)>,
     /// The alias being typed into the "add" row, and why it cannot be added.
-    ///
-    /// The same category as `editing` above: the state a control has while it
-    /// is being filled in, and not a copy of the alias list. There is no draft
-    /// list - adding and removing each write the whole array immediately - so
-    /// the window never holds a version of the aliases the file does not.
-    draft: AliasDraft,
+    draft: lists::AliasDraft,
     /// The drive being typed into the "add" row. Same category as `draft`.
-    drive: DriveDraft,
+    drive: lists::DriveDraft,
 }
 
-/// The boxes on the row that adds a drive.
-struct DriveDraft {
-    name: String,
-    path: String,
-    kind: crate::paths::MappingKind,
-    problem: Option<String>,
-}
-
-impl Default for DriveDraft {
+impl Default for Windows {
     fn default() -> Self {
         Self {
-            name: String::new(),
-            path: String::new(),
-            // What most drives are, and the one whose cost is a background
-            // walk rather than a round trip per search.
-            kind: crate::paths::MappingKind::Tree,
-            problem: None,
+            open: false,
+            page: PageId::General,
+            report: None,
+            editing: None,
+            draft: lists::AliasDraft::default(),
+            drive: lists::DriveDraft::default(),
         }
     }
 }
 
-/// The three boxes on the row that adds an alias.
-#[derive(Default)]
-struct AliasDraft {
-    name: String,
-    code: String,
-    note: String,
-    /// Shown under the row, and only after an attempt: complaining that a name
-    /// is empty before anybody has typed one is nagging.
-    problem: Option<String>,
-}
-
 impl Windows {
-    pub fn open(&mut self, which: Window) {
-        match which {
-            Window::Settings => self.settings = true,
-            Window::Diagnostics => {
-                self.diagnostics = true;
-                self.report = None;
-            }
+    /// Opens the window on a named page.
+    ///
+    /// What the tray menu does. A menu item named "Diagnostics" has to land
+    /// on the diagnostics, not on wherever the window was last left.
+    pub fn open_at(&mut self, page: PageId) {
+        self.go_to(page);
+        // Unconditionally, unlike `go_to`: re-opening on the page it is
+        // already on must still take a fresh report, or somebody who fixed a
+        // drive and looked again would be shown the old answer.
+        if page == PageId::Diagnostics {
+            self.report = None;
         }
+        self.open = true;
     }
 
     /// Opens the window, or shuts it if it is already up.
     ///
-    /// What Ctrl+, does, as against what the tray menu does. A menu item
+    /// What Ctrl+comma does, as against what the tray menu does. A menu item
     /// named "Settings" that closed the window when it was open would be a
-    /// menu that lies, so that route still calls [`Self::open`]; a key
-    /// advertised as "show or hide" has to do both.
-    pub fn toggle(&mut self, which: Window) {
-        if self.is_open(which) {
-            self.close(which);
-        } else {
-            self.open(which);
+    /// menu that lies, so that route still opens; a key advertised as "show
+    /// or hide" has to do both. It names no page, because a toggle should
+    /// come back to where you were.
+    pub fn toggle(&mut self) {
+        self.open = !self.open;
+    }
+
+    fn go_to(&mut self, page: PageId) {
+        if self.page == page {
+            return;
+        }
+        self.page = page;
+        // Cleared on arrival rather than on departure, so somebody who fixed
+        // a drive and came back sees the new answer rather than the old one.
+        if page == PageId::Diagnostics {
+            self.report = None;
         }
     }
 
-    fn close(&mut self, which: Window) {
-        match which {
-            Window::Settings => self.settings = false,
-            Window::Diagnostics => self.diagnostics = false,
-        }
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
-    pub fn is_open(&self, which: Window) -> bool {
-        match which {
-            Window::Settings => self.settings,
-            Window::Diagnostics => self.diagnostics,
-        }
-    }
-
+    /// Kept as a name rather than folded into [`Self::is_open`] because
+    /// `Shell::park` and `Shell::logic` both read as questions about the
+    /// program rather than about this struct.
     pub fn any_open(&self) -> bool {
-        self.settings || self.diagnostics
+        self.open
     }
 
-    /// Draws whichever are open, and reports anything that was clicked.
+    /// Draws the window if it is open, and reports anything that was pressed.
     ///
-    /// A return value rather than a callback because these windows are drawn
+    /// A return value rather than a callback because the window is drawn
     /// inline inside the parent's pass: `Shell` is already borrowed for the
     /// frame, and a closure that could reach back into it would not compile.
     pub fn show(
@@ -225,59 +179,61 @@ impl Windows {
         report: impl Fn() -> String,
     ) -> Clicked {
         let mut clicked = Clicked::default();
-        let mut aliases_changed = None;
-        let mut mappings_changed = None;
-        if self.settings {
+        if !self.open {
+            return clicked;
+        }
+
+        // Taken on the first frame the page is showing rather than when the
+        // menu item was clicked, so the window appears immediately and the
+        // waiting happens with something on screen. Asked of the model
+        // rather than of the page id, so a report added to a second page
+        // does not silently show a stale one.
+        if self.report.is_none() && settings::wants_report(state, settings, self.page) {
+            self.report = Some(report());
+        }
+        let text = self.report.clone().unwrap_or_default();
+
+        let mut chosen = self.page;
+        let mut aliases = None;
+        let mut mappings = None;
+        let was_editing = self.editing.is_some();
+        {
             let editing = &mut self.editing;
+            let draft = &mut self.draft;
+            let drive = &mut self.drive;
             let changed = &mut clicked.changed;
-            let asked = &mut clicked.asked;
-            let open = show_one(ctx, theme, Window::Settings, |ui| {
+            let actions = &mut clicked.actions;
+            let page = self.page;
+            let open = show_one(ctx, was_editing, |ui| {
                 let mut form = Form {
                     editing,
-                    draft: &mut self.draft,
-                    drive: &mut self.drive,
+                    draft,
+                    drive,
                     changed,
-                    asked,
+                    actions,
                     aliases: None,
                     mappings: None,
                 };
-                if self::settings(ui, theme, state, settings, placement, &mut form) {
-                    clicked.forget_placement = true;
-                }
-                aliases_changed = form.aliases;
-                mappings_changed = form.mappings;
+                chosen = settings::show(
+                    ui, theme, state, settings, placement, page, &text, &mut form,
+                );
+                aliases = form.aliases;
+                mappings = form.mappings;
             });
-            self.settings = open;
-            clicked.aliases = aliases_changed;
-            clicked.mappings = mappings_changed;
+            self.open = open;
         }
-        if self.diagnostics {
-            // Computed on the first frame the window is up rather than when the
-            // menu item was clicked, so the window appears immediately and the
-            // waiting happens with something on screen.
-            if self.report.is_none() {
-                self.report = Some(report());
-            }
-            let text = self.report.clone().unwrap_or_default();
-            let open = show_one(ctx, theme, Window::Diagnostics, |ui| {
-                diagnostics(ui, theme, &text)
-            });
-            self.diagnostics = open;
-        }
+        self.go_to(chosen);
+        clicked.aliases = aliases;
+        clicked.mappings = mappings;
         clicked
     }
 }
 
-/// What the user pressed in one of these windows, for the caller to act on.
-///
-/// A struct of one field rather than a bare `bool`, because the Settings window
-/// is where a second such button would go and a `bool` return says nothing
-/// about which one it was.
+/// What the user pressed, for the caller to act on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Clicked {
-    pub forget_placement: bool,
-    /// What the update section was asked to do.
-    pub asked: Asked,
+    /// Buttons pressed this frame, in the order they were pressed.
+    pub actions: Vec<ActionId>,
     /// The alias list as it should now be, when this frame changed it.
     pub aliases: Option<Vec<crate::alias::Alias>>,
     /// And the drive list, likewise.
@@ -286,48 +242,40 @@ pub struct Clicked {
     pub changed: Vec<SettingChange>,
 }
 
-/// One window, returning whether it is still open.
-fn show_one(
-    ctx: &egui::Context,
-    theme: &Theme,
-    which: Window,
-    mut body: impl FnMut(&mut egui::Ui),
-) -> bool {
+/// The window, returning whether it is still open.
+/// `was_editing` is whether a text box had the keyboard when this frame
+/// began. Taken before the pass, because by the time the pass has run the box
+/// has already let go of it - see the Escape note below.
+fn show_one(ctx: &egui::Context, was_editing: bool, mut body: impl FnMut(&mut egui::Ui)) -> bool {
     let mut open = true;
     ctx.show_viewport_immediate(
-        egui::ViewportId::from_hash_of(which.id()),
+        egui::ViewportId::from_hash_of(ID),
         egui::ViewportBuilder::default()
-            .with_title(which.title())
-            .with_inner_size(which.size())
-            .with_min_inner_size([420.0, 300.0]),
+            .with_title(TITLE)
+            .with_inner_size(SIZE)
+            .with_min_inner_size(MIN_SIZE),
         |ctx, _class| {
             egui::CentralPanel::default()
-                .frame(
-                    egui::Frame::new()
-                        .fill(opaque(theme.surface))
-                        .inner_margin(theme::PAD_X),
-                )
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, &mut body);
-                });
+                .frame(egui::Frame::NONE)
+                .show(ctx, &mut body);
 
-            // The title bar's close button, and Escape while this window has
-            // the keyboard. Without the first the window closes and
-            // immediately reappears, because nothing told the parent it had
-            // gone; without the second, the key that shuts every other layer of
-            // this program does nothing here.
+            // Escape, innermost thing first.
             //
+            // This used to be one unconditional read, and it was wrong in a
+            // way nothing reported: egui drops widget focus on an
+            // *unconsumed* Escape inside `Focus::begin_pass`, so a press
+            // while a text box had the keyboard both ended the edit and shut
+            // the window in the same frame. With a read-only document that
+            // was invisible. With a form it threw the window away from under
+            // somebody who was backing out of one field.
             //
-            // There used to be a third, F1, needed because once a window has
-            // the keyboard its presses land in that viewport rather than the
-            // panel's - so the toggle in the shell could never see them. The
-            // key and the window it opened are both gone; Ctrl+, reaches the
-            // settings window from the panel only, which is where it is
-            // pressed.
-            let by_key = ctx.input(|i| i.key_pressed(egui::Key::Escape));
-            if by_key || ctx.input(|i| i.viewport().close_requested()) {
+            // So a press that a box has just answered is a press this does
+            // not see. `was_editing` is taken before the pass, because by
+            // the time the pass has run the box has already let go.
+            let escaped =
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            let closing = ctx.input(|i| i.viewport().close_requested());
+            if closing || (escaped && !was_editing) {
                 open = false;
             }
         },
@@ -336,679 +284,29 @@ fn show_one(
 }
 
 /// The panel's surface without its transparency.
-///
-/// These windows are documents rather than overlays: they sit over other
-/// programs for minutes at a time, and text on a translucent ground is harder
-/// to read the longer you read it.
-fn opaque(colour: egui::Color32) -> egui::Color32 {
-    egui::Color32::from_rgb(colour.r(), colour.g(), colour.b())
+pub fn opaque(colour: egui::Color32) -> egui::Color32 {
+    settings::opaque(colour)
 }
 
-fn heading(ui: &mut egui::Ui, theme: &Theme, text: &str) {
-    crate::gui::settings::widgets::group_gap(ui);
-    crate::gui::settings::widgets::group_heading(ui, theme, text);
-}
-
-fn row(ui: &mut egui::Ui, theme: &Theme, key: &str, what: &str) {
-    ui.horizontal(|ui| {
-        // A fixed key column, so the descriptions line up in one rule rather
-        // than stepping in and out with the length of each key name.
-        ui.allocate_ui_with_layout(
-            egui::vec2(130.0, 22.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.label(
-                    egui::RichText::new(key)
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
-                        .color(theme.accent),
-                );
-            },
-        );
-        ui.label(
-            egui::RichText::new(what)
-                .font(theme::font(theme::SIZE_ROW, Weight::Regular))
-                .color(theme.text),
-        );
-    });
-}
-
-/// Returns whether the remembered window position was asked to be forgotten.
-/// Everything one frame of the settings window produces or carries over.
-///
-/// Bundled rather than passed as four more parameters, because they are one
-/// thing: what this frame learned, on its way back to the caller that can act
-/// on it. `editing` is the odd one out and belongs here anyway - it is the
-/// only piece that survives the frame.
-struct Form<'a> {
-    editing: &'a mut Option<(SettingKey, String)>,
-    draft: &'a mut AliasDraft,
-    drive: &'a mut DriveDraft,
-    changed: &'a mut Vec<SettingChange>,
-    asked: &'a mut Asked,
-    /// The alias list as it should now be, when this frame changed it.
-    aliases: Option<Vec<crate::alias::Alias>>,
-    /// And the drive list, likewise.
-    mappings: Option<Vec<crate::paths::Mapping>>,
-}
-
-fn settings(
-    ui: &mut egui::Ui,
-    theme: &Theme,
-    state: &AppState,
-    settings: &Settings,
-    placement: Option<(i32, i32)>,
-    form: &mut Form<'_>,
-) -> bool {
-    // This window used to be read-only, on the grounds that a settings window
-    // writing a second copy of the truth is how the file and the window come
-    // to disagree. That objection is right and is answered rather than
-    // overruled: there is no second copy. Every control below is drawn from
-    // the live `Settings` each frame, and a change is written through
-    // `config::write`, which reads the file back before it keeps the result.
-    // The only state held here is the text of the box being typed in, which
-    // any text box has to have.
-    for section in view::settings::sections(settings) {
-        heading(ui, theme, section.heading);
-        for row in &section.rows {
-            control(ui, theme, row, form);
-        }
-    }
-
-    aliases(ui, theme, settings, form);
-
-    drives(ui, theme, settings, form);
-
-    if let Some(path) = &settings.history_path {
-        heading(ui, theme, "Remembering");
-        row(ui, theme, "Stored in", &path.display().to_string());
-    }
-
-    // The one control in this window that writes anything, and it is not a
-    // contradiction of the note at the top: a window position is runtime state
-    // the mouse produced, not a line in a file the user maintains. There is
-    // nothing here for the file and the window to disagree about.
-    let mut forget = false;
-    heading(ui, theme, "Where the panel appears");
-    match placement {
-        Some((left, top)) => {
-            row(
-                ui,
-                theme,
-                "Position",
-                &format!("where you left it, {left},{top}"),
-            );
-            ui.add_space(8.0);
-            forget = ui.button("Forget the remembered position").clicked();
-        }
-        None => {
-            row(
-                ui,
-                theme,
-                "Position",
-                "chosen by the program \u{b7} drag the panel to move it",
-            );
-        }
-    }
-
-    heading(ui, theme, "Updates");
-    row(
-        ui,
-        theme,
-        "This version",
-        &crate::update::Version::current().to_string(),
-    );
-    match &settings.update_from {
-        None => row(
-            ui,
-            theme,
-            "Looking in",
-            "Nowhere \u{b7} set update_from to be told about new versions",
-        ),
-        Some(folder) => {
-            row(ui, theme, "Looking in", &folder.display().to_string());
-
-            // Three states, and the third is not the second. "Nothing yet"
-            // means the checker has not answered, which is a different thing
-            // from having looked and found nothing - claiming to be up to
-            // date before knowing would be the one lie this section could
-            // tell.
-            match &state.update {
-                None => row(ui, theme, "Status", "Looking\u{2026}"),
-                Some(crate::update::Found::UpToDate) => {
-                    row(ui, theme, "Status", "This is the newest version")
-                }
-                Some(crate::update::Found::Unavailable { detail }) => {
-                    row(ui, theme, "Status", detail)
-                }
-                Some(crate::update::Found::Available { manifest, msi }) => {
-                    row(ui, theme, "Available", &manifest.version.to_string());
-                    if let Some(notes) = &manifest.notes {
-                        row(ui, theme, "What changed", notes);
-                    }
-                    if !msi.is_file() {
-                        row(
-                            ui,
-                            theme,
-                            "Installer",
-                            "Not where the manifest says it is \u{b7} ask whoever published it",
-                        );
-                    }
-                }
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.add_space(KEY_COLUMN);
-                if ui.button("Check now").clicked() {
-                    form.asked.check_now = true;
-                }
-                // Only when there is something to install and something to
-                // install it from. A button that reported a problem when
-                // pressed is a button that should not have been pressable.
-                let ready = matches!(
-                    &state.update,
-                    Some(crate::update::Found::Available { msi, .. }) if msi.is_file()
-                );
-                if ready && ui.button("Install and restart").clicked() {
-                    form.asked.install = true;
-                }
-            });
-            if matches!(&state.update, Some(crate::update::Found::Available { .. })) {
-                ui.horizontal(|ui| {
-                    ui.add_space(KEY_COLUMN);
-                    ui.label(
-                        egui::RichText::new(
-                            "Installing closes files, asks Windows for permission, \
-                             and opens it again.",
-                        )
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                        .color(theme.dim),
-                    );
-                });
-            }
-        }
-    }
-
-    heading(ui, theme, "Configuration file");
-    let config = crate::config::file::default_config_path();
-    match &config {
-        Some(path) => {
-            row(ui, theme, "Path", &path.display().to_string());
-            ui.add_space(8.0);
-            if ui.button("Open the configuration file").clicked() {
-                // Whatever the user has registered for .toml, which is what
-                // "open" means everywhere else on this machine.
-                #[cfg(windows)]
-                let _ = crate::open::shell_open(&path.to_string_lossy());
-            }
-        }
-        None => {
-            row(
-                ui,
-                theme,
-                "Path",
-                "None \u{b7} running on the built-in defaults",
-            );
-        }
-    }
-    forget
-}
-
-/// One setting, drawn as whatever kind of control it needs.
-///
-/// A control whose value cannot be saved is drawn disabled rather than hidden.
-/// Hiding it would answer "why can I not change the theme?" with silence; this
-/// way the setting is visible, its value is visible, and the line underneath
-/// names what is holding it.
-fn control(ui: &mut egui::Ui, theme: &Theme, row: &view::settings::Row, form: &mut Form<'_>) {
-    use crate::gui::settings::widgets::{self, width};
-    use view::settings::Field;
-
-    let changed = &mut *form.changed;
-    let editing = &mut *form.editing;
-    let mut push = |typed| {
-        changed.push(SettingChange {
-            key: row.key,
-            typed,
-            label: row.label,
-        })
-    };
-
-    let caveat = row.caveat();
-    let control_w = match &row.field {
-        Field::Choice { .. } => width::DROPDOWN,
-        Field::Toggle { .. } => width::SWITCH,
-        Field::Text { .. } => width::TEXT,
-    };
-    let spec = widgets::Row {
-        label: row.label,
-        help: row.help,
-        caveat: caveat.as_deref(),
-        // A setting the environment or a flag is holding is drawn disabled
-        // rather than hidden. Hiding it would answer "why can I not change
-        // the theme?" with silence; this way the setting is there, its value
-        // is there, and the line underneath names what is holding it.
-        enabled: row.pin.is_none(),
-        control_w,
-    };
-
-    widgets::setting_row(ui, theme, spec, |ui| match &row.field {
-        // A drop-down, where this used to show every option at once. That
-        // was the right answer in a 620-point column with the controls in a
-        // 190-point gutter: three words side by side cost nothing and saved
-        // a click. It is the wrong answer in a tile whose right-hand column
-        // is a fixed width, because three options of unequal length make
-        // three rows that do not line up with each other or with the
-        // switches above and below them.
-        Field::Choice { options, current } => {
-            let labels: Vec<&str> = options.iter().map(|o| o.label).collect();
-            let salt = format!("files-setting-{}", row.key.name());
-            if let Some(i) = widgets::dropdown(ui, &salt, *current, &labels, control_w) {
-                push(Typed::Text(options[i].value.to_string()));
-            }
-        }
-        Field::Toggle { on } => {
-            let mut value = *on;
-            if widgets::switch(ui, theme, &mut value, row.label).changed() {
-                push(Typed::Flag(value));
-            }
-        }
-        // Committed when the box gives up the keyboard, which is Enter and
-        // clicking away and is *not* Escape. Not per keystroke: every
-        // character of a path would otherwise be a write to a file on a
-        // network share, and half of them would name a program that does not
-        // exist yet.
-        Field::Text { value, placeholder } => {
-            let mut text = match &editing {
-                Some((key, buffer)) if *key == row.key => buffer.clone(),
-                _ => value.clone(),
-            };
-            let typed = widgets::text_field(ui, theme, &mut text, placeholder, control_w, None);
-            if typed.commit {
-                if text.trim() != value.trim() {
-                    push(Typed::Text(text));
-                }
-                *editing = None;
-            } else if typed.response.has_focus() {
-                *editing = Some((row.key, text));
-            } else if typed.response.lost_focus() {
-                // Escape. The draft is dropped and the box goes back to what
-                // the file says, which is the whole point of having a way
-                // out of a half-typed path.
-                *editing = None;
-            }
-        }
-    });
-}
-
-/// The drives, with a row to add one and a button to take one away.
-///
-/// The most dangerous control in this window, and the one written most
-/// carefully. A mistyped share path is the single configuration error with no
-/// symptom: the search finds nothing, and a code with no files looks exactly
-/// like a job with no files. So a path that is not there is called out on the
-/// row rather than accepted silently - as a warning and not a refusal, because
-/// this configuration roams to laptops where `R:\` legitimately is not mapped.
-///
-/// Every change is written whole and takes effect at the next start. Nothing
-/// is applied live: an index actor per drive is started once, and telling one
-/// to become a different drive is a much larger thing than editing a list.
-fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
-    use view::settings::drives as words;
-
-    heading(ui, theme, words::HEADING);
-    ui.label(
-        egui::RichText::new(words::HELP)
-            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-            .color(theme.dim),
-    );
-    ui.add_space(6.0);
-
-    let current = settings.routes.all();
-    for mapping in current {
-        ui.horizontal(|ui| {
-            let mut enabled = mapping.enabled;
-            if ui.checkbox(&mut enabled, "").changed() {
-                form.mappings = Some(
-                    current
-                        .iter()
-                        .map(|m| {
-                            let mut m = m.clone();
-                            if m.id == mapping.id {
-                                m.enabled = enabled;
-                            }
-                            m
-                        })
-                        .collect(),
-                );
-            }
-            ui.allocate_ui_with_layout(
-                egui::vec2(84.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(mapping.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
-                            .color(theme.accent),
-                    );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(220.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(mapping.path.display().to_string())
-                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
-                            .color(theme.text),
-                    );
-                },
-            );
-            ui.label(
-                egui::RichText::new(mapping.kind.label())
-                    .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                    .color(theme.dim),
-            );
-            if ui.button(words::REMOVE).clicked() {
-                form.mappings = Some(
-                    current
-                        .iter()
-                        .filter(|m| m.id != mapping.id)
-                        .cloned()
-                        .collect(),
-                );
-            }
-        });
-
-        // The one error with no symptom, said out loud. A warning rather than
-        // a refusal: this file roams, and a laptop at home has none of them.
-        if mapping.enabled && !mapping.path.as_os_str().is_empty() && !mapping.path.is_dir() {
-            ui.horizontal(|ui| {
-                ui.add_space(28.0);
-                ui.label(
-                    egui::RichText::new(words::NOT_THERE)
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                        .color(theme.tone(view::status::Tone::Warn)),
-                );
-            });
-        }
-    }
-
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut form.drive.name)
-                .hint_text(words::NAME_HINT)
-                .desired_width(84.0),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut form.drive.path)
-                .hint_text(words::PATH_HINT)
-                .desired_width(214.0),
-        );
-        egui::ComboBox::from_id_salt("files-drive-kind")
-            .selected_text(form.drive.kind.label())
-            .width(76.0)
-            .show_ui(ui, |ui| {
-                for kind in [
-                    crate::paths::MappingKind::Flat,
-                    crate::paths::MappingKind::Tree,
-                    crate::paths::MappingKind::Live,
-                ] {
-                    ui.selectable_value(&mut form.drive.kind, kind, kind.label());
-                }
-            });
-        if ui.button(words::ADD).clicked() {
-            match new_drive(current, form.drive) {
-                Ok(next) => {
-                    form.mappings = Some(next);
-                    *form.drive = DriveDraft::default();
-                }
-                Err(problem) => form.drive.problem = Some(problem),
-            }
-        }
-    });
-
-    if let Some(problem) = &form.drive.problem {
-        ui.label(
-            egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                .color(theme.tone(view::status::Tone::Warn)),
-        );
-    }
-}
-
-/// The list as it would be with this drive added, or why it cannot be.
-///
-/// The set rules come from `paths::conflicts`, which is what the loader uses,
-/// so a drive this accepts is one the next start accepts. The rest - a name,
-/// a path, a name that is already taken - are the per-entry rules the parser
-/// applies against a line, restated here against a box.
-fn new_drive(
-    current: &[crate::paths::Mapping],
-    draft: &DriveDraft,
-) -> Result<Vec<crate::paths::Mapping>, String> {
-    use view::settings::drives as words;
-
-    let name = draft.name.trim();
-    let path = draft.path.trim();
-    if name.is_empty() {
-        return Err(words::NEEDS_NAME.into());
-    }
-    if path.is_empty() {
-        return Err(words::NEEDS_PATH.into());
-    }
-    if current.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
-        return Err(words::NAME_TAKEN.into());
-    }
-
-    let mut next = current.to_vec();
-    next.push(crate::paths::Mapping {
-        // The position it is about to occupy. Ids are positions in this list,
-        // so the one being appended takes the index at the end of it.
-        id: crate::paths::MappingId(next.len() as u16),
-        name: name.into(),
-        path: crate::util::winpath::normalise_root(std::path::Path::new(path)),
-        kind: draft.kind,
-        enabled: true,
-        refresh: crate::paths::RefreshPolicy::default_for(draft.kind),
-        depth: crate::config::DEFAULT_LIVE_DEPTH,
-    });
-
-    match crate::paths::conflicts(&next).first() {
-        Some(conflict) => Err(conflict.detail()),
-        None => Ok(next),
-    }
-}
-
-/// The alias list, with a row to add one and a button to take one away.
-///
-/// There is no draft list. Adding and removing each write the whole array
-/// immediately, so the window never holds a version of the aliases the file
-/// does not - which is the same promise the rest of this form makes, kept the
-/// same way. The three boxes on the "add" row are the exception that proves
-/// it: they are what somebody is typing, not what is configured.
-fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
-    use view::settings::aliases as words;
-
-    heading(ui, theme, words::HEADING);
-    ui.label(
-        egui::RichText::new(words::HELP)
-            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-            .color(theme.dim),
-    );
-    ui.add_space(6.0);
-
-    let current = settings.aliases.all();
-    if current.is_empty() {
-        ui.label(
-            egui::RichText::new(words::EMPTY)
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                .color(theme.faint),
-        );
-    }
-
-    for alias in current {
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(90.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(alias.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
-                            .color(theme.accent),
-                    );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(alias.code.as_ref())
-                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
-                            .color(theme.text),
-                    );
-                },
-            );
-            if ui.button(words::REMOVE).clicked() {
-                // The whole list, minus this one. Rewriting the array wholesale
-                // is what keeps "what the window shows" and "what the file
-                // says" the same object rather than two that have to be kept
-                // in step.
-                form.aliases = Some(
-                    current
-                        .iter()
-                        .filter(|a| a.name != alias.name)
-                        .cloned()
-                        .collect(),
-                );
-            }
-            if let Some(note) = &alias.note {
-                ui.label(
-                    egui::RichText::new(note.as_ref())
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                        .color(theme.dim),
-                );
-            }
-        });
-    }
-
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add(
-            egui::TextEdit::singleline(&mut form.draft.name)
-                .hint_text(words::NAME_HINT)
-                .desired_width(84.0),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut form.draft.code)
-                .hint_text(words::CODE_HINT)
-                .desired_width(194.0),
-        );
-        ui.add(
-            egui::TextEdit::singleline(&mut form.draft.note)
-                .hint_text(words::NOTE_HINT)
-                .desired_width(150.0),
-        );
-        if ui.button(words::ADD).clicked() {
-            // The very same check the loader applies, from the same function.
-            // Anything this accepts is something the next start will accept,
-            // which is the entire point of it living in `crate::alias`.
-            match crate::alias::check(&form.draft.name, &form.draft.code, current) {
-                Ok(()) => {
-                    let mut next = current.to_vec();
-                    next.push(crate::alias::Alias {
-                        name: form.draft.name.trim().into(),
-                        code: form.draft.code.trim().into(),
-                        note: Some(form.draft.note.trim())
-                            .filter(|n| !n.is_empty())
-                            .map(Into::into),
-                    });
-                    form.aliases = Some(next);
-                    *form.draft = AliasDraft::default();
-                }
-                Err(problem) => form.draft.problem = Some(problem.detail()),
-            }
-        }
-    });
-
-    // Only after an attempt. Complaining that a name is empty before anybody
-    // has typed one is nagging at somebody who has done nothing wrong.
-    if let Some(problem) = &form.draft.problem {
-        ui.label(
-            egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                .color(theme.tone(view::status::Tone::Warn)),
-        );
-    }
-}
-
-fn diagnostics(ui: &mut egui::Ui, theme: &Theme, report: &str) {
-    ui.horizontal(|ui| {
-        if ui.button("Copy to clipboard").clicked() {
-            ui.ctx().copy_text(report.to_owned());
-        }
-        ui.label(
-            egui::RichText::new("Paste this into an email if you are asking for help.")
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
-                .color(theme.dim),
-        );
-    });
-    ui.add_space(8.0);
-
-    // Monospaced, because the report lines things up in columns and a
-    // proportional font would take that apart.
-    ui.label(
-        egui::RichText::new(report)
-            .monospace()
-            .size(theme::SIZE_SMALL)
-            .color(theme.text),
-    );
-}
+#[allow(dead_code)]
+fn _theme_is_used(_: &theme::Theme) {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Opening one must not open the others, and closing one must not close
-    /// them - which is the whole of what this struct is for.
+    /// What Ctrl+comma does. A toggle used to only ever open, so a second
+    /// press was a no-op and the window could be shut by nothing but Escape
+    /// or its title bar - while the key was advertised as "show or hide".
     #[test]
-    fn the_windows_open_and_close_independently() {
-        let mut windows = Windows::default();
-        assert!(!windows.any_open());
-
-        windows.open(Window::Settings);
-        assert!(windows.is_open(Window::Settings));
-        assert!(!windows.is_open(Window::Diagnostics));
-        assert!(windows.any_open());
-
-        windows.open(Window::Diagnostics);
-        assert!(
-            windows.is_open(Window::Settings),
-            "opening one closed another"
-        );
-    }
-
-    /// What Ctrl+, does. A toggle used to only ever open, so a second press
-    /// was a no-op and the window could be shut by nothing but Escape or its
-    /// title bar - while the key was advertised as "show or hide".
-    #[test]
-    fn toggling_a_window_opens_it_and_then_shuts_it() {
+    fn toggling_the_window_opens_it_and_then_shuts_it() {
         let mut windows = Windows::default();
 
-        windows.toggle(Window::Settings);
-        assert!(
-            windows.is_open(Window::Settings),
-            "the first press did not open"
-        );
+        windows.toggle();
+        assert!(windows.is_open(), "the first press did not open");
 
-        windows.toggle(Window::Settings);
-        assert!(
-            !windows.is_open(Window::Settings),
-            "the second press did not shut"
-        );
+        windows.toggle();
+        assert!(!windows.is_open(), "the second press did not shut");
         assert!(!windows.any_open());
     }
 
@@ -1017,52 +315,76 @@ mod tests {
     #[test]
     fn opening_an_already_open_window_leaves_it_open() {
         let mut windows = Windows::default();
-        windows.open(Window::Settings);
-        windows.open(Window::Settings);
-        assert!(windows.is_open(Window::Settings));
+        windows.open_at(PageId::General);
+        windows.open_at(PageId::General);
+        assert!(windows.is_open());
     }
 
+    /// A named menu item is a destination.
     #[test]
-    fn toggling_one_window_does_not_touch_the_others() {
+    fn opening_at_a_page_lands_on_that_page() {
         let mut windows = Windows::default();
-        windows.open(Window::Diagnostics);
-
-        windows.toggle(Window::Settings);
-        windows.toggle(Window::Settings);
-
-        assert!(
-            windows.is_open(Window::Diagnostics),
-            "diagnostics was shut too"
-        );
+        windows.open_at(PageId::Diagnostics);
+        assert_eq!(windows.page, PageId::Diagnostics);
     }
 
-    /// `doctor` touches the network shares, so the report is taken once per
-    /// opening rather than once per frame. Re-opening must take a fresh one, or
-    /// somebody who fixed a drive and looked again would see the old answer.
+    /// And the key is a resumption: it comes back where you left it.
     #[test]
-    fn re_opening_diagnostics_discards_the_previous_report() {
+    fn the_window_comes_back_on_the_page_it_was_left_on() {
         let mut windows = Windows::default();
-        windows.open(Window::Diagnostics);
+        windows.open_at(PageId::Diagnostics);
+        windows.toggle();
+        windows.toggle();
+        assert_eq!(windows.page, PageId::Diagnostics);
+    }
+
+    /// `doctor` touches the network drives, so the report is taken once per
+    /// arrival rather than once per frame. Coming back to the page must take
+    /// a fresh one, or somebody who fixed a drive and looked again would see
+    /// the old answer.
+    #[test]
+    fn arriving_at_the_diagnostics_discards_the_previous_report() {
+        let mut windows = Windows::default();
+        windows.open_at(PageId::Diagnostics);
         windows.report = Some("stale".into());
 
-        windows.open(Window::Diagnostics);
+        windows.go_to(PageId::General);
+        windows.go_to(PageId::Diagnostics);
         assert_eq!(
             windows.report, None,
-            "a second opening would have shown the first one's answer"
+            "a second arrival would have shown the first one's answer"
         );
     }
 
-    /// They are separate windows, so nothing about them may collide -
-    /// least of all the viewport id, which is what egui keys their position and
-    /// size on.
+    /// Staying put is not arriving. Re-taking the report every frame is the
+    /// failure this whole arrangement is here to avoid.
     #[test]
-    fn each_window_is_distinguishable_from_the_others() {
-        let all = [Window::Settings, Window::Diagnostics];
-        for field in [Window::id, Window::title] {
-            let mut seen: Vec<_> = all.iter().map(|w| field(*w)).collect();
-            seen.sort_unstable();
-            seen.dedup();
-            assert_eq!(seen.len(), all.len(), "two windows share a name");
-        }
+    fn staying_on_the_diagnostics_keeps_the_report_it_has() {
+        let mut windows = Windows::default();
+        windows.open_at(PageId::Diagnostics);
+        windows.report = Some("taken once".into());
+
+        windows.go_to(PageId::Diagnostics);
+        assert_eq!(windows.report.as_deref(), Some("taken once"));
+    }
+
+    /// And a window opened somewhere else pays for nothing.
+    #[test]
+    fn opening_the_window_on_another_page_takes_no_report() {
+        let mut windows = Windows::default();
+        windows.open_at(PageId::General);
+        assert_eq!(windows.report, None);
+    }
+
+    /// Re-opening on the diagnostics, from the diagnostics, still refreshes.
+    /// `go_to` alone would not, because the page did not change.
+    #[test]
+    fn re_opening_on_the_diagnostics_still_takes_a_fresh_report() {
+        let mut windows = Windows::default();
+        windows.open_at(PageId::Diagnostics);
+        windows.report = Some("stale".into());
+
+        windows.open_at(PageId::Diagnostics);
+        assert_eq!(windows.report, None);
     }
 }
