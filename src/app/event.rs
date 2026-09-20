@@ -331,19 +331,23 @@ pub enum Cmd {
     Quit,
 }
 
-/// Which shares a refresh is for.
+/// Which share a refresh is for.
+///
+/// One, always. There used to be an `All` variant behind the `A` key in the
+/// drive picker, and it is gone with it: re-reading every share at once is
+/// nine hundred thousand round trips against somebody else's file server,
+/// started by one keystroke, and a few hundred copies of this program able to
+/// do that is not a feature anybody asked for twice.
+///
+/// Still a named type rather than a bare `MappingId`, because the thing it is
+/// compared against in `index::actor` is also a `MappingId` and a function
+/// taking two of them is a function whose arguments can be swapped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshTarget {
-    All,
-    One(MappingId),
-}
+pub struct RefreshTarget(pub MappingId);
 
 impl RefreshTarget {
     pub fn wants(self, id: MappingId) -> bool {
-        match self {
-            Self::All => true,
-            Self::One(want) => want == id,
-        }
+        self.0 == id
     }
 }
 
@@ -545,7 +549,7 @@ mod tests {
     fn merging_accumulates_commands_and_promotes_redraw() {
         let mut a = Response::none().with(Cmd::Quit);
         a.merge(Response::redraw().with(Cmd::RefreshIndex {
-            target: RefreshTarget::All,
+            target: RefreshTarget(MappingId(0)),
             force: true,
         }));
         assert_eq!(a.redraw, Redraw::Yes);

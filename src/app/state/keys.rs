@@ -50,11 +50,6 @@ impl AppState {
                 Key::Up => return self.move_share(-1),
                 Key::Down => return self.move_share(1),
                 Key::Enter => return self.update_chosen_share(now),
-                // Still available, and still one keystroke - just no longer
-                // the only thing this key can mean.
-                Key::Char('a') | Key::Char('A') => {
-                    return self.update_every_share(now);
-                }
                 Key::Esc | Key::F(5) => return self.close_shares(),
                 Key::Char('q') if ctrl => {
                     self.should_quit = true;
@@ -332,7 +327,7 @@ impl AppState {
             now,
         );
         self.after_refresh(Response::redraw().with(Cmd::RefreshIndex {
-            target: RefreshTarget::One(id),
+            target: RefreshTarget(id),
             force: true,
         }))
     }
@@ -353,20 +348,6 @@ impl AppState {
             });
         }
         r
-    }
-
-    fn update_every_share(&mut self, now: Instant) -> Response {
-        self.picking_share = false;
-        let n = self.share_ids().len();
-        self.set_toast(
-            format!("Updating all {n} drives\u{2026}"),
-            Severity::Info,
-            now,
-        );
-        self.after_refresh(Response::redraw().with(Cmd::RefreshIndex {
-            target: RefreshTarget::All,
-            force: true,
-        }))
     }
 
     /// Up always moves the selection. Always.

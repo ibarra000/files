@@ -13,9 +13,11 @@
 //! round trips. Almost every one of those presses wanted *one* share.
 //!
 //! So the question is asked rather than assumed. The list says how old each
-//! share is and which one has a reason to be updated, `Enter` updates the one
-//! highlighted, and `A` still updates everything for the times that is really
-//! what was meant.
+//! share is and which one has a reason to be updated, and `Enter` updates the
+//! one highlighted. There is no key that updates all of them. There was, and
+//! it is gone: one keystroke able to start that pass on every configured
+//! share - on every machine running this - is the outage the paragraph above
+//! is about, reachable by leaning on a letter.
 
 use std::time::SystemTime;
 

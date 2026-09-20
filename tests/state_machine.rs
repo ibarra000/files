@@ -543,11 +543,7 @@ fn enter_in_the_drive_list_updates_only_that_drive() {
         } => Some(*target),
         _ => None,
     });
-    assert!(
-        matches!(target, Some(RefreshTarget::One(_))),
-        "one drive, not all of them: {:?}",
-        r.cmds
-    );
+    assert!(target.is_some(), "one drive, not all of them: {:?}", r.cmds);
     assert!(!s.picking_share, "and the list closes behind it");
     assert!(
         s.verify_due_at().is_some(),
@@ -555,23 +551,23 @@ fn enter_in_the_drive_list_updates_only_that_drive() {
     );
 }
 
+/// `A` used to refresh every drive at once. It does not any more: re-reading
+/// every share is some nine hundred trips to somebody else's file server, and
+/// one keystroke that starts all of them - on a few hundred machines - is an
+/// outage rather than a shortcut. Drives are refreshed one at a time now.
 #[test]
-fn a_in_the_drive_list_still_updates_everything() {
+fn a_in_the_drive_list_refreshes_nothing() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(press(Key::F(5)), now);
     let r = s.update(press(Key::Char('a')), now);
+
     assert!(
-        r.cmds.iter().any(|c| matches!(
-            c,
-            Cmd::RefreshIndex {
-                target: RefreshTarget::All,
-                force: true
-            }
-        )),
+        !r.cmds.iter().any(|c| matches!(c, Cmd::RefreshIndex { .. })),
         "{:?}",
         r.cmds
     );
+    assert!(!s.picking_share, "an unbound key still closes the list");
 }
 
 #[test]
@@ -2034,15 +2030,11 @@ fn every_toast() -> Vec<String> {
         raised(&s);
     }
 
-    // The drive picker, one drive and all of them.
+    // The drive picker. One drive, because there is no longer a key that
+    // updates all of them.
     let (mut s, now) = state();
     s.update(press(Key::F(5)), now);
     s.update(press(Key::Enter), now);
-    raised(&s);
-
-    let (mut s, now) = state();
-    s.update(press(Key::F(5)), now);
-    s.update(key('a'), now);
     raised(&s);
 
     // A search that never came back. Enter has to land while one is still

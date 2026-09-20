@@ -397,12 +397,17 @@ fn draw_field(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<I
     let text = state.input.text();
 
     if text.is_empty() {
-        // The whole instruction, in the one place the eye is already looking.
-        // "Search" would be decoration; this says what to type.
+        // One word. This used to be the whole instruction - "Type a job code,
+        // for example 11-D-0704" - on the argument that a placeholder saying
+        // "Search" is decoration beside a magnifier that already says it. The
+        // argument was sound and the result was still wrong: a box that
+        // explains itself is a box somebody reads, and this one is summoned
+        // dozens of times an hour by people who learned what it was for on the
+        // first day.
         painter.text(
             pos2(text_left, rect.center().y),
             Align2::LEFT_CENTER,
-            "Type a job code, for example 11-D-0704",
+            "Search",
             theme::font(theme::SIZE_ROW, Weight::Regular),
             fade(theme.dim),
         );
@@ -506,7 +511,7 @@ fn draw_field(ui: &mut Ui, state: &AppState, theme: &Theme, rect: Rect) -> Vec<I
     // the silent one, reached by the ear instead of the eye.
     let spoken = match (&expansion, text.is_empty()) {
         (Some(shown), _) => format!("{text} {shown}"),
-        (None, true) => "Type a job code, for example 11-D-0704".to_string(),
+        (None, true) => "Search".to_string(),
         (None, false) => text.to_string(),
     };
     announce(ui, rect, "field", &spoken);

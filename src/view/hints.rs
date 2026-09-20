@@ -201,7 +201,6 @@ pub fn hints(cx: Context) -> Vec<Hint> {
             hint("Enter", "Update this drive", Priority::Essential),
             quit,
             hint("\u{2191}\u{2193}", "Choose", Priority::High),
-            hint("A", "Update all", Priority::Normal),
             hint("Esc", "Back", Priority::High),
         ];
     }

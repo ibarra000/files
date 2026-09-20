@@ -113,7 +113,6 @@ fn table() -> Vec<Binding> {
         b(Key::Up, NONE, Picking, "previous drive"),
         b(Key::Down, NONE, Picking, "next drive"),
         b(Key::Enter, NONE, Picking, "update the chosen drive"),
-        b(Key::Char('a'), NONE, Picking, "update every drive"),
         b(Key::Esc, NONE, Picking, "back to typing"),
         // Editing. The caret keys are caret keys everywhere, which is the
         // whole of what collapsing the focus bought.
@@ -314,6 +313,101 @@ fn every_binding_in_the_table_still_answers() {
             binding.at
         );
     }
+}
+
+/// Every chord in the table is one the toolkit can actually deliver.
+///
+/// The gap every other test in this file was blind to. They all build a
+/// `KeyEvent` by hand and hand it to the state machine, so the table could - and
+/// did - promise a binding that `gui::input::translate` drops on the floor. That
+/// is how `Ctrl+,` shipped: the arm in `keys.rs` was correct, the chip was
+/// correct, this table was correct, and `egui::Key::Comma` was in neither of the
+/// two lookup tables in `gui::input`, so no press ever reached any of them.
+///
+/// So this one starts where a keystroke really starts. The `egui::Key` for each
+/// character is written out below, which is a second list and earns it: its only
+/// purpose is to disagree with `gui::input::chord` when somebody adds a binding
+/// and forgets the half that receives it.
+#[test]
+fn every_chord_in_the_table_survives_the_input_layer() {
+    for binding in table() {
+        let Key::Char(c) = binding.code else {
+            continue;
+        };
+        if binding.mods != CTRL {
+            continue;
+        }
+        let Some(event) = pressed_with_ctrl(c) else {
+            // Copy, cut and paste never arrive as a key at all - the toolkit
+            // turns them into their own events first, and `translate` puts the
+            // chord back from there. They are covered by `the_clipboard_keys_*`
+            // tests in `gui::input`.
+            continue;
+        };
+
+        let produced = translated(vec![event]);
+        assert!(
+            produced.contains(&KeyEvent::new(binding.code, CTRL)),
+            "Ctrl+{c} ({}) is in the binding table and the input layer drops it: \
+             `gui::input::chord` has no arm for it, so no press can ever reach \
+             the state machine.\ngot: {produced:?}",
+            binding.what
+        );
+    }
+}
+
+/// A bare comma is text, not a command.
+///
+/// The other half of the fix, and the failure the `chord` table is shaped to
+/// avoid: a printable key listed as a binding is typed twice, once from
+/// `Event::Text` and once from `Event::Key`.
+#[test]
+fn a_bare_comma_is_typed_exactly_once() {
+    let typed = translated(vec![
+        eframe::egui::Event::Text(",".into()),
+        raw_press(eframe::egui::Key::Comma, eframe::egui::Modifiers::NONE),
+    ]);
+    assert_eq!(typed, vec![KeyEvent::new(Key::Char(','), Mods::NONE)]);
+}
+
+/// The key that types `c`, for a chord the toolkit delivers as a key.
+///
+/// `None` for the three the toolkit intercepts before anything sees a key.
+fn pressed_with_ctrl(c: char) -> Option<eframe::egui::Event> {
+    use eframe::egui::Key as E;
+    let key = match c {
+        'a' => E::A,
+        'q' => E::Q,
+        'u' => E::U,
+        'w' => E::W,
+        ',' => E::Comma,
+        'c' | 'x' | 'v' => return None,
+        other => panic!("no egui key written down for Ctrl+{other}; add one"),
+    };
+    Some(raw_press(key, eframe::egui::Modifiers::CTRL))
+}
+
+fn raw_press(key: eframe::egui::Key, modifiers: eframe::egui::Modifiers) -> eframe::egui::Event {
+    eframe::egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// What the real input layer makes of a frame's worth of toolkit events.
+fn translated(events: Vec<eframe::egui::Event>) -> Vec<KeyEvent> {
+    let mut input = eframe::egui::InputState::default();
+    input.events = events;
+    files::gui::input::translate(&input)
+        .into_iter()
+        .filter_map(|event| match event {
+            AppEvent::Key(key) => Some(key),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Every chip in the hint bar names a key that does something.

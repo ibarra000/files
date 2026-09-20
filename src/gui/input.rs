@@ -177,6 +177,11 @@ fn chord(key: egui::Key) -> Option<Key> {
         E::Q => Key::Char('q'),
         E::U => Key::Char('u'),
         E::W => Key::Char('w'),
+        // Ctrl+, opens the settings, which is what this operating system uses
+        // the chord for everywhere else. It belongs here rather than in
+        // `binding` for the same reason the letters do: a bare comma is text,
+        // and listing it there would type every one of them twice.
+        E::Comma => Key::Char(','),
         _ => return None,
     })
 }
