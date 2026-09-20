@@ -13,8 +13,7 @@ use std::time::{Duration, Instant};
 
 use files::app::event::LiveMsg;
 use files::app::event::{
-    AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, RefreshTarget, Response, SearchMsg,
-    VerifyMsg,
+    AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Response, SearchMsg, VerifyMsg,
 };
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
