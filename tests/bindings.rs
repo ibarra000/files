@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use files::app::event::{AppEvent, Cmd, HotkeyMsg, Redraw, SearchMsg};
+use files::app::event::{AppEvent, Cmd, Redraw, SearchMsg};
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
@@ -195,28 +195,18 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
 /// A state already at `at`, reached the way the program reaches it rather than
 /// by assigning a field - so the fixture cannot describe a state the program
 /// cannot get into.
+///
+/// Not summoned. There used to be a second fixture that was, because the
+/// hint bar drew a shorter set of chips on a summoned panel and that set was
+/// never contract-tested - which is how a panel shipped whose only route to
+/// the shortcut window was a key it advertised nowhere. The actions menu
+/// that replaced the chips offers the same rows either way, so there is one
+/// fixture again. What a *summoned* panel does differently is dismissal, and
+/// `tests/overlay.rs` is where that lives.
 fn fixture(at: Where) -> (AppState, Instant) {
-    fixture_in(at, false)
-}
-
-/// The same, with the panel summoned - which is the *shipped* configuration
-/// and the one the hint bar calls `compact`.
-///
-/// It had no fixture until now, so `Context::of` always saw `compact: false`
-/// and the short set the real panel draws was never contract-tested. That is
-/// how a panel shipped whose only route to the shortcut window was a key it
-/// advertised nowhere.
-///
-/// Summoned before anything is typed, because `enter_overlay` stands down
-/// whatever was being browsed and selects the field - so summoning afterwards
-/// would unwind the state `at` just reached.
-fn fixture_in(at: Where, compact: bool) -> (AppState, Instant) {
     let now = Instant::now();
     let mut s = AppState::new(Settings::default(), now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
-    if compact {
-        s.update(AppEvent::Hotkey(HotkeyMsg::Summoned), now);
-    }
     for c in "11-D-0704".chars() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), NONE)), now);
     }

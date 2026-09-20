@@ -114,11 +114,11 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     // through a long list does not feel bottomless - which is what the
     // terminal build's " History (2 of 3) " title said.
     //
-    // The position and nothing else. This used to add "Enter to use it, Esc to
-    // go back", which the hint bar says two inches to the right in the chips
-    // that are the actual keys - and saying it twice cost exactly the room the
-    // position needs, so the one thing only this line can say was the thing
-    // that got truncated away.
+    // The position and nothing else. This used to add "Enter to use it, Esc
+    // to go back", which is what the footer says two inches to the right on
+    // the button that names the default action - and saying it twice cost
+    // exactly the room the position needs, so the one thing only this line
+    // can say was the thing that got truncated away.
     if let Some(cursor) = state.history.cursor() {
         return StatusLine {
             text: format!(
@@ -443,16 +443,12 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
     None
 }
 
-/// The two facts the footer reserves room for, so neither can be truncated.
+/// The facts the footer reserves room for, so neither can be truncated.
 ///
-/// Everything else on that line is prose, and prose is what the hint chips eat
-/// into: it is laid out in whatever they left and ellipsised to fit. These two
-/// are not prose. They are values somebody is *looking* for, and a value that
-/// might not be there is not worth putting on screen.
-///
-/// `shown` is how many rows the renderer actually drew. That is the only
-/// honest source for it: the state holds up to [`crate::config::MAX_RESULTS`]
-/// and the panel has room for eight, so nothing in `view` can work it out.
+/// Everything else on that line is prose, and prose is what the buttons on
+/// the right eat into: it is laid out in whatever they left and ellipsised
+/// to fit. These are not prose. They are values somebody is *looking* for,
+/// and a value that might not be there is not worth putting on screen.
 ///
 /// # Why each of them is here
 ///

@@ -452,15 +452,13 @@ impl AppState {
     ///
     /// Kept beside the state it reads rather than in `view::status`, which
     /// draws the same facts: the panel has to know whether to leave room for
-    /// the line *before* it asks what the line says, and two answers to that
-    /// would be a footer whose height and contents disagree. `index_warning`
-    /// is the other half and calls this one, so there is no second opinion to
-    /// drift - only the words are over there.
+    /// the line *before* it asks what the line says. `index_warning` is the
+    /// other half and calls this one, so there is no second opinion to drift
+    /// - only the words are over there.
     ///
     /// Takes the clock rather than reading `last_frame_wall`, because the
-    /// renderer has a fresher one and staleness is the one notice that arrives
-    /// with no event behind it. `is_quiet` passes the stored one, which is set
-    /// by `note_frame` before the panel is measured.
+    /// renderer has a fresher one and staleness is the one notice that
+    /// arrives with no event behind it.
     /// Whether an empty box is showing the configured shortcuts.
     ///
     /// Ueli's favourites. Its empty screen lists them and that is the whole

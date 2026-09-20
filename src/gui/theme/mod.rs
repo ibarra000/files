@@ -176,7 +176,7 @@ pub const SIZE_INPUT: f32 = 22.0;
 pub const SIZE_ROW: f32 = 15.0;
 /// The folder beside it, and the status line.
 pub const SIZE_SMALL: f32 = 13.0;
-/// A key name in a hint chip.
+/// A key name in a shortcut chip, a group caption, and a menu row.
 pub const SIZE_CHIP: f32 = 12.0;
 /// The first-run headline in the empty state.
 pub const SIZE_HEADLINE: f32 = 17.0;

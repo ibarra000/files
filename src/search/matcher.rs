@@ -718,9 +718,9 @@ mod tests {
         );
     }
 
-    /// `visible_range` renders this as "1-12 of {matched}". A count taken
-    /// before the filter would promise rows that do not exist, and somebody
-    /// would scroll looking for them.
+    /// `view::status::found` renders this as the number in the footer. A
+    /// count taken before the filter would promise rows that do not exist,
+    /// and somebody would scroll looking for them.
     #[test]
     fn the_match_count_counts_what_survived_the_filter() {
         let s = snap(&["a-0704.pdf", "b-0704.dwg", "c-0704.dwg"]);

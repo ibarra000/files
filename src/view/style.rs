@@ -23,8 +23,9 @@
 /// they are status text and are held to the status rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
-    /// The status line and the toasts that share it. One line, ellipsised to
-    /// whatever the hint chips left, so it is a fragment and takes no stop.
+    /// The status line and the toasts that share it. One line, ellipsised
+    /// to whatever the footer's two buttons left, so it is a fragment and
+    /// takes no stop.
     Status,
     /// The results pane, the empty-state blocks and the windows. Room for
     /// whole sentences, so it has them.
