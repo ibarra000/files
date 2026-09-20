@@ -119,7 +119,6 @@ impl AppState {
             Action::Recall => Key::Up,
             Action::Results => Key::Down,
             Action::Refresh => Key::F(5),
-            Action::Help => Key::F(1),
         };
         self.on_key(KeyEvent::new(key, Mods::NONE), now)
     }

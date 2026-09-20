@@ -688,22 +688,26 @@ fn a_key_release_in_the_overlay_does_nothing() {
     assert!(s.overlay_up);
 }
 
-/// The shortcuts are a window of their own now, so `F1` asks for one rather
+/// The settings are a window of their own, so `Ctrl+,` asks for one rather
 /// than borrowing the panel's body.
 ///
-/// This used to be a panel that had to close itself before the overlay would,
-/// and it advertised Escape in its own key hints to say so - a panel that
+/// The shortcuts window used to work this way too, and before that it was a
+/// panel that had to close itself before the overlay would - a panel that
 /// could not be shut without taking the search box with it would have been a
-/// trap. A real window has a title bar, so none of that has to be arranged.
+/// trap. It is gone entirely now; a real window has a title bar, so none of
+/// that has to be arranged for the one that is left.
 #[test]
-fn f1_asks_to_show_or_hide_the_shortcuts_window_without_disturbing_the_panel() {
+fn ctrl_comma_asks_for_the_settings_without_disturbing_the_panel() {
     let (mut s, now) = state();
     summon(&mut s, now);
 
-    let opened = s.update(press(Key::F(1)), now);
+    let opened = s.update(
+        AppEvent::Key(KeyEvent::new(Key::Char(','), Mods::CTRL)),
+        now,
+    );
     assert!(
-        has(&opened, &Cmd::ToggleHelp),
-        "F1 should ask for the shortcuts window: {:?}",
+        has(&opened, &Cmd::ToggleSettings),
+        "Ctrl+, should ask for the settings window: {:?}",
         opened.cmds
     );
     assert!(s.overlay_up, "and must not disturb the panel");

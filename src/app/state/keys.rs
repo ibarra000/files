@@ -102,9 +102,14 @@ impl AppState {
             }
             Key::Char('w') if ctrl => self.delete_field(now),
             // What this operating system uses for settings everywhere else.
-            // F1 to F5 are all spoken for, and a sixth function key would be
-            // one nobody guesses. Above the Ctrl+Alt arm, so it is reached at
-            // all: everything below treats a modified character as text.
+            // F2 to F5 are all spoken for and F1 is deliberately dead, so a
+            // function key was never the answer here. Above the Ctrl+Alt arm,
+            // so it is reached at all: everything below treats a modified
+            // character as text.
+            //
+            // It is also the binding this program shipped unable to deliver -
+            // see `gui::input::chord`, and the test in `tests/bindings.rs`
+            // that now drives the real input layer rather than this function.
             Key::Char(',') if ctrl && !alt => Response::redraw().with(Cmd::ToggleSettings),
 
             // AltGr arrives as Ctrl+Alt on Windows, and on a German, Polish
@@ -180,11 +185,11 @@ impl AppState {
             // make this intermittently dead. An unmodified letter is not
             // available for a toggle - every `Char` falls through into the
             // search box.
-            // F1 is the one key every program has meant "help" for thirty
-            // years, and it was unbound. Everything the hint bar cannot fit
-            // lives behind it, which is what lets that bar stay short.
-            Key::F(1) => Response::redraw().with(Cmd::ToggleHelp),
-
+            //
+            // F1 is deliberately absent. It opened a window listing every key,
+            // and both are gone: the panel is a search box, and a search box
+            // that answers a function key with a page of documentation is one
+            // more thing to be surprised by. What remains is on the chips.
             Key::F(2) => self.toggle_viewer(now),
 
             Key::F(3) => self.cycle_match_mode(now),

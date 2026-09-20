@@ -38,7 +38,6 @@ const ICON_SIZE: u32 = 32;
 pub enum TrayAction {
     /// Bring the panel up. Also what a left-click on the icon means.
     Show,
-    Help,
     Settings,
     Diagnostics,
     Quit,
@@ -68,14 +67,12 @@ impl Tray {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let menu = Menu::new();
         let show = MenuItem::new("Show files", true, None);
-        let help = MenuItem::new("Keyboard shortcuts", true, None);
         let settings = MenuItem::new("Settings", true, None);
         let diagnostics = MenuItem::new("Diagnostics", true, None);
         let quit = MenuItem::new("Quit files", true, None);
         menu.append_items(&[
             &show,
             &PredefinedMenuItem::separator(),
-            &help,
             &settings,
             &diagnostics,
             &PredefinedMenuItem::separator(),
@@ -84,7 +81,6 @@ impl Tray {
 
         let ids = vec![
             (show.id().clone(), TrayAction::Show),
-            (help.id().clone(), TrayAction::Help),
             (settings.id().clone(), TrayAction::Settings),
             (diagnostics.id().clone(), TrayAction::Diagnostics),
             (quit.id().clone(), TrayAction::Quit),
@@ -200,11 +196,11 @@ mod tests {
         let Ok(tray) = Tray::new(|_| {}) else {
             return;
         };
-        assert_eq!(tray.len(), 5);
+        assert_eq!(tray.len(), 4);
 
         let mut actions: Vec<_> = tray.ids.iter().map(|(_, a)| *a).collect();
         actions.sort_by_key(|a| format!("{a:?}"));
         actions.dedup();
-        assert_eq!(actions.len(), 5, "two menu items run the same action");
+        assert_eq!(actions.len(), 4, "two menu items run the same action");
     }
 }

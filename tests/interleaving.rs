@@ -93,7 +93,6 @@ fn an_intent() -> impl Strategy<Value = Step> {
             Just(files::view::hints::Action::Recall),
             Just(files::view::hints::Action::Results),
             Just(files::view::hints::Action::Refresh),
-            Just(files::view::hints::Action::Help),
         ]
         .prop_map(Intent::Hint),
     ]

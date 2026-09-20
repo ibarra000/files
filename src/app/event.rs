@@ -317,16 +317,14 @@ pub enum Cmd {
     /// because the window work has to happen on the thread that owns the
     /// window, and because whether the overlay is up has exactly one owner.
     DismissOverlay,
-    /// Show the keyboard-shortcuts window, or put it away if it is already up.
+    /// Show the settings window, or put it away if it is already up.
     ///
     /// A command rather than a flag on the state, because the window belongs to
     /// the shell: the state machine's business is what the keys mean, and
     /// "which windows are open" is not something it can be asked to be right
     /// about. Which is also why this says *toggle* rather than carrying the
     /// answer - only the shell knows whether the window is open, so only the
-    /// shell can decide which way a press of F1 goes.
-    ToggleHelp,
-    /// Show or hide the settings window.
+    /// shell can decide which way the press goes.
     ToggleSettings,
     Quit,
 }

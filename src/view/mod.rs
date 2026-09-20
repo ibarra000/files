@@ -49,7 +49,6 @@ use std::borrow::Cow;
 pub mod style;
 
 pub mod empty;
-pub mod help;
 pub mod hints;
 pub mod preview;
 pub mod row;

@@ -61,7 +61,6 @@ pub enum Action {
     Recall,
     Results,
     Refresh,
-    Help,
 }
 
 const fn hint(key: &'static str, label: &'static str, priority: Priority) -> Hint {
@@ -179,14 +178,6 @@ pub fn hints(cx: Context) -> Vec<Hint> {
                 Action::Results,
             ));
         }
-        // The chip that stands for every key this bar could not fit, which is
-        // why it outranks the viewer indicator here and does not in the full
-        // set. A bar narrow enough to be dropping chips is exactly the bar
-        // whose reader most needs the window that lists all of them - and in
-        // the overlay there is nothing else on screen that could teach a key.
-        // The viewer chip names one fact; this one is the index to every fact,
-        // and F1 was reachable from the keyboard and advertised nowhere.
-        v.push(clickable("F1", "All keys", Priority::Normal, Action::Help));
         v.push(hint("F2", viewer_label(cx.viewer), Priority::Low));
         return v;
     }
@@ -253,16 +244,15 @@ pub fn hints(cx: Context) -> Vec<Hint> {
             }
             // Ahead of `F1 help`, and `High` rather than `Normal`. Both are
             // deliberate: `fit` drops the lowest priority first and the
-            // rightmost among equals, so at `Normal` this chip sat behind help
-            // and was the first thing to go - which is how the viewer came to
-            // be advertised nowhere at the shipped width.
-            //
-            // It outranks help because it is the only chip carrying *state*.
-            // The others name a key; this one also answers "and what is it set
-            // to", which is the question F2 leaves behind every time it is
-            // pressed.
+            // rightmost among equals, so at `Normal` this chip sat behind the
+            // help chip and was the first thing to go - which is how the
+            // viewer came to be advertised nowhere at the shipped width. The
+            // help chip has since gone with the window it opened; this one
+            // keeps the rank it was raised to, because it is the only chip
+            // carrying *state*. The others name a key; this one also answers
+            // "and what is it set to", which is the question F2 leaves behind
+            // every time it is pressed.
             v.push(hint("F2", viewer_label(cx.viewer), Priority::High));
-            v.push(clickable("F1", "Help", Priority::Normal, Action::Help));
             v.push(clickable("F5", "Refresh", Priority::Low, Action::Refresh));
             if cx.has_text {
                 v.push(hint("Esc", "Clear", Priority::Low));

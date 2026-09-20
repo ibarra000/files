@@ -37,12 +37,11 @@ use crate::index::enumerate::DirSource;
 
 /// Windows a keystroke asked the shell to show or hide.
 ///
-/// A struct of bools rather than one enum, because two can legitimately be
-/// asked for in the same turn - a burst of keystrokes is fed before anything
-/// reads this - and an enum would make the second silently replace the first.
+/// A struct rather than an enum, even at one field: a burst of keystrokes is
+/// fed before anything reads this, so a second request must not be able to
+/// replace the first. It held two until the shortcuts window was removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowRequests {
-    pub help: bool,
     pub settings: bool,
 }
 
@@ -141,7 +140,6 @@ impl App {
         // `pump` that `logic` performs before `ui` ever asks.
         for cmd in &response.cmds {
             match cmd {
-                event::Cmd::ToggleHelp => self.requested.help = true,
                 event::Cmd::ToggleSettings => self.requested.settings = true,
                 _ => {}
             }
@@ -331,29 +329,33 @@ mod tests {
         app.shutdown();
     }
 
-    /// F1 survives the pump that happens between the key and the question.
+    /// A window request survives the pump that happens between the key and the
+    /// question.
     ///
     /// The seam nothing covered, and the reason F1 did nothing for as long as
-    /// it existed. `tests/overlay.rs` asserts the state machine *emits*
-    /// `Cmd::ToggleHelp`, which it always did; `gui::Shell::logic` then feeds and
-    /// pumps, and `ui` asks afterwards. Anything that lived only in `pending`
-    /// was gone by then.
+    /// it existed - the same shape of bug Ctrl+, then had one layer further
+    /// out. `tests/bindings.rs` asserts the state machine *emits* the command,
+    /// which it always did; `gui::Shell::logic` then feeds and pumps, and `ui`
+    /// asks afterwards. Anything that lived only in `pending` was gone by then.
     #[test]
-    fn a_help_request_survives_the_pump_that_follows_it() {
+    fn a_window_request_survives_the_pump_that_follows_it() {
         let (_tx, rx) = bounded::<AppEvent>(4);
         let mut app = App::around(state(), actors_for_test(), rx);
         let now = Instant::now();
 
-        app.feed(AppEvent::Key(KeyEvent::new(Key::F(1), Mods::NONE)), now);
+        app.feed(
+            AppEvent::Key(KeyEvent::new(Key::Char(','), Mods::CTRL)),
+            now,
+        );
         // Exactly what the shell does between the keystroke and the question.
         let _ = app.pump(now);
 
         assert!(
-            app.take_window_requests().help,
+            app.take_window_requests().settings,
             "the pump swallowed the request before anybody could read it"
         );
         assert!(
-            !app.take_window_requests().help,
+            !app.take_window_requests().settings,
             "read-and-clear, or the window opens again on the next frame"
         );
         app.shutdown();

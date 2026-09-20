@@ -81,7 +81,6 @@ const WANT_BACKDROP: window::Backdrop = window::Backdrop::Painted;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     Show,
-    Help,
     Settings,
     Diagnostics,
     Quit,
@@ -213,7 +212,7 @@ struct Shell {
     up: bool,
     /// Gestures from outside the frame loop: the tray, and a second launch.
     requests: crossbeam_channel::Receiver<Request>,
-    /// Help, Settings and Diagnostics, which are ordinary windows.
+    /// Settings and Diagnostics, which are ordinary windows.
     windows: Windows,
     /// The notification-area icon. Held for the life of the process, because
     /// dropping it takes the icon out of the tray.
@@ -295,7 +294,6 @@ impl Shell {
         let _tray = tray::Tray::new(move |action| {
             post(match action {
                 tray::TrayAction::Show => Request::Show,
-                tray::TrayAction::Help => Request::Help,
                 tray::TrayAction::Settings => Request::Settings,
                 tray::TrayAction::Diagnostics => Request::Diagnostics,
                 tray::TrayAction::Quit => Request::Quit,
@@ -355,7 +353,6 @@ impl Shell {
                 // taking the foreground and that is the one thread Windows will
                 // accept it from.
                 Request::Show => self.app.actors.summon_overlay(),
-                Request::Help => self.windows.open(Window::Help),
                 Request::Settings => self.windows.open(Window::Settings),
                 Request::Diagnostics => self.windows.open(Window::Diagnostics),
                 Request::Quit => self.app.state.should_quit = true,
@@ -715,13 +712,6 @@ impl eframe::App for Shell {
         let requested = self.app.take_window_requests();
         if requested.settings {
             self.windows.toggle(Window::Settings);
-        }
-        if requested.help {
-            // Toggled rather than opened: F1 says "show or hide" in the panel
-            // this draws. The other half of that is in `windows::show_one`,
-            // for the presses this viewport never receives because the help
-            // window has the keyboard.
-            self.windows.toggle(Window::Help);
         }
         let _ = self.app.pump(now);
     }

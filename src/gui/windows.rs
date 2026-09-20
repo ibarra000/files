@@ -1,6 +1,6 @@
-//! Help, Settings and Diagnostics.
+//! Settings and Diagnostics.
 //!
-//! Three ordinary windows, reached from the tray menu and from `?`. Ordinary is
+//! Two ordinary windows, reached from the tray menu. Ordinary is
 //! the point: they have a title bar, they can be moved and resized, and they
 //! stay where they were put. The panel is the thing that behaves unusually, and
 //! it earns that by being summoned and dismissed dozens of times an hour; a
@@ -84,7 +84,6 @@ const TEXT_WIDTH: f32 = 260.0;
 /// Which of the three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Window {
-    Help,
     Settings,
     Diagnostics,
 }
@@ -92,7 +91,6 @@ pub enum Window {
 impl Window {
     fn title(self) -> &'static str {
         match self {
-            Self::Help => "files - keyboard shortcuts",
             Self::Settings => "files - settings",
             Self::Diagnostics => "files - diagnostics",
         }
@@ -100,7 +98,6 @@ impl Window {
 
     fn id(self) -> &'static str {
         match self {
-            Self::Help => "files-help",
             Self::Settings => "files-settings",
             Self::Diagnostics => "files-diagnostics",
         }
@@ -108,7 +105,6 @@ impl Window {
 
     fn size(self) -> [f32; 2] {
         match self {
-            Self::Help => [620.0, 560.0],
             Self::Settings => [620.0, 480.0],
             Self::Diagnostics => [860.0, 620.0],
         }
@@ -118,7 +114,6 @@ impl Window {
 /// Which windows are open, and anything they had to compute to open.
 #[derive(Default)]
 pub struct Windows {
-    help: bool,
     settings: bool,
     diagnostics: bool,
     /// The diagnostic report, taken once when the window is opened.
@@ -179,7 +174,6 @@ struct AliasDraft {
 impl Windows {
     pub fn open(&mut self, which: Window) {
         match which {
-            Window::Help => self.help = true,
             Window::Settings => self.settings = true,
             Window::Diagnostics => {
                 self.diagnostics = true;
@@ -190,10 +184,10 @@ impl Windows {
 
     /// Opens the window, or shuts it if it is already up.
     ///
-    /// What F1 does, as against what the tray menu does. A menu item named
-    /// "Keyboard shortcuts" that closed the window when it was open would be a
-    /// menu that lies, so that route still calls [`Self::open`]; a key the help
-    /// panel itself describes as "show or hide" has to do both.
+    /// What Ctrl+, does, as against what the tray menu does. A menu item
+    /// named "Settings" that closed the window when it was open would be a
+    /// menu that lies, so that route still calls [`Self::open`]; a key
+    /// advertised as "show or hide" has to do both.
     pub fn toggle(&mut self, which: Window) {
         if self.is_open(which) {
             self.close(which);
@@ -204,7 +198,6 @@ impl Windows {
 
     fn close(&mut self, which: Window) {
         match which {
-            Window::Help => self.help = false,
             Window::Settings => self.settings = false,
             Window::Diagnostics => self.diagnostics = false,
         }
@@ -212,14 +205,13 @@ impl Windows {
 
     pub fn is_open(&self, which: Window) -> bool {
         match which {
-            Window::Help => self.help,
             Window::Settings => self.settings,
             Window::Diagnostics => self.diagnostics,
         }
     }
 
     pub fn any_open(&self) -> bool {
-        self.help || self.settings || self.diagnostics
+        self.settings || self.diagnostics
     }
 
     /// Draws whichever are open, and reports anything that was clicked.
@@ -239,10 +231,6 @@ impl Windows {
         let mut clicked = Clicked::default();
         let mut aliases_changed = None;
         let mut mappings_changed = None;
-        if self.help {
-            let open = show_one(ctx, theme, Window::Help, |ui| help(ui, theme, state));
-            self.help = open;
-        }
         if self.settings {
             let editing = &mut self.editing;
             let changed = &mut clicked.changed;
@@ -335,18 +323,14 @@ fn show_one(
             // gone; without the second, the key that shuts every other layer of
             // this program does nothing here.
             //
-            // F1 is the third, and it is needed *as well as* the toggle in the
-            // shell rather than instead of it. Once this window has the
-            // keyboard its keystrokes land in this viewport's input, not the
-            // panel's, so `gui::mod::Shell::logic` never sees the press and the
-            // toggle there can never fire. Scoped to Help because F1 closing
-            // the settings window would be a key doing something unrelated to
-            // what it says. The two cannot disagree: whichever of them sees the
-            // press, it closes.
-            let by_key = ctx.input(|i| {
-                i.key_pressed(egui::Key::Escape)
-                    || (which == Window::Help && i.key_pressed(egui::Key::F1))
-            });
+            //
+            // There used to be a third, F1, needed because once a window has
+            // the keyboard its presses land in that viewport rather than the
+            // panel's - so the toggle in the shell could never see them. The
+            // key and the window it opened are both gone; Ctrl+, reaches the
+            // settings window from the panel only, which is where it is
+            // pressed.
+            let by_key = ctx.input(|i| i.key_pressed(egui::Key::Escape));
             if by_key || ctx.input(|i| i.viewport().close_requested()) {
                 open = false;
             }
@@ -395,16 +379,6 @@ fn row(ui: &mut egui::Ui, theme: &Theme, key: &str, what: &str) {
                 .color(theme.text),
         );
     });
-}
-
-fn help(ui: &mut egui::Ui, theme: &Theme, state: &AppState) {
-    for entry in view::help::rows(state.viewer) {
-        match entry {
-            view::help::Row::Blank => ui.add_space(6.0),
-            view::help::Row::Heading(text) => heading(ui, theme, text),
-            view::help::Row::Entry(key, what) => row(ui, theme, key, what),
-        }
-    }
 }
 
 /// Returns whether the remembered window position was asked to be forgotten.
@@ -1026,33 +1000,34 @@ mod tests {
         let mut windows = Windows::default();
         assert!(!windows.any_open());
 
-        windows.open(Window::Help);
-        assert!(windows.is_open(Window::Help));
-        assert!(!windows.is_open(Window::Settings));
+        windows.open(Window::Settings);
+        assert!(windows.is_open(Window::Settings));
         assert!(!windows.is_open(Window::Diagnostics));
         assert!(windows.any_open());
 
-        windows.open(Window::Settings);
-        assert!(windows.is_open(Window::Help), "opening one closed another");
+        windows.open(Window::Diagnostics);
+        assert!(
+            windows.is_open(Window::Settings),
+            "opening one closed another"
+        );
     }
 
-    /// What F1 does. It used to only ever open, so a second press was a no-op
-    /// and the window could be shut by nothing but Escape or its title bar -
-    /// while the help panel it displays promised "show or hide this list of
-    /// keys" throughout.
+    /// What Ctrl+, does. A toggle used to only ever open, so a second press
+    /// was a no-op and the window could be shut by nothing but Escape or its
+    /// title bar - while the key was advertised as "show or hide".
     #[test]
     fn toggling_a_window_opens_it_and_then_shuts_it() {
         let mut windows = Windows::default();
 
-        windows.toggle(Window::Help);
+        windows.toggle(Window::Settings);
         assert!(
-            windows.is_open(Window::Help),
+            windows.is_open(Window::Settings),
             "the first press did not open"
         );
 
-        windows.toggle(Window::Help);
+        windows.toggle(Window::Settings);
         assert!(
-            !windows.is_open(Window::Help),
+            !windows.is_open(Window::Settings),
             "the second press did not shut"
         );
         assert!(!windows.any_open());
@@ -1063,21 +1038,19 @@ mod tests {
     #[test]
     fn opening_an_already_open_window_leaves_it_open() {
         let mut windows = Windows::default();
-        windows.open(Window::Help);
-        windows.open(Window::Help);
-        assert!(windows.is_open(Window::Help));
+        windows.open(Window::Settings);
+        windows.open(Window::Settings);
+        assert!(windows.is_open(Window::Settings));
     }
 
     #[test]
     fn toggling_one_window_does_not_touch_the_others() {
         let mut windows = Windows::default();
-        windows.open(Window::Settings);
         windows.open(Window::Diagnostics);
 
-        windows.toggle(Window::Help);
-        windows.toggle(Window::Help);
+        windows.toggle(Window::Settings);
+        windows.toggle(Window::Settings);
 
-        assert!(windows.is_open(Window::Settings), "settings was shut too");
         assert!(
             windows.is_open(Window::Diagnostics),
             "diagnostics was shut too"
@@ -1100,12 +1073,12 @@ mod tests {
         );
     }
 
-    /// The three are separate windows, so nothing about them may collide -
+    /// They are separate windows, so nothing about them may collide -
     /// least of all the viewport id, which is what egui keys their position and
     /// size on.
     #[test]
     fn each_window_is_distinguishable_from_the_others() {
-        let all = [Window::Help, Window::Settings, Window::Diagnostics];
+        let all = [Window::Settings, Window::Diagnostics];
         for field in [Window::id, Window::title] {
             let mut seen: Vec<_> = all.iter().map(|w| field(*w)).collect();
             seen.sort_unstable();

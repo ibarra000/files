@@ -99,7 +99,6 @@ fn table() -> Vec<Binding> {
             Searching,
             "show or hide the settings window",
         ),
-        anymod(Key::F(1), Searching, "show or hide the shortcuts window"),
         anymod(Key::F(2), Searching, "switch viewer"),
         anymod(
             Key::F(3),
@@ -640,91 +639,10 @@ fn every_chip_says_what_its_key_does() {
 }
 
 /// Maps a chip's key name back to the key it stands for.
-/// How the help panel writes the key this binding answers.
-///
-/// `None` for the ones the panel deliberately does not list as keys of their
-/// own: a typed character, and `Delete`, which the Backspace row covers.
-fn help_name(binding: &Binding) -> Option<&'static str> {
-    let ctrl = binding.mods == CTRL;
-    Some(match binding.code {
-        Key::Char('1') => return None,
-        Key::Delete => return None,
-        Key::Char(c) if ctrl => match c {
-            'q' => "Ctrl+Q",
-            'c' => "Ctrl+C",
-            'x' => "Ctrl+X",
-            'v' => "Ctrl+V",
-            'a' => "Ctrl+A",
-            'u' => "Ctrl+U",
-            'w' => "Ctrl+W",
-            _ => return None,
-        },
-        // `A` in the drive picker, which the panel writes bare.
-        Key::Char('a') => "A",
-        Key::F(1) => "F1",
-        Key::F(2) => "F2",
-        Key::F(3) => "F3",
-        Key::F(4) => "F4",
-        Key::F(5) => "F5",
-        Key::Enter => "Enter",
-        Key::Esc => "Esc",
-        Key::Backspace => "Backspace",
-        Key::Up => "Up",
-        Key::Down => "Down",
-        Key::Left => "Left",
-        Key::Right => "Right",
-        Key::Home => "Home",
-        Key::End => "End",
-        Key::PageUp => "PgUp",
-        Key::PageDown => "PgDn",
-        _ => return None,
-    })
-}
-
-/// The help panel is the program's only documentation, so every key in the
-/// table has to appear in it.
-///
-/// Driven from the table rather than from a list written out by hand. The
-/// panel's own copy of this test checks thirteen key names that somebody typed
-/// into it, which is exactly why `Ctrl+A`, `Ctrl+U`, `Home` and `End` were
-/// live bindings documented nowhere while it passed.
-#[test]
-fn every_key_in_the_table_is_in_the_help_panel() {
-    let panel = help_text();
-    for binding in table() {
-        let Some(name) = help_name(&binding) else {
-            continue;
-        };
-        assert!(
-            panel.contains(name),
-            "{name} ({}) is a live binding and is not in the help panel:
-{panel}",
-            binding.what
-        );
-    }
-}
-
-fn help_text() -> String {
-    use files::view::help::Row;
-    files::view::help::rows(files::config::ViewerKind::Pdf)
-        .iter()
-        .map(|row| match row {
-            Row::Blank => String::new(),
-            Row::Heading(text) => (*text).to_string(),
-            Row::Entry(key, what) => format!("{key} {what}"),
-        })
-        .collect::<Vec<_>>()
-        .join(
-            "
-",
-        )
-}
-
 fn key_of(name: &str) -> Option<Key> {
     match name {
         "Enter" => Some(Key::Enter),
         "Esc" => Some(Key::Esc),
-        "F1" => Some(Key::F(1)),
         "F3" => Some(Key::F(3)),
         "F4" => Some(Key::F(4)),
         "F2" => Some(Key::F(2)),
@@ -745,33 +663,4 @@ fn mods_of(name: &str) -> Mods {
     } else {
         NONE
     }
-}
-
-/// The panel you actually get says how to find every key.
-///
-/// F1 has opened the shortcut window since the window existed, and the bar the
-/// shipped panel draws advertised it nowhere - so the only way to discover it
-/// was to already know. The compact set had no fixture either, which is how
-/// that survived: every contract test above ran against the full bar.
-#[test]
-fn the_compact_bar_offers_a_way_to_see_every_key() {
-    let (s, _) = fixture_in(Where::Searching, false);
-    assert!(
-        !hints::Context::of(&s).compact,
-        "the plain fixture should not be compact, or this proves nothing"
-    );
-
-    let (s, _) = fixture_in(Where::Searching, true);
-    let cx = hints::Context::of(&s);
-    assert!(cx.compact, "the summoned fixture is not the compact bar");
-
-    let help = hints::hints(cx)
-        .into_iter()
-        .find(|h| h.key == "F1")
-        .expect("the compact bar does not mention F1");
-    assert_eq!(
-        help.action,
-        Some(hints::Action::Help),
-        "the F1 chip is not clickable"
-    );
 }
