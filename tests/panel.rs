@@ -3,7 +3,7 @@
 //! The safety net the rewrite dropped. The terminal build rendered into a
 //! `TestBackend` buffer and asserted on the characters *and the styles* in it,
 //! so a selection highlight that quietly stopped being painted failed a test.
-//! When the window replaced it, `gui::overlay::show` - the one function that
+//! When the window replaced it, `gui::panel::show` - the one function that
 //! paints the whole panel - arrived with no way to check anything at all, and
 //! stayed that way. The toast band went missing through exactly that gap: the
 //! messages were still raised, still expired on a timer, and were drawn
@@ -19,9 +19,9 @@
 //!
 //! # What this drives, and what it does not
 //!
-//! `gui::overlay::show` and `gui::frame::Frame`, over an `AppState` built by
+//! `gui::panel::show` and `gui::frame::Frame`, over an `AppState` built by
 //! hand. Not `gui::Shell`, which owns threads, a tray icon and a window: the
-//! panel is a pure function of state, a theme and a `Visual`, and that is
+//! panel is a pure function of state, a theme and a `Content`, and that is
 //! exactly the seam worth testing.
 
 use std::sync::Arc;
@@ -34,7 +34,7 @@ use egui_kittest::kittest::NodeT;
 use files::app::event::{AppEvent, IndexMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
-use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
+use files::config::{Settings, ViewerKind};
 use files::gui::frame::Frame;
 use files::gui::theme::{self, Theme};
 use files::index::store::{IndexStatus, Origin};
@@ -161,12 +161,12 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
                     panel.fonts_ready = true;
                     return;
                 }
-                let visual = panel.frame.advance(&panel.state, DT);
-                files::gui::overlay::show(
+                let content = panel.frame.advance(&panel.state, DT);
+                files::gui::panel::show(
                     ui,
                     &panel.state,
                     &panel.theme,
-                    &visual,
+                    content,
                     None,
                     panel.now,
                     panel.wall,
@@ -273,18 +273,23 @@ fn a_toast_gives_the_line_back_when_it_expires() {
     );
 }
 
-/// Twelve rows, three hundred results. The rest used to be unreachable and
-/// unmentioned; they are reachable now, and this says where in them you are.
+/// Six rows on screen, three hundred results, and every one of them
+/// reachable by scrolling. The count is what says there are more than fit.
+///
+/// This used to read "1-6 of 300", because the panel drew a fixed window over
+/// the list and the other 294 could not be got at. The band scrolls now, so
+/// the scrollbar answers where in them you are and the footer answers how
+/// many there are.
 #[test]
-fn the_footer_says_which_of_the_results_are_on_screen() {
+fn the_footer_says_how_many_the_code_found() {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains(&format!("1-{VISIBLE_ROWS} of 300")),
-        "nothing said where in the list this is:\n{screen}"
+        screen.contains("300"),
+        "nothing said how many there were:\n{screen}"
     );
 }
 
@@ -295,8 +300,8 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        !screen.contains(" of "),
-        "a count of nothing:
+        !screen.contains("Results"),
+        "a caption over a list that is not there:
 {screen}"
     );
     // The viewer is still there: it is a fact about the program rather than
@@ -413,6 +418,99 @@ fn something_worth_saying_brings_the_footer_back() {
     );
 }
 
+/// The list is a group with a caption over it, which is Ueli's shape.
+#[test]
+fn the_results_are_captioned() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(screen.contains("Results"), "no caption:\n{screen}");
+}
+
+/// A row the arrows walked to is brought into view, by as little as it takes.
+///
+/// The whole reason the content band is a scroller. The panel used to draw a
+/// twelve-row window that the state machine moved; the rows past it were not
+/// laid out at all, and a selection beyond the window left the highlight
+/// frozen on the last row while `Enter` opened a file that was not on screen.
+///
+/// Read off the accessibility tree rather than off a scroll offset, because
+/// a row outside the clip rectangle is culled before it is given a label -
+/// so its presence in the tree *is* the claim that it is on screen.
+#[test]
+fn walking_down_a_long_list_carries_the_view_with_it() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+
+    let mut h = harness(s);
+    assert!(
+        !on_screen(&h).contains("11-D-0704-50.pdf"),
+        "the fixture starts with row fifty already on screen"
+    );
+
+    for _ in 0..50 {
+        h.state_mut()
+            .state
+            .update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
+    }
+    h.run_steps(2);
+
+    let screen = on_screen(&h);
+    assert!(
+        screen.contains("11-D-0704-50.pdf"),
+        "the selection walked off the bottom and the view stayed put:\n{screen}"
+    );
+    // And by as little as it takes: `block: "nearest"` puts the row at the
+    // foot of the band, so the ones just above it are still there. A scroller
+    // that centred the selection would have thrown them away.
+    assert!(
+        screen.contains("11-D-0704-49.pdf"),
+        "it scrolled further than it had to:\n{screen}"
+    );
+}
+
+/// And the wheel moves the view without moving the selection, which is the
+/// reason it was unbound in the first place: it used to walk the cursor
+/// through somebody's results whenever a hand rested on the mouse.
+#[test]
+fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+
+    let mut h = harness(s);
+    let before = h.state().state.selected_row();
+    assert!(before.is_some(), "the fixture selected nothing");
+
+    // The pointer over the middle of the list, then a long way down it.
+    // egui hands a wheel event to whichever scroller is under the pointer, so
+    // the hover is not decoration.
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H + theme::CONTENT_H / 2.0,
+    ));
+    h.run_steps(1);
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(4);
+
+    let screen = on_screen(&h);
+    assert!(
+        !screen.contains("11-D-0704-00.pdf"),
+        "the wheel moved nothing:\n{screen}"
+    );
+    assert_eq!(
+        h.state().state.selected_row(),
+        before,
+        "the wheel moved the selection"
+    );
+}
+
 // --- what the panel does not do --------------------------------------------
 
 /// The jitter budget, checked through a real layout pass rather than through
@@ -490,12 +588,18 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
 
     let h = harness(s);
     // The band the rows are given, in the harness's coordinates. Arithmetic
-    // off the fixed panel now rather than off a measured height: the window
-    // is always four hundred points tall, so the footer is always in the same
-    // place and a row past it is a row drawn through the status line. That is
-    // exactly what happened when the rows picked up three points of spacing
-    // each and a full list stood twenty-four points taller than its band.
-    let footer_top = HARNESS_MARGIN + theme::PANEL_H - theme::PAD_Y - theme::FOOTER_H;
+    // off the fixed panel: the window is always four hundred points tall, so
+    // the footer is always in the same place and a row that *starts* below
+    // the band is a row the scroller never clipped.
+    //
+    // Where a row *ends* is deliberately not asserted. The list is a scroller
+    // now, and the row straddling its bottom edge is cut off by the clip
+    // rectangle rather than by arithmetic - which is what a scroller is. The
+    // failure this guards against is the one that actually happened: rows
+    // picking up three points of spacing each and a full list standing
+    // twenty-four points taller than the band it was given.
+    let content_top = HARNESS_MARGIN + theme::HEADER_H + theme::DIVIDER;
+    let content_bottom = content_top + theme::CONTENT_H;
 
     let root = h.root();
     let mut seen = 0;
@@ -509,14 +613,21 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
         }
         seen += 1;
         assert!(
-            bounds.y1 <= footer_top as f64 + 1.0,
-            "{label} reaches {:.0}pt, past the footer at {footer_top:.0}pt",
-            bounds.y1
+            bounds.y0 >= content_top as f64 - 1.0 && bounds.y0 < content_bottom as f64,
+            "{label} starts at {:.0}pt, outside the band {content_top:.0}-{content_bottom:.0}pt",
+            bounds.y0
         );
     }
     // Without this the loop can pass by matching nothing at all, which is how
     // the first version of this test passed while the rows really did overlap.
-    assert_eq!(seen, theme::MAX_ROWS, "the rows were not found");
+    // A screenful, at least: the rows past the clip rectangle are culled
+    // before they are laid out, so the exact number is the scroller's
+    // business rather than this test's.
+    assert!(
+        seen >= theme::MAX_ROWS,
+        "only {seen} rows were drawn, of a screenful of {}",
+        theme::MAX_ROWS
+    );
 }
 
 // --- the pictures ----------------------------------------------------------

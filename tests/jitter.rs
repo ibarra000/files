@@ -29,7 +29,7 @@ use files::app::event::{AppEvent, Cmd, HotkeyMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
-use files::gui::anim::{Content, Phase, Visual};
+use files::gui::anim::{Content, Phase};
 use files::gui::frame::Frame;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
@@ -56,24 +56,28 @@ const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 /// Everything the frames did, in the order they did it.
 #[derive(Default)]
 struct Log {
-    visuals: Vec<Visual>,
+    bodies: Vec<Content>,
+    /// Which row was selected on each of those frames.
+    ///
+    /// Read off the state rather than off the frame. It used to come back
+    /// with the body, because the animator slid the highlight and therefore
+    /// had to be told where it was going; a row paints its own now, so the
+    /// only place the answer lives is the state machine.
+    selected: Vec<Option<usize>>,
 }
 
 impl Log {
     /// How many times the body changed to something else.
     fn body_changes(&self) -> usize {
-        self.visuals
-            .windows(2)
-            .filter(|w| w[0].content != w[1].content)
-            .count()
+        self.bodies.windows(2).filter(|w| w[0] != w[1]).count()
     }
 
     /// Every body the panel showed, in order, with repeats collapsed.
     fn bodies(&self) -> Vec<Content> {
         let mut out: Vec<Content> = Vec::new();
-        for v in &self.visuals {
-            if out.last() != Some(&v.content) {
-                out.push(v.content);
+        for body in &self.bodies {
+            if out.last() != Some(body) {
+                out.push(*body);
             }
         }
         out
@@ -82,7 +86,7 @@ impl Log {
     fn report(&self, what: &str) {
         println!(
             "{what}: {} frames, {} body changes, bodies {:?}",
-            self.visuals.len(),
+            self.bodies.len(),
             self.body_changes(),
             self.bodies(),
         );
@@ -210,8 +214,10 @@ impl Rig {
         }
 
         self.state.note_frame(self.now, SystemTime::now());
-        let visual = self.frame.advance(&self.state, FRAME.as_secs_f32());
-        self.log.visuals.push(visual);
+        self.log
+            .bodies
+            .push(self.frame.advance(&self.state, FRAME.as_secs_f32()));
+        self.log.selected.push(self.state.selected_row());
     }
 
     fn run(&mut self, span: Duration) {
@@ -234,8 +240,8 @@ impl Rig {
         }
     }
 
-    fn last(&self) -> Visual {
-        *self.log.visuals.last().expect("no frames were drawn")
+    fn last(&self) -> Content {
+        *self.log.bodies.last().expect("no frames were drawn")
     }
 }
 
@@ -275,7 +281,7 @@ fn typing_a_code_never_empties_the_result_list() {
     rig.log.report("typing_a_code");
 
     assert!(
-        !rig.log.visuals.iter().any(|v| v.content == Content::Empty),
+        !rig.log.bodies.contains(&Content::Empty),
         "the panel showed its empty state while a result set was in flight; bodies were {:?}",
         rig.log.bodies()
     );
@@ -335,8 +341,9 @@ fn the_selection_stays_on_screen_while_typing() {
     rig.type_code("D-07", KEYSTROKE_GAP);
 
     assert!(
-        rig.log.visuals.iter().all(|v| v.selection_y.is_some()),
-        "the selection highlight left the screen while typing"
+        rig.log.selected.iter().all(Option::is_some),
+        "the selection left the list while typing: {:?}",
+        rig.log.selected
     );
 }
 
@@ -350,6 +357,7 @@ fn an_unchanged_result_set_moves_nothing() {
     rig.run(Duration::from_millis(600));
 
     let before = rig.last();
+    let selected = rig.state.selected_row();
     rig.forget();
 
     // The same answer, again, as a republished snapshot would deliver it.
@@ -358,9 +366,11 @@ fn an_unchanged_result_set_moves_nothing() {
     rig.run(Duration::from_millis(400));
 
     assert_eq!(rig.log.body_changes(), 0, "it changed the body");
-    for v in &rig.log.visuals {
-        assert_eq!(v.content, before.content, "the body changed under it");
-        assert_eq!(v.selection_y, before.selection_y, "the selection moved");
+    for body in &rig.log.bodies {
+        assert_eq!(*body, before, "the body changed under it");
+    }
+    for row in &rig.log.selected {
+        assert_eq!(*row, selected, "the selection moved");
     }
 }
 
@@ -374,7 +384,7 @@ fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
 
     assert!(rig.state.hits.is_empty());
     assert_eq!(
-        rig.last().content,
+        rig.last(),
         Content::Empty,
         "bodies were {:?}",
         rig.log.bodies()

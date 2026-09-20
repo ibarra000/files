@@ -533,30 +533,44 @@ fn the_surface_is_translucent_in_both_themes() {
     }
 }
 
-/// The rows have to fit between the field and the footer.
+/// The five bands have to add up to the window.
 ///
-/// The same arithmetic the `const` assertion beside `MAX_ROWS` runs, said
-/// out loud with the numbers in the failure message. The window used to be
-/// created tall enough for whatever the row count asked for; the row count
-/// is now what has to fit the window, and this is the direction that can be
-/// got wrong.
+/// Said out loud, with the numbers in the failure message. The content band
+/// is what is left over after the other four, so an arithmetic slip here is
+/// a scroller that is the wrong height rather than anything that fails to
+/// compile.
 #[test]
-fn a_full_list_fits_between_the_field_and_the_footer() {
-    let wanted = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0;
-    assert!(
-        wanted <= PANEL_H,
-        "{MAX_ROWS} rows want {wanted}pt of a {PANEL_H}pt panel"
+fn the_bands_add_up_to_the_panel() {
+    let bands = HEADER_H + DIVIDER + CONTENT_H + DIVIDER + FOOTER_H;
+    assert_eq!(
+        bands, PANEL_H,
+        "the bands come to {bands}pt, not {PANEL_H}pt"
     );
 }
 
-/// And they have to fit *well*: a row count that left a hundred points of
-/// nothing under the list would mean the panel was the wrong size for its
-/// own content.
+/// A full list, under its heading, has to fit the content band.
+///
+/// The same arithmetic the `const` assertion beside `MAX_ROWS` runs. The
+/// window used to be created tall enough for whatever the row count asked
+/// for; the row count is now what has to fit the window, and this is the
+/// direction that can be got wrong.
 #[test]
-fn a_full_list_very_nearly_fills_the_panel() {
-    let wanted = FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0;
+fn a_full_list_fits_the_content_band() {
+    let wanted = BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32;
     assert!(
-        PANEL_H - wanted < ROW_H,
-        "another row would fit: {wanted}pt of {PANEL_H}pt used"
+        wanted <= CONTENT_H,
+        "{MAX_ROWS} rows want {wanted}pt of a {CONTENT_H}pt band"
+    );
+}
+
+/// And they have to fit *well*. A row count that left a hundred points of
+/// nothing under the list would mean `PageDown` moved less than a screen,
+/// which is the one thing the number is still load-bearing for.
+#[test]
+fn a_full_list_very_nearly_fills_the_content_band() {
+    let wanted = BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32;
+    assert!(
+        CONTENT_H - wanted < ROW_H,
+        "another row would fit: {wanted}pt of {CONTENT_H}pt used"
     );
 }

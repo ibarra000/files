@@ -39,7 +39,7 @@ pub const CONTROL_H: f32 = 28.0;
 /// # Why there was no such function until now
 ///
 /// Because until now nothing needed one. The panel does not use a single egui
-/// widget: `gui::overlay` and `gui::row` between them call
+/// widget: `gui::panel` and `gui::row` between them call
 /// `ui.interact` and then paint, and every colour they use comes from
 /// [`Theme`] directly. A `Style` would have configured nothing.
 ///

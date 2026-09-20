@@ -1670,52 +1670,50 @@ fn paging_reaches_the_ends_of_the_list() {
 /// that was pixel-identical to the one before it. Frames were still being
 /// produced - each auto-repeat woke the loop - the panel simply had nothing
 /// new to say, and `Enter` would have opened a file that was not on screen.
+///
+/// This used to assert on `scroll_top` as well, because the state machine
+/// held the first rank on screen and the renderer drew a window from it. The
+/// content band is a scroller now and owns that; what is left here is the
+/// half that was always the state machine's - the cursor walks the whole
+/// list, in both directions, and stops at each end.
 #[test]
-fn holding_down_scrolls_the_list_rather_than_freezing_on_its_last_row() {
+fn holding_down_walks_the_whole_list_rather_than_freezing_on_one_row() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
-    assert_eq!(s.scroll_top(), 0, "it starts at the top");
 
-    // Down to the foot of the window: still no scrolling needed.
+    // Down to the foot of what fits on one screen.
     for _ in 0..VISIBLE_ROWS - 1 {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS - 1));
-    assert_eq!(s.scroll_top(), 0, "the window has not had to move yet");
 
-    // One more, and the window follows by exactly one row.
+    // And one past it, which is where it used to stop moving.
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS));
-    assert_eq!(s.scroll_top(), 1, "the list scrolls under the cursor");
-    assert!(s.visible_rows().contains(&VISIBLE_ROWS));
 
-    // And all the way to the end, where the window stops rather than running
-    // off it.
+    // All the way to the end, where it stops rather than running off it.
     for _ in 0..300 {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(199));
-    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS);
-    assert_eq!(s.visible_rows(), (200 - VISIBLE_ROWS)..200);
 
     // Back up, and it comes with you.
     for _ in 0..300 {
         s.update(press(Key::Up), now);
     }
     assert_eq!(s.selected_row(), Some(0));
-    assert_eq!(s.scroll_top(), 0);
 }
 
-/// A list that shrinks under a window near its end must not leave the window
-/// pointing past it - half a screen of rows with nothing below them.
+/// A list that shrinks under a cursor near its end must not leave the cursor
+/// pointing past it - one keystroke from opening a file that is not there.
 #[test]
-fn a_shorter_result_set_pulls_the_window_back() {
+fn a_shorter_result_set_pulls_the_cursor_back() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
     for _ in 0..199 {
         s.update(press(Key::Down), now);
     }
-    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS, "precondition");
+    assert_eq!(s.selected_row(), Some(199), "precondition");
 
     // The server answers with far fewer.
     let v = view(&s);
@@ -1724,11 +1722,12 @@ fn a_shorter_result_set_pulls_the_window_back() {
         now,
     );
 
-    assert_eq!(s.scroll_top(), 2);
-    assert_eq!(s.visible_rows().end, VISIBLE_ROWS + 2);
+    assert_eq!(s.hits.len(), VISIBLE_ROWS + 2);
+    let row = s.selected_row().expect("nothing is selected at all");
     assert!(
-        s.visible_rows().contains(&s.selected_row().unwrap()),
-        "the cursor is off screen"
+        row < s.hits.len(),
+        "the cursor is on rank {row} of a list of {}",
+        s.hits.len()
     );
 }
 

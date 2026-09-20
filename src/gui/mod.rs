@@ -27,7 +27,7 @@ pub mod drag;
 pub mod fonts;
 pub mod frame;
 pub mod input;
-pub mod overlay;
+pub mod panel;
 pub mod row;
 pub mod settings;
 pub mod theme;
@@ -447,18 +447,14 @@ impl Shell {
         self.app.actors.dismiss_overlay();
     }
 
-    /// Keeps the window the size the animator asked for.
-    ///
-    /// The entrance is the *window* arriving, not the content moving inside
-    /// it, and that is forced rather than chosen: [`overlay::show`] paints into
     /// Moves the panel with the pointer, and remembers where it was left.
     ///
-    /// `response` is the interaction over the panel's whole rectangle.
-    /// Registered *before* `overlay::show` when no modifier is held, so the
-    /// field, the rows and the chips are added on top of it and win the press -
-    /// which makes the drag handle "whatever none of them claimed" without this
-    /// function needing to know where any of them are. With Alt held it is
-    /// registered afterwards instead, so the whole panel becomes a handle.
+    /// `response` is the interaction over whatever the handle is this frame:
+    /// the header and the footer together, or - with Alt held - the whole
+    /// panel. Which side of [`panel::show`] it was registered on *is* the
+    /// policy, because egui gives a press to the last widget that claimed the
+    /// point: before means "only what nothing else wanted", after means
+    /// "everything". See [`panel::handles`].
     ///
     /// The arithmetic is [`drag::Drag`], and it is there rather than here for
     /// the reason every other pure decision in this crate is split out: a
@@ -622,7 +618,7 @@ impl eframe::App for Shell {
         // asked what to draw. One order, in one place - and that place is
         // `frame`, so the tests take the same one.
         let dt = ui.input(|i| i.stable_dt);
-        let visual = self.frame.advance(&self.app.state, dt);
+        let content = self.frame.advance(&self.app.state, dt);
 
         self.park();
 
@@ -664,22 +660,26 @@ impl eframe::App for Shell {
             }
         }
 
-        // Alt makes the whole panel a handle, because the chrome left over
-        // between the field, the rows and the chips is a thin target and the
-        // panel is frameless - there is no caption bar to reach for. Which side
-        // of `overlay::show` this is registered on *is* the policy: egui gives
-        // a press to the last widget that claimed the point, so before means
-        // "only what nothing else wanted" and after means "everything".
+        // The header and the footer, underneath everything that goes in them,
+        // so the search box and the chips take their own presses and the air
+        // around them moves the window. Alt makes the whole panel a handle
+        // instead - registered *after*, so it beats even the rows - because
+        // the air is a thin target and the panel is frameless: there is no
+        // caption bar to reach for.
         let alt = ui.input(|i| i.modifiers.alt);
-        let handle = egui::Id::new("files-chrome");
         let sense = egui::Sense::click_and_drag();
-        let chrome = (!alt).then(|| ui.interact(ui.max_rect(), handle, sense));
+        let (header, footer) = panel::handles(ui.max_rect());
+        let chrome = (!alt).then(|| {
+            let top = ui.interact(header, egui::Id::new("files-chrome-header"), sense);
+            let bottom = ui.interact(footer, egui::Id::new("files-chrome-footer"), sense);
+            top.union(bottom)
+        });
 
-        let intents = overlay::show(
+        let intents = panel::show(
             ui,
             &self.app.state,
             &self.theme,
-            &visual,
+            content,
             self.backdrop,
             now,
             wall,
@@ -687,7 +687,7 @@ impl eframe::App for Shell {
 
         let chrome = match chrome {
             Some(chrome) => chrome,
-            None => ui.interact(ui.max_rect(), handle, sense),
+            None => ui.interact(ui.max_rect(), egui::Id::new("files-chrome-all"), sense),
         };
         self.follow_drag(&ui.ctx().clone(), &chrome);
 

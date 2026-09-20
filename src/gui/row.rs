@@ -46,9 +46,24 @@ pub fn show(ui: &mut Ui, theme: &Theme, hit: &Hit, query_len: usize, selected: b
     let painter = ui.painter().clone();
     let fade = |c: Color32| c;
 
-    // The selection is drawn by the panel, which animates it between rows; a
-    // row painting its own would fight that and win, since it draws later.
-    if !selected && response.hovered() {
+    // Its own, now. The panel used to paint the highlight from a y it had
+    // measured, because it slid between rows and a row only knows about
+    // itself. Nothing slides any more, and the list is a scroller - so the
+    // panel no longer knows where a row is either, and the row is the only
+    // thing that does.
+    //
+    // Raised, then washed. The shading is what says "this one", and the wash
+    // is what says which one - the pair is legible where either alone would
+    // not be, which is the point of shading a monochrome panel.
+    if selected {
+        theme::raise(&painter, theme, rect, theme::ROW_RADIUS);
+        painter.rect_filled(
+            rect,
+            theme::radius(theme::ROW_RADIUS),
+            fade(theme.selection),
+        );
+        marker(ui, theme, rect);
+    } else if response.hovered() {
         painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), fade(theme.hover));
     }
 
@@ -150,8 +165,10 @@ pub fn show(ui: &mut Ui, theme: &Theme, hit: &Hit, query_len: usize, selected: b
 
 /// The accent bar down the left of the selected row.
 ///
-/// Drawn by the panel rather than by the row, because it slides between rows
-/// and a row only knows about itself.
+/// Ueli's is three points wide, forty-five per cent of the row's height, and
+/// vertically centred at its left edge. Shared rather than inlined above,
+/// because the recall list and the drive picker are the same kind of list and
+/// have to mark their row the same way.
 pub fn marker(ui: &Ui, theme: &Theme, row: Rect) {
     let bar = Rect::from_min_size(
         pos2(row.left(), row.center().y - theme::ROW_H * 0.3),

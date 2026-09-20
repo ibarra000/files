@@ -32,7 +32,7 @@
 //! genuinely tempting. It also enters the modal `WM_NCLBUTTONDOWN` move loop,
 //! which blocks the event loop the panel's own animation is advanced from, and
 //! leaves nothing behind that a test can hold this program to. The panel is the
-//! window here - `gui::overlay::show` paints into `ui.max_rect()` - so a frozen
+//! window here - `gui::panel::show` paints into `ui.max_rect()` - so a frozen
 //! event loop is a frozen panel.
 
 use eframe::egui::{Pos2, Vec2};

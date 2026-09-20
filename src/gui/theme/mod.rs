@@ -38,33 +38,60 @@ use crate::view::status::Tone;
 pub const PANEL_W: f32 = 600.0;
 pub const PANEL_H: f32 = 400.0;
 
-/// The search field.
-pub const FIELD_H: f32 = 64.0;
+/// The air inside the header, and around the list.
+///
+/// Ten points, which is the padding Ueli gives both. Small for a window this
+/// size, and deliberately so: the list is what somebody is here for and every
+/// point of margin is a point the list has not got.
+pub const BAND_PAD: f32 = 10.0;
+
+/// The search box. Fluent's `large` input, which is what Ueli asks for.
+pub const INPUT_H: f32 = 40.0;
+
+/// The header: the search box with air above and below it.
+pub const HEADER_H: f32 = BAND_PAD * 2.0 + INPUT_H;
+
+/// The footer, which is tighter than the header because its controls are.
+pub const FOOTER_H: f32 = 40.0;
+/// The air inside the footer.
+pub const FOOTER_PAD: f32 = 8.0;
+
+/// The hairline between two bands.
+///
+/// A constant rather than a bare `1.0` at three call sites, because it is
+/// taken out of the content band's height as well as painted, and the two
+/// have to be the same number.
+pub const DIVIDER: f32 = 1.0;
+
+/// A group's caption, and the air under it.
+pub const HEADING_H: f32 = 21.0;
+
 /// One result.
 pub const ROW_H: f32 = 40.0;
-/// The status and key hints.
-pub const FOOTER_H: f32 = 44.0;
+/// The gap between a row's edge and its text.
+pub const ROW_PAD_X: f32 = 12.0;
+
+/// Everything between the two hairlines: the scroller, and nothing else.
+pub const CONTENT_H: f32 = PANEL_H - HEADER_H - FOOTER_H - DIVIDER * 2.0;
 
 /// The most rows shown at once.
 ///
-/// Re-exported rather than defined here: the arrows scroll a window over the
-/// result list and the state machine owns that window, so the number belongs
-/// where the state machine can reach it. See [`crate::config::VISIBLE_ROWS`].
+/// Re-exported rather than defined here: this is also how far `PageDown`
+/// moves, and the state machine owns that. See [`crate::config::VISIBLE_ROWS`].
+///
+/// No longer a cap on what is *drawn* - the content band is a scroller and
+/// holds the whole list. It is how many are on screen at once, which is what
+/// a page has to be worth.
 pub use crate::config::VISIBLE_ROWS as MAX_ROWS;
 
-/// The rows have to fit between the field and the footer.
+/// A full list, under its heading, has to fit the content band.
 ///
 /// A constant now that the window is one. While it grew, the height was
 /// derived from the row count and this direction could not be wrong; fixed,
-/// the two are independent and a row count one too large would draw the last
-/// row through the footer. Checked at compile time so it cannot.
-const _: () = assert!(FIELD_H + ROW_H * MAX_ROWS as f32 + FOOTER_H + PAD_Y * 2.0 <= PANEL_H);
-
-/// Breathing room at the panel's edge.
-pub const PAD_X: f32 = 16.0;
-pub const PAD_Y: f32 = 8.0;
-/// The gap between a row's edge and its text.
-pub const ROW_PAD_X: f32 = 12.0;
+/// the two are independent and a row count one too large would mean a page
+/// that scrolls further than the screen shows. Checked at compile time so it
+/// cannot.
+const _: () = assert!(BAND_PAD * 2.0 + HEADING_H + ROW_H * MAX_ROWS as f32 <= CONTENT_H);
 
 /// The accent bar down the selected row.
 pub const MARKER_W: f32 = 3.0;

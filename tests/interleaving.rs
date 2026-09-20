@@ -20,7 +20,7 @@ use files::app::event::{AppEvent, Response, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
 use files::app::state::pointer::Intent;
-use files::config::{Settings, VISIBLE_ROWS};
+use files::config::Settings;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use proptest::prelude::*;
@@ -200,40 +200,21 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
         prop_assert!(row < s.hits.len(), "rank {} is past the list", row);
     }
 
-    // 5. The window over the list contains the selection, and is a window onto
-    //    a list that exists.
+    // 5. There is no window any more, and that is the point.
     //
-    //    This is the invariant that makes `scroll_top` safe to store rather
-    //    than derive. The terminal build computed its page from the selection
-    //    on every frame precisely so the two could not disagree, and warned
-    //    that a stored offset "every result update would have to keep in step"
-    //    - the failure being a cursor on a screen nobody can see. It is stored
-    //    now, because page-flipping a twelve-row list on the twelfth Down is
-    //    worse than sliding it; this is the check that replaces the argument.
+    //    This used to be four assertions about `scroll_top`: that the window
+    //    over the list ran to somewhere inside it, that it was no taller than
+    //    the panel, that it contained the cursor, and that it was full
+    //    wherever the list allowed. The state machine held the offset because
+    //    page-flipping a twelve-row list on the twelfth Down was worse than
+    //    sliding it, and this was the check that replaced the argument for
+    //    deriving it instead - the failure being a cursor on a screen nobody
+    //    can see.
     //
-    //    Shuffled keys, pointer intents and result sets are exactly the thing
-    //    that would catch a path through `apply_hits` or `jump_selection` that
-    //    forgot to re-establish it.
-    let window = s.visible_rows();
-    prop_assert!(
-        window.end <= s.hits.len(),
-        "the window {window:?} runs past a list of {}, after {step:?}",
-        s.hits.len()
-    );
-    prop_assert!(
-        window.len() <= VISIBLE_ROWS,
-        "the window {window:?} is taller than the panel, after {step:?}"
-    );
-    if let Some(row) = s.selected_row() {
-        prop_assert!(
-            window.contains(&row),
-            "the cursor is on rank {row}, which is outside the visible {window:?}, after {step:?}"
-        );
-    }
-    prop_assert!(
-        s.hits.len() <= VISIBLE_ROWS || window.len() == VISIBLE_ROWS,
-        "the window {window:?} shows fewer rows than there is room for, after {step:?}"
-    );
+    //    The content band is an `egui::ScrollArea` now and owns its own
+    //    offset, so there is no second source of truth left to keep in step.
+    //    What survives of the invariant is assertion 4 above: the selected
+    //    rank is inside the list.
 
     // 6. Browsing the recent codes has a cursor in it. Browsing without one
     //    draws a list with nothing highlighted and leaves Up and Down with

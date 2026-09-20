@@ -11,7 +11,7 @@
 //!
 //! # There used to be a fourth step
 //!
-//! Deciding how big the window should be. `overlay::show` paints into
+//! Deciding how big the window should be. `panel::show` paints into
 //! `ui.max_rect()`, so the window's height *was* the panel's height, and
 //! resizing it was how the panel grew and shrank. That cost a `SetWindowPos`
 //! and a swapchain reconfigure per change, which is why the height transition
@@ -24,8 +24,8 @@
 //! growing around the list.
 
 use crate::app::state::AppState;
-use crate::gui::anim::{Motion, Target, Visual};
-use crate::gui::overlay;
+use crate::gui::anim::{Content, Motion};
+use crate::gui::panel;
 
 /// The panel's motion.
 #[derive(Default)]
@@ -40,12 +40,8 @@ impl Frame {
 
     /// Told what the world looks like, then how much time has passed, then
     /// asked what to draw. One order, in one place.
-    pub fn advance(&mut self, state: &AppState, dt: f32) -> Visual {
-        let measured = overlay::measure(state);
-        self.motion.retarget(Target {
-            content: measured.content,
-            selection_y: measured.selection_y,
-        });
+    pub fn advance(&mut self, state: &AppState, dt: f32) -> Content {
+        self.motion.retarget(panel::body_of(state));
         self.motion.advance(dt)
     }
 }

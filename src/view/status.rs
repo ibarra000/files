@@ -9,7 +9,6 @@
 //! The previous implementation showed `0 / 0 files matched` for every one of
 //! them.
 
-use std::ops::Range;
 use std::time::{Instant, SystemTime};
 
 use crate::app::state::{AppState, QueryPhase, Severity};
@@ -36,7 +35,7 @@ pub struct StatusLine {
 /// Builds the status line.
 ///
 /// Words only. The mark that leads the line - a tone glyph, or a spinner while
-/// something is in flight - is added by [`crate::gui::overlay`], which is the one
+/// something is in flight - is added by [`crate::gui::panel::footer`], which is the one
 /// place that knows the whole frame's clock. Putting it here as well is how the
 /// line came to be drawn with two spinners on it.
 pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
@@ -465,30 +464,26 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
 /// said which way it had been changed. The chip that names it is real but it is
 /// `Priority::Normal`, and at the shipped width it does not fit - so on its own
 /// it would be an answer that is there until the moment somebody needs it.
-/// Where in the result list the rows on screen are.
+/// How many the code found.
 ///
-/// Empty when there is nothing to count, so the footer says nothing rather than
-/// a zero, and when it all fits, because "1-4 of 4" is four words for a fact
-/// the eye already has.
+/// Empty when there is nothing to count, so the footer says nothing rather
+/// than a zero.
 ///
-/// A *range*, not a count, because the list scrolls: "8 of 300" answers how
-/// many were left out but not which eight, and somebody holding Down through
-/// three hundred drawings wants to know how far they have got. This is the
-/// terminal build's `showing 9-16 of 300` restored.
-pub fn visible_range(state: &AppState, window: Range<usize>) -> String {
+/// This used to be a *range* - "9-16 of 300" - and the argument for it was
+/// sound while it held: the panel drew a twelve-row window over the result
+/// list, the other 288 were unreachable, and somebody holding Down through
+/// three hundred drawings had nothing else to tell them how far they had got.
+///
+/// The content band is a scroller now. Every result is reachable, the
+/// scrollbar says how far down them you are, and a range printed beside it
+/// would be a second, worse answer to a question the bar already answers. So
+/// what is left is the fact the range was wrapped around: how many there are.
+pub fn found(state: &AppState) -> String {
     let found = state.matched as usize;
-    if found == 0 || state.hits.is_empty() || window.is_empty() {
+    if found == 0 || state.hits.is_empty() {
         return String::new();
     }
-    if window.len() >= found {
-        return humanize::count(found);
-    }
-    format!(
-        "{}-{} of {}",
-        window.start + 1,
-        window.end,
-        humanize::count(found)
-    )
+    humanize::count(found)
 }
 
 #[cfg(test)]
@@ -701,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn the_range_follows_the_window_down_the_list() {
+    fn the_count_does_not_move_as_the_list_is_walked() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
@@ -709,23 +704,24 @@ mod tests {
         let many: Vec<_> = (0..300).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 300, 9_000);
 
-        assert_eq!(
-            visible_range(&s, s.visible_rows()),
-            format!("1-{} of 300", crate::config::VISIBLE_ROWS)
-        );
+        assert_eq!(found(&s), "300");
 
-        // To the foot of the list, the way an arrow key does it.
+        // To the foot of the list, the way an arrow key does it. This used to
+        // read "295-300 of 300" by the end, because the panel drew a window
+        // over the list and the range said where the window was. The band
+        // scrolls now and the scrollbar says that, so the number beside it is
+        // a number rather than a second opinion about the same thing.
         for _ in 0..299 {
             s.update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
         }
-        assert_eq!(
-            visible_range(&s, s.visible_rows()),
-            format!("{}-300 of 300", 300 - crate::config::VISIBLE_ROWS + 1)
-        );
+        assert_eq!(found(&s), "300");
     }
 
+    /// What the index found, not what came back: the search is capped at
+    /// [`crate::config::MAX_RESULTS`], and the difference is the whole reason
+    /// there is a number in the footer at all.
     #[test]
-    fn a_capped_result_list_says_which_of_them_is_on_screen() {
+    fn a_capped_result_list_says_how_many_it_really_found() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
@@ -733,22 +729,18 @@ mod tests {
         let many: Vec<_> = (0..40).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 4321, 9_000);
 
-        assert_eq!(
-            visible_range(&s, s.visible_rows()),
-            format!("1-{} of 4,321", crate::config::VISIBLE_ROWS)
-        );
+        assert_eq!(found(&s), "4,321");
     }
 
-    /// It all fits, so there is no range worth stating - only the total.
     #[test]
-    fn a_result_list_that_fits_is_reported_as_a_count() {
+    fn a_short_result_list_is_reported_as_a_count() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
         type_code(&mut s, now);
         give_results(&mut s, now, vec![hit("a"), hit("b")], 2, 9_000);
 
-        assert_eq!(visible_range(&s, s.visible_rows()), "2");
+        assert_eq!(found(&s), "2");
     }
 
     #[test]
@@ -763,7 +755,7 @@ mod tests {
         give_results(&mut s, now, vec![], 0, 9_000);
 
         assert_eq!(render(&s, now, EPOCH).text, "");
-        assert_eq!(visible_range(&s, s.visible_rows()), "");
+        assert_eq!(found(&s), "");
     }
 
     /// The condition the previous implementation rendered as `0 / 0 files`.
@@ -888,7 +880,7 @@ mod tests {
         assert_eq!(line.tone, Tone::Busy);
         // The count is beside the line, not in it, so a round trip in flight
         // does not cost the number somebody is reading.
-        assert_eq!(visible_range(&s, s.visible_rows()), "1");
+        assert_eq!(found(&s), "1");
     }
 
     #[test]
@@ -965,7 +957,7 @@ mod tests {
         assert_eq!(line.tone, Tone::Warn);
         // And the results are still reachable beside it: a warning about the
         // index must not cost the count of what it found.
-        assert_eq!(visible_range(&s, s.visible_rows()), "1");
+        assert_eq!(found(&s), "1");
     }
 
     #[test]

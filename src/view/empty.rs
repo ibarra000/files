@@ -311,7 +311,7 @@ mod tests {
     /// Every variant is short enough to fit the pane it is drawn into.
     ///
     /// [`crate::config::VISIBLE_ROWS`], not the sixteen a terminal used to
-    /// give it: `gui::overlay` draws these blocks into the same body the
+    /// give it: `gui::panel::list` draws these blocks into the same body the
     /// result rows use and stops at the bottom of it, so a block past that
     /// count is not scrolled to, it is *dropped* - and the lines these drop
     /// first are the ones saying what to do about it.

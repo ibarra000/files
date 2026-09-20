@@ -14,7 +14,7 @@
 //! all of it was a claim about nothing anybody had asked to be told.
 //!
 //! The cost was not the curves, it was what drove them. The panel *is* the
-//! window - [`crate::gui::overlay::show`] paints into `ui.max_rect()` - so
+//! window - [`crate::gui::panel::show`] paints into `ui.max_rect()` - so
 //! every frame of a height transition was a `SetWindowPos` and a swapchain
 //! reconfigure. Sixty a second, to move a list by forty points.
 //!
@@ -100,26 +100,26 @@ pub enum Phase {
 /// only reason the panel still asks for a frame it was not given an event for.
 #[derive(Debug, Clone, Copy)]
 struct Hold {
-    granted: Target,
+    granted: Content,
     /// How long an ungranted `Empty` has been asked for, in seconds.
     waited: f32,
 }
 
 impl Hold {
-    fn new(granted: Target) -> Self {
+    fn new(granted: Content) -> Self {
         Self {
             granted,
             waited: 0.0,
         }
     }
 
-    fn admit(&mut self, want: Target, dt: f32) -> Target {
+    fn admit(&mut self, want: Content, dt: f32) -> Content {
         // Held the same way, because they fail the same way: backspacing to
         // an empty field and typing again would otherwise flap the window
         // between one band and five, twice per keystroke.
         let settling = |c: Content| matches!(c, Content::Empty | Content::Quiet);
         // Already there, or not asking to be: nothing to hold.
-        if !settling(want.content) || settling(self.granted.content) {
+        if !settling(want) || settling(self.granted) {
             self.waited = 0.0;
             self.granted = want;
             return want;
@@ -141,29 +141,20 @@ impl Hold {
     }
 }
 
-/// Everything the view measured this frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Target {
-    pub content: Content,
-    /// Top of the selected row, in points from the top of the list, or `None`
-    /// when nothing is selected.
-    pub selection_y: Option<f32>,
-}
-
-/// What to draw. Pure data: no toolkit type appears here, so a test can assert
-/// on it with no window, no context and no GPU.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Visual {
-    pub content: Content,
-    pub selection_y: Option<f32>,
-}
-
 /// The panel's motion, such as it is.
+///
+/// What goes in and what comes out is a [`Content`] - the same type, because
+/// this gate delays a body and changes nothing else about it. There used to
+/// be a `Target` going in and a `Visual` coming out, each carrying a height,
+/// a layout and the y of the selected row alongside it. The window is a fixed
+/// size now, so there is no height; the preview pane is gone, so there is no
+/// layout; and the list is a scroller that paints its own selected row, so
+/// there is no y. Two structs of one field each is one field.
 #[derive(Debug, Clone, Copy)]
 pub struct Motion {
     phase: Phase,
     /// What the view last asked for, and the gate it has to get through.
-    want: Target,
+    want: Content,
     hold: Hold,
 }
 
@@ -175,10 +166,7 @@ impl Default for Motion {
 
 impl Motion {
     pub fn new() -> Self {
-        let start = Target {
-            content: Content::Recent,
-            selection_y: None,
-        };
+        let start = Content::Recent;
         Self {
             phase: Phase::Hidden,
             want: start,
@@ -192,11 +180,11 @@ impl Motion {
     /// between call sites. Recorded rather than applied, because the gate on an
     /// empty body needs to know how long one has been asked for before it can
     /// decide whether to grant it, and only `advance` is told about time.
-    pub fn retarget(&mut self, target: Target) {
-        self.want = target;
+    pub fn retarget(&mut self, want: Content) {
+        self.want = want;
     }
 
-    pub fn advance(&mut self, dt: f32) -> Visual {
+    pub fn advance(&mut self, dt: f32) -> Content {
         // A non-finite `dt` would poison the gate permanently - a body waiting
         // to go empty with no frame able to let it. The toolkit should never
         // hand one over; the cost of not depending on that is one comparison.
@@ -206,12 +194,7 @@ impl Motion {
             0.0
         };
 
-        let target = self.hold.admit(self.want, dt);
-
-        Visual {
-            content: target.content,
-            selection_y: target.selection_y,
-        }
+        self.hold.admit(self.want, dt)
     }
 
     /// Immediate.

@@ -8,13 +8,14 @@
 //! Most of this file used to be about the entrance, the height tween, the
 //! cross-fade and the sliding selection. They are gone, and so are their
 //! tests. The height went with them when the window became a fixed six
-//! hundred by four hundred: there is nothing left for the animator to have an
-//! opinion about the size of.
+//! hundred by four hundred; the selection went with them when the list became
+//! a scroller and a row started painting its own highlight. What goes into
+//! [`Motion`] and what comes out is now a [`Content`] both ways.
 //!
 //! What is left is the one thing that still takes time - the gate that stops
 //! a body going empty for one frame on its way to a perfectly good list.
 
-use files::gui::anim::{Content, EMPTY_HOLD, Motion, Phase, Target, Visual};
+use files::gui::anim::{Content, EMPTY_HOLD, Motion, Phase};
 
 /// Sixty frames a second, which is what the compositor gives us.
 const FRAME: f32 = 1.0 / 60.0;
@@ -23,15 +24,8 @@ const FRAME: f32 = 1.0 / 60.0;
 /// exactly on its own deadline.
 const SLACK: f32 = 3.0 * FRAME;
 
-fn at(content: Content) -> Target {
-    Target {
-        content,
-        selection_y: None,
-    }
-}
-
-/// Runs `secs` of frames, handing each visual to `f`.
-fn play(motion: &mut Motion, secs: f32, mut f: impl FnMut(Visual)) -> Visual {
+/// Runs `secs` of frames, handing each body to `f`.
+fn play(motion: &mut Motion, secs: f32, mut f: impl FnMut(Content)) -> Content {
     let mut last = motion.advance(0.0);
     let mut elapsed = 0.0;
     while elapsed < secs {
@@ -42,7 +36,7 @@ fn play(motion: &mut Motion, secs: f32, mut f: impl FnMut(Visual)) -> Visual {
     last
 }
 
-fn run(motion: &mut Motion, secs: f32) -> Visual {
+fn run(motion: &mut Motion, secs: f32) -> Content {
     play(motion, secs, |_| {})
 }
 
@@ -50,7 +44,7 @@ fn run(motion: &mut Motion, secs: f32) -> Visual {
 /// transition is not also a test about the entrance.
 fn shown() -> Motion {
     let mut motion = Motion::new();
-    motion.retarget(at(Content::Results));
+    motion.retarget(Content::Results);
     motion.summon();
     motion.advance(0.0);
     assert_eq!(motion.phase(), Phase::Shown);
@@ -64,7 +58,7 @@ fn shown() -> Motion {
 #[test]
 fn a_summon_is_immediate() {
     let mut motion = Motion::new();
-    motion.retarget(at(Content::Recent));
+    motion.retarget(Content::Recent);
     motion.summon();
 
     // No frames run: the panel is up on the same call. The hotkey thread has
@@ -72,7 +66,7 @@ fn a_summon_is_immediate() {
     // curve to play alongside that.
     let visual = motion.advance(0.0);
     assert_eq!(motion.phase(), Phase::Shown);
-    assert_eq!(visual.content, Content::Recent);
+    assert_eq!(visual, Content::Recent);
     assert!(
         !motion.is_animating(),
         "an arrived panel owes no further frames"
@@ -103,10 +97,10 @@ fn re_summoning_a_panel_that_is_already_up_does_not_reset_the_empty_gate() {
     // pressed while the panel is up is not an arrival, and must not hand the
     // body a fresh hold under a live query.
     let mut motion = shown();
-    motion.retarget(at(Content::Empty));
+    motion.retarget(Content::Empty);
     run(&mut motion, EMPTY_HOLD / 2.0);
     assert_eq!(
-        motion.advance(0.0).content,
+        motion.advance(0.0),
         Content::Results,
         "the gate should still be holding the old body"
     );
@@ -114,7 +108,7 @@ fn re_summoning_a_panel_that_is_already_up_does_not_reset_the_empty_gate() {
     motion.summon();
     let after = run(&mut motion, EMPTY_HOLD / 2.0 + SLACK);
     assert_eq!(
-        after.content,
+        after,
         Content::Empty,
         "the re-summon restarted the hold instead of letting it finish"
     );
@@ -136,16 +130,16 @@ fn a_body_that_is_empty_for_a_frame_is_never_shown_as_empty() {
     let mut motion = shown();
 
     // One frame of nothing, exactly as an in-flight query produces.
-    motion.retarget(at(Content::Empty));
+    motion.retarget(Content::Empty);
     let blink = motion.advance(FRAME);
-    assert_eq!(blink.content, Content::Results, "it flinched");
+    assert_eq!(blink, Content::Results, "it flinched");
 
     // And the results come back. This matters more without the cross-fade
     // than it did with one: an ungated transient is now a list of rows
     // replaced by a line of prose and back, in two frames.
-    motion.retarget(at(Content::Results));
+    motion.retarget(Content::Results);
     let recovered = motion.advance(FRAME);
-    assert_eq!(recovered.content, Content::Results);
+    assert_eq!(recovered, Content::Results);
 }
 
 /// The hold is a delay, not a refusal: a code that really matches nothing
@@ -153,66 +147,17 @@ fn a_body_that_is_empty_for_a_frame_is_never_shown_as_empty() {
 #[test]
 fn a_body_that_stays_empty_is_shown_as_empty() {
     let mut motion = shown();
-    motion.retarget(at(Content::Empty));
+    motion.retarget(Content::Empty);
 
     let held = run(&mut motion, EMPTY_HOLD * 0.5);
-    assert_eq!(held.content, Content::Results, "granted too early");
+    assert_eq!(held, Content::Results, "granted too early");
     assert!(
         motion.is_animating(),
         "the loop would park before granting it"
     );
 
     let granted = run(&mut motion, EMPTY_HOLD + SLACK);
-    assert_eq!(granted.content, Content::Empty);
-}
-
-// -- the selection ----------------------------------------------------------
-
-/// The first selection since there was none appears where it belongs. Kept as
-/// a regression guard: this used to need a special case, because a plain tween
-/// flew the highlight in from the top of the list every time a search returned.
-#[test]
-fn the_first_selection_appears_in_place_rather_than_sliding_in() {
-    let mut motion = shown();
-    motion.retarget(Target {
-        selection_y: Some(120.0),
-        ..at(Content::Results)
-    });
-
-    let visual = motion.advance(FRAME);
-    assert_eq!(visual.selection_y, Some(120.0));
-}
-
-#[test]
-fn the_selection_lands_on_the_row_it_was_given() {
-    let mut motion = shown();
-    let rows = |y: f32| Target {
-        selection_y: Some(y),
-        ..at(Content::Results)
-    };
-    motion.retarget(rows(120.0));
-    assert_eq!(motion.advance(FRAME).selection_y, Some(120.0));
-
-    motion.retarget(rows(160.0));
-    assert_eq!(
-        motion.advance(FRAME).selection_y,
-        Some(160.0),
-        "the highlight took a frame to get there"
-    );
-    assert!(!motion.is_animating());
-}
-
-#[test]
-fn a_cleared_selection_draws_nothing() {
-    let mut motion = shown();
-    motion.retarget(Target {
-        selection_y: Some(120.0),
-        ..at(Content::Results)
-    });
-    motion.advance(FRAME);
-
-    motion.retarget(at(Content::Recent));
-    assert_eq!(motion.advance(FRAME).selection_y, None);
+    assert_eq!(granted, Content::Empty);
 }
 
 // -- frames that are not sixty a second -------------------------------------
@@ -220,7 +165,7 @@ fn a_cleared_selection_draws_nothing() {
 #[test]
 fn a_frame_time_that_is_not_a_number_cannot_wedge_the_panel() {
     let mut motion = shown();
-    motion.retarget(at(Content::Empty));
+    motion.retarget(Content::Empty);
 
     motion.advance(f32::NAN);
     motion.advance(f32::INFINITY);
@@ -230,20 +175,20 @@ fn a_frame_time_that_is_not_a_number_cannot_wedge_the_panel() {
     // body would never be allowed to go empty at all.
     let visual = run(&mut motion, EMPTY_HOLD + SLACK);
     assert_eq!(
-        visual.content,
+        visual,
         Content::Empty,
         "a bad frame time wedged the empty gate"
     );
     assert_eq!(motion.phase(), Phase::Shown);
 }
 
-/// A panel nobody has summoned draws nothing and asks for nothing.
+/// A panel nobody has summoned asks for nothing.
 #[test]
 fn a_fresh_animator_is_idle() {
     let mut motion = Motion::new();
     assert!(motion.is_hidden());
     assert!(!motion.is_animating());
 
-    let visual = motion.advance(FRAME);
-    assert_eq!(visual.selection_y, None);
+    motion.advance(FRAME);
+    assert!(!motion.is_animating(), "an idle animator owes a frame");
 }

@@ -41,7 +41,7 @@ use super::input::{self, Input};
 use crate::config::COUNTDOWN_TICK;
 use crate::config::{
     ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, SEARCH_DEBOUNCE, Settings,
-    VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS, ViewerKind,
+    VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
 };
 use crate::history::History;
 use crate::index::store::{IndexOverview, IndexStatus};
@@ -122,8 +122,6 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
-    /// The first result rank on screen. See [`Self::scroll_into_view`].
-    scroll_top: usize,
     /// Whether `avwin.exe` could not be found on PATH when the program
     /// started.
     ///
@@ -260,7 +258,6 @@ impl AppState {
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
-            scroll_top: 0,
             avwin_missing: false,
             viewer,
             query_epoch: 0,
@@ -673,7 +670,6 @@ impl AppState {
     /// see the note in [`Self::on_input_changed`].
     fn clear_results(&mut self) {
         self.hits.clear();
-        self.scroll_top = 0;
         self.hovered = None;
         self.matched = 0;
         self.total = 0;
@@ -987,75 +983,7 @@ impl AppState {
         self.selection_pinned = true;
         self.selection_lost = false;
         self.selected_path = Some(Arc::clone(&self.hits[row.min(self.hits.len() - 1)].path));
-        self.scroll_into_view();
         Response::redraw()
-    }
-
-    /// The window over the result list: the first rank on screen.
-    ///
-    /// The list holds up to [`crate::config::MAX_RESULTS`] and the panel has
-    /// room for [`VISIBLE_ROWS`], so most of a broad search is off screen. This
-    /// is where.
-    pub fn scroll_top(&self) -> usize {
-        self.scroll_top
-    }
-
-    /// The ranks currently on screen.
-    pub fn visible_rows(&self) -> std::ops::Range<usize> {
-        let start = self.scroll_top.min(self.hits.len());
-        start..(start + VISIBLE_ROWS).min(self.hits.len())
-    }
-
-    /// The remembered codes on screen while recall is up.
-    ///
-    /// Derived, never stored - the opposite of [`Self::scroll_top`], and for a
-    /// reason that is a property of the data rather than a preference: the list
-    /// cannot change while it is being browsed, because `History::record` drops
-    /// the cursor. There is no update this could fall out of step with, so
-    /// there is nothing for a stored offset to be wrong about.
-    ///
-    /// The cursor rides the last row once it walks past the window, which is
-    /// the rule [`Self::scroll_into_view`] applies downwards - and browsing only
-    /// ever moves one entry at a time from the newest, so that is the only
-    /// direction there is.
-    pub fn recent_rows(&self) -> std::ops::Range<usize> {
-        let len = self.history.len();
-        let cursor = self.history.cursor().unwrap_or(0);
-        let start = (cursor + 1).saturating_sub(VISIBLE_ROWS).min(len);
-        start..(start + VISIBLE_ROWS).min(len)
-    }
-
-    /// Moves the window as little as it takes to contain the selected row.
-    ///
-    /// The **only** place `scroll_top` moves, called from the only two places
-    /// that can invalidate it: [`Self::jump_selection`], which moves the cursor,
-    /// and [`Self::apply_hits`], which moves the list out from under it. A
-    /// third caller would be a third opinion about where the window is.
-    ///
-    /// The terminal build derived its page from the selection instead, and its
-    /// note argued a stored offset would be "a second source of truth that
-    /// every result update would have to keep in step". That was written for a
-    /// three-column grid, where the page was the unit somebody moved in. For a
-    /// single column of twelve, flipping the whole list on the twelfth Down is
-    /// worse than sliding it by one - so the offset is stored, and the
-    /// invariant it has to hold is asserted directly by the interleaving
-    /// fuzzer rather than argued about here.
-    fn scroll_into_view(&mut self) {
-        let Some(row) = self.selected_row() else {
-            self.scroll_top = 0;
-            return;
-        };
-        if row < self.scroll_top {
-            self.scroll_top = row;
-        } else if row >= self.scroll_top + VISIBLE_ROWS {
-            self.scroll_top = row + 1 - VISIBLE_ROWS;
-        }
-        // A list that shrank under a window near its end would otherwise leave
-        // the window pointing past it, showing fewer rows than there is room
-        // for with nothing below them.
-        self.scroll_top = self
-            .scroll_top
-            .min(self.hits.len().saturating_sub(VISIBLE_ROWS));
     }
 
     // --- results ----------------------------------------------------------
@@ -1321,15 +1249,16 @@ impl AppState {
     }
 
     /// Installs a new result set while keeping the cursor where the user put
-    /// it, and the window where the cursor is.
+    /// it.
     ///
-    /// Split so that `place_selection` below can return early from any of its
-    /// four arms without each one having to remember the window. Forgetting it
-    /// on one arm is a cursor on a screen nobody can see, which is the failure
-    /// the stored offset has to be proof against.
+    /// There used to be a second half to this: the state held the first rank
+    /// on screen, and every arm of `place_selection` below had to remember to
+    /// move it, because forgetting on one arm was a cursor on a screen nobody
+    /// could see. The content band is an `egui::ScrollArea` now and owns its
+    /// own offset, so the only thing that has to survive a result set landing
+    /// under the cursor is the cursor.
     fn apply_hits(&mut self, hits: Vec<Hit>) {
         self.place_selection(hits);
-        self.scroll_into_view();
     }
 
     fn place_selection(&mut self, hits: Vec<Hit>) {

@@ -1,3 +1,5 @@
 /target
 /ueli
 /tests/snapshots/*.old.png
+/tests/snapshots/*.new.png
+/tests/snapshots/*.diff.png
