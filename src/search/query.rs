@@ -54,7 +54,7 @@
 //! [`Query::parse`] is total, and anything it could not honour rides along on
 //! the result as a [`Problem`].
 
-use crate::config::MIN_QUERY_LEN;
+use crate::config::MIN_TERM_LEN;
 use crate::config::hidden::Hidden;
 use crate::util::fold;
 
@@ -296,10 +296,15 @@ impl Problem {
 /// per share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryReject {
-    /// The *term* is below [`MIN_QUERY_LEN`]. Not the line: `ab ext:pdf` is a
-    /// ten-character line and a two-character sweep across every name on the
-    /// share, which is the work the minimum exists to prevent.
-    TooShort { need: usize },
+    /// There is no term at all.
+    ///
+    /// The *term*, not the line: `ext:pdf` is a seven-character line with
+    /// nothing to search for, and `  ` is a line with nothing on it. This
+    /// used to be `TooShort { need }` and to fire at anything under three
+    /// characters, which was the whole of the search floor. The floor is one
+    /// now, so the only remaining case is nothing - and "keep typing" is the
+    /// wrong sentence for a line that has syntax on it and no term.
+    Empty,
     /// Contains a NUL byte.
     ///
     /// Rejected rather than stripped: stripping would let `a\0bc` match `abc`,
@@ -313,7 +318,7 @@ pub enum QueryReject {
 impl QueryReject {
     pub fn detail(&self) -> String {
         match self {
-            Self::TooShort { need } => format!("type at least {need} characters"),
+            Self::Empty => "there is nothing on the line to search for".into(),
             Self::ContainsNul => "that is not a code this can look for".into(),
             Self::Syntax(p) => p.detail().into(),
         }
@@ -444,10 +449,8 @@ impl Query {
         if let Some(p) = self.problem {
             return Err(QueryReject::Syntax(p));
         }
-        if self.term.chars().count() < MIN_QUERY_LEN {
-            return Err(QueryReject::TooShort {
-                need: MIN_QUERY_LEN,
-            });
+        if self.term.chars().count() < MIN_TERM_LEN {
+            return Err(QueryReject::Empty);
         }
         if fold::fold_query(&self.term).contains(&0) {
             return Err(QueryReject::ContainsNul);
@@ -859,32 +862,35 @@ mod tests {
         assert_eq!(Query::parse("abc ext:pdf,pdf,PDF").types().len(), 1);
     }
 
-    // --- what counts as too short -------------------------------------------
+    // --- what counts as nothing ---------------------------------------------
 
-    /// `ab ext:pdf` is a ten-character line and a two-character sweep across
-    /// every name on the share. The minimum exists to bound the sweep, so it
-    /// has to be counted on the thing that is swept for.
+    /// The floor is counted on the *term* and not on the line, which used to
+    /// matter for a three-character minimum and still matters for a
+    /// one-character one: a line can be long and have nothing on it to
+    /// search for.
     #[test]
     fn the_minimum_length_applies_to_the_term_and_not_to_the_line() {
-        assert_eq!(
-            Query::parse("ab ext:pdf").check(),
-            Err(QueryReject::TooShort {
-                need: MIN_QUERY_LEN
-            })
+        assert_eq!(Query::parse("  ext:pdf").check(), Err(QueryReject::Empty));
+        assert!(
+            Query::parse("a ext:pdf").check().is_ok(),
+            "one character is a search now"
         );
-        assert!(Query::parse("abc ext:pdf").check().is_ok());
     }
 
     /// "Every PDF on the share" is three hundred rows in directory order
     /// ranked by nothing, and an arena sweep with no needle to make it fast.
+    /// That was the argument for a three-character floor and it is still the
+    /// argument against a filter with no term at all.
     #[test]
-    fn a_line_that_is_nothing_but_a_filter_is_too_short_rather_than_everything() {
-        assert_eq!(
-            Query::parse("ext:pdf").check(),
-            Err(QueryReject::TooShort {
-                need: MIN_QUERY_LEN
-            })
-        );
+    fn a_line_that_is_nothing_but_a_filter_is_empty_rather_than_everything() {
+        assert_eq!(Query::parse("ext:pdf").check(), Err(QueryReject::Empty));
+    }
+
+    /// And one character is now a search, which is the change.
+    #[test]
+    fn one_character_is_a_search() {
+        assert!(Query::parse("a").check().is_ok());
+        assert!(Query::parse("1").check().is_ok());
     }
 
     #[test]

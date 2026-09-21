@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 
 use crate::config::file::ConfigError;
+use crate::config::write::SettingKey;
 use crate::config::{ConfigChoice, EnumStrategy, MatcherKind, Settings, ViewerKind};
+use crate::view::settings::PageId;
 
 /// How a `--bench --walk` run is bounded.
 ///
@@ -24,6 +26,32 @@ pub struct WalkArgs {
 pub enum Mode {
     /// Run the search panel. The default, and what the program is.
     Gui,
+    /// Run the settings window, and nothing else.
+    ///
+    /// Not a debugging aid. It is how the settings window is opened at all:
+    /// the panel starts a copy of itself this way rather than drawing the
+    /// form inside its own viewport, which is how Ueli does it and is the
+    /// only arrangement in which the window is genuinely independent of the
+    /// panel - resizable, in the taskbar, and not fighting a panel that is
+    /// always on top.
+    ///
+    /// It is also a legitimate thing to type. With no panel running the
+    /// window opens anyway, reads the configuration file, and writes to it;
+    /// what it cannot do is the three things that need a running panel, and
+    /// it says so rather than failing when pressed.
+    Settings {
+        /// Which page to open on. `None` means the one it was last left on,
+        /// which is what a toggle should do.
+        page: Option<PageId>,
+        /// Which settings a command-line flag on the *panel* is holding.
+        ///
+        /// Without this the window would be a second process with a second
+        /// view of what is overridden, and `files --viewer pdf` would give a
+        /// settings window that offers to save the viewer, reports success,
+        /// and changes nothing at all. The panel passes its own
+        /// `Settings::cli_pinned` across. See `config::Pin`.
+        pinned: u32,
+    },
     /// Fast, read-only capability report.
     Doctor,
     /// Timing comparison across enumeration strategies.
@@ -77,6 +105,23 @@ pub struct Args {
     pub demo: bool,
 }
 
+/// Applies an override and records that a flag is holding it.
+///
+/// One helper rather than a `pin_to_session` line beside each assignment,
+/// because the pin is not optional and a line that can be left out will be.
+/// Written so that adding the next override means writing the key down.
+fn pinned<T>(
+    s: &mut Settings,
+    key: SettingKey,
+    value: Option<T>,
+    apply: impl FnOnce(&mut Settings, T),
+) {
+    if let Some(v) = value {
+        apply(s, v);
+        s.pin_to_session(key);
+    }
+}
+
 impl Args {
     /// Resolves settings: shipped defaults, then the config file, then the
     /// environment, then these flags.
@@ -94,20 +139,39 @@ impl Args {
         if let Some(v) = self.overrides.persist {
             s.persist = v;
         }
-        if let Some(v) = &self.overrides.index_log {
-            s.index_log = Some(v.clone());
-        }
-        if let Some(v) = self.overrides.viewer {
-            s.viewer = v;
-            // The flag outranks the file for this run, so writing the file
-            // would report a save that the next start ignores.
-            s.pin_to_session(crate::config::write::SettingKey::Viewer);
-        }
-        if let Some(v) = &self.overrides.pdf_viewer {
-            s.pdf_viewer = Some(v.clone());
-        }
-        if let Some(v) = self.overrides.hotkey {
-            s.hotkey = v;
+        // The four above are not settings the window can write, so there is
+        // nothing for a flag to be holding. The four below are, and every
+        // one of them has to say so: a flag outranks the file for this run,
+        // so writing the file would report a save the next start ignores.
+        //
+        // Only `--viewer` used to. The other three set their field and said
+        // nothing, so the settings window offered to save a path that
+        // `--pdf-viewer` was overruling, reported success, and changed
+        // nothing at all - the precise failure `Pin` exists to prevent.
+        pinned(&mut s, SettingKey::Viewer, self.overrides.viewer, |s, v| {
+            s.viewer = v
+        });
+        pinned(
+            &mut s,
+            SettingKey::PdfViewer,
+            self.overrides.pdf_viewer.clone(),
+            |s, v| s.pdf_viewer = Some(v),
+        );
+        pinned(&mut s, SettingKey::Hotkey, self.overrides.hotkey, |s, v| {
+            s.hotkey = v
+        });
+        pinned(
+            &mut s,
+            SettingKey::IndexLog,
+            self.overrides.index_log.clone(),
+            |s, v| s.index_log = Some(v),
+        );
+        // And whatever the *panel's* flags are holding, where this process
+        // is the settings window rather than the panel. Merged rather than
+        // assigned: a `--viewer` on this line pins the viewer here too, and
+        // the two sets are both true.
+        if let Mode::Settings { pinned, .. } = self.mode {
+            s.cli_pinned |= pinned;
         }
         Ok(s)
     }
@@ -134,6 +198,9 @@ USAGE:
 
 MODES:
     (none)              interactive search
+    --settings          the settings window on its own. The panel starts one
+                        of these; typing it with no panel running opens the
+                        window anyway, and every setting still saves.
     --doctor            report drive type, SMB dialect, and capabilities
                         (fast, read-only, safe to run any time)
     --bench             time every enumeration strategy against the real
@@ -213,8 +280,10 @@ ENVIRONMENT:
     FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER,
     FILES_HISTORY, FILES_HOTKEY, FILES_THEME, FILES_STALE_NOTICES,
     FILES_LIVE_UPDATES, FILES_HIDE_EXTENSIONS, FILES_HIDE_SYSTEM_FILES,
-    FILES_AUTO_HIDE, FILES_PDF_READ_ONLY, FILES_MAX_CONCURRENT_SCANS,
-    FILES_UPDATE_FROM, FILES_DEV_MODE
+    FILES_PDF_READ_ONLY, FILES_MAX_CONCURRENT_SCANS,
+    FILES_UPDATE_FROM, FILES_DEV_MODE, FILES_BACKDROP,
+    FILES_RESULT_LAYOUT, FILES_HIDE_ON_BLUR, FILES_HIDE_AFTER_OPENING,
+    FILES_HIDE_ON_ESCAPE
 
     Any of these outranks the configuration file, so a setting changed in the
     settings window applies for the session and is not saved - the window says
@@ -246,6 +315,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     let mut msi: Option<PathBuf> = None;
     let mut wait_pid: Option<u32> = None;
     let mut relaunch: Option<PathBuf> = None;
+    let mut settings_window = false;
+    let mut page: Option<PageId> = None;
+    let mut pinned = 0u32;
 
     let mut it = args.into_iter().peekable();
     while let Some(arg) = it.next() {
@@ -292,6 +364,22 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                     .parse()
                     .map_err(|_| ArgError(format!("--max-depth expects a number, got {d:?}")))?;
                 walk.get_or_insert_with(WalkArgs::default).max_depth = Some(d.max(1));
+            }
+            "--settings" => settings_window = true,
+            "--page" => {
+                let raw = value("--page")?;
+                page = Some(
+                    PageId::ALL
+                        .into_iter()
+                        .find(|p| p.slug() == raw)
+                        .ok_or_else(|| ArgError(format!("there is no {raw:?} page")))?,
+                );
+            }
+            "--pinned" => {
+                let raw = value("--pinned")?;
+                pinned = raw
+                    .parse::<u32>()
+                    .map_err(|_| ArgError(format!("--pinned wants a number, not {raw:?}")))?;
             }
             "--check-config" => check_config = true,
             "--apply-update" => apply_update = true,
@@ -380,6 +468,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
         });
     }
 
+    // Above the text modes and below `--apply-update`, for the same reason
+    // as the latter: it is an instruction from the copy of this program that
+    // is already running, not a preference somebody expressed alongside
+    // others.
+    if settings_window {
+        return Ok(Args {
+            mode: Mode::Settings { page, pinned },
+            config,
+            overrides,
+            demo,
+        });
+    }
+
     // `--check-config` wins over a mode, so `--check-config --query X` shows
     // where X would go rather than benchmarking.
     if check_config {
@@ -416,6 +517,61 @@ mod tests {
     #[test]
     fn no_arguments_runs_the_interactive_search() {
         assert_eq!(args(&[]).unwrap().mode, Mode::Gui);
+    }
+
+    /// A flag that overrides a setting the window can write has to say so,
+    /// or the window offers to save a value the next start will ignore.
+    ///
+    /// Only `--viewer` did. The other three set their field silently, so
+    /// with `--pdf-viewer` given the settings window showed the path as
+    /// editable, wrote it to the file, reported a success, and changed
+    /// nothing about the running program or the next one.
+    ///
+    /// `--no-config` so this tests the flags rather than whatever
+    /// configuration file the machine running it happens to have.
+    #[test]
+    fn a_flag_that_overrides_a_writable_setting_pins_it_for_the_session() {
+        let a = args(&[
+            "--no-config",
+            "--viewer",
+            "pdf",
+            "--pdf-viewer",
+            r"C:\viewer.exe",
+            "--hotkey",
+            "ctrl+alt+j",
+            "--index-log",
+            r"C:\index.log",
+        ])
+        .unwrap();
+        let s = a.settings().expect("these flags are all valid");
+
+        for key in [
+            SettingKey::Viewer,
+            SettingKey::PdfViewer,
+            SettingKey::Hotkey,
+            SettingKey::IndexLog,
+        ] {
+            assert_eq!(
+                s.pin(key),
+                Some(crate::config::Pin::CommandLine),
+                "{} was overridden by a flag and did not say so",
+                key.name()
+            );
+        }
+    }
+
+    /// And one nothing overrode is not pinned to the command line, or the
+    /// pin would mean nothing.
+    #[test]
+    fn a_setting_no_flag_touched_is_not_pinned_to_the_command_line() {
+        let s = args(&["--no-config", "--viewer", "pdf"])
+            .unwrap()
+            .settings()
+            .unwrap();
+        assert_ne!(
+            s.pin(SettingKey::Theme),
+            Some(crate::config::Pin::CommandLine)
+        );
     }
 
     #[test]

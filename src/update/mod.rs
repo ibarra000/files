@@ -41,7 +41,22 @@ pub const MANIFEST_NAME: &str = "latest.toml";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
     /// A newer version, and where its installer is.
-    Available { manifest: Manifest, msi: PathBuf },
+    Available {
+        manifest: Manifest,
+        msi: PathBuf,
+        /// Whether that installer is actually on disk, answered once here
+        /// rather than at every reader.
+        ///
+        /// The About page asks this twice a frame - once to decide whether
+        /// to warn and once to decide whether to offer the button - and the
+        /// settings window is redrawn continuously while it is open. That
+        /// is two `stat` calls per frame against a network share, which is
+        /// two round trips per frame on a laptop over a VPN. It is answered
+        /// when the manifest is read, which is once every four hours, and
+        /// being a few hours stale is exactly as wrong as the manifest
+        /// beside it.
+        msi_present: bool,
+    },
     /// The folder was read and holds nothing newer than this build.
     UpToDate,
     /// The folder could not be read, or what it held could not be used.
@@ -83,7 +98,14 @@ pub fn look(folder: &Path, running: Version) -> Found {
     // Joined here rather than by the caller, so the one place that has already
     // proved the name is a bare one is the place that builds the path from it.
     let msi = folder.join(&manifest.msi);
-    Found::Available { manifest, msi }
+    // Asked once, here, rather than at every reader on every frame. See the
+    // field's own note.
+    let msi_present = msi.is_file();
+    Found::Available {
+        manifest,
+        msi,
+        msi_present,
+    }
 }
 
 #[cfg(test)]
@@ -102,7 +124,7 @@ mod tests {
     fn a_newer_version_is_offered_with_the_installer_beside_it() {
         let dir = folder(PUBLISHED);
         match look(dir.path(), Version::new(0, 2, 0)) {
-            Found::Available { manifest, msi } => {
+            Found::Available { manifest, msi, .. } => {
                 assert_eq!(manifest.version, Version::new(0, 3, 0));
                 assert_eq!(msi, dir.path().join("files-0.3.0-x64.msi"));
             }

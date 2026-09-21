@@ -14,6 +14,7 @@ use std::time::Instant;
 
 use files::app::event::{AppEvent, Cmd, HotkeyMsg, Response, SearchMsg, VerifyMsg};
 use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
+use files::app::state::pointer::Intent;
 use files::app::state::{AppState, QueryPhase};
 use files::config::{REMEMBER_DEBOUNCE, Settings, VERIFY_DEBOUNCE};
 use files::search::matcher::{Hit, SearchOutcome};
@@ -301,8 +302,10 @@ fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
     );
 }
 
+/// Enter opens the row the cursor is on, whatever else it does with the
+/// panel afterwards.
 #[test]
-fn opening_a_result_from_the_overlay_leaves_it_up() {
+fn opening_a_result_from_the_overlay_opens_it() {
     let (mut s, now) = state();
     let (settled, _) = settle(&mut s, CODE, now);
     deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
@@ -313,11 +316,6 @@ fn opening_a_result_from_the_overlay_leaves_it_up() {
     assert!(
         r.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
         "nothing was opened: {:?}",
-        r.cmds
-    );
-    assert!(
-        !has(&r, &Cmd::DismissOverlay),
-        "the overlay put itself away, so nothing on it could be read: {:?}",
         r.cmds
     );
 }
@@ -343,13 +341,33 @@ fn opening_a_result_selects_the_code_it_opened() {
     );
 }
 
-/// The old behaviour, for anyone who asks for it by name.
+/// Opening a file puts the panel away, which is what a launcher does.
+///
+/// This used to be off by default and the test was written the other way
+/// round. The objection to switching it on was that an open is answered on
+/// another thread, so everything the open had to say arrived at a window
+/// that had gone - which is answered rather than overruled: see
+/// `an_open_that_fails_after_the_panel_has_gone_is_still_reported` below.
 #[test]
-fn auto_hide_closes_the_overlay_on_an_open() {
+fn opening_something_closes_the_overlay() {
+    let now = Instant::now();
+    let (mut s, _) = state();
+    let (settled, _) = settle(&mut s, CODE, now);
+    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    summon(&mut s, settled);
+
+    let r = s.update(press(Key::Enter), settled);
+
+    assert!(has(&r, &Cmd::DismissOverlay), "the overlay stayed up");
+}
+
+/// And it can be turned off, which is what it shipped as.
+#[test]
+fn the_overlay_can_be_told_to_stay_up_after_an_open() {
     let now = Instant::now();
     let mut s = AppState::new(
         Settings {
-            auto_hide: true,
+            hide_after_opening: false,
             ..Settings::default()
         },
         now,
@@ -360,7 +378,196 @@ fn auto_hide_closes_the_overlay_on_an_open() {
 
     let r = s.update(press(Key::Enter), settled);
 
-    assert!(has(&r, &Cmd::DismissOverlay), "the overlay stayed up");
+    assert!(!has(&r, &Cmd::DismissOverlay), "the overlay went anyway");
+    assert_eq!(
+        s.input.selected_text(),
+        Some(CODE),
+        "and the code is selected, so the next keystroke replaces it"
+    );
+}
+
+/// A copy leaves the panel up, whatever the setting says, because the whole
+/// of what a copy reports is a toast.
+#[test]
+fn copying_leaves_the_panel_up_to_be_read() {
+    let now = Instant::now();
+    let (mut s, _) = state();
+    let (settled, _) = settle(&mut s, CODE, now);
+    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    summon(&mut s, settled);
+
+    for action in [
+        files::view::actions::ActionId::CopyPath,
+        files::view::actions::ActionId::CopyName,
+    ] {
+        let r = s.update(AppEvent::Intent(Intent::Act(action)), settled);
+        assert!(
+            r.cmds.iter().any(|c| matches!(c, Cmd::Copy(_))),
+            "{action:?} copied nothing"
+        );
+        assert!(
+            !has(&r, &Cmd::DismissOverlay),
+            "{action:?} took the panel away with its own message"
+        );
+    }
+}
+
+/// Every action that says it hides does, and every one that says it does not
+/// does not.
+///
+/// `Action::hides` is a claim the renderer reads and the state machine never
+/// consults - the hiding happens inside `open_selection` and
+/// `reveal_selection`. Two facts in two places is two facts that drift, and
+/// this is the join.
+#[test]
+fn every_hiding_action_hides() {
+    use files::view::actions::ActionId;
+    let now = Instant::now();
+
+    for action in [
+        ActionId::Open,
+        ActionId::OpenAsDocument,
+        ActionId::OpenInAvwin,
+        ActionId::OpenWithWindows,
+        ActionId::Reveal,
+        ActionId::CopyPath,
+        ActionId::CopyName,
+        ActionId::Refresh,
+        ActionId::Settings,
+    ] {
+        let (mut s, _) = state();
+        let (settled, _) = settle(&mut s, CODE, now);
+        deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+        summon(&mut s, settled);
+
+        // Only what is actually on offer. The menu lists the default open
+        // and the two viewers it is *not*, so one of the three named opens
+        // is always absent - and an action nobody can reach makes no claim
+        // to check.
+        let Some(claimed) = files::view::actions::actions(&s)
+            .into_iter()
+            .find(|a| a.id == action)
+            .map(|a| a.hides)
+        else {
+            continue;
+        };
+        let r = s.update(AppEvent::Intent(Intent::Act(action)), settled);
+        assert_eq!(
+            has(&r, &Cmd::DismissOverlay),
+            claimed,
+            "{action:?} claims hides: {claimed}"
+        );
+    }
+}
+
+/// An open that fails after the panel has gone is still reported.
+///
+/// The whole of what makes hiding safe to ship switched on. A document
+/// quietly missing page seven is the worst outcome this program can produce,
+/// because nothing on screen would ever reveal it.
+#[test]
+fn an_open_that_fails_after_the_panel_has_gone_is_still_reported() {
+    let now = Instant::now();
+    let (mut s, _) = state();
+    assert!(!s.overlay_up, "the fixture has a panel to report on");
+
+    let r = s.update(
+        AppEvent::Open(files::app::event::OpenMsg::Failed {
+            path: std::sync::Arc::from(r"R:\jobs\11-D-0704\GA.pdf"),
+            detail: "the file no longer exists".into(),
+        }),
+        now,
+    );
+    assert!(
+        r.cmds.iter().any(|c| matches!(c, Cmd::Announce { .. })),
+        "the failure went nowhere: {:?}",
+        r.cmds
+    );
+}
+
+/// And with the panel up it stays a toast, because there is somewhere to
+/// read one. A modal on top of a window that is already saying it would be
+/// the same news twice, with a button.
+#[test]
+fn an_open_that_fails_with_the_panel_up_is_a_toast() {
+    let now = Instant::now();
+    let (mut s, _) = state();
+    summon(&mut s, now);
+
+    let r = s.update(
+        AppEvent::Open(files::app::event::OpenMsg::Failed {
+            path: std::sync::Arc::from(r"R:\jobs\11-D-0704\GA.pdf"),
+            detail: "the file no longer exists".into(),
+        }),
+        now,
+    );
+    assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Announce { .. })));
+    assert!(s.toast.is_some(), "and nothing was said at all");
+}
+
+/// Clicking on something else puts the panel away, which is what a launcher
+/// does and is the third of Ueli's three.
+#[test]
+fn losing_focus_puts_the_panel_away() {
+    let now = Instant::now();
+    let (mut s, _) = state();
+    summon(&mut s, now);
+
+    let r = s.update(AppEvent::WindowFocus(false), now);
+    assert!(has(&r, &Cmd::DismissOverlay), "the panel stayed up");
+}
+
+/// And it can be turned off, and does nothing at all when the panel was
+/// never up in the first place.
+#[test]
+fn losing_focus_does_nothing_when_it_should_not() {
+    let now = Instant::now();
+
+    let mut off = AppState::new(
+        Settings {
+            hide_on_blur: false,
+            ..Settings::default()
+        },
+        now,
+    );
+    summon(&mut off, now);
+    let r = off.update(AppEvent::WindowFocus(false), now);
+    assert!(!has(&r, &Cmd::DismissOverlay), "the setting was ignored");
+
+    // Never summoned: there is no panel to put away, and asking for one to
+    // be dismissed would be the state machine telling the hotkey thread
+    // about a window neither of them has.
+    let (mut down, _) = state();
+    let r = down.update(AppEvent::WindowFocus(false), now);
+    assert!(!has(&r, &Cmd::DismissOverlay));
+
+    // And gaining focus is nothing either way.
+    let (mut up, _) = state();
+    summon(&mut up, now);
+    let r = up.update(AppEvent::WindowFocus(true), now);
+    assert!(!has(&r, &Cmd::DismissOverlay));
+}
+
+/// Escape puts the panel away, and can be told not to.
+#[test]
+fn escape_can_be_told_to_clear_rather_than_close() {
+    let now = Instant::now();
+    let mut s = AppState::new(
+        Settings {
+            hide_on_escape: false,
+            ..Settings::default()
+        },
+        now,
+    );
+    let (settled, _) = settle(&mut s, CODE, now);
+    summon(&mut s, settled);
+
+    let r = s.update(press(Key::Esc), settled);
+    assert!(!has(&r, &Cmd::DismissOverlay), "Escape closed the panel");
+    // Summoning selects the whole code, so the first Escape drops the
+    // selection and the second clears the box.
+    s.update(press(Key::Esc), settled);
+    assert_eq!(s.input.text(), "", "the code was not cleared");
 }
 
 /// Losing the overlay having opened nothing would be bad enough; in compact
@@ -405,9 +612,9 @@ fn ctrl_q_still_quits_from_inside_the_overlay() {
 
 /// The headline case, and the one a phase-only gate gets wrong.
 ///
-/// The local matcher waits out `SEARCH_DEBOUNCE`, which is 300ms - an ordinary
-/// pause between syllables - so `inv` reaches `QueryPhase::Local` while
-/// somebody is still reading the rest of the code off a drawing. Gating on "a
+/// The local matcher waits out `SEARCH_DEBOUNCE`, which is shorter than an
+/// ordinary pause between syllables - so `inv` reaches `QueryPhase::Local`
+/// while somebody is still reading the rest of the code off a drawing. Gating on "a
 /// search resolved" would therefore remember every prefix typed on the way to a
 /// code, which is the entire thing this feature was asked not to do.
 #[test]
@@ -620,8 +827,17 @@ fn browsing_recall_and_then_closing_the_overlay_does_not_reorder_the_list() {
     assert_eq!(saves(&r) + saves(&r2), 0);
 }
 
+/// Two characters is a search now, and still not a code worth recalling
+/// tomorrow.
+///
+/// This used to hold for free: a short query was rejected outright and sat
+/// in a phase `query_settled` does not accept, so the floor on the history
+/// was a side effect of the floor on the search. The search floor is one
+/// now, so the history has a floor of its own - and this is the test that
+/// would have caught the recent-codes list filling with every prefix
+/// anybody typed on the way to a real code.
 #[test]
-fn a_query_below_the_minimum_length_is_never_remembered() {
+fn a_query_below_the_remembering_length_is_never_remembered() {
     let (mut s, now) = state();
     summon(&mut s, now);
     type_in(&mut s, "in", now);
@@ -630,12 +846,7 @@ fn a_query_below_the_minimum_length_is_never_remembered() {
 
     let r = s.update(press(Key::Esc), later);
 
-    assert_eq!(
-        s.phase,
-        QueryPhase::TooShort {
-            need: files::config::MIN_QUERY_LEN
-        }
-    );
+    assert!("in".chars().count() < files::config::MIN_REMEMBERED_LEN);
     assert!(s.history.is_empty());
     assert_eq!(saves(&r), 0);
 }

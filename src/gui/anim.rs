@@ -14,7 +14,7 @@
 //! all of it was a claim about nothing anybody had asked to be told.
 //!
 //! The cost was not the curves, it was what drove them. The panel *is* the
-//! window - [`crate::gui::overlay::show`] paints into `ui.max_rect()` - so
+//! window - [`crate::gui::panel::show`] paints into `ui.max_rect()` - so
 //! every frame of a height transition was a `SetWindowPos` and a swapchain
 //! reconfigure. Sixty a second, to move a list by forty points.
 //!
@@ -67,15 +67,22 @@ pub enum Content {
     /// The codes used before, while the Up arrow is browsing them. Never on
     /// screen otherwise.
     Recent,
+    /// The shortcuts somebody configured, which is what an empty box shows
+    /// when there are any. Ueli's favourites, under another name.
+    Aliases,
     Results,
-    /// A reason there are none.
-    Empty,
-    /// Nothing at all: the field and no band under it.
+    /// A reason there are none, which on an untouched panel is no reason at
+    /// all.
     ///
-    /// What an untouched panel is. Distinct from [`Self::Empty`], which is a
-    /// body with a sentence in it explaining why the list is short - this one
-    /// has no body and no footer, because there is nothing to explain yet.
-    Quiet,
+    /// There used to be a `Quiet` beside this one, for a panel with nothing
+    /// typed and nothing to say: it drew no body *and no footer*, because a
+    /// footer whose height depended on its contents could disagree with them.
+    /// The footer is a fixed forty points now and holds a gear whatever else
+    /// is going on, so there is nothing left for the distinction to protect -
+    /// and `view::empty` already answers `NoQuery` with no blocks at all, so
+    /// an untouched panel is still a search box and nothing else, by
+    /// construction rather than by a special case.
+    Empty,
     /// The drive picker, which is the one thing that still borrows the body.
     /// Help used to be here too, and is a window of its own now.
     Shares,
@@ -100,26 +107,25 @@ pub enum Phase {
 /// only reason the panel still asks for a frame it was not given an event for.
 #[derive(Debug, Clone, Copy)]
 struct Hold {
-    granted: Target,
+    granted: Content,
     /// How long an ungranted `Empty` has been asked for, in seconds.
     waited: f32,
 }
 
 impl Hold {
-    fn new(granted: Target) -> Self {
+    fn new(granted: Content) -> Self {
         Self {
             granted,
             waited: 0.0,
         }
     }
 
-    fn admit(&mut self, want: Target, dt: f32) -> Target {
-        // Held the same way, because they fail the same way: backspacing to
-        // an empty field and typing again would otherwise flap the window
-        // between one band and five, twice per keystroke.
-        let settling = |c: Content| matches!(c, Content::Empty | Content::Quiet);
+    fn admit(&mut self, want: Content, dt: f32) -> Content {
+        // Backspacing to an empty field and typing again would otherwise
+        // flap the body between a list and a sentence, twice per keystroke.
+        let settling = |c: Content| c == Content::Empty;
         // Already there, or not asking to be: nothing to hold.
-        if !settling(want.content) || settling(self.granted.content) {
+        if !settling(want) || settling(self.granted) {
             self.waited = 0.0;
             self.granted = want;
             return want;
@@ -141,40 +147,20 @@ impl Hold {
     }
 }
 
-/// Everything the view measured this frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Target {
-    pub height: f32,
-    pub content: Content,
-    /// Top of the selected row, in points from the top of the list, or `None`
-    /// when nothing is selected.
-    pub selection_y: Option<f32>,
-}
-
-/// What to draw. Pure data: no toolkit type appears here, so a test can assert
-/// on it with no window, no context and no GPU.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Visual {
-    pub height: f32,
-    pub content: Content,
-    pub selection_y: Option<f32>,
-    /// Whether the pane beside the list is in play.
-    ///
-    /// Carried on the frame rather than passed to `overlay::show` beside it,
-    /// because it is decided by the same thing that decides the height and at
-    /// the same moment - and a renderer that had to be told twice is a renderer
-    /// that can be told two different things. Set by
-    /// [`crate::gui::frame::Frame::advance`]; never animated, because a width
-    /// that eased would be a `SetWindowPos` per frame of the ease.
-    pub layout: crate::gui::theme::Layout,
-}
-
 /// The panel's motion, such as it is.
+///
+/// What goes in and what comes out is a [`Content`] - the same type, because
+/// this gate delays a body and changes nothing else about it. There used to
+/// be a `Target` going in and a `Visual` coming out, each carrying a height,
+/// a layout and the y of the selected row alongside it. The window is a fixed
+/// size now, so there is no height; the preview pane is gone, so there is no
+/// layout; and the list is a scroller that paints its own selected row, so
+/// there is no y. Two structs of one field each is one field.
 #[derive(Debug, Clone, Copy)]
 pub struct Motion {
     phase: Phase,
     /// What the view last asked for, and the gate it has to get through.
-    want: Target,
+    want: Content,
     hold: Hold,
 }
 
@@ -186,11 +172,7 @@ impl Default for Motion {
 
 impl Motion {
     pub fn new() -> Self {
-        let start = Target {
-            height: 0.0,
-            content: Content::Recent,
-            selection_y: None,
-        };
+        let start = Content::Recent;
         Self {
             phase: Phase::Hidden,
             want: start,
@@ -204,16 +186,11 @@ impl Motion {
     /// between call sites. Recorded rather than applied, because the gate on an
     /// empty body needs to know how long one has been asked for before it can
     /// decide whether to grant it, and only `advance` is told about time.
-    pub fn retarget(&mut self, target: Target) {
-        self.want = target;
+    pub fn retarget(&mut self, want: Content) {
+        self.want = want;
     }
 
-    /// `layout` is carried through rather than decided here: it is not
-    /// animated - a width that eased would be one `SetWindowPos` per frame of
-    /// the ease - but it belongs on the `Visual`, which is the whole of what a
-    /// frame is drawn from. Passing it in keeps that true without giving this
-    /// module an opinion about monitors.
-    pub fn advance(&mut self, dt: f32, layout: crate::gui::theme::Layout) -> Visual {
+    pub fn advance(&mut self, dt: f32) -> Content {
         // A non-finite `dt` would poison the gate permanently - a body waiting
         // to go empty with no frame able to let it. The toolkit should never
         // hand one over; the cost of not depending on that is one comparison.
@@ -223,14 +200,7 @@ impl Motion {
             0.0
         };
 
-        let target = self.hold.admit(self.want, dt);
-
-        Visual {
-            height: target.height,
-            content: target.content,
-            selection_y: target.selection_y,
-            layout,
-        }
+        self.hold.admit(self.want, dt)
     }
 
     /// Immediate.

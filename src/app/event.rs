@@ -26,25 +26,39 @@ use crate::search::verify::VerifyOutcome;
 /// Something happened.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    /// The configuration file was rewritten, and here is what it now says.
+    ///
+    /// The settings window writes the file and then says so; this is the
+    /// panel reading it again. The whole of `Settings` rather than one
+    /// edit, because the two processes share the file and nothing else, so
+    /// "it changed" is the most either can honestly report.
+    ///
+    /// Boxed because `Settings` is the largest thing in this enum by a
+    /// wide margin and every other variant would pay for it.
+    Adopt(Box<crate::config::Settings>),
     Key(KeyEvent),
     /// What the pointer meant, already resolved against the layout that drew
     /// it. See [`crate::app::state::pointer`].
     Intent(crate::app::state::pointer::Intent),
-    /// A control in the settings window was moved.
-    Setting(crate::app::state::SettingChange),
-    /// The alias list was changed in the settings window.
-    Aliases(Vec<crate::alias::Alias>),
-    /// The drive list was changed in the settings window.
-    Drives(Vec<crate::paths::Mapping>),
     Paste(String),
+    /// The window gained or lost the keyboard.
+    ///
+    /// Only ever `false` matters, and only when the panel is up: it is how a
+    /// launcher knows to get out of the way. It arrives from the toolkit
+    /// rather than from the hotkey thread, because the hotkey thread does
+    /// not hear about a click on somebody else's window.
+    ///
+    /// The shell drops it while an auxiliary window of ours is open - see
+    /// `gui::Shell::ui` - because the settings window takes the keyboard
+    /// from the panel, and a panel that dismissed itself over that would
+    /// close the window the user had just clicked into.
+    WindowFocus(bool),
     Search(SearchMsg),
     Verify(VerifyMsg),
     /// One live share answered. Sent once per share, not once per search.
     Live(LiveMsg),
     Index(IndexMsg),
     Open(OpenMsg),
-    /// What a file is, for the pane beside the list. See [`crate::preview`].
-    Preview(PreviewMsg),
     Clipboard(ClipboardMsg),
     /// The overlay hotkey did something. Sent only by the hotkey thread.
     Hotkey(HotkeyMsg),
@@ -75,6 +89,15 @@ pub enum HotkeyMsg {
     Summoned,
     /// The window has been put back and minimised. Return to the full layout.
     Dismissed,
+    /// The chord was claimed, and this process owns it.
+    ///
+    /// Sent once, at startup. Nothing on screen changes; it is recorded so
+    /// that the diagnostics can say "accepted" without asking Windows a
+    /// question it cannot answer correctly from in here. `RegisterHotKey` is
+    /// per-thread, so a second registration of a chord this program already
+    /// holds fails - and the report used to tell people their own program
+    /// had stolen their hotkey. See [`crate::hotkey::Probe`].
+    Claimed,
     /// The hotkey, or the window behind it, is not available on this machine.
     ///
     /// Sent at most once. The compact layout still toggles on the hotkey - a
@@ -149,20 +172,6 @@ pub enum ClipboardMsg {
     Failed { detail: String },
 }
 
-/// What the preview worker found out.
-///
-/// One variant, and deliberately no `Failed`. Every way this can go wrong -
-/// a share that has gone away, a file deleted between the search and the
-/// pointer reaching it, an index not yet built - is already a field on
-/// [`crate::preview::Facts`], because each of them is a fact about the file
-/// worth drawing rather than an error worth reporting. A pane that empties and
-/// raises a toast whenever a share is slow would be worse at the one job it
-/// has.
-#[derive(Debug, Clone)]
-pub enum PreviewMsg {
-    Ready(Arc<crate::preview::Preview>),
-}
-
 #[derive(Debug, Clone)]
 pub enum OpenMsg {
     Launched {
@@ -194,14 +203,6 @@ pub enum OpenMsg {
     },
     ViewerSaveFailed {
         detail: String,
-    },
-    /// A setting changed in the window reached the configuration file.
-    ///
-    /// Carries the label rather than the key, because what the user is owed
-    /// is confirmation about the thing they just changed, spelled the way the
-    /// form spelled it.
-    SettingSaved {
-        label: &'static str,
     },
     SettingSaveFailed {
         label: &'static str,
@@ -279,29 +280,30 @@ pub enum Cmd {
         force: bool,
     },
     Open(OpenRequest),
-    /// Find out what the file under the pointer is.
-    ///
-    /// Carries the path rather than the row for the reason `selected_path`
-    /// exists: `apply_hits` replaces the result list wholesale, so a rank is
-    /// stale the instant results land and the answer would be drawn against
-    /// whatever file happened to inherit the row.
-    Preview(crate::preview::Request),
     /// Write the chosen viewer back to the configuration file, preserving
     /// every comment in it. Emitted only when the state machine already knows
     /// the value can stick - see `Settings::can_save`.
     SaveViewer(ViewerKind),
-    /// Write a setting changed in the window back to the configuration file.
-    ///
-    /// Emitted only for a setting `Settings::can_save` has already agreed to,
-    /// so this never reaches the disk to report a save the next start would
-    /// ignore.
-    SaveSetting {
-        edit: crate::config::write::Edit,
-        /// How the form spells it, for the message that reports the outcome.
-        label: &'static str,
-    },
     /// Put text on the system clipboard.
     Copy(String),
+    /// Say something the user has to see, with no panel to say it on.
+    ///
+    /// A native message box. Raised only when the panel has already gone and
+    /// the thing to say is a warning or worse - see [`crate::notify`] for why
+    /// that case exists at all, and why an open that went perfectly stays
+    /// silent.
+    Announce {
+        title: String,
+        detail: String,
+    },
+    /// Open Explorer with this file already picked out.
+    ///
+    /// `explorer.exe /select,"<path>"`, which is what "Show in folder" does
+    /// everywhere else on this machine. Its own command rather than an
+    /// [`Self::Open`] with a fourth route, because it does not open the file
+    /// at all - it opens the folder, and the two fail for different reasons
+    /// and report differently.
+    Reveal(Arc<str>),
     /// Fetch the clipboard, to be inserted at the caret.
     ReadClipboard,
     /// Store the recalled codes.

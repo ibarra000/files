@@ -1,7 +1,7 @@
 //! What the screen says, with no opinion about how it looks.
 //!
 //! Every module here is a pure function from application state to the words,
-//! marks and key hints that belong on screen - and to nothing else. There is no
+//! marks and words that belong on screen - and to nothing else. There is no
 //! colour, no rectangle and no widget: a caller renders these with whatever it
 //! draws with.
 //!
@@ -48,9 +48,8 @@ use std::borrow::Cow;
 
 pub mod style;
 
+pub mod actions;
 pub mod empty;
-pub mod hints;
-pub mod preview;
 pub mod row;
 pub mod settings;
 pub mod shares;

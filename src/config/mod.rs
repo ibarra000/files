@@ -38,7 +38,36 @@ pub const CUSTPRO_PATH: &str = r"V:\Documents\custpro";
 
 // --- Query -----------------------------------------------------------------
 
-pub const MIN_QUERY_LEN: usize = 3;
+/// The shortest term this program will search for.
+///
+/// One. It was three, and dropping it is what Ueli does - it has no minimum
+/// and no debounce, and typing one character gives you results.
+///
+/// The three constants below used to be one, and that is the important part
+/// of this change rather than the number. `MIN_QUERY_LEN` was doing three
+/// different jobs under one name - a floor on the local search, a floor on
+/// what gets sent to a file server, and, by accident, a floor on what gets
+/// remembered - and two of those jobs still want a three.
+pub const MIN_TERM_LEN: usize = 1;
+
+/// The shortest term worth sending to a *file server*.
+///
+/// Still three, and for a reason that has nothing to do with the local
+/// search. A server-side filter is a network round trip per share, and a
+/// one-character filter matches most of the share - so the round trip costs
+/// a full listing and saves nothing. Below this the local index answers and
+/// the live shares are left alone.
+pub const MIN_SERVER_QUERY_LEN: usize = 3;
+
+/// The shortest code worth writing into the history file.
+///
+/// Three, and this one used to be enforced by accident. `query_settled`
+/// accepts only a query that reached a settled phase, and short queries sat
+/// in a `TooShort` phase that never settled - so the floor was a side effect
+/// of a rejection, and lowering the search floor without naming this job
+/// would have quietly filled the recent-codes list with every one- and
+/// two-character prefix anybody typed on the way to a real code.
+pub const MIN_REMEMBERED_LEN: usize = 3;
 
 /// Results retained and reachable by scrolling.
 ///
@@ -58,11 +87,23 @@ pub const MAX_RESULTS: usize = 300;
 /// `gui::theme` for this, which is a dependency pointing the wrong way - the
 /// interaction model is meant to be drawable by anything.
 ///
-/// Twelve rows of forty points is most of a laptop's vertical half. Past that
-/// the panel stops being an overlay and starts being a file manager, which is a
-/// different program; below it, a broad code spends too much of its time being
-/// scrolled.
-pub const VISIBLE_ROWS: usize = 12;
+/// Six, and no longer a free choice: the panel is a fixed four hundred points
+/// tall, and six forty-point rows is what is left once the field and the
+/// footer have taken theirs. It was twelve while the window grew to fit the
+/// list. `gui::theme` asserts the arithmetic so the two cannot drift.
+///
+/// This is the page size the arrows move by, and no longer the window the
+/// state machine keeps over the results: the content band is a scroll area
+/// and owns its own offset. What is left of the number is how far `PageDown`
+/// goes, which has to be one screen.
+pub const VISIBLE_ROWS: usize = 6;
+
+/// And four, when the rows are the taller kind.
+///
+/// See [`ResultLayout`]. A detailed row is fifty-two points where a compact
+/// one is thirty-six, so a screen is four of them rather than six - and a
+/// `PageDown` that moved six would scroll past two rows nobody saw.
+pub const VISIBLE_ROWS_DETAILED: usize = 4;
 
 /// Arena bytes in the first segment a walk publishes.
 ///
@@ -146,18 +187,22 @@ pub const LIVE_DEADLINE: Duration = Duration::from_millis(1_200);
 
 /// Quiet period after the last keystroke before a live share is asked.
 ///
-/// Twice [`SEARCH_DEBOUNCE`], and the doubling is the justification. That one
-/// is paced by what a *reader* can use, because the match itself is free. This
-/// one is paced by what somebody else's file server can afford: a leading `*`
-/// defeats the NTFS index, so the server walks its own directory to answer and
-/// the answer costs it real CPU rather than a seek.
+/// Paced by what somebody else's file server can afford, where
+/// [`SEARCH_DEBOUNCE`] is paced by what a reader can use: a leading `*`
+/// defeats the NTFS index, so the server walks its own directory to answer
+/// and the answer costs it real CPU rather than a seek.
 ///
 /// Somebody reading a code off a drawing pauses about 200-300 ms between
-/// groups, which is what 300 ms was chosen to sit just past. Six hundred
-/// clears the pause between a code and the modifier after it as well, so
-/// `11-D-0704` costs one query rather than the two that 300 ms lets through -
-/// halving the load across the fleet for 300 ms nobody notices, because the
-/// local results are already on screen by then.
+/// groups. Six hundred clears the pause between a code and the modifier after
+/// it as well, so `11-D-0704` costs one query rather than two - halving the
+/// load across the fleet for a delay nobody notices, because the local
+/// results are already on screen by then.
+///
+/// This is deliberately *not* tied to [`SEARCH_DEBOUNCE`]. It used to be
+/// twice it, and the doubling read as the justification; it is not. This
+/// number answers a question about a file server and that one answers a
+/// question about a screen, and when the second was shortened this one had
+/// no reason to move.
 pub const LIVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// Floor between two queries of the same share, whatever asks for them.
@@ -206,26 +251,46 @@ pub const JOB_CACHE_CAPACITY: usize = 64;
 /// Answering every prefix meant a result set, a body change and a window resize
 /// per character, for answers nobody reads.
 ///
-/// Equal to [`VERIFY_DEBOUNCE`] deliberately: one pause, one answer, one server
-/// check. `AppState::on_tick` fires them in that order and relies on it.
-pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// **A hundred and eighty, and it was three hundred.** Three hundred was
+/// chosen to sit just past the 200-300 ms pause somebody makes between the
+/// groups of a code, so that `11-D-0704` cost one sweep rather than three.
+/// That is the thing being traded away here and it is worth saying plainly:
+/// at a hundred and eighty, a slow reader's pause between `11-` and `D-` will
+/// sometimes dispatch a sweep nobody reads.
+///
+/// Two of the three costs that bought have since gone. A result set arriving
+/// no longer resizes the window - it is a fixed six hundred by four hundred -
+/// and it no longer empties the list on the way, because `on_input_changed`
+/// keeps the previous results on screen until the next ones land. What is
+/// left is one in-memory sweep and one list swap, both local, and the server
+/// is untouched either way: [`VERIFY_DEBOUNCE`] and [`LIVE_DEBOUNCE`] are
+/// what pace the network and neither moves.
+///
+/// What it buys is the list appearing a hundred and twenty milliseconds
+/// sooner after the typing stops, every single time. Ueli searches on every
+/// keystroke against an in-memory index and feels instant; this cannot do
+/// that against a network index, and this is how close it gets.
+///
+/// No longer equal to [`VERIFY_DEBOUNCE`], and that is an improvement rather
+/// than a thing to watch: they used to fall due on the same tick, and
+/// `AppState::on_tick` had to run the matcher first so the verification was
+/// checked against a fresh local answer. Now the local answer has been back
+/// for over a hundred milliseconds by the time the check is asked for. The
+/// ordering in `on_tick` stays, because a burst can still land both on one
+/// tick after a long stall.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
+
+/// The local match answers before the server is asked, always.
+///
+/// The invariant `on_tick`'s ordering used to carry on its own. Checked here
+/// so that raising one of the two without the other is a build error rather
+/// than a verification run against the previous code's results.
+const _: () = assert!(SEARCH_DEBOUNCE.as_millis() <= VERIFY_DEBOUNCE.as_millis());
 
 /// Quiet period after the last keystroke before the authoritative server-side
 /// verification runs. A leading `*` defeats the NTFS index, so this costs real
 /// server CPU and must not fire per keystroke.
 pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
-
-/// Quiet period before the pane beside the list asks what a file is.
-///
-/// A twentieth of [`VERIFY_DEBOUNCE`] and a different kind of pause. That one
-/// waits for somebody to stop *typing*, which is a decision they are still
-/// making; this one waits for them to stop *pointing*, which is already made -
-/// so it only has to be long enough that sweeping a mouse down twelve rows does
-/// not spend twelve round trips on rows nobody stopped at.
-///
-/// Not zero, and the reason is where the answer comes from: `metadata` on a
-/// drawing share reached over a VPN is tens of milliseconds, not microseconds.
-pub const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Quiet period after the last keystroke before the code on the line reaches
 /// the recall list.
@@ -553,6 +618,69 @@ pub enum ViewerKind {
     Avwin,
 }
 
+/// How much of itself a result row shows.
+///
+/// Ueli's two, and its default. A compact row is an icon, a name and a badge
+/// on one line; a detailed row puts the folder under the name and is half as
+/// tall again, so four fit where six did.
+///
+/// **The default is worth arguing about, and it ships as Ueli has it.** Ueli's
+/// rows are installed applications, whose names are unique - so the folder
+/// under them would be noise and compact is obviously right. Ours are files,
+/// and two drawings called `GA.pdf` in different job folders are the ordinary
+/// case rather than the odd one: compact shows them as two identical rows
+/// distinguished only by their drive badge. The instruction was to keep the
+/// experience Ueli's, so compact is the default and [`Self::Detailed`] is one
+/// switch away on the Appearance page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResultLayout {
+    /// One line: an icon, the name, the drive it came off.
+    #[default]
+    Compact,
+    /// Two: the name over the folder it is in.
+    Detailed,
+}
+
+impl ResultLayout {
+    pub const ALL: [Self; 2] = [Self::Compact, Self::Detailed];
+
+    /// The spelling written back to the config file, so it must be one
+    /// [`Self::parse`] accepts.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Detailed => "detailed",
+        }
+    }
+
+    /// How the settings window spells it.
+    pub const fn display(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Detailed => "Detailed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|l| l.name().eq_ignore_ascii_case(text.trim()))
+    }
+
+    /// How far `PageUp` and `PageDown` move.
+    ///
+    /// A screen, which is a different number for each layout. Here rather
+    /// than in `gui::theme` because the state machine is what moves the
+    /// cursor; the geometry that makes these two numbers true is asserted
+    /// beside the row heights.
+    pub const fn rows_per_page(self) -> usize {
+        match self {
+            Self::Compact => VISIBLE_ROWS,
+            Self::Detailed => VISIBLE_ROWS_DETAILED,
+        }
+    }
+}
+
 /// Which palette the panel is drawn in.
 ///
 /// A setting rather than a follow of the Windows theme, which is what it used
@@ -697,6 +825,21 @@ pub enum ConfigChoice {
     None,
 }
 
+impl ConfigChoice {
+    /// The file this resolves to, where there is one.
+    ///
+    /// `Default` answers the same path `Settings::load` would use, so a
+    /// process that loaded from the default and then wants to write to it
+    /// does not have to work out where it was.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Explicit(path) => Some(path.clone()),
+            Self::Default => file::default_config_path(),
+            Self::None => None,
+        }
+    }
+}
+
 /// Why a setting cannot be written back to the configuration file.
 ///
 /// Carried rather than flattened to a bool because the three have different
@@ -772,8 +915,34 @@ pub struct Settings {
     /// what makes opening a second code a keystroke rather than a hotkey.
     ///
     /// On for anyone who wants the old behaviour. Escape and the hotkey close
-    /// the panel either way: this is about the times it decides for itself.
-    pub auto_hide: bool,
+    /// Whether clicking on something else puts the panel away.
+    ///
+    /// On, which is what a launcher does and what Ueli does. The panel is
+    /// summoned over somebody's work and is in the way until it is not
+    /// wanted; a launcher that had to be dismissed by hand would be one more
+    /// window to manage.
+    pub hide_on_blur: bool,
+    /// Whether the panel goes away once a file is on its way.
+    ///
+    /// On, and it used to be off. The objection was specific and correct: an
+    /// open is answered on another thread, so "Opened 11 of 13 pages", the
+    /// list of pages skipped and "Could not open …" all arrived at a window
+    /// that had already gone, and nobody ever read one. That is answered
+    /// rather than overruled - anything the open has to say that the user
+    /// must see now arrives in a message box. See [`crate::notify`].
+    ///
+    /// Per action rather than per open, which is the other half: a copy
+    /// leaves the panel up so its toast can be read, and only the opens and
+    /// the reveal take it away. See [`crate::view::actions::Action::hides`].
+    pub hide_after_opening: bool,
+    /// Whether Escape puts the panel away rather than clearing the box.
+    ///
+    /// On. Switched off, Escape clears the code and the shortcut is the way
+    /// out - which is the arrangement somebody who lives in the panel may
+    /// want, and is not the one to default to: a window covering somebody's
+    /// work has to be dismissable without them working out which layer they
+    /// are on.
+    pub hide_on_escape: bool,
     /// Whether an assembled document is handed to the viewer read-only.
     ///
     /// On by default, and the reason is the cache rather than the share. A
@@ -839,6 +1008,14 @@ pub struct Settings {
     pub viewer: ViewerKind,
     /// Which palette the panel is drawn in.
     pub theme: ThemeChoice,
+    /// What the compositor is asked to put behind the panel.
+    ///
+    /// Only readable at startup: `DWMWA_SYSTEMBACKDROP_TYPE` is set on the
+    /// window handle once, and the shell re-applies it on a theme change and
+    /// nowhere else. See [`crate::gui::window::Material`].
+    pub backdrop: crate::gui::window::Material,
+    /// How much of itself a result row shows.
+    pub result_layout: ResultLayout,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -876,7 +1053,7 @@ pub struct Settings {
     /// because it cannot change while this runs. A flag leaves nothing to ask,
     /// so it is recorded here as it is applied. One bit per
     /// [`write::SettingKey`]; see [`Self::pin`].
-    pub cli_pinned: u16,
+    pub cli_pinned: u32,
     /// The files that are never shown, however well they match.
     ///
     /// One derived value rather than the two settings it is built from, so
@@ -954,7 +1131,9 @@ impl Settings {
             persist: true,
             stale_notices: true,
             dev_mode: false,
-            auto_hide: false,
+            hide_on_blur: true,
+            hide_after_opening: true,
+            hide_on_escape: true,
             pdf_read_only: true,
             max_concurrent_scans: DEFAULT_MAX_CONCURRENT_SCANS,
             cache_dir: default_cache_dir(),
@@ -965,6 +1144,8 @@ impl Settings {
             hotkey: crate::hotkey::spec::HotkeySpec::default(),
             viewer: ViewerKind::default(),
             theme: ThemeChoice::default(),
+            backdrop: crate::gui::window::Material::default(),
+            result_layout: ResultLayout::default(),
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1087,10 +1268,20 @@ impl Settings {
         {
             self.dev_mode = v;
         }
-        if env_bool("FILES_AUTO_HIDE").is_none()
-            && let Some(v) = f.auto_hide
+        if env_bool("FILES_HIDE_ON_BLUR").is_none()
+            && let Some(v) = f.hide_on_blur
         {
-            self.auto_hide = v;
+            self.hide_on_blur = v;
+        }
+        if env_bool("FILES_HIDE_AFTER_OPENING").is_none()
+            && let Some(v) = f.hide_after_opening
+        {
+            self.hide_after_opening = v;
+        }
+        if env_bool("FILES_HIDE_ON_ESCAPE").is_none()
+            && let Some(v) = f.hide_on_escape
+        {
+            self.hide_on_escape = v;
         }
         if env_bool("FILES_PDF_READ_ONLY").is_none()
             && let Some(v) = f.pdf_read_only
@@ -1147,10 +1338,28 @@ impl Settings {
         {
             self.update_from = Some(v.clone());
         }
+        if env_str("FILES_INDEX_LOG").is_none()
+            && let Some(v) = &f.index_log
+        {
+            self.index_log = Some(v.clone());
+        }
         if env_str("FILES_THEME").is_none()
             && let Some(v) = f.theme.as_deref().and_then(ThemeChoice::parse)
         {
             self.theme = v;
+        }
+        if env_str("FILES_BACKDROP").is_none()
+            && let Some(v) = f
+                .backdrop
+                .as_deref()
+                .and_then(crate::gui::window::Material::parse)
+        {
+            self.backdrop = v;
+        }
+        if env_str("FILES_RESULT_LAYOUT").is_none()
+            && let Some(v) = f.result_layout.as_deref().and_then(ResultLayout::parse)
+        {
+            self.result_layout = v;
         }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
@@ -1207,8 +1416,14 @@ impl Settings {
         if let Some(v) = env_bool("FILES_DEV_MODE") {
             s.dev_mode = v;
         }
-        if let Some(v) = env_bool("FILES_AUTO_HIDE") {
-            s.auto_hide = v;
+        if let Some(v) = env_bool("FILES_HIDE_ON_BLUR") {
+            s.hide_on_blur = v;
+        }
+        if let Some(v) = env_bool("FILES_HIDE_AFTER_OPENING") {
+            s.hide_after_opening = v;
+        }
+        if let Some(v) = env_bool("FILES_HIDE_ON_ESCAPE") {
+            s.hide_on_escape = v;
         }
         if let Some(v) = env_bool("FILES_PDF_READ_ONLY") {
             s.pdf_read_only = v;
@@ -1233,6 +1448,14 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_THEME").and_then(|v| ThemeChoice::parse(&v)) {
             s.theme = v;
+        }
+        if let Some(v) =
+            env_str("FILES_BACKDROP").and_then(|v| crate::gui::window::Material::parse(&v))
+        {
+            s.backdrop = v;
+        }
+        if let Some(v) = env_str("FILES_RESULT_LAYOUT").and_then(|v| ResultLayout::parse(&v)) {
+            s.result_layout = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;
@@ -1351,6 +1574,46 @@ mod tests {
         let mut s = Settings::default();
         s.apply_file_settings(&f);
         s
+    }
+
+    /// The index log used to be reachable only from a flag or a variable,
+    /// which put the one diagnostic for "the drives reload at random" out of
+    /// reach of anybody who could not be talked through a command line.
+    #[test]
+    fn the_index_log_can_be_set_in_the_configuration_file() {
+        let s = applied(file::FileSettings {
+            index_log: Some(PathBuf::from(r"C:\temp\files.log")),
+            ..Default::default()
+        });
+        assert_eq!(s.index_log, Some(PathBuf::from(r"C:\temp\files.log")));
+    }
+
+    /// And obeys the same layering as every other path: the environment sits
+    /// over the file, so a variable set for one run is not quietly overruled
+    /// by what the file says.
+    #[test]
+    fn an_index_log_in_the_environment_outranks_the_file() {
+        const ENV: &str = "FILES_INDEX_LOG";
+        let _guard = lock();
+
+        // SAFETY: as in the test below - the lock is what makes the write
+        // safe, and both calls happen before the guard is dropped.
+        unsafe { std::env::set_var(ENV, r"C:\temp\from-env.log") };
+
+        let mut s = Settings::from_env_with(default_routes());
+        s.apply_file_settings(&file::FileSettings {
+            index_log: Some(PathBuf::from(r"C:\temp\from-file.log")),
+            ..Default::default()
+        });
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(ENV) };
+
+        assert_eq!(
+            s.index_log,
+            Some(PathBuf::from(r"C:\temp\from-env.log")),
+            "the file overrode the environment"
+        );
     }
 
     /// An empty `FILES_HIDE_EXTENSIONS` is the deliberate one-variable way to
@@ -1562,8 +1825,10 @@ mod tests {
     /// Checked at compile time: a shorter needle would make `memmem` weak
     /// and would make a leading wildcard match an unreasonable share of a
     /// million-entry directory.
-    const _: () = assert!(MIN_QUERY_LEN >= 3);
-    const _: () = assert!(MAX_SERVER_QUERY_LEN > MIN_QUERY_LEN);
+    const _: () = assert!(MIN_TERM_LEN >= 1);
+    const _: () = assert!(MIN_SERVER_QUERY_LEN >= MIN_TERM_LEN);
+    const _: () = assert!(MIN_REMEMBERED_LEN >= MIN_TERM_LEN);
+    const _: () = assert!(MAX_SERVER_QUERY_LEN > MIN_SERVER_QUERY_LEN);
 
     // --- what may be written back -------------------------------------------
 
@@ -1629,7 +1894,7 @@ mod tests {
     /// One bit each, or two settings would pin each other.
     #[test]
     fn every_writable_key_has_a_bit_of_its_own() {
-        let mut seen = 0u16;
+        let mut seen = 0u32;
         for key in SettingKey::ALL {
             assert_eq!(seen & key.bit(), 0, "{} shares a bit", key.name());
             seen |= key.bit();

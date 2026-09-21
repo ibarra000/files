@@ -17,13 +17,25 @@ use std::sync::Arc;
 
 use eframe::egui::{FontData, FontDefinitions, FontFamily};
 
-use crate::gui::theme::{FALLBACK_FILES, FONT_FILES, VARIABLE_FONT_FILES, Weight};
+use crate::gui::theme::icons::{ICON_FAMILY, ICON_FILES};
+use crate::gui::theme::{FALLBACK_FILES, FONT_FILES, Weight};
 
-/// Installs both weights, and says whether the real ones were found.
+/// Which of the fonts this program would like were actually there.
 ///
-/// The answer is kept for the diagnostics panel: "the text looks wrong" is a
-/// support call, and "Segoe UI was not found" is the answer to it.
-pub fn install(ctx: &eframe::egui::Context) -> bool {
+/// Two answers rather than one, because they fail separately and for
+/// different reasons: a machine can have Segoe UI and not have Segoe MDL2
+/// Assets, and the second is a cosmetic loss where the first is not.
+///
+/// Both are kept for the diagnostics report. "The text looks wrong" and "the
+/// icons are missing" are two support calls, and these are the two answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Found {
+    pub text: bool,
+    pub icons: bool,
+}
+
+/// Installs every family, and says which of them found a file.
+pub fn install(ctx: &eframe::egui::Context) -> Found {
     install_with(ctx, true)
 }
 
@@ -47,7 +59,7 @@ pub fn install_bundled(ctx: &eframe::egui::Context) {
     install_with(ctx, !cfg!(feature = "test-fonts"));
 }
 
-fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> bool {
+fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
     let mut defs = FontDefinitions::default();
 
     // Whatever egui was going to use, which in the shipping build is nothing at
@@ -77,15 +89,14 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> bool {
     tail.extend(bundled.iter().cloned());
 
     let mut found_all = true;
-    for (i, (name, path)) in FONT_FILES.iter().enumerate() {
+    for (name, path) in FONT_FILES.iter() {
         let mut stack: Vec<String> = Vec::new();
-        // Segoe UI Variable first where the machine has it - it is the same
-        // typeface cut to stay crisp at a given size, which is the whole
-        // complaint - and the original where it does not. Both are read the
-        // same way and registered under the same name, so nothing downstream
-        // knows which it got.
+        // One file per family. There used to be a second list read first,
+        // indexed against this one by position - a landmine that only held
+        // while the two stayed the same length and the same order. See the
+        // note on `FONT_FILES` for why it is gone rather than made safe.
         let read = |p: &str| use_system.then(|| std::fs::read(p).ok()).flatten();
-        match read(VARIABLE_FONT_FILES[i].1).or_else(|| read(path)) {
+        match read(path) {
             Some(bytes) => {
                 defs.font_data
                     .insert((*name).to_owned(), Arc::new(FontData::from_owned(bytes)));
@@ -97,6 +108,32 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> bool {
         defs.families
             .insert(FontFamily::Name((*name).into()), stack);
     }
+
+    // The marks, from whichever of the two icon fonts this Windows has.
+    //
+    // Registered with no fallback tail, unlike the two families above, and
+    // `gui::theme::icons` gives the reason: these are Private Use code points,
+    // and a tail would resolve a mark the icon font lacks to an unrelated
+    // glyph from `seguisym` rather than to nothing.
+    let mut icons: Vec<String> = Vec::new();
+    if use_system {
+        for path in ICON_FILES {
+            if let Ok(bytes) = std::fs::read(path) {
+                defs.font_data.insert(
+                    ICON_FAMILY.to_owned(),
+                    Arc::new(FontData::from_owned(bytes)),
+                );
+                icons.push(ICON_FAMILY.to_owned());
+                break;
+            }
+        }
+    }
+    let found_icons = !icons.is_empty();
+    // Inserted whether or not a file was read, for the reason the module note
+    // gives: egui panics on a family it has never been given, and a family
+    // bound to nothing merely lays out to nothing.
+    defs.families
+        .insert(FontFamily::Name(ICON_FAMILY.into()), icons);
 
     // egui's own two families, which this panel never asks for and egui itself
     // does - the debug-on-hover overlay, a tooltip, anything reaching
@@ -117,7 +154,10 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> bool {
 
     ctx.set_fonts(defs);
     sharpen(ctx);
-    found_all
+    Found {
+        text: found_all,
+        icons: found_icons,
+    }
 }
 
 /// Turns off the one default that epaint itself warns makes text blurry.
@@ -147,17 +187,17 @@ mod tests {
     /// are drawn the same are one weight and a wasted load.
     #[test]
     fn every_weight_names_a_distinct_family() {
-        let mut names: Vec<_> = [Weight::Regular, Weight::Bold].map(|w| w.family()).to_vec();
+        let mut names: Vec<_> = Weight::ALL.map(|w| w.family()).to_vec();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), Weight::ALL.len());
     }
 
     /// `theme::font` asks for these by name, and egui panics on a family it was
     /// never given. The two lists have to agree.
     #[test]
     fn every_family_the_panel_asks_for_is_one_that_gets_registered() {
-        for weight in [Weight::Regular, Weight::Bold] {
+        for weight in Weight::ALL {
             assert!(
                 FONT_FILES.iter().any(|(name, _)| *name == weight.family()),
                 "{:?} asks for a family nothing registers",
@@ -199,9 +239,27 @@ mod tests {
                     })
                     .rect
                     .width();
-                if found {
+                if found.text {
                     assert!(width > 0.0, "{name} laid out to nothing");
                 }
+            }
+
+            // And the marks, which are a third family asked for by name and
+            // are the newest way for this to go wrong. Laid out rather than
+            // asked about, because `has_glyph` answers a question about
+            // coverage and this one is about whether the family exists at all.
+            let mark = ctx
+                .fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        crate::gui::theme::Icon::Gear.text(),
+                        crate::gui::theme::icon_font(16.0),
+                        eframe::egui::Color32::WHITE,
+                    )
+                })
+                .rect
+                .width();
+            if found.icons {
+                assert!(mark > 0.0, "{ICON_FAMILY} laid out to nothing");
             }
 
             // And egui's own two, which this panel never asks for and egui

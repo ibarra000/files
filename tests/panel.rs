@@ -3,7 +3,7 @@
 //! The safety net the rewrite dropped. The terminal build rendered into a
 //! `TestBackend` buffer and asserted on the characters *and the styles* in it,
 //! so a selection highlight that quietly stopped being painted failed a test.
-//! When the window replaced it, `gui::overlay::show` - the one function that
+//! When the window replaced it, `gui::panel::show` - the one function that
 //! paints the whole panel - arrived with no way to check anything at all, and
 //! stayed that way. The toast band went missing through exactly that gap: the
 //! messages were still raised, still expired on a timer, and were drawn
@@ -19,9 +19,9 @@
 //!
 //! # What this drives, and what it does not
 //!
-//! `gui::overlay::show` and `gui::frame::Frame`, over an `AppState` built by
+//! `gui::panel::show` and `gui::frame::Frame`, over an `AppState` built by
 //! hand. Not `gui::Shell`, which owns threads, a tray icon and a window: the
-//! panel is a pure function of state, a theme and a `Visual`, and that is
+//! panel is a pure function of state, a theme and a `Content`, and that is
 //! exactly the seam worth testing.
 
 use std::sync::Arc;
@@ -34,10 +34,9 @@ use egui_kittest::kittest::NodeT;
 use files::app::event::{AppEvent, IndexMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
-use files::app::state::pointer::Intent;
-use files::config::{Settings, VISIBLE_ROWS, ViewerKind};
+use files::config::{ResultLayout, Settings, VISIBLE_ROWS, VISIBLE_ROWS_DETAILED, ViewerKind};
 use files::gui::frame::Frame;
-use files::gui::theme::{self, Layout, Theme};
+use files::gui::theme::{self, Theme};
 use files::index::store::{IndexStatus, Origin};
 use files::paths::MappingId;
 use files::search::matcher::{Hit, SearchOutcome};
@@ -100,15 +99,13 @@ struct Panel {
     state: AppState,
     frame: Frame,
     theme: Theme,
-    now: Instant,
     wall: SystemTime,
     fonts_ready: bool,
 }
 
 impl Panel {
-    fn new(state: AppState, now: Instant, layout: Layout) -> Self {
+    fn new(state: AppState) -> Self {
         let mut frame = Frame::new();
-        frame.set_layout(layout);
         frame.motion.summon();
         Self {
             state,
@@ -116,7 +113,6 @@ impl Panel {
             // Pinned rather than followed from the system, so a machine in
             // dark mode and a machine in light mode agree about the pictures.
             theme: Theme::light(),
-            now,
             // A fixed wall clock, because the status line renders an age from
             // it and "updated 4s ago" is not a stable snapshot.
             wall: SystemTime::UNIX_EPOCH,
@@ -131,24 +127,14 @@ impl Panel {
 /// one where the panel paints its own surface, which is what there is to look
 /// at.
 fn harness(state: AppState) -> Harness<'static, Panel> {
-    harness_in(state, Layout::List)
-}
-
-/// The same panel, laid out for a monitor with room for the pane beside it.
-fn harness_wide(state: AppState) -> Harness<'static, Panel> {
-    harness_in(state, Layout::Pane)
-}
-
-fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
-    let now = Instant::now();
     let mut harness = Harness::builder()
         // The harness frames whatever it is given in an eight-point outer
         // margin. `eframe::App::ui` hands over a `Ui` with no margin at all,
         // so the window is grown to match and the panel gets exactly the
         // rectangle it gets in the real program.
         .with_size(egui::vec2(
-            layout.width() + HARNESS_MARGIN * 2.0,
-            theme::PANEL_MAX_H + HARNESS_MARGIN * 2.0,
+            theme::PANEL_W + HARNESS_MARGIN * 2.0,
+            theme::PANEL_H + HARNESS_MARGIN * 2.0,
         ))
         // Points, not pixels: the panel is laid out in points and a snapshot
         // taken at whatever the machine's scaling happens to be is a snapshot
@@ -169,22 +155,21 @@ fn harness_in(state: AppState, layout: Layout) -> Harness<'static, Panel> {
                 // them and draws nothing, and every frame after is the panel.
                 if !panel.fonts_ready {
                     files::gui::fonts::install_bundled(ui.ctx());
+                    // And the style, which these pictures went without for
+                    // as long as they have existed. Nothing the panel paints
+                    // by hand reads it - but the scroll-bar down the results
+                    // is an egui widget, and without this it was drawn from
+                    // egui's defaults: floating, over the content, twice the
+                    // width. So the snapshots were of a scrollbar the program
+                    // does not ship.
+                    files::gui::theme::apply_style(ui.ctx(), &panel.theme);
                     panel.fonts_ready = true;
                     return;
                 }
-                let visual = panel.frame.advance(&panel.state, DT);
-                panel.frame.resize(&visual);
-                files::gui::overlay::show(
-                    ui,
-                    &panel.state,
-                    &panel.theme,
-                    &visual,
-                    None,
-                    panel.now,
-                    panel.wall,
-                );
+                let content = panel.frame.advance(&panel.state, DT);
+                files::gui::panel::show(ui, &panel.state, &panel.theme, content, None, panel.wall);
             },
-            Panel::new(state, now, layout),
+            Panel::new(state),
         );
 
     // Past the entrance, so nothing here is a test of a half-arrived panel.
@@ -201,9 +186,8 @@ fn state() -> (AppState, Instant) {
 /// reported in healthy.
 ///
 /// `state()` is not that. A fresh one has no index yet, which is a standing
-/// notice - "No file list yet" - and a panel with something to say keeps its
-/// footer. That is the intended behaviour and it is asserted below; this
-/// fixture is for the other half.
+/// notice - "No file list yet" - and that notice is a real screen somebody
+/// sees. This fixture is for the other half.
 fn quiet_state() -> (AppState, Instant) {
     let (mut s, now) = state();
     let status = IndexStatus {
@@ -219,9 +203,13 @@ fn quiet_state() -> (AppState, Instant) {
         }),
         now,
     );
+    // Read off the line the footer would draw, which is the only public
+    // answer to "has this panel anything to say" now that `is_quiet` has
+    // gone with `Content::Quiet`.
+    let said = files::view::status::render(&s, SystemTime::UNIX_EPOCH).text;
     assert!(
-        s.is_quiet(),
-        "the fixture is not quiet, so it proves nothing"
+        said.is_empty(),
+        "the fixture has something to say - {said:?} - so it proves nothing"
     );
     (s, now)
 }
@@ -285,18 +273,23 @@ fn a_toast_gives_the_line_back_when_it_expires() {
     );
 }
 
-/// Twelve rows, three hundred results. The rest used to be unreachable and
-/// unmentioned; they are reachable now, and this says where in them you are.
+/// Six rows on screen, three hundred results, and every one of them
+/// reachable by scrolling. The count is what says there are more than fit.
+///
+/// This used to read "1-6 of 300", because the panel drew a fixed window over
+/// the list and the other 294 could not be got at. The band scrolls now, so
+/// the scrollbar answers where in them you are and the footer answers how
+/// many there are.
 #[test]
-fn the_footer_says_which_of_the_results_are_on_screen() {
+fn the_footer_says_how_many_the_code_found() {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains(&format!("1-{VISIBLE_ROWS} of 300")),
-        "nothing said where in the list this is:\n{screen}"
+        screen.contains("300"),
+        "nothing said how many there were:\n{screen}"
     );
 }
 
@@ -307,36 +300,87 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        !screen.contains(" of "),
-        "a count of nothing:
-{screen}"
+        !screen.contains("Results"),
+        "a caption over a list that is not there:\n{screen}"
     );
-    // The viewer is still there: it is a fact about the program rather than
-    // about the list, so it does not come and go with one.
-    assert!(screen.contains("Viewer: Auto"), "{screen}");
+    // And offers no way to open anything, because there is nothing to open.
+    // The button that names the default action is what carries that now: it
+    // is simply not drawn.
+    assert!(
+        !screen.contains("\u{b7} Enter"),
+        "the footer offered to open nothing:\n{screen}"
+    );
+    // The gear and the menu are still there. They are about the program
+    // rather than about the list, so they do not come and go with one - and
+    // between them they are the only thing left advertising F5 and Ctrl+,.
+    assert!(screen.contains("Settings"), "{screen}");
 }
 
-/// F2 changes what Enter does. With the confirming toast drawn nowhere and no
-/// label anywhere on the panel, pressing it produced no visible effect at all.
+/// F2 changes what Enter does, and the footer says so in words.
+///
+/// It used to be a chip reading `Viewer: PDF`, at `Priority::Normal` - so at
+/// the shipped width it was the first thing the hint bar dropped, and the one
+/// key whose whole job is to change a mode gave no sign of which mode it was
+/// in. It is the label on the button Enter runs now, which cannot be dropped
+/// because it is the button.
 #[test]
-fn the_footer_names_the_viewer_enter_will_use() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
-
-    let h = harness(s);
-    assert!(on_screen(&h).contains("Viewer: Auto"), "{}", on_screen(&h));
-
-    // Every mode, so one that the footer cannot name is a failure here.
+fn the_footer_says_what_enter_will_do() {
     for (viewer, label) in [
-        (ViewerKind::Pdf, "Viewer: PDF"),
-        (ViewerKind::Avwin, "Viewer: avwin"),
+        (ViewerKind::Auto, "Open"),
+        (ViewerKind::Pdf, "Open as one document"),
+        (ViewerKind::Avwin, "Open with avwin"),
     ] {
         let (mut s, now) = state();
         with_results(&mut s, "11-D-0704", many(3), 3, now);
         s.viewer = viewer;
         let h = harness(s);
-        assert!(on_screen(&h).contains(label), "{}", on_screen(&h));
+        let screen = on_screen(&h);
+        assert!(
+            screen.contains(&format!("{label} \u{b7} Enter")),
+            "{viewer:?} is not named on the footer:\n{screen}"
+        );
     }
+}
+
+/// And Ctrl+K opens the rest of them, which is the whole reason the footer
+/// can be two buttons rather than a row of chips.
+#[test]
+fn the_actions_menu_lists_everything_else() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    s.actions_open = true;
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    for offered in [
+        "Open \u{b7} Enter",
+        "Open as one document \u{b7} Ctrl D",
+        "Open with avwin \u{b7} Ctrl E",
+        "Show it in Explorer \u{b7} Ctrl O",
+        "Copy the path \u{b7} Ctrl C",
+        "Copy the name",
+        "Read a drive again \u{b7} F5",
+        "Settings \u{b7} Ctrl ,",
+    ] {
+        assert!(
+            screen.contains(offered),
+            "the menu does not offer {offered:?}:\n{screen}"
+        );
+    }
+}
+
+/// With nothing found it offers nothing to do with a file, and still offers
+/// the two that are about the program.
+#[test]
+fn the_actions_menu_with_nothing_selected_offers_no_file() {
+    let (mut s, _) = state();
+    s.actions_open = true;
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(!screen.contains("Copy the path"), "{screen}");
+    assert!(!screen.contains("Show it in Explorer"), "{screen}");
+    assert!(screen.contains("Read a drive again"), "{screen}");
 }
 
 /// Choosing the viewer that is not installed used to fail silently, at the
@@ -355,11 +399,18 @@ fn a_missing_avwin_is_reported_before_it_is_needed() {
     assert!(screen.contains("F2"), "and says how to fix it:\n{screen}");
 }
 
-/// Browsing a long list of remembered codes without knowing where you are in
-/// it is what the terminal build's " History (2 of 3) " title existed to
-/// prevent.
+/// Browsing the remembered codes puts the code on the line, and the list
+/// itself says what it is.
+///
+/// The status line used to carry "Codes you used before - 2 of 3", on the
+/// argument that browsing a list without knowing where you are in it is what
+/// the terminal build's " History (2 of 3) " title existed to prevent. It is
+/// gone with the rest of the panel's prose: the list is at most a handful of
+/// codes and is on screen, the group heading over it already names what it
+/// is, and the status line is the one place reserved for things somebody has
+/// to act on.
 #[test]
-fn browsing_the_recent_codes_says_where_you_are_in_them() {
+fn browsing_the_recent_codes_puts_the_code_on_the_line() {
     let (mut s, now) = state();
     s.seed_history(vec![
         "11-D-0704".into(),
@@ -374,10 +425,11 @@ fn browsing_the_recent_codes_says_where_you_are_in_them() {
 
     let h = harness(s);
     let screen = on_screen(&h);
-    assert!(screen.contains("Codes you used before"), "{screen}");
+    assert!(screen.contains("P12345-001"), "{screen}");
+    assert!(screen.contains("Recent codes"), "{screen}");
     assert!(
-        screen.contains("of 3"),
-        "no position in the list:\n{screen}"
+        !screen.contains("Codes you used before"),
+        "the status line is still narrating:\n{screen}"
     );
 }
 
@@ -422,6 +474,152 @@ fn something_worth_saying_brings_the_footer_back() {
     assert!(
         screen.contains("No file list yet"),
         "a notice was swallowed by the quiet panel:\n{screen}"
+    );
+}
+
+/// The taller rows show fewer of themselves, which is the whole of what the
+/// setting does to the list.
+///
+/// Counted off the accessibility tree rather than off the arithmetic: the
+/// rows past the clip rectangle are culled before they are laid out, so how
+/// many are in the tree *is* how many are on screen.
+#[test]
+fn detailed_rows_fit_fewer_to_a_screen() {
+    let drawn = |layout| {
+        let (mut s, now) = state();
+        s.settings.result_layout = layout;
+        with_results(&mut s, "11-D-0704", many(300), 300, now);
+        let h = harness(s);
+        let root = h.root();
+        root.children_recursive()
+            .filter(|node| {
+                node.accesskit_node()
+                    .label()
+                    .is_some_and(|l| l.contains(".pdf, in "))
+            })
+            .count()
+    };
+
+    let compact = drawn(ResultLayout::Compact);
+    let detailed = drawn(ResultLayout::Detailed);
+    assert!(compact >= VISIBLE_ROWS, "only {compact} compact rows");
+    assert!(
+        detailed >= VISIBLE_ROWS_DETAILED,
+        "only {detailed} detailed rows"
+    );
+    assert!(
+        detailed < compact,
+        "{detailed} detailed rows against {compact} compact ones - the          setting changed nothing"
+    );
+}
+
+/// Whichever layout is on, a row says the whole truth about itself to a
+/// reader. Compact does not draw the folder, and a screen reader that was
+/// given only what was drawn would be worse off than the tooltip.
+#[test]
+fn a_compact_row_still_names_the_folder_it_is_in() {
+    let (mut s, now) = state();
+    s.settings.result_layout = ResultLayout::Compact;
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(
+        screen.contains(r"11-D-0704-00.pdf, in R:\11d\11-D-0704"),
+        "a compact row told a reader less than it knows:\n{screen}"
+    );
+}
+
+/// The list is a group with a caption over it, which is Ueli's shape.
+#[test]
+fn the_results_are_captioned() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(screen.contains("Results"), "no caption:\n{screen}");
+}
+
+/// A row the arrows walked to is brought into view, by as little as it takes.
+///
+/// The whole reason the content band is a scroller. The panel used to draw a
+/// twelve-row window that the state machine moved; the rows past it were not
+/// laid out at all, and a selection beyond the window left the highlight
+/// frozen on the last row while `Enter` opened a file that was not on screen.
+///
+/// Read off the accessibility tree rather than off a scroll offset, because
+/// a row outside the clip rectangle is culled before it is given a label -
+/// so its presence in the tree *is* the claim that it is on screen.
+#[test]
+fn walking_down_a_long_list_carries_the_view_with_it() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+
+    let mut h = harness(s);
+    assert!(
+        !on_screen(&h).contains("11-D-0704-50.pdf"),
+        "the fixture starts with row fifty already on screen"
+    );
+
+    for _ in 0..50 {
+        h.state_mut()
+            .state
+            .update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
+    }
+    h.run_steps(2);
+
+    let screen = on_screen(&h);
+    assert!(
+        screen.contains("11-D-0704-50.pdf"),
+        "the selection walked off the bottom and the view stayed put:\n{screen}"
+    );
+    // And by as little as it takes: `block: "nearest"` puts the row at the
+    // foot of the band, so the ones just above it are still there. A scroller
+    // that centred the selection would have thrown them away.
+    assert!(
+        screen.contains("11-D-0704-49.pdf"),
+        "it scrolled further than it had to:\n{screen}"
+    );
+}
+
+/// And the wheel moves the view without moving the selection, which is the
+/// reason it was unbound in the first place: it used to walk the cursor
+/// through somebody's results whenever a hand rested on the mouse.
+#[test]
+fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+
+    let mut h = harness(s);
+    let before = h.state().state.selected_row();
+    assert!(before.is_some(), "the fixture selected nothing");
+
+    // The pointer over the middle of the list, then a long way down it.
+    // egui hands a wheel event to whichever scroller is under the pointer, so
+    // the hover is not decoration.
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H + theme::CONTENT_H / 2.0,
+    ));
+    h.run_steps(1);
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, -400.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run_steps(4);
+
+    let screen = on_screen(&h);
+    assert!(
+        !screen.contains("11-D-0704-00.pdf"),
+        "the wheel moved nothing:\n{screen}"
+    );
+    assert_eq!(
+        h.state().state.selected_row(),
+        before,
+        "the wheel moved the selection"
     );
 }
 
@@ -476,7 +674,7 @@ fn a_very_long_code_stays_inside_the_panel() {
     // true when a pasted code ran off the edge and took the caret with it.
     let panel = egui::Rect::from_min_size(
         egui::pos2(HARNESS_MARGIN, HARNESS_MARGIN),
-        egui::vec2(theme::PANEL_W, theme::PANEL_MAX_H),
+        egui::vec2(theme::PANEL_W, theme::PANEL_H),
     );
     let root = h.root();
     for node in root.children_recursive() {
@@ -501,13 +699,19 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
-    // The band the rows are given, in the harness's coordinates. Taken from
-    // the same `measure` the animator is driven by, so this asserts that what
-    // is *drawn* agrees with what was *measured* - which is exactly what
-    // stopped being true when the rows picked up three points of spacing each
-    // and a full list stood twenty-four points taller than its band.
-    let measured = files::gui::overlay::measure(&h.state().state, files::gui::theme::Layout::List);
-    let footer_top = HARNESS_MARGIN + measured.height - theme::PAD_Y - theme::FOOTER_H;
+    // The band the rows are given, in the harness's coordinates. Arithmetic
+    // off the fixed panel: the window is always four hundred points tall, so
+    // the footer is always in the same place and a row that *starts* below
+    // the band is a row the scroller never clipped.
+    //
+    // Where a row *ends* is deliberately not asserted. The list is a scroller
+    // now, and the row straddling its bottom edge is cut off by the clip
+    // rectangle rather than by arithmetic - which is what a scroller is. The
+    // failure this guards against is the one that actually happened: rows
+    // picking up three points of spacing each and a full list standing
+    // twenty-four points taller than the band it was given.
+    let content_top = HARNESS_MARGIN + theme::HEADER_H + theme::DIVIDER;
+    let content_bottom = content_top + theme::CONTENT_H;
 
     let root = h.root();
     let mut seen = 0;
@@ -521,14 +725,21 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
         }
         seen += 1;
         assert!(
-            bounds.y1 <= footer_top as f64 + 1.0,
-            "{label} reaches {:.0}pt, past the footer at {footer_top:.0}pt",
-            bounds.y1
+            bounds.y0 >= content_top as f64 - 1.0 && bounds.y0 < content_bottom as f64,
+            "{label} starts at {:.0}pt, outside the band {content_top:.0}-{content_bottom:.0}pt",
+            bounds.y0
         );
     }
     // Without this the loop can pass by matching nothing at all, which is how
     // the first version of this test passed while the rows really did overlap.
-    assert_eq!(seen, theme::MAX_ROWS, "the rows were not found");
+    // A screenful, at least: the rows past the clip rectangle are culled
+    // before they are laid out, so the exact number is the scroller's
+    // business rather than this test's.
+    assert!(
+        seen >= files::config::VISIBLE_ROWS,
+        "only {seen} rows were drawn, of a screenful of {}",
+        files::config::VISIBLE_ROWS
+    );
 }
 
 // --- the pictures ----------------------------------------------------------
@@ -542,14 +753,11 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
 /// library is built for, and it also means a failure names itself.
 macro_rules! snapshot {
     ($name:ident, $build:expr) => {
-        snapshot!($name, $build, Layout::List);
-    };
-    ($name:ident, $build:expr, $layout:expr) => {
         #[test]
         #[cfg_attr(not(feature = "ui-snapshots"), ignore = "needs a GPU adapter")]
         fn $name() {
             let build: fn() -> AppState = $build;
-            harness_in(build(), $layout).snapshot(stringify!($name));
+            harness(build()).snapshot(stringify!($name));
         }
     };
 }
@@ -582,171 +790,6 @@ snapshot!(looks_right_showing_recent_codes, || {
     s
 });
 
-// --- the pane beside the list ----------------------------------------------
-
-/// The facts a preview carries, the way the worker would have gathered them.
-fn previewed(state: &mut AppState, now: Instant, rank: usize) {
-    use files::app::event::PreviewMsg;
-    use files::preview::{Facts, Pages, Preview};
-
-    state.update(AppEvent::Intent(Intent::Hover(Some(rank))), now);
-    let hit = state.hits[rank].clone();
-    state.update(
-        AppEvent::Preview(PreviewMsg::Ready(std::sync::Arc::new(Preview {
-            path: hit.path.clone(),
-            name: hit.name.clone(),
-            facts: Facts {
-                bytes: Some(2_411_724),
-                // Against the harness's pinned `UNIX_EPOCH` wall clock, so the
-                // age readout is the same on every machine.
-                modified: Some(std::time::SystemTime::UNIX_EPOCH),
-                share: Some("jobs".into()),
-                folder: Some(r"R:\11d\11-D-0704".into()),
-                missing: false,
-            },
-            pages: Some(Pages {
-                total: 13,
-                named: vec![
-                    std::sync::Arc::from("11-D-0704.pdf"),
-                    std::sync::Arc::from("11-D-0704-01.pdf"),
-                ],
-                capped: false,
-            }),
-        }))),
-        now,
-    );
-    assert!(state.preview.is_some(), "the fixture stored no preview");
-}
-
-/// The pane is painted rather than built from widgets, so without `announce`
-/// it is an empty rectangle to a screen reader - which is exactly the gap
-/// `tests/panel.rs` was written for when the toast band went missing.
-#[test]
-fn what_the_pane_says_is_in_the_accessibility_tree() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-    previewed(&mut s, now, 2);
-
-    let screen = on_screen(&harness_wide(s));
-    assert!(
-        screen.contains("2.3 MiB"),
-        "no size in the pane:
-{screen}"
-    );
-    assert!(
-        screen.contains("On jobs"),
-        "no drive in the pane:
-{screen}"
-    );
-    assert!(
-        screen.contains("13 pages in this set"),
-        "no page count in the pane:
-{screen}"
-    );
-}
-
-/// And the popup says the same things on a monitor with no room for a pane.
-#[test]
-fn the_popup_says_what_the_pane_would_have() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-    previewed(&mut s, now, 1);
-
-    let screen = on_screen(&harness(s));
-    assert!(
-        screen.contains("2.3 MiB"),
-        "no size in the popup:
-{screen}"
-    );
-    assert!(
-        screen.contains("13 pages in this set"),
-        "no page count in the popup:
-{screen}"
-    );
-}
-
-/// With nothing under the pointer the pane explains itself rather than sitting
-/// as a blank column beside a full list.
-#[test]
-fn an_empty_pane_says_why_it_is_empty() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-
-    let screen = on_screen(&harness_wide(s));
-    assert!(screen.contains("Point at a result"), "{screen}");
-}
-
-/// The popup is the opposite: with nothing hovered there must be no card at
-/// all, because a card that appears to say it has nothing to say is worse than
-/// no card.
-#[test]
-fn there_is_no_popup_until_something_is_pointed_at() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 6, now);
-
-    let screen = on_screen(&harness(s));
-    assert!(!screen.contains("Point at a result"), "{screen}");
-    assert!(
-        !screen.contains("MiB"),
-        "a popup appeared unbidden:
-{screen}"
-    );
-}
-
-/// Everything the panel laid out stays inside the wider panel. The generalised
-/// form of `a_very_long_code_stays_inside_the_panel`, and the check that the
-/// list really did give its column up rather than being drawn under the pane.
-#[test]
-fn nothing_in_the_wide_panel_reaches_past_its_edge() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
-    previewed(&mut s, now, 3);
-
-    let h = harness_wide(s);
-    let right = HARNESS_MARGIN + theme::PANEL_WIDE_W;
-    let root = h.root();
-    for node in root.children_recursive() {
-        let Some(bounds) = node.accesskit_node().bounding_box() else {
-            continue;
-        };
-        assert!(
-            bounds.x1 <= right as f64 + 1.0,
-            "something reaches {:.0}pt, past the panel's {right:.0}pt edge",
-            bounds.x1
-        );
-    }
-}
-
-/// A row must not run under the pane. Before the list was inset, the folder
-/// column was drawn full width and the pane was painted over the end of it.
-#[test]
-fn a_result_row_stops_where_the_pane_begins() {
-    let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(12), 12, now);
-
-    let h = harness_wide(s);
-    let pane_left = HARNESS_MARGIN + theme::PANEL_WIDE_W - theme::PREVIEW_W;
-    let root = h.root();
-    let mut seen = 0;
-    for node in root.children_recursive() {
-        let Some(bounds) = node.accesskit_node().bounding_box() else {
-            continue;
-        };
-        let label = node.accesskit_node().label().unwrap_or_default();
-        if !label.contains(".pdf, in ") {
-            continue;
-        }
-        seen += 1;
-        assert!(
-            bounds.x1 <= pane_left as f64 + 1.0,
-            "{label} reaches {:.0}pt, under the pane at {pane_left:.0}pt",
-            bounds.x1
-        );
-    }
-    // Without this the loop passes by matching nothing at all.
-    assert_eq!(seen, theme::MAX_ROWS, "the rows were not found");
-}
-
 // The drive picker: the one body that had never been photographed, along with
 // the hover and text-selection colours it is the only place to see.
 snapshot!(looks_right_picking_a_drive, || {
@@ -764,24 +807,40 @@ snapshot!(looks_right_with_more_than_it_can_show, || {
     s
 });
 
-// The pane, on a monitor with room for it. The one picture that says whether
-// the list really gave its column up, rather than being drawn under it.
-snapshot!(
-    looks_right_with_the_preview_pane,
-    || {
-        let (mut s, now) = state();
-        with_results(&mut s, "11-D-0704", many(6), 47, now);
-        previewed(&mut s, now, 2);
-        s
-    },
-    Layout::Pane
-);
+// What an empty box shows when there is anything to show on it: Ueli's
+// favourites, which here are the shortcuts somebody configured.
+snapshot!(looks_right_showing_the_shortcuts, || {
+    let (mut s, _) = quiet_state();
+    s.settings.aliases = Arc::new(files::alias::Aliases::new(vec![
+        files::alias::Alias {
+            name: "pw".into(),
+            code: "11-D-0704".into(),
+            note: Some("the pump house".into()),
+        },
+        files::alias::Alias {
+            name: "gd".into(),
+            code: "22-A-1234".into(),
+            note: None,
+        },
+    ]));
+    s
+});
 
-// And the popup, which is the same words drawn over the list instead of beside
-// it - so the two pictures together are what stops the layouts drifting.
-snapshot!(looks_right_with_a_hover_preview, || {
+// The one key that replaced the whole hint bar, and the only place the
+// program teaches its own chords now.
+snapshot!(looks_right_with_the_actions_menu_open, || {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(6), 47, now);
-    previewed(&mut s, now, 2);
+    s.actions_open = true;
+    s
+});
+
+// The other row layout: the folder under the name, a larger mark, and four of
+// them where there were six. The one setting on the Appearance page whose
+// effect cannot be described in words as well as it can be shown.
+snapshot!(looks_right_with_detailed_rows, || {
+    let (mut s, now) = state();
+    s.settings.result_layout = ResultLayout::Detailed;
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
     s
 });

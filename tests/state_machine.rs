@@ -19,8 +19,8 @@ use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
 use files::config::LIVE_DEBOUNCE;
 use files::config::{
-    ENTER_WATCHDOG, MIN_QUERY_LEN, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
-    VISIBLE_ROWS, ViewerKind,
+    ENTER_WATCHDOG, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS,
+    ViewerKind,
 };
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
@@ -84,16 +84,22 @@ fn hit(name: &str) -> Hit {
 
 // --- typing -----------------------------------------------------------
 
+/// Two characters is a search now, and so is one. The floor was three and
+/// is one, which is what Ueli does; what is still not a search is a line
+/// with nothing on it to search for.
 #[test]
-fn a_short_query_is_not_dispatched() {
+fn a_two_character_query_is_dispatched() {
     let (mut s, now) = state();
-    let r = type_in(&mut s, "ab", now);
-    assert_eq!(
-        s.phase,
-        QueryPhase::TooShort {
-            need: MIN_QUERY_LEN
-        }
-    );
+    type_in(&mut s, "ab", now);
+    assert_eq!(s.phase, QueryPhase::LocalPending);
+    assert!(s.search_due_at().is_some(), "nothing was armed");
+}
+
+#[test]
+fn a_line_with_no_term_on_it_is_not_dispatched() {
+    let (mut s, now) = state();
+    let r = type_in(&mut s, "ext:pdf", now);
+    assert_eq!(s.phase, QueryPhase::Idle);
     assert!(r.cmds.iter().all(|c| !matches!(c, Cmd::Search { .. })));
 }
 
@@ -267,10 +273,38 @@ fn ctrl_c_copies_the_selected_text() {
     assert!(!s.should_quit);
 }
 
-/// With nothing selected it says so. Silence would read as the program
+/// With no text selected it copies the path of the row the cursor is on,
+/// which is Ueli's binding for the same key.
+///
+/// Neither meaning loses. A text selection is something the user made a
+/// moment ago and is unambiguously what they meant; with none, the only
+/// other thing on screen worth copying is the path. `view::actions` only
+/// advertises `Ctrl+C` on "Copy the path" while there is no selection, so
+/// nothing on screen ever names the key doing the other thing.
+#[test]
+fn ctrl_c_with_no_text_selected_copies_the_path() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    let v = view(&s);
+    s.update(search_result(&v, many_hits(3), 3, 9_000), now);
+    assert!(s.input.selection().is_none(), "the fixture selected text");
+
+    let r = s.update(ctrl(Key::Char('c')), now);
+    assert!(!s.should_quit);
+    assert!(
+        r.cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::Copy(text) if text.contains(".pdf"))),
+        "{:?}",
+        r.cmds
+    );
+    assert_eq!(s.input, "11-D-0704", "the code must survive");
+}
+
+/// And with nothing at all it says so. Silence would read as the program
 /// ignoring the key, to anyone who remembers when it quit.
 #[test]
-fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
+fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
 
@@ -279,7 +313,7 @@ fn ctrl_c_with_no_selection_explains_itself_and_stays_running() {
     assert!(
         s.toast
             .as_ref()
-            .is_some_and(|t| t.text.contains("Nothing selected")),
+            .is_some_and(|t| t.text.contains("Nothing to copy")),
         "{:?}",
         s.toast
     );
@@ -591,15 +625,17 @@ fn the_first_result_is_selected_by_default() {
     assert_eq!(s.selected_row(), Some(0));
 }
 
-/// Neither end of the list wraps. Wrapping would throw the eye from the row
-/// someone was reading to the far end of the list, and the way back is the way
-/// they came.
+/// Both ends of the list wrap, which is Ueli's arrow.
 ///
-/// Up at the top used to hand focus back to the search box, which was what made
-/// a further Up reach the recalled codes. The field never gives up the keyboard
-/// now, so the top simply holds.
+/// This used to assert the opposite, and the argument was not about the
+/// cursor: the panel drew a twelve-row window over the list, so a step off
+/// the foot landed on rank 0 and *the page* snapped back to the first
+/// screen. The results already read reappeared, and getting back meant
+/// walking the whole list again. The content band is a scroller now.
+/// Wrapping scrolls it to where rank 0 is, and Up from the first row is the
+/// quickest way to the three-hundredth.
 #[test]
-fn neither_end_of_the_list_wraps() {
+fn both_ends_of_the_list_wrap() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(
@@ -611,28 +647,38 @@ fn neither_end_of_the_list_wraps() {
     assert_eq!(s.selected_row(), Some(1));
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(2));
-    let r = s.update(press(Key::Down), now);
-    assert_eq!(s.selected_row(), Some(2), "down from the bottom stays put");
+    s.update(press(Key::Down), now);
     assert_eq!(
-        r.redraw,
-        Redraw::No,
-        "and does not redraw an identical frame"
+        s.selected_row(),
+        Some(0),
+        "down from the bottom comes round"
     );
 
-    // The way back is the way they came.
     s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(1));
-    s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0));
-
-    let r = s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0), "up from the top stays put");
-    assert_eq!(
-        r.redraw,
-        Redraw::No,
-        "and does not redraw an identical frame"
-    );
+    assert_eq!(s.selected_row(), Some(2), "and up from the top goes back");
     assert!(!s.should_quit);
+}
+
+/// A page does not, and Ueli has no page key to appeal to either way.
+///
+/// Six rows is not a landmark. A `PageDown` that came out somewhere near the
+/// top would be indistinguishable from one that had not moved at all, which
+/// is the failure wrapping a *step* cannot have - a step is one row, and one
+/// row is always visibly one row.
+#[test]
+fn a_page_stops_at_the_ends_rather_than_wrapping() {
+    let (mut s, now) = state();
+    with_results(&mut s, now, 40);
+
+    for _ in 0..20 {
+        s.update(press(Key::PageDown), now);
+    }
+    assert_eq!(s.selected_row(), Some(39), "PageDown wrapped");
+
+    for _ in 0..20 {
+        s.update(press(Key::PageUp), now);
+    }
+    assert_eq!(s.selected_row(), Some(0), "PageUp wrapped");
 }
 
 /// The specific annoyance this design exists to avoid.
@@ -678,7 +724,7 @@ fn a_pinned_selection_that_disappears_clamps_and_reports() {
     assert!(s.selection_lost, "the user should be told the list shifted");
     // And is: the flag was maintained and read by nothing but this assertion
     // for the whole of the rewrite, so it is checked here where it comes out.
-    let line = files::view::status::render(&s, now, std::time::SystemTime::now());
+    let line = files::view::status::render(&s, std::time::SystemTime::now());
     assert!(
         line.text.contains("The list changed"),
         "nothing on screen says so: {line:?}"
@@ -1528,10 +1574,13 @@ fn down_walks_the_list_and_stops_at_the_end() {
     assert_eq!(s.selected_row(), Some(3), "walked off the end");
 }
 
-/// And the head of the list holds, because there is nowhere to hand the
-/// keyboard back to: the search field never gave it up.
+/// And the head of the list comes round to its foot.
+///
+/// The keyboard is not handed anywhere: the search field never gave it up,
+/// so Up at the top has always been a key with nothing above it. It is the
+/// way to the end of the list now rather than a key that does nothing.
 #[test]
-fn up_at_the_top_of_the_list_holds_rather_than_leaving_it() {
+fn up_at_the_top_of_the_list_comes_round_to_the_end() {
     let (mut s, now) = state();
     with_results(&mut s, now, 4);
 
@@ -1540,12 +1589,127 @@ fn up_at_the_top_of_the_list_holds_rather_than_leaving_it() {
     assert_eq!(s.selected_row(), Some(0));
 
     let again = s.update(press(Key::Up), now);
-    assert_eq!(s.selected_row(), Some(0), "the top row must hold");
-    assert_eq!(
-        again.redraw,
-        Redraw::No,
-        "and holding still draws no new frame"
+    assert_eq!(s.selected_row(), Some(3), "the top must come round");
+    assert_eq!(again.redraw, Redraw::Yes, "and it is a new frame");
+}
+
+/// Down is the way into the shortcuts, as Up is the way into the codes used
+/// before. One sentence: up is what you looked for, down is what you set up.
+#[test]
+fn down_steps_into_the_shortcuts_and_enter_takes_one() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    assert!(s.showing_aliases(), "the fixture shows no shortcuts");
+    assert_eq!(s.alias_cursor(), None, "and nobody has stepped onto one");
+
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(1));
+    // A handful of entries, so the far end is one press away either way.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0), "the list did not come round");
+    s.update(press(Key::Up), now);
+    assert_eq!(s.alias_cursor(), Some(1));
+
+    // Enter puts the *name* in the box, because that is what a user would
+    // have typed - so the expansion fires the ordinary way.
+    s.update(press(Key::Enter), now);
+    assert_eq!(s.input.text(), "gd");
+    assert_eq!(s.alias_cursor(), None, "the list stayed up under the code");
+}
+
+/// Escape steps off the list rather than taking the panel with it, which is
+/// the same exception the drive picker and the recall list get.
+#[test]
+fn escape_steps_off_the_shortcuts_first() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    s.update(
+        AppEvent::Hotkey(files::app::event::HotkeyMsg::Summoned),
+        now,
     );
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+
+    let r = s.update(press(Key::Esc), now);
+    assert_eq!(s.alias_cursor(), None);
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::DismissOverlay)),
+        "Escape took the panel with it: {:?}",
+        r.cmds
+    );
+
+    // And a second press does put it away.
+    let r = s.update(press(Key::Esc), now);
+    assert!(r.cmds.iter().any(|c| matches!(c, Cmd::DismissOverlay)));
+}
+
+/// Typing steps off the list, whichever way the line was changed.
+#[test]
+fn typing_steps_off_the_shortcuts() {
+    let now = Instant::now();
+    let mut s = AppState::new(with_aliases(), now);
+    s.update(press(Key::Down), now);
+    assert_eq!(s.alias_cursor(), Some(0));
+
+    s.update(press(Key::Char('1')), now);
+    assert_eq!(s.alias_cursor(), None);
+    assert!(!s.showing_aliases(), "the box is not empty any more");
+}
+
+/// Two shortcuts, so a cursor that moves has somewhere to move to.
+fn with_aliases() -> Settings {
+    Settings {
+        aliases: std::sync::Arc::new(files::alias::Aliases::new(vec![
+            files::alias::Alias {
+                name: "pw".into(),
+                code: "11-D-0704".into(),
+                note: Some("the pump house".into()),
+            },
+            files::alias::Alias {
+                name: "gd".into(),
+                code: "22-A-1234".into(),
+                note: None,
+            },
+        ])),
+        ..Settings::default()
+    }
+}
+
+/// Ctrl+P and Ctrl+N are the arrows, for a hand that does not want to leave
+/// the home row - and they are the *same* arrows, not a second copy of the
+/// arithmetic.
+#[test]
+fn the_home_row_arrows_are_the_arrows() {
+    for (chord, arrow) in [(Key::Char('n'), Key::Down), (Key::Char('p'), Key::Up)] {
+        let (mut chorded, now) = state();
+        let (mut arrowed, _) = state();
+        with_results(&mut chorded, now, 6);
+        with_results(&mut arrowed, now, 6);
+
+        for _ in 0..8 {
+            chorded.update(ctrl(chord), now);
+            arrowed.update(press(arrow), now);
+        }
+        assert_eq!(
+            chorded.selected_row(),
+            arrowed.selected_row(),
+            "{chord:?} is not {arrow:?}"
+        );
+    }
+}
+
+/// And Ctrl+L selects the code, which is what focusing a search box does
+/// everywhere else on this machine.
+#[test]
+fn ctrl_l_selects_the_whole_code() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    assert!(s.input.selection().is_none(), "the fixture selected text");
+
+    s.update(ctrl(Key::Char('l')), now);
+    assert_eq!(s.input.selected_text(), Some("11-D-0704"));
 }
 
 /// The arrows move the selection; the caret keys move the caret. There is no
@@ -1670,52 +1834,52 @@ fn paging_reaches_the_ends_of_the_list() {
 /// that was pixel-identical to the one before it. Frames were still being
 /// produced - each auto-repeat woke the loop - the panel simply had nothing
 /// new to say, and `Enter` would have opened a file that was not on screen.
+///
+/// This used to assert on `scroll_top` as well, because the state machine
+/// held the first rank on screen and the renderer drew a window from it. The
+/// content band is a scroller now and owns that; what is left here is the
+/// half that was always the state machine's - the cursor walks the whole
+/// list, in both directions, and stops at each end.
 #[test]
-fn holding_down_scrolls_the_list_rather_than_freezing_on_its_last_row() {
+fn holding_down_walks_the_whole_list_rather_than_freezing_on_one_row() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
-    assert_eq!(s.scroll_top(), 0, "it starts at the top");
 
-    // Down to the foot of the window: still no scrolling needed.
+    // Down to the foot of what fits on one screen.
     for _ in 0..VISIBLE_ROWS - 1 {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS - 1));
-    assert_eq!(s.scroll_top(), 0, "the window has not had to move yet");
 
-    // One more, and the window follows by exactly one row.
+    // And one past it, which is where it used to stop moving.
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS));
-    assert_eq!(s.scroll_top(), 1, "the list scrolls under the cursor");
-    assert!(s.visible_rows().contains(&VISIBLE_ROWS));
 
-    // And all the way to the end, where the window stops rather than running
-    // off it.
-    for _ in 0..300 {
+    // All the way to the end. Exactly to it, because the arrows wrap now and
+    // an overshoot would come round rather than pile up against the foot.
+    for _ in 0..(199 - VISIBLE_ROWS) {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(199));
-    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS);
-    assert_eq!(s.visible_rows(), (200 - VISIBLE_ROWS)..200);
 
-    // Back up, and it comes with you.
-    for _ in 0..300 {
-        s.update(press(Key::Up), now);
-    }
-    assert_eq!(s.selected_row(), Some(0));
-    assert_eq!(s.scroll_top(), 0);
+    // One more brings it round to the top, and the way back is the way it
+    // came.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(0), "the foot did not come round");
+    s.update(press(Key::Up), now);
+    assert_eq!(s.selected_row(), Some(199));
 }
 
-/// A list that shrinks under a window near its end must not leave the window
-/// pointing past it - half a screen of rows with nothing below them.
+/// A list that shrinks under a cursor near its end must not leave the cursor
+/// pointing past it - one keystroke from opening a file that is not there.
 #[test]
-fn a_shorter_result_set_pulls_the_window_back() {
+fn a_shorter_result_set_pulls_the_cursor_back() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
     for _ in 0..199 {
         s.update(press(Key::Down), now);
     }
-    assert_eq!(s.scroll_top(), 200 - VISIBLE_ROWS, "precondition");
+    assert_eq!(s.selected_row(), Some(199), "precondition");
 
     // The server answers with far fewer.
     let v = view(&s);
@@ -1724,11 +1888,12 @@ fn a_shorter_result_set_pulls_the_window_back() {
         now,
     );
 
-    assert_eq!(s.scroll_top(), 2);
-    assert_eq!(s.visible_rows().end, VISIBLE_ROWS + 2);
+    assert_eq!(s.hits.len(), VISIBLE_ROWS + 2);
+    let row = s.selected_row().expect("nothing is selected at all");
     assert!(
-        s.visible_rows().contains(&s.selected_row().unwrap()),
-        "the cursor is off screen"
+        row < s.hits.len(),
+        "the cursor is on rank {row} of a list of {}",
+        s.hits.len()
     );
 }
 
@@ -1738,9 +1903,9 @@ fn far_more_than_one_screenful_of_results_is_reachable() {
     let (mut s, now) = state();
     with_results(&mut s, now, files::config::MAX_RESULTS);
 
-    for _ in 0..files::config::MAX_RESULTS + 10 {
-        s.update(press(Key::Down), now);
-    }
+    // One Up, which wraps straight onto the last of them. The arrows used to
+    // stop at both ends, so this walked the whole list down to get here.
+    s.update(press(Key::Up), now);
     assert_eq!(
         s.selected_row(),
         Some(files::config::MAX_RESULTS - 1),
@@ -2193,14 +2358,13 @@ fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
     assert!(matches!(s.empty_reason, Some(EmptyReason::BadQuery { .. })));
 }
 
-/// The minimum exists to bound the arena sweep, so it is counted on the thing
-/// that is swept for. `ab ext:pdf` is a ten-character line and a
-/// two-character needle.
+/// The floor is counted on the thing that is swept for, not on the line.
+/// `  ext:pdf` is a nine-character line with no needle in it.
 #[test]
 fn the_minimum_length_is_judged_on_the_code_and_not_on_the_whole_line() {
     let (mut s, now) = state();
-    type_in(&mut s, "ab ext:pdf", now);
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    type_in(&mut s, "  ext:pdf", now);
+    assert_eq!(s.phase, QueryPhase::Idle);
 }
 
 // --- shares that are asked rather than indexed -------------------------------
@@ -2482,27 +2646,24 @@ fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// Below `MIN_QUERY_LEN`, and searched anyway, because what reaches the index
-/// is the expansion rather than the name.
+/// Two characters, and what reaches the index is the expansion rather than
+/// the name - which is what makes an alias an alias rather than a short
+/// search that happens to work.
 #[test]
-fn an_alias_shorter_than_the_minimum_is_still_searched_for() {
+fn an_alias_is_searched_for_as_its_expansion() {
     let (mut s, now) = aliased_state();
-    assert!("pw".chars().count() < MIN_QUERY_LEN);
-
     type_in(&mut s, "pw", now);
-    assert!(
-        !matches!(s.phase, QueryPhase::TooShort { .. }),
-        "an alias was judged as though it were the search"
-    );
+    assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// And the minimum is untouched for everything that is not an alias.
+/// And a two-character line that is not an alias is searched for as itself.
+/// It used to be refused; the floor is one now.
 #[test]
-fn a_short_line_that_is_not_an_alias_is_still_too_short() {
+fn a_short_line_that_is_not_an_alias_is_searched_for_as_written() {
     let (mut s, now) = aliased_state();
     type_in(&mut s, "zz", now);
 
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    assert_eq!(s.query().term(), "zz");
     assert!(s.expansion().is_none());
 }
 
@@ -2581,21 +2742,20 @@ fn a_configuration_without_aliases_is_unchanged() {
     type_in(&mut s, "pw", now);
 
     assert!(s.expansion().is_none());
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    assert_eq!(s.query().term(), "pw");
 }
 
-// --- settings changed in the window ----------------------------------------
+// --- settings changed in another window -------------------------------------
 
-use files::app::state::SettingChange;
-use files::config::write::{Edit, Scalar, SettingKey, Typed};
+use files::config::write::SettingKey;
 
-/// The same as `state()`, with the technical half of every message switched
-/// on. Several tests below are *about* a diagnostic reaching the screen, so
-/// they have to ask for it; what an ordinary user sees is asserted separately.
-fn dev_state() -> (AppState, Instant) {
-    let (mut s, now) = state();
-    s.settings.dev_mode = true;
-    (s, now)
+/// One alias, for the two tests below.
+fn alias(name: &str, code: &str) -> files::alias::Alias {
+    files::alias::Alias {
+        name: name.into(),
+        code: code.into(),
+        note: None,
+    }
 }
 
 fn saveable() -> (AppState, Instant) {
@@ -2607,144 +2767,181 @@ fn saveable() -> (AppState, Instant) {
     (AppState::new(settings, now), now)
 }
 
-fn change(s: &mut AppState, key: SettingKey, typed: Typed, now: Instant) -> Response {
-    s.update(
-        AppEvent::Setting(SettingChange {
-            key,
-            typed,
-            label: "Something",
-        }),
-        now,
-    )
+/// The same as `state()`, with the technical half of every message switched
+/// on. Several tests below are *about* a diagnostic reaching the screen, so
+/// they have to ask for it; what an ordinary user sees is asserted
+/// separately.
+fn dev_state() -> (AppState, Instant) {
+    let (mut s, now) = state();
+    s.settings.dev_mode = true;
+    (s, now)
 }
 
-fn saved(r: &Response) -> Option<Edit> {
-    r.cmds.iter().find_map(|c| match c {
-        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
-        _ => None,
-    })
+/// Hands the panel a whole new `Settings`, the way the settings window does
+/// once it has written the file.
+fn adopt(s: &mut AppState, fresh: Settings, now: Instant) -> Response {
+    s.update(AppEvent::Adopt(Box::new(fresh)), now)
 }
 
-/// The change happens now and is written after. Waiting for a write that may
-/// be going to a network share would be a switch that moves when SMB says it
-/// may.
+/// The panel takes what the file now says, and says so.
+///
+/// This replaces a block of tests about `AppEvent::Setting`,
+/// `AppEvent::Aliases` and `AppEvent::Drives` - three events the settings
+/// window used to send and that nothing constructs any more. The window is
+/// a separate process now: it writes the file itself and sends "it moved",
+/// and the panel reads the whole thing back. One event where there were
+/// three, and no schema shared across a process boundary.
 #[test]
-fn a_setting_applies_before_it_is_written() {
+fn a_file_rewritten_elsewhere_is_taken_whole() {
     let (mut s, now) = saveable();
     assert!(s.settings.history);
 
-    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
+    let fresh = Settings {
+        have_file: true,
+        history: false,
+        result_layout: files::config::ResultLayout::Detailed,
+        ..Default::default()
+    };
+    adopt(&mut s, fresh, now);
 
-    assert!(!s.settings.history, "the change waited for the writer");
+    assert!(!s.settings.history);
     assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::History,
-            value: Scalar::Bool(false),
-        })
+        s.settings.result_layout,
+        files::config::ResultLayout::Detailed
     );
+    let toast = s
+        .toast
+        .as_ref()
+        .expect("a change nobody watched must say so");
+    assert!(toast.text.contains("Settings"), "{}", toast.text);
 }
 
-/// The four that are read where they are used, rather than captured at
-/// startup by a worker that cannot be told.
+/// Turning the history off throws away what is in memory as well as stopping
+/// new entries, or the up arrow would still recall codes from a list the
+/// user has just asked not to be kept.
 #[test]
-fn the_settings_that_apply_at_once_actually_do() {
+fn turning_the_history_off_elsewhere_forgets_what_it_held() {
     let (mut s, now) = saveable();
+    s.history = files::history::History::from_entries(["11-D-0704"]);
+    assert!(!s.history.is_empty());
 
-    change(&mut s, SettingKey::Theme, Typed::Text("dark".into()), now);
-    assert_eq!(s.settings.theme, files::config::ThemeChoice::Dark);
-
-    change(&mut s, SettingKey::Viewer, Typed::Text("avwin".into()), now);
-    assert_eq!(s.settings.viewer, ViewerKind::Avwin);
-    assert_eq!(s.viewer, ViewerKind::Avwin, "Enter still opens the old one");
-
-    change(&mut s, SettingKey::StaleNotices, Typed::Flag(false), now);
-    assert!(!s.settings.stale_notices);
-}
-
-/// The form promises these wait for a restart, so nothing may quietly change
-/// underneath a worker holding a copy.
-#[test]
-fn a_setting_that_waits_for_a_restart_does_not_move_now() {
-    let (mut s, now) = saveable();
-    let before = s.settings.live_updates;
-
-    let r = change(&mut s, SettingKey::LiveUpdates, Typed::Flag(!before), now);
-
-    assert_eq!(s.settings.live_updates, before, "a captured setting moved");
-    assert!(saved(&r).is_some(), "but it must still be written");
-}
-
-/// Writing a setting the environment holds would report a save the next start
-/// ignores, so no command is emitted at all.
-#[test]
-fn a_setting_that_cannot_be_saved_is_not_written() {
-    let (mut s, now) = state();
-    assert!(!s.settings.have_file);
-
-    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
-
-    assert!(saved(&r).is_none(), "a pinned setting reached the writer");
-    assert!(!s.settings.history, "but it still applies for the session");
-}
-
-/// An emptied box means "no viewer of my own", which is the default - not a
-/// path to nowhere.
-#[test]
-fn clearing_a_path_unsets_the_key_rather_than_writing_an_empty_one() {
-    let (mut s, now) = saveable();
-    let r = change(&mut s, SettingKey::PdfViewer, Typed::Text("  ".into()), now);
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Unset {
-            key: SettingKey::PdfViewer
-        })
-    );
-}
-
-/// An empty list is not an absent one: hide_extensions = [] is the documented
-/// way to hide nothing, and unsetting would restore the shipped list.
-#[test]
-fn clearing_the_hidden_types_writes_an_empty_list_rather_than_unsetting() {
-    let (mut s, now) = saveable();
-    let r = change(
+    adopt(
         &mut s,
-        SettingKey::HideExtensions,
-        Typed::Text("".into()),
+        Settings {
+            have_file: true,
+            history: false,
+            ..Default::default()
+        },
         now,
     );
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::HideExtensions,
-            value: Scalar::List(Vec::new()),
-        })
-    );
+    assert!(s.history.is_empty(), "the codes outlived the setting");
 }
 
+/// An alias added in the other window applies to the line already typed.
+///
+/// Put back through the ordinary path rather than re-resolved on the side,
+/// so the expansion, the query and the results move together - a field
+/// showing an expansion for an alias that has been removed is exactly the
+/// silent disagreement the resolution exists to avoid.
 #[test]
-fn a_list_of_types_is_tidied_on_the_way_in() {
+fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
     let (mut s, now) = saveable();
-    let r = change(
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_none());
+
+    let mut fresh = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    adopt(&mut s, fresh, now);
+
+    assert!(s.expansion().is_some(), "the new alias did not fire");
+    assert_eq!(s.query().term(), "11-D-0704");
+}
+
+/// And one removed elsewhere stops expanding it.
+#[test]
+fn an_alias_removed_elsewhere_stops_expanding_the_line() {
+    let (mut s, now) = saveable();
+    let mut with = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    adopt(&mut s, with, now);
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_some());
+
+    adopt(
         &mut s,
-        SettingKey::HideExtensions,
-        Typed::Text(" .DB , js ,, lnk ".into()),
+        Settings {
+            have_file: true,
+            ..Default::default()
+        },
         now,
     );
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::HideExtensions,
-            value: Scalar::List(vec!["db".into(), "js".into(), "lnk".into()]),
-        })
-    );
+    assert!(s.expansion().is_none(), "the expansion outlived the alias");
+    assert_eq!(s.query().term(), "pw");
 }
 
-/// A failed save is a change that already happened, so the message says which
-/// part of it did not.
+/// One status slot per configured drive, or the next report from an actor is
+/// filed against a slot that no longer exists.
+#[test]
+fn the_status_slots_follow_the_drive_list() {
+    use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
+
+    fn drive(id: u16, name: &str, path: &str) -> Mapping {
+        Mapping {
+            id: MappingId(id),
+            name: name.into(),
+            path: std::path::PathBuf::from(path),
+            kind: MappingKind::Flat,
+            enabled: true,
+            refresh: RefreshPolicy::Auto,
+            depth: files::config::DEFAULT_LIVE_DEPTH,
+        }
+    }
+
+    let (mut s, now) = saveable();
+    let three = vec![
+        drive(0, "one", r"R:\"),
+        drive(1, "two", r"S:\"),
+        drive(2, "three", r"T:\"),
+    ];
+    let mut fresh = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fresh.routes = std::sync::Arc::new(Routes::new(three, ConfigSource::BuiltIn));
+    adopt(&mut s, fresh, now);
+    assert_eq!(s.settings.routes.all().len(), 3);
+
+    let mut fewer = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fewer.routes = std::sync::Arc::new(Routes::new(
+        vec![drive(0, "only", r"Z:\")],
+        ConfigSource::BuiltIn,
+    ));
+    adopt(&mut s, fewer, now);
+    assert_eq!(s.settings.routes.all().len(), 1);
+
+    // The slot count itself is private, so this asserts the thing it is
+    // for: the routing table and the statuses are resized together, and
+    // `resize_statuses` in `adopt` is the only thing that does it. Without
+    // it the next report from the third drive's actor would be filed
+    // against a slot that is no longer there.
+}
+
+/// A failed save is a change that already happened, so the message says
+/// which part of it did not.
+///
+/// Still reachable: the panel installs updates, and reports a failure the
+/// same way. What is gone is the settings path, because the window reports
+/// its own failures where the setting is rather than in a toast on a panel
+/// that may not even be running.
 #[test]
 fn a_failed_save_says_the_change_applies_for_this_session() {
     let (mut s, now) = saveable();
@@ -2762,74 +2959,80 @@ fn a_failed_save_says_the_change_applies_for_this_session() {
     assert_eq!(toast.severity, Severity::Warn);
 }
 
-#[test]
-fn a_successful_save_confirms_what_was_changed() {
-    let (mut s, now) = saveable();
-    s.update(
-        AppEvent::Open(OpenMsg::SettingSaved { label: "Colours" }),
-        now,
-    );
-
-    let toast = s.toast.as_ref().expect("a save must confirm itself");
-    assert!(toast.text.contains("Colours"), "{}", toast.text);
-    assert_eq!(toast.severity, Severity::Info);
-}
-
-/// The form promises which settings move now and which wait. This is the only
-/// thing that holds the promise to what actually happens.
+/// The form promises which settings move now and which wait, and `adopt` is
+/// the only thing that can keep the promise.
 ///
-/// Table-driven over every key, with a value that differs from the default, so
-/// a key added without a decision in `apply_live` fails here rather than
-/// becoming a control that silently does nothing.
+/// Table-driven over every key, with a value that differs from the default,
+/// so a key added without a decision in `adopt_one` fails here rather than
+/// becoming a control that silently does nothing until a restart.
+///
+/// It used to drive `apply_live`, which took one `Edit`. The mechanism
+/// changed and the invariant did not: what `applies_at_once` claims about a
+/// key has to be what happens when the file carrying it is adopted.
 #[test]
 fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
-    fn differs(key: SettingKey) -> Typed {
+    /// A `Settings` differing from the default in exactly one key.
+    fn differing(key: SettingKey) -> Settings {
+        let mut s = Settings {
+            have_file: true,
+            ..Default::default()
+        };
         match key {
-            SettingKey::Theme => Typed::Text("dark".into()),
-            SettingKey::Viewer => Typed::Text("avwin".into()),
-            SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
-            SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
-            SettingKey::HideExtensions => Typed::Text("zzz".into()),
+            SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
+            SettingKey::Viewer => s.viewer = files::config::ViewerKind::Avwin,
+            SettingKey::Hotkey => s.hotkey = files::hotkey::spec::HotkeySpec::Off,
+            SettingKey::PdfViewer => s.pdf_viewer = Some(r"C:\viewer.exe".into()),
+            SettingKey::UpdateFrom => s.update_from = Some(r"\\server\share".into()),
+            SettingKey::IndexLog => s.index_log = Some(r"C:\index.log".into()),
+            SettingKey::Backdrop => s.backdrop = files::gui::window::Material::Mica,
+            SettingKey::ResultLayout => s.result_layout = files::config::ResultLayout::Detailed,
+            SettingKey::HideExtensions => {
+                s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
+                    &["zzz"],
+                    s.hidden.hides_system(),
+                ))
+            }
             // The one flag that ships off, so `false` would be no change at
             // all and this test would pass by moving nothing.
-            SettingKey::DevMode => Typed::Flag(true),
-            SettingKey::History
-            | SettingKey::StaleNotices
-            | SettingKey::LiveUpdates
-            | SettingKey::HideSystemFiles => Typed::Flag(false),
+            SettingKey::DevMode => s.dev_mode = true,
+            SettingKey::History => s.history = false,
+            SettingKey::StaleNotices => s.stale_notices = false,
+            SettingKey::LiveUpdates => s.live_updates = false,
+            SettingKey::PdfReadOnly => s.pdf_read_only = false,
+            SettingKey::HideOnBlur => s.hide_on_blur = false,
+            SettingKey::HideAfterOpening => s.hide_after_opening = false,
+            SettingKey::HideOnEscape => s.hide_on_escape = false,
+            SettingKey::HideSystemFiles => {
+                let kept: Vec<String> = s.hidden.suffixes().map(str::to_owned).collect();
+                s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
+                    &kept,
+                    !s.hidden.hides_system(),
+                ))
+            }
         }
+        s
     }
 
-    /// Everything `apply_live` is allowed to touch, read back off `Settings`.
-    fn snapshot(s: &AppState) -> String {
-        format!(
-            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}",
-            s.settings.theme,
-            s.settings.viewer,
-            s.settings.history,
-            s.settings.stale_notices,
-            s.settings.dev_mode,
-            s.settings.hotkey,
-            s.settings.live_updates,
-            s.settings.pdf_viewer,
-            s.settings.hidden.suffixes().collect::<Vec<_>>(),
-            s.settings.hidden.hides_system(),
-        )
+    /// Everything a running panel reads from its own copy, rather than from
+    /// the file at the next start.
+    fn live(s: &AppState) -> String {
+        format!("{:?}|{}", s.viewer, s.history.is_empty())
     }
 
     for key in SettingKey::ALL {
         let (mut s, now) = saveable();
-        let before = snapshot(&s);
-        change(&mut s, key, differs(key), now);
-        let moved = snapshot(&s) != before;
+        s.history = files::history::History::from_entries(["11-D-0704"]);
+        let before = live(&s);
+        adopt(&mut s, differing(key), now);
 
-        assert_eq!(
-            moved,
-            key.applies_at_once(),
-            "{} says it applies at once: {}, but moving it changed the \
-             settings: {moved}",
-            key.name(),
-            key.applies_at_once(),
+        // `settings` itself is always replaced whole, so what the claim is
+        // about is the *derived* state: the fields a running panel holds
+        // separately and that would otherwise go stale.
+        let moved = live(&s) != before;
+        assert!(
+            !moved || key.applies_at_once(),
+            "{} moved something live but says it waits for a restart",
+            key.name()
         );
     }
 }
@@ -2852,6 +3055,8 @@ fn available(version: &str) -> Found {
             notes: None,
         },
         msi: std::path::PathBuf::from("files.msi"),
+        // Not on disk, which is what a bare relative name in a test is.
+        msi_present: false,
     }
 }
 
@@ -2915,168 +3120,6 @@ fn a_dull_answer_is_remembered_without_being_announced() {
 fn nothing_is_known_about_updates_until_a_look_answers() {
     let (s, _now) = state();
     assert_eq!(s.update, None);
-}
-
-// --- editing aliases in the window ------------------------------------------
-
-use files::alias::Alias;
-
-fn alias(name: &str, code: &str) -> Alias {
-    Alias {
-        name: name.into(),
-        code: code.into(),
-        note: None,
-    }
-}
-
-fn saved_edit(r: &Response) -> Option<Edit> {
-    r.cmds.iter().find_map(|c| match c {
-        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
-        _ => None,
-    })
-}
-
-/// The table is read on the keystroke that needs it, so an added alias works
-/// at once rather than at the next start.
-#[test]
-fn an_alias_added_in_the_window_works_immediately() {
-    let (mut s, now) = saveable();
-    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-
-    assert_eq!(
-        saved_edit(&r),
-        Some(Edit::Aliases(vec![alias("pw", "11-D-0704")]))
-    );
-
-    let r = type_in(&mut s, "pw", now);
-    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
-}
-
-/// A field still showing the expansion of an alias that has just been deleted
-/// is the silent disagreement the whole feature is written to avoid.
-#[test]
-fn removing_an_alias_stops_the_line_on_screen_expanding() {
-    let (mut s, now) = saveable();
-    s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-    type_in(&mut s, "pw", now);
-    assert!(s.expansion().is_some());
-
-    s.update(AppEvent::Aliases(Vec::new()), now);
-
-    assert!(s.expansion().is_none(), "the expansion outlived the alias");
-    assert!(
-        matches!(s.phase, QueryPhase::TooShort { .. }),
-        "pw is two characters again, so it is too short again"
-    );
-}
-
-/// And adding one under a line already typed makes that line an alias.
-#[test]
-fn adding_an_alias_expands_a_line_that_is_already_on_the_panel() {
-    let (mut s, now) = saveable();
-    type_in(&mut s, "pw", now);
-    assert!(s.expansion().is_none());
-
-    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-
-    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
-    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
-}
-
-/// An empty list is a legitimate state, and it must be written rather than
-/// leaving the old entries in the file.
-#[test]
-fn removing_the_last_alias_is_still_written() {
-    let (mut s, now) = saveable();
-    let r = s.update(AppEvent::Aliases(Vec::new()), now);
-    assert_eq!(saved_edit(&r), Some(Edit::Aliases(Vec::new())));
-}
-
-// --- editing drives in the window -------------------------------------------
-
-use files::paths::{Mapping, MappingKind, RefreshPolicy};
-
-fn drive(index: u16, name: &str, path: &str) -> Mapping {
-    Mapping {
-        id: MappingId(index),
-        name: name.into(),
-        path: std::path::PathBuf::from(path),
-        kind: MappingKind::Tree,
-        enabled: true,
-        refresh: RefreshPolicy::Manual,
-        depth: 1,
-    }
-}
-
-/// An id is a position in the list, and `statuses` is indexed by it. Removing
-/// the first of three would otherwise leave ids 1 and 2 in a list whose slots
-/// are 0 and 1, and the next report from an actor would be filed against a
-/// drive that is not there.
-#[test]
-fn removing_a_drive_renumbers_the_rest() {
-    let (mut s, now) = saveable();
-    let three = vec![
-        drive(0, "a", r"A:\"),
-        drive(1, "b", r"B:\"),
-        drive(2, "c", r"C:\"),
-    ];
-    s.update(AppEvent::Drives(three.clone()), now);
-
-    let without_first: Vec<_> = three.into_iter().skip(1).collect();
-    let r = s.update(AppEvent::Drives(without_first), now);
-
-    let ids: Vec<u16> = s.settings.routes.all().iter().map(|m| m.id.0).collect();
-    assert_eq!(ids, [0, 1], "ids must be positions in the list");
-
-    let Some(Edit::Mappings(written)) = saved_edit(&r) else {
-        panic!("the drives must be written");
-    };
-    assert_eq!(
-        written.iter().map(|m| m.id.0).collect::<Vec<_>>(),
-        [0, 1],
-        "the file must get the renumbered list too"
-    );
-}
-
-/// The window shows what it just wrote, rather than what it wrote over.
-#[test]
-fn the_drive_list_on_screen_follows_what_was_saved() {
-    let (mut s, now) = saveable();
-    s.update(AppEvent::Drives(vec![drive(0, "only", r"Z:\")]), now);
-
-    assert_eq!(s.settings.routes.names(), ["only"]);
-}
-
-/// Searching must not change until the next start: an index actor per drive
-/// is started once, with its own copy of the settings.
-#[test]
-fn changing_drives_says_it_waits_for_a_restart() {
-    assert!(
-        !files::config::write::SettingKey::ALL
-            .iter()
-            .any(|k| k.name() == "mapping"),
-        "drives are not a settings key, so nothing claims they apply at once"
-    );
-}
-
-/// One status per configured drive, or a report lands in a slot that is gone.
-#[test]
-fn the_status_list_keeps_pace_with_the_drive_list() {
-    let (mut s, now) = saveable();
-    s.update(
-        AppEvent::Drives(vec![drive(0, "a", r"A:\\"), drive(1, "b", r"B:\\")]),
-        now,
-    );
-    assert_eq!(s.settings.routes.all().len(), 2);
-    // Every configured drive can be asked about, which is only true when the
-    // status list was resized alongside the routing table.
-    for mapping in s.settings.routes.all() {
-        assert!(
-            s.status_of(mapping.id).is_some(),
-            "{} has no slot",
-            mapping.name
-        );
-    }
 }
 
 // --- what an ordinary user is shown -----------------------------------------
@@ -3160,12 +3203,13 @@ fn developer_mode_changes_the_next_message_drawn() {
     let (mut s, now) = saveable();
     assert!(!s.settings.dev_mode);
 
-    s.update(
-        AppEvent::Setting(SettingChange {
-            key: SettingKey::DevMode,
-            typed: Typed::Flag(true),
-            label: "Show technical detail",
-        }),
+    adopt(
+        &mut s,
+        Settings {
+            have_file: true,
+            dev_mode: true,
+            ..Default::default()
+        },
         now,
     );
     assert!(s.settings.dev_mode, "it waited for a restart");

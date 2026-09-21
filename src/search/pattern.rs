@@ -39,7 +39,7 @@
 //! local index would have returned, and disables the whole mechanism after a
 //! few disagreements.
 
-use crate::config::{MAX_SERVER_QUERY_LEN, MIN_QUERY_LEN};
+use crate::config::{MAX_SERVER_QUERY_LEN, MIN_SERVER_QUERY_LEN};
 use crate::search::query::{self, MatchMode, Query};
 use crate::util::fold;
 
@@ -165,7 +165,11 @@ fn literal_body(query: &str) -> Result<&str, PatternReject> {
     if !query.is_ascii() {
         return Err(PatternReject::NonAscii);
     }
-    if query.len() < MIN_QUERY_LEN {
+    // The server's floor, not the panel's. A one-character filter matches
+    // most of a share, so the round trip costs a full listing and saves
+    // nothing - which is why this stayed at three when the local search
+    // dropped to one.
+    if query.len() < MIN_SERVER_QUERY_LEN {
         return Err(PatternReject::TooShort);
     }
     if query.len() > MAX_SERVER_QUERY_LEN {

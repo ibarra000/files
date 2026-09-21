@@ -28,7 +28,6 @@ mod keys;
 mod model;
 mod overlay;
 pub mod pointer;
-mod preview;
 mod settings;
 
 pub use model::{EmptyReason, LiveProgress, QueryPhase, Severity, TOAST_LIFETIME, Toast, Urgency};
@@ -41,8 +40,8 @@ use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Respo
 use super::input::{self, Input};
 use crate::config::COUNTDOWN_TICK;
 use crate::config::{
-    ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, SEARCH_DEBOUNCE, Settings,
-    VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS, ViewerKind,
+    ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_SERVER_QUERY_LEN, MIN_TERM_LEN, REMEMBER_DEBOUNCE,
+    SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
 };
 use crate::history::History;
 use crate::index::store::{IndexOverview, IndexStatus};
@@ -88,6 +87,21 @@ pub struct AppState {
     /// keyboard; this is the one thing that borrows the *body*, and it borrows
     /// it for one keystroke at a time.
     pub picking_share: bool,
+    /// Where the keyboard is in the alias list, if it is in it at all.
+    ///
+    /// `None` means the list is on screen and nobody has stepped onto it -
+    /// which is the ordinary case, because an alias is two or three
+    /// characters and typing it is faster than walking to it. See
+    /// [`Self::showing_aliases`].
+    alias_cursor: Option<usize>,
+    /// Whether the actions menu is up.
+    ///
+    /// Here rather than in the renderer because Escape has to close it, and
+    /// which key means what is the state machine's business. It is a *flag*
+    /// and not a cursor: the menu is keyboard-reachable through the shortcut
+    /// each row names, so there is nothing to walk. See
+    /// [`crate::view::actions`].
+    pub actions_open: bool,
     pub hits: Vec<Hit>,
     pub matched: u32,
     pub total: u32,
@@ -123,8 +137,6 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
-    /// The first result rank on screen. See [`Self::scroll_into_view`].
-    scroll_top: usize,
     /// Whether `avwin.exe` could not be found on PATH when the program
     /// started.
     ///
@@ -149,6 +161,14 @@ pub struct AppState {
     /// from having looked and found nothing - the settings window says so
     /// rather than claiming to be up to date before it knows.
     pub update: Option<crate::update::Found>,
+    /// Whether this process holds the global chord, as the hotkey thread
+    /// reported it at startup.
+    ///
+    /// `None` until it has said, which for a hotkey that is switched off or
+    /// a platform that has none is for ever. Recorded rather than asked
+    /// again later because `RegisterHotKey` is per-thread and cannot be
+    /// asked again correctly from in here - see [`crate::hotkey::Probe`].
+    pub hotkey_claim: Option<Result<(), String>>,
 
     query_epoch: u64,
     /// When the code on the line becomes worth matching against the index.
@@ -221,24 +241,21 @@ pub struct AppState {
     /// terminal reports no "the pointer left the window" event and a hover
     /// that outlives the pointer is a lie.
     hovered: Option<usize>,
-    /// What the file under the pointer is, once the worker has said.
-    ///
-    /// `None` while nothing is being pointed at, and also for the moment
-    /// between moving onto a row and the answer arriving - see
-    /// [`AppState::follow_preview`] for why it is cleared rather than left up.
-    pub preview: Option<Arc<crate::preview::Preview>>,
-    /// Which file `preview` is, or is about to be, about.
-    ///
-    /// Held separately because it is set the instant the pointer moves, while
-    /// `preview` is set 120 ms later: the gap between them is what an arriving
-    /// answer is checked against.
-    preview_target_path: Option<Arc<str>>,
-    preview_due_at: Option<Instant>,
     /// How far the help panel is scrolled.
     ///
     /// Clamped against the pane on the way out rather than on the way in, so a
     /// terminal that grows cannot leave the panel parked below its own end.
     help_scroll: u16,
+}
+
+/// Whether a move that runs off the end comes back on at the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wrap {
+    /// A step: Up from the first row is the last, and Down from the last is
+    /// the first. What Ueli's arrows do.
+    Around,
+    /// A page: the ends hold. See [`AppState::move_selection`].
+    Stop,
 }
 
 impl AppState {
@@ -258,6 +275,8 @@ impl AppState {
             history: History::new(),
             overlay_up: false,
             picking_share: false,
+            alias_cursor: None,
+            actions_open: false,
             // Replaced by the real size before the first frame; a sane default
             // means mouse arithmetic is never done against a zero rect.
             hits: Vec::new(),
@@ -274,7 +293,6 @@ impl AppState {
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
-            scroll_top: 0,
             avwin_missing: false,
             viewer,
             query_epoch: 0,
@@ -294,10 +312,8 @@ impl AppState {
             query: Query::default(),
             expansion: None,
             update: None,
+            hotkey_claim: None,
             last_verified_query: None,
-            preview: None,
-            preview_target_path: None,
-            preview_due_at: None,
             help_scroll: 0,
             hovered: None,
         };
@@ -441,44 +457,52 @@ impl AppState {
         self.settings.dev_mode.then(|| detail.into())
     }
 
-    /// Nothing to show but the box to type in.
-    ///
-    /// What the panel looks like before anybody has typed: one band, the
-    /// field, and no body or footer under it. It used to be five lines of
-    /// instructions and four chips, which is a great deal of furniture to put
-    /// in front of somebody who summoned a search box to search.
-    ///
-    /// The last two terms are what stop this being a hole rather than a
-    /// feature. A toast such as "Copied 9 characters", and a standing notice
-    /// about a drive, are exactly the things the footer exists to carry, and a
-    /// footer of no height would swallow them without a sound. So a panel with
-    /// anything to say is not a quiet one.
-    ///
-    /// The wall clock is the one the renderer handed over on the last frame,
-    /// because staleness is the one standing notice that arrives with no event
-    /// behind it. `note_frame` runs before the panel is measured, so it is the
-    /// same instant the footer would be drawn against.
-    pub fn is_quiet(&self) -> bool {
-        self.input.text().is_empty()
-            && !self.picking_share
-            && !self.showing_recent()
-            && self.toast.is_none()
-            && !self.has_standing_notice(self.last_frame_wall)
-    }
-
     /// Whether the status line would say something without being asked.
     ///
     /// Kept beside the state it reads rather than in `view::status`, which
     /// draws the same facts: the panel has to know whether to leave room for
-    /// the line *before* it asks what the line says, and two answers to that
-    /// would be a footer whose height and contents disagree. `index_warning`
-    /// is the other half and calls this one, so there is no second opinion to
-    /// drift - only the words are over there.
+    /// the line *before* it asks what the line says. `index_warning` is the
+    /// other half and calls this one, so there is no second opinion to drift
+    /// - only the words are over there.
     ///
     /// Takes the clock rather than reading `last_frame_wall`, because the
-    /// renderer has a fresher one and staleness is the one notice that arrives
-    /// with no event behind it. `is_quiet` passes the stored one, which is set
-    /// by `note_frame` before the panel is measured.
+    /// renderer has a fresher one and staleness is the one notice that
+    /// arrives with no event behind it.
+    /// Whether an empty box is showing the configured shortcuts.
+    ///
+    /// Ueli's favourites. Its empty screen lists them and that is the whole
+    /// point of having them; ours lists aliases, which are the same kind of
+    /// thing - configured, named, few, and a record of nothing.
+    ///
+    /// This is the one place the panel puts anything on an untouched screen,
+    /// and it is worth saying why that is not a reversal of b719a20, which
+    /// stripped the first screen to a search box and nothing else. What that
+    /// removed was five lines of *instructions* - what to type, what a code
+    /// looks like - in front of somebody who learned both on their first
+    /// day. A list somebody wrote themselves is not instructions, and a
+    /// machine with no aliases configured still gets a search box and
+    /// nothing else.
+    ///
+    /// The recent codes are deliberately *not* here, and that is the line:
+    /// they are a record of what this person looked up, and a panel summoned
+    /// over somebody's shoulder must not put that on screen unasked. Ueli
+    /// agrees - its search history is an opt-in dropdown rather than part of
+    /// the list - so the privacy decision and its shape do not have to
+    /// disagree. Up is still the only way in.
+    pub fn showing_aliases(&self) -> bool {
+        self.input.text().is_empty()
+            && !self.picking_share
+            && !self.showing_recent()
+            && !self.settings.aliases.is_empty()
+    }
+
+    /// Which shortcut the keyboard is on, if it has been stepped onto.
+    pub fn alias_cursor(&self) -> Option<usize> {
+        self.showing_aliases()
+            .then_some(self.alias_cursor)
+            .flatten()
+    }
+
     pub(crate) fn has_standing_notice(&self, wall: SystemTime) -> bool {
         self.index.origin.is_none()
             || self.index.degraded().is_some()
@@ -553,7 +577,6 @@ impl AppState {
             self.remember_due_at,
             self.verify_watchdog_at,
             self.toast_expires_at,
-            self.preview_due_at,
             // Without this the loop parks in an unbounded receive whenever
             // nothing else is pending, so the age on screen froze until a
             // keystroke happened to arrive and then jumped.
@@ -571,37 +594,23 @@ impl AppState {
         // the keyboard *is* - only because of what it did. This used to be
         // fourteen assignments guarded by one comparison; it is now nothing at
         // all, which is the clearest measure of what collapsing `Focus` bought.
-        self.dispatch(event, now)
-    }
-
-    /// Runs the event, then lets the preview pane notice what it changed.
-    ///
-    /// The second half is here rather than at each of the five sites that can
-    /// move the selection, because a sixth site added later would not know to
-    /// call it - and the symptom of forgetting is the pane describing the
-    /// previous file under this one's name. See [`preview`].
-    fn dispatch(&mut self, event: AppEvent, now: Instant) -> Response {
-        let mut response = self.dispatch_event(event, now);
-        response.merge(self.follow_preview(now));
-        response
+        self.dispatch_event(event, now)
     }
 
     fn dispatch_event(&mut self, event: AppEvent, now: Instant) -> Response {
         match event {
             AppEvent::Key(key) => self.on_key(key, now),
             AppEvent::Intent(intent) => self.on_intent(intent, now),
-            AppEvent::Setting(change) => self.on_setting(change, now),
+            AppEvent::Adopt(fresh) => self.on_adopt(*fresh, now),
             AppEvent::Update(msg) => self.on_update(msg, now),
-            AppEvent::Aliases(list) => self.on_aliases(list, now),
-            AppEvent::Drives(list) => self.on_drives(list),
             AppEvent::Paste(text) => self.on_paste(&text, now),
+            AppEvent::WindowFocus(has_focus) => self.on_focus(has_focus),
             AppEvent::Tick => self.on_tick(now),
             AppEvent::Search(msg) => self.on_search(msg, now),
             AppEvent::Verify(msg) => self.on_verify(msg, now),
             AppEvent::Live(msg) => self.on_live(msg, now),
             AppEvent::Index(msg) => self.on_index(msg, now),
             AppEvent::Open(msg) => self.on_open(msg, now),
-            AppEvent::Preview(msg) => self.on_preview(msg),
             AppEvent::Clipboard(msg) => self.on_clipboard(msg, now),
             AppEvent::Hotkey(msg) => self.on_hotkey(msg, now),
             AppEvent::ActorDied { actor, detail } => {
@@ -704,7 +713,6 @@ impl AppState {
     /// see the note in [`Self::on_input_changed`].
     fn clear_results(&mut self) {
         self.hits.clear();
-        self.scroll_top = 0;
         self.hovered = None;
         self.matched = 0;
         self.total = 0;
@@ -712,11 +720,15 @@ impl AppState {
     }
 
     fn on_input_changed(&mut self, now: Instant, urgency: Urgency) -> Response {
-        // Editing the code accepts whatever was being previewed: the text in
+        // Editing the code accepts whatever was being recalled: the text in
         // the field is now something the user typed rather than something they
         // were looking at. This is the one place it happens, so no key handler
         // has to remember to do it.
         self.leave_history();
+        // And steps off the shortcut list for the same reason. Kept here
+        // rather than in the key handlers because there are half a dozen
+        // ways to change the line and one of them would forget.
+        self.alias_cursor = None;
         self.query_epoch += 1;
         // Editing the code un-pins: the user is choosing a different code, not
         // holding a place in the list for this one. The selected *path* is kept
@@ -752,18 +764,17 @@ impl AppState {
             self.clear_results();
             return Response::redraw();
         }
-        // Judged on the *term*, not the line: `ab ext:pdf` is a ten-character
-        // line and a two-character sweep across every name on the share, which
-        // is the work the minimum exists to prevent.
+        // Judged on the *term*, not the line: `ext:pdf` is a seven-character
+        // line with nothing on it to search for.
         if let Err(reject) = self.query.check() {
             self.phase = match reject {
-                QueryReject::TooShort { need } => QueryPhase::TooShort { need },
+                QueryReject::Empty => QueryPhase::Idle,
                 _ => QueryPhase::BadQuery {
                     detail: reject.detail(),
                 },
             };
             self.empty_reason = Some(match reject {
-                QueryReject::TooShort { need } => EmptyReason::QueryTooShort { need },
+                QueryReject::Empty => EmptyReason::NoQuery,
                 _ => EmptyReason::BadQuery {
                     detail: reject.detail(),
                 },
@@ -850,12 +861,15 @@ impl AppState {
     }
 
     fn on_enter(&mut self, now: Instant) -> Response {
-        // Enter takes the row you are on. On a remembered code that means
-        // filling the field and searching; on a file it means opening it. One
-        // rule, two kinds of row - and the rows look different enough that
-        // nobody has to be told which is which.
+        // Enter takes the row you are on. On a remembered code or a shortcut
+        // that means filling the field and searching; on a file it means
+        // opening it. One rule, three kinds of row - and the three look
+        // different enough that nobody has to be told which is which.
         if self.history.is_browsing() {
             return self.accept_recall(now);
+        }
+        if let Some(rank) = self.alias_cursor() {
+            return self.accept_alias(rank, now);
         }
 
         // Unless the match for what is on the line has not run yet, in which
@@ -872,12 +886,29 @@ impl AppState {
             });
         }
 
-        self.open_selection(now)
+        self.open_selection(self.viewer, now)
     }
 
     /// Opens the row the selection is on. The second half of [`Self::on_enter`],
     /// split out because a deferred Enter re-enters it from `on_search`.
-    fn open_selection(&mut self, now: Instant) -> Response {
+    /// Opens the row the selection is on with a viewer other than the
+    /// current one, without changing which one is current.
+    ///
+    /// Public to the module so `keys` and `pointer` can both reach it: the
+    /// three viewer-specific actions are a keystroke *and* a menu row, and
+    /// the two have to be the same act.
+    pub(super) fn open_with(&mut self, viewer: ViewerKind, now: Instant) -> Response {
+        self.open_selection(viewer, now)
+    }
+
+    /// Opens the row the selection is on, with the viewer named.
+    ///
+    /// The viewer is a parameter rather than `self.viewer` because three of
+    /// the actions in [`crate::view::actions`] are the same open with a
+    /// different one - and `OpenRequest` has carried the viewer per request
+    /// since it was written, precisely so this could be a parameter rather
+    /// than a mode change followed by an open followed by a mode change back.
+    fn open_selection(&mut self, viewer: ViewerKind, now: Instant) -> Response {
         // Never blocks on the network: if the file turns out to be gone, that
         // is reported afterwards.
         let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
@@ -911,7 +942,7 @@ impl AppState {
         let code = self.query.term().to_string();
         // Decided before the path is moved into the request, and kept, because
         // the answer is wanted again below.
-        let route = crate::open::route_of(self.viewer, &path);
+        let route = crate::open::route_of(viewer, &path);
         let request = crate::open::OpenRequest {
             path,
             // The typed code, not the selected row: the page set is rebuilt
@@ -919,7 +950,7 @@ impl AppState {
             // match position, so a long document would arrive truncated and
             // out of order.
             query: code.clone(),
-            viewer: self.viewer,
+            viewer,
         };
         let mut response = Response::none().with(Cmd::Open(request));
 
@@ -946,18 +977,20 @@ impl AppState {
             response = response.with(cmd);
         }
 
-        // The overlay used to be got rid of here unconditionally, on the
-        // reasoning that the drawing is opening so the search is over. What
-        // that actually did was throw away every word the open had to say: the
-        // worker answers on its own thread, and `Opening...`, the count of
-        // pages it skipped and `Could not open ...` all arrived at a window
-        // that had already gone. Staying up is what makes those readable, and
-        // what makes a second code a keystroke rather than a hotkey.
+        // On by default now, and it was not. The objection was specific and
+        // correct: the worker answers on its own thread, so `Opening…`, the
+        // count of pages it skipped and `Could not open …` all arrived at a
+        // window that had already gone, and nobody ever read one.
+        //
+        // That is answered rather than overruled - anything the open has to
+        // say that the user must see arrives in a message box instead, from
+        // `on_open` below. See `crate::notify`, and the note on
+        // `Settings::hide_after_opening`.
         //
         // `request_dismiss` re-runs the gate and finds this code already at
         // the head of the list, so no second write happens.
         if self.overlay_up {
-            if self.settings.auto_hide {
+            if self.settings.hide_after_opening {
                 response.merge(self.request_dismiss());
             } else {
                 // Staying up, so leave the field the way a summon does: the
@@ -974,19 +1007,36 @@ impl AppState {
 
     /// Moves the selection by `delta` ranks.
     ///
-    /// Every relative move goes through here - Up and Down, PageUp and PageDown
-    /// by a screen, and a clicked arrow chip - so the ends of the list behave
-    /// the same way whichever of them was pressed. The wheel used to be on that
-    /// list, and columns before that; both are gone. They did not before:
-    /// a step by one wrapped while a step by a column clamped, because the two
-    /// were separate copies of the same arithmetic.
+    /// Every relative move goes through here - Up and Down, PageUp and
+    /// PageDown by a screen, and the same two under Ctrl - so the ends of the
+    /// list behave the same way whichever of them was pressed. They did not
+    /// always: a step by one wrapped while a step by a column clamped,
+    /// because the two were separate copies of the same arithmetic.
     ///
-    /// Both ends stop. The list used to be circular, so a step off the foot
-    /// landed back on rank 0 and the page snapped back to the first screen -
-    /// the results already read reappeared at the end, and returning to where
-    /// someone was meant walking the whole list again. Stopping means the way
-    /// back is the way they came.
-    fn move_selection(&mut self, delta: isize) -> Response {
+    /// **A step wraps and a page does not**, which is a smaller rule than it
+    /// sounds. Ueli's arrows wrap, and the reason this program's stopped is
+    /// worth restating: the panel drew a twelve-row window over the list, so
+    /// a step off the foot landed back on rank 0 and *the page snapped back
+    /// to the first screen* - the results already read reappeared at the end,
+    /// and getting back meant walking the whole list again. The content band
+    /// is a scroller now; wrapping scrolls it to the top, which is where
+    /// rank 0 is, and Up from the first row is the quickest way to the last.
+    ///
+    /// A page that wrapped would be a different matter, and Ueli has no page
+    /// key to appeal to. Six rows is not a landmark, so a `PageDown` that
+    /// came out somewhere near the top would be indistinguishable from one
+    /// that had not moved.
+    /// How far a page key moves.
+    ///
+    /// A screenful, which is a different number of rows in each layout. Read
+    /// off the settings rather than off a constant so that switching the
+    /// layout in the settings window changes the page on the next press, the
+    /// same frame the rows change shape.
+    fn rows_per_page(&self) -> isize {
+        self.settings.result_layout.rows_per_page() as isize
+    }
+
+    fn move_selection(&mut self, delta: isize, wrap: Wrap) -> Response {
         if self.hits.is_empty() {
             return Response::none();
         }
@@ -998,7 +1048,13 @@ impl AppState {
             let row = if delta > 0 { 0 } else { self.hits.len() - 1 };
             return self.jump_selection(row);
         };
-        let target = (current + delta).clamp(0, len - 1);
+        let target = match wrap {
+            // `rem_euclid` rather than `%`, which in Rust keeps the sign of
+            // the left operand - so Up from rank zero would ask for rank
+            // minus one and land back on zero.
+            Wrap::Around => (current + delta).rem_euclid(len),
+            Wrap::Stop => (current + delta).clamp(0, len - 1),
+        };
         if target == current {
             // Against the edge. The keypress still says "I am working in this
             // list", so it pins, but the frame it would produce is the one
@@ -1018,75 +1074,7 @@ impl AppState {
         self.selection_pinned = true;
         self.selection_lost = false;
         self.selected_path = Some(Arc::clone(&self.hits[row.min(self.hits.len() - 1)].path));
-        self.scroll_into_view();
         Response::redraw()
-    }
-
-    /// The window over the result list: the first rank on screen.
-    ///
-    /// The list holds up to [`crate::config::MAX_RESULTS`] and the panel has
-    /// room for [`VISIBLE_ROWS`], so most of a broad search is off screen. This
-    /// is where.
-    pub fn scroll_top(&self) -> usize {
-        self.scroll_top
-    }
-
-    /// The ranks currently on screen.
-    pub fn visible_rows(&self) -> std::ops::Range<usize> {
-        let start = self.scroll_top.min(self.hits.len());
-        start..(start + VISIBLE_ROWS).min(self.hits.len())
-    }
-
-    /// The remembered codes on screen while recall is up.
-    ///
-    /// Derived, never stored - the opposite of [`Self::scroll_top`], and for a
-    /// reason that is a property of the data rather than a preference: the list
-    /// cannot change while it is being browsed, because `History::record` drops
-    /// the cursor. There is no update this could fall out of step with, so
-    /// there is nothing for a stored offset to be wrong about.
-    ///
-    /// The cursor rides the last row once it walks past the window, which is
-    /// the rule [`Self::scroll_into_view`] applies downwards - and browsing only
-    /// ever moves one entry at a time from the newest, so that is the only
-    /// direction there is.
-    pub fn recent_rows(&self) -> std::ops::Range<usize> {
-        let len = self.history.len();
-        let cursor = self.history.cursor().unwrap_or(0);
-        let start = (cursor + 1).saturating_sub(VISIBLE_ROWS).min(len);
-        start..(start + VISIBLE_ROWS).min(len)
-    }
-
-    /// Moves the window as little as it takes to contain the selected row.
-    ///
-    /// The **only** place `scroll_top` moves, called from the only two places
-    /// that can invalidate it: [`Self::jump_selection`], which moves the cursor,
-    /// and [`Self::apply_hits`], which moves the list out from under it. A
-    /// third caller would be a third opinion about where the window is.
-    ///
-    /// The terminal build derived its page from the selection instead, and its
-    /// note argued a stored offset would be "a second source of truth that
-    /// every result update would have to keep in step". That was written for a
-    /// three-column grid, where the page was the unit somebody moved in. For a
-    /// single column of twelve, flipping the whole list on the twelfth Down is
-    /// worse than sliding it by one - so the offset is stored, and the
-    /// invariant it has to hold is asserted directly by the interleaving
-    /// fuzzer rather than argued about here.
-    fn scroll_into_view(&mut self) {
-        let Some(row) = self.selected_row() else {
-            self.scroll_top = 0;
-            return;
-        };
-        if row < self.scroll_top {
-            self.scroll_top = row;
-        } else if row >= self.scroll_top + VISIBLE_ROWS {
-            self.scroll_top = row + 1 - VISIBLE_ROWS;
-        }
-        // A list that shrank under a window near its end would otherwise leave
-        // the window pointing past it, showing fewer rows than there is room
-        // for with nothing below them.
-        self.scroll_top = self
-            .scroll_top
-            .min(self.hits.len().saturating_sub(VISIBLE_ROWS));
     }
 
     // --- results ----------------------------------------------------------
@@ -1125,7 +1113,7 @@ impl AppState {
                 let mut response = Response::redraw();
                 if std::mem::take(&mut self.enter_pending) {
                     self.enter_watchdog_at = None;
-                    response.merge(self.open_selection(now));
+                    response.merge(self.open_selection(self.viewer, now));
                 }
                 response
             }
@@ -1139,9 +1127,9 @@ impl AppState {
                 self.clear_results();
                 Response::redraw()
             }
-            Err(QueryReject::TooShort { need }) => {
-                self.phase = QueryPhase::TooShort { need };
-                self.empty_reason = Some(EmptyReason::QueryTooShort { need });
+            Err(QueryReject::Empty) => {
+                self.phase = QueryPhase::Idle;
+                self.empty_reason = Some(EmptyReason::NoQuery);
                 Response::redraw()
             }
             Err(QueryReject::ContainsNul) => {
@@ -1352,15 +1340,16 @@ impl AppState {
     }
 
     /// Installs a new result set while keeping the cursor where the user put
-    /// it, and the window where the cursor is.
+    /// it.
     ///
-    /// Split so that `place_selection` below can return early from any of its
-    /// four arms without each one having to remember the window. Forgetting it
-    /// on one arm is a cursor on a screen nobody can see, which is the failure
-    /// the stored offset has to be proof against.
+    /// There used to be a second half to this: the state held the first rank
+    /// on screen, and every arm of `place_selection` below had to remember to
+    /// move it, because forgetting on one arm was a cursor on a screen nobody
+    /// could see. The content band is an `egui::ScrollArea` now and owns its
+    /// own offset, so the only thing that has to survive a result set landing
+    /// under the cursor is the cursor.
     fn apply_hits(&mut self, hits: Vec<Hit>) {
         self.place_selection(hits);
-        self.scroll_into_view();
     }
 
     fn place_selection(&mut self, hits: Vec<Hit>) {
@@ -1581,6 +1570,26 @@ impl AppState {
         }
     }
 
+    /// The window gained or lost the keyboard.
+    ///
+    /// Losing it is how a launcher knows to get out of the way: the user has
+    /// clicked on something else, and the panel is over it. Gaining it is
+    /// nothing - the hotkey thread reports a summon as
+    /// [`HotkeyMsg::Summoned`], which is a stronger fact and arrives first.
+    ///
+    /// Guarded three ways, and each guard is a bug that would otherwise be
+    /// reachable. `overlay_up` because a window nobody summoned has nothing
+    /// to dismiss. The setting because it is a setting. And the shell drops
+    /// the event entirely while an auxiliary window of ours has the keyboard,
+    /// because the settings window *is* somewhere else to click and closing
+    /// the panel would take it with them.
+    fn on_focus(&mut self, has_focus: bool) -> Response {
+        if has_focus || !self.overlay_up || !self.settings.hide_on_blur {
+            return Response::none();
+        }
+        self.request_dismiss()
+    }
+
     fn on_open(&mut self, msg: OpenMsg, now: Instant) -> Response {
         match msg {
             // A document that opened whole says nothing. One that lost pages
@@ -1614,27 +1623,19 @@ impl AppState {
                     text.push_str(" \u{b7} skipped ");
                     text.push_str(&skipped.join(", "));
                 }
-                self.set_toast(text, Severity::Warn, now);
-                Response::redraw()
+                self.set_toast(text.clone(), Severity::Warn, now);
+                self.also_say("Opened, but not whole", text)
             }
             OpenMsg::Failed { path, detail } => {
                 let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
-                self.set_toast_detailed(
-                    format!("Could not open {name}"),
-                    detail,
-                    Severity::Error,
-                    now,
-                );
-                Response::redraw()
+                let title = format!("Could not open {name}");
+                self.set_toast_detailed(title.clone(), detail.clone(), Severity::Error, now);
+                self.also_say(&title, detail)
             }
             OpenMsg::ViewerSaved { viewer } => {
                 // `display`, not `name`: the latter is the config spelling
                 // and is round-tripped through the file.
                 self.set_toast(format!("Viewer: {}", viewer.display()), Severity::Info, now);
-                Response::redraw()
-            }
-            OpenMsg::SettingSaved { label } => {
-                self.set_toast(format!("Saved \u{b7} {label}"), Severity::Info, now);
                 Response::redraw()
             }
             // The change is already in force for this session - the state
@@ -1664,6 +1665,28 @@ impl AppState {
         }
     }
 
+    /// Raises a message box as well as the toast, when there is no panel to
+    /// read the toast on.
+    ///
+    /// The whole of what makes `hide_after_opening` safe to ship switched on.
+    /// An open is answered on another thread, long after the panel has gone,
+    /// and a document quietly missing page seven is the worst outcome this
+    /// program can produce - nothing on screen would ever reveal it. So the
+    /// panel is allowed to leave and the message follows the user instead.
+    ///
+    /// The toast is still raised, and that is not redundant: the panel may
+    /// have been summoned again by the time this lands, in which case there
+    /// *is* somewhere to read it and `overlay_up` says so.
+    fn also_say(&self, title: impl Into<String>, detail: impl Into<String>) -> Response {
+        if self.overlay_up {
+            return Response::redraw();
+        }
+        Response::redraw().with(Cmd::Announce {
+            title: title.into(),
+            detail: detail.into(),
+        })
+    }
+
     // --- timers -----------------------------------------------------------
 
     fn on_tick(&mut self, now: Instant) -> Response {
@@ -1685,11 +1708,6 @@ impl AppState {
             }
         }
 
-        // The pane beside the list, which is paced separately from everything
-        // above: it describes whatever is under the pointer rather than
-        // answering the query, so it falls due on its own schedule.
-        response.merge(self.preview_due(now));
-
         // A matcher that never answered an Enter. Hands the keystroke back
         // rather than leaving it dead.
         if let Some(due) = self.enter_watchdog_at
@@ -1705,7 +1723,14 @@ impl AppState {
             && now >= due
         {
             self.live_due_at = None;
-            if self.query.is_searchable() {
+            // The server's floor as well as the panel's. `is_searchable` is
+            // about to be true for a single character, and dispatching that
+            // would be a network round trip to every live share on the first
+            // keystroke - which the footer would then report as "asking" and
+            // "not searched" in the same second.
+            if self.query.is_searchable()
+                && self.query.term().chars().count() >= MIN_SERVER_QUERY_LEN
+            {
                 let outstanding = self.settings.routes.live().count();
                 self.live = Some(LiveProgress::asking(now, outstanding));
                 response.merge(Response::redraw().with(Cmd::Live {
@@ -1719,7 +1744,7 @@ impl AppState {
             && now >= due
         {
             self.verify_due_at = None;
-            if self.input.chars().count() >= MIN_QUERY_LEN {
+            if self.input.chars().count() >= MIN_TERM_LEN {
                 self.phase = QueryPhase::Verifying { since: now };
                 self.verify_watchdog_at = Some(now + VERIFY_WATCHDOG);
                 response.merge(Response::redraw().with(Cmd::Verify {

@@ -69,6 +69,19 @@ fn main() -> io::Result<()> {
 
     match args.mode {
         Mode::Gui => run_gui(args, settings),
+        // Its own window and its own process. See `gui::settings::app`.
+        Mode::Settings { page, .. } => {
+            let choice = args.config.clone();
+            if let Err(err) = files::gui::settings::app::run(settings, choice, page) {
+                tell(&format!(
+                    "The settings window could not be opened.
+
+{err}"
+                ));
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         // Everything that answers in text. This program has no console to
         // answer with, so rather than printing into the void it says where the
         // answer lives - once, in the one way a windowed program can.
@@ -90,26 +103,7 @@ fn main() -> io::Result<()> {
 /// program, and both of which would otherwise be a process that starts and
 /// vanishes with nothing on screen at all.
 fn tell(message: &str) {
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW};
-
-        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-        let text = wide(message);
-        let title = wide("files");
-        // SAFETY: two live NUL-terminated wide strings and a null owner window,
-        // which is the documented way to show a message box with no parent.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
-    }
-    #[cfg(not(windows))]
-    eprintln!("files: {message}");
+    files::notify::tell("files", message);
 }
 
 fn source_for(args: &cli::Args, settings: &Settings) -> Arc<dyn DirSource> {
@@ -136,7 +130,7 @@ fn run_gui(args: cli::Args, settings: Settings) -> io::Result<()> {
 
     prewarm(&settings, Arc::clone(&source));
 
-    if let Err(err) = files::gui::run(settings, source) {
+    if let Err(err) = files::gui::run(settings, args.config.clone(), source) {
         tell(&format!("The search panel could not be opened.\n\n{err}"));
         std::process::exit(1);
     }

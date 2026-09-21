@@ -8,9 +8,16 @@
 //! told, and the window system is asked to do something about it.
 //!
 //! Every assertion here is a *budget*. Jitter is not a behaviour that is
-//! either present or absent, it is a count - of body changes, of cross-fades,
-//! of window resizes - and a count is something a test can hold a number
-//! against and a future change can be measured by. `--nocapture` prints them.
+//! either present or absent, it is a count - of body changes, of searches
+//! dispatched - and a count is something a test can hold a number against and
+//! a future change can be measured by. `--nocapture` prints them.
+//!
+//! Window resizes used to be the headline count here, because the panel was
+//! the window and every row-count change was a `SetWindowPos` and a swapchain
+//! reconfigure. The window is a fixed six hundred by four hundred now and
+//! resizes exactly never, so that budget is gone along with the thing it was
+//! counting - and the body-change and search budgets, which were always the
+//! ones about what somebody actually sees, are what is left.
 //!
 //! Nothing here opens a window, touches a GPU or reads a clock. The clock is a
 //! variable and the search worker is a dozen lines in the rig.
@@ -22,9 +29,8 @@ use files::app::event::{AppEvent, Cmd, HotkeyMsg, SearchMsg};
 use files::app::key::{Key, KeyEvent, Mods};
 use files::app::state::AppState;
 use files::config::Settings;
-use files::gui::anim::{Content, Phase, Visual};
+use files::gui::anim::{Content, Phase};
 use files::gui::frame::Frame;
-use files::gui::theme::Layout;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 
@@ -41,8 +47,14 @@ const CODE: &str = "11-D-0704";
 /// Long enough for a typed code to be searched for and answered.
 ///
 /// `SEARCH_DEBOUNCE` plus slack. Typing at `KEYSTROKE_GAP` never reaches it -
-/// 120ms between characters against a 300ms pause - which is the whole point:
+/// 120ms between characters against a 180ms pause - which is the whole point:
 /// a burst dispatches nothing until it stops.
+///
+/// The margin is 60ms where it used to be 180ms, which is exactly what the
+/// shorter debounce bought and exactly what it costs. The budget below still
+/// holds at a hundred and twenty; it would not at two hundred, and a reader
+/// who pauses that long between the groups of a code will now spend one
+/// extra sweep over an index this process owns.
 const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 
 // --- the rig ---------------------------------------------------------------
@@ -50,44 +62,37 @@ const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 /// Everything the frames did, in the order they did it.
 #[derive(Default)]
 struct Log {
-    visuals: Vec<Visual>,
-    resizes: Vec<(f32, f32)>,
+    bodies: Vec<Content>,
+    /// Which row was selected on each of those frames.
+    ///
+    /// Read off the state rather than off the frame. It used to come back
+    /// with the body, because the animator slid the highlight and therefore
+    /// had to be told where it was going; a row paints its own now, so the
+    /// only place the answer lives is the state machine.
+    selected: Vec<Option<usize>>,
 }
 
 impl Log {
     /// How many times the body changed to something else.
     fn body_changes(&self) -> usize {
-        self.visuals
-            .windows(2)
-            .filter(|w| w[0].content != w[1].content)
-            .count()
+        self.bodies.windows(2).filter(|w| w[0] != w[1]).count()
     }
 
     /// Every body the panel showed, in order, with repeats collapsed.
     fn bodies(&self) -> Vec<Content> {
         let mut out: Vec<Content> = Vec::new();
-        for v in &self.visuals {
-            if out.last() != Some(&v.content) {
-                out.push(v.content);
+        for body in &self.bodies {
+            if out.last() != Some(body) {
+                out.push(*body);
             }
         }
         out
     }
 
-    /// The tallest and shortest the panel got.
-    fn height_span(&self) -> (f32, f32) {
-        self.visuals.iter().fold((f32::MAX, 0.0f32), |(lo, hi), v| {
-            (lo.min(v.height), hi.max(v.height))
-        })
-    }
-
     fn report(&self, what: &str) {
-        let (lo, hi) = self.height_span();
         println!(
-            "{what}: {} frames, {} resizes, {} body changes, \
-             height {lo:.0}-{hi:.0}pt, bodies {:?}",
-            self.visuals.len(),
-            self.resizes.len(),
+            "{what}: {} frames, {} body changes, bodies {:?}",
+            self.bodies.len(),
             self.body_changes(),
             self.bodies(),
         );
@@ -132,13 +137,7 @@ impl Rig {
     /// A panel already up and settled, so a test about typing is not also a
     /// test about the entrance.
     fn summoned(corpus: Vec<&'static str>) -> Self {
-        Self::summoned_in(corpus, Layout::List)
-    }
-
-    /// The same, on a monitor wide enough for the pane beside the list.
-    fn summoned_in(corpus: Vec<&'static str>, layout: Layout) -> Self {
         let mut rig = Self::new(corpus);
-        rig.frame.set_layout(layout);
         rig.feed(AppEvent::Hotkey(HotkeyMsg::Summoned));
         rig.frame.motion.summon();
         rig.run(Duration::from_millis(400));
@@ -221,11 +220,10 @@ impl Rig {
         }
 
         self.state.note_frame(self.now, SystemTime::now());
-        let visual = self.frame.advance(&self.state, FRAME.as_secs_f32());
-        if let Some(size) = self.frame.resize(&visual) {
-            self.log.resizes.push((size.x, size.y));
-        }
-        self.log.visuals.push(visual);
+        self.log
+            .bodies
+            .push(self.frame.advance(&self.state, FRAME.as_secs_f32()));
+        self.log.selected.push(self.state.selected_row());
     }
 
     fn run(&mut self, span: Duration) {
@@ -248,8 +246,8 @@ impl Rig {
         }
     }
 
-    fn last(&self) -> Visual {
-        *self.log.visuals.last().expect("no frames were drawn")
+    fn last(&self) -> Content {
+        *self.log.bodies.last().expect("no frames were drawn")
     }
 }
 
@@ -289,7 +287,7 @@ fn typing_a_code_never_empties_the_result_list() {
     rig.log.report("typing_a_code");
 
     assert!(
-        !rig.log.visuals.iter().any(|v| v.content == Content::Empty),
+        !rig.log.bodies.contains(&Content::Empty),
         "the panel showed its empty state while a result set was in flight; bodies were {:?}",
         rig.log.bodies()
     );
@@ -313,11 +311,16 @@ fn typing_a_code_does_not_change_the_body_at_all() {
     );
 }
 
-/// The panel is the window, so a height transition is a `SetWindowPos` and a
-/// swapchain reconfigure per frame. That is a fair price for a transition
-/// somebody asked for and an unreasonable one for six keystrokes.
+/// Six keystrokes are one sweep over the index.
+///
+/// This used to count window resizes as well, and that was the headline: the
+/// panel was the window, so every row-count change was a `SetWindowPos` and a
+/// swapchain reconfigure. It went thirty-one, then six, then one. The window
+/// is fixed now and the count is zero by construction, so what is left to
+/// budget is the thing that still costs something - a sweep over an index on
+/// a file server.
 #[test]
-fn typing_a_code_costs_the_window_system_almost_nothing() {
+fn typing_a_code_costs_the_index_exactly_one_sweep() {
     let mut rig = Rig::summoned(corpus());
     rig.type_code("11-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
@@ -325,22 +328,12 @@ fn typing_a_code_costs_the_window_system_almost_nothing() {
 
     rig.type_code("D-0704", KEYSTROKE_GAP);
     rig.run(Duration::from_millis(600));
-    rig.log.report("window_cost");
+    rig.log.report("index_cost");
 
-    // One. Not one per keystroke, and not one per frame of a transition.
-    //
-    // The six characters are typed 120ms apart, inside a 300ms pause, so the
-    // matcher is asked once - after the typing stops - and the row count
-    // changes once. It was thirty-one when the window eased to every new
-    // height, then six when only genuine row-count changes moved it, and it is
-    // one now that only a finished code produces a row-count change at all.
-    assert!(
-        rig.log.resizes.len() <= 1,
-        "six keystrokes cost {} window resizes: {:?}",
-        rig.log.resizes.len(),
-        rig.log.resizes
-    );
-    assert_eq!(rig.searches, 1, "and one sweep over the index, not six");
+    // The six characters are typed 120ms apart, inside the debounce, so the
+    // matcher is asked once - after the typing stops.
+    assert_eq!(rig.searches, 1, "six keystrokes, one sweep over the index");
+    assert_eq!(rig.log.body_changes(), 0, "and the body never changed");
 }
 
 /// A selection that blinks out and back is the same defect as a list that
@@ -354,34 +347,10 @@ fn the_selection_stays_on_screen_while_typing() {
     rig.type_code("D-07", KEYSTROKE_GAP);
 
     assert!(
-        rig.log.visuals.iter().all(|v| v.selection_y.is_some()),
-        "the selection highlight left the screen while typing"
+        rig.log.selected.iter().all(Option::is_some),
+        "the selection left the list while typing: {:?}",
+        rig.log.selected
     );
-}
-
-/// The panel is allowed to settle at a new height. It is not allowed to travel
-/// somewhere and come back, which is what a transient empty body made it do.
-#[test]
-fn the_panel_height_never_doubles_back() {
-    let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
-    rig.run(SEARCH_SETTLE);
-    rig.forget();
-
-    // Each character can only narrow this result set, so the panel can only
-    // ever get shorter. A frame taller than the one before it is the panel
-    // going back for something.
-    rig.type_code("D-0704", KEYSTROKE_GAP);
-    rig.run(Duration::from_millis(400));
-
-    for (i, w) in rig.log.visuals.windows(2).enumerate() {
-        assert!(
-            w[1].height <= w[0].height + 0.01,
-            "frame {i} grew from {:.1}pt to {:.1}pt on a query that can only narrow",
-            w[0].height,
-            w[1].height
-        );
-    }
 }
 
 /// A result set that arrives saying exactly what the last one said should move
@@ -394,6 +363,7 @@ fn an_unchanged_result_set_moves_nothing() {
     rig.run(Duration::from_millis(600));
 
     let before = rig.last();
+    let selected = rig.state.selected_row();
     rig.forget();
 
     // The same answer, again, as a republished snapshot would deliver it.
@@ -401,16 +371,12 @@ fn an_unchanged_result_set_moves_nothing() {
     rig.inflight.push((epoch, Query::contains(CODE)));
     rig.run(Duration::from_millis(400));
 
-    assert_eq!(rig.log.resizes.len(), 0, "it resized the window");
     assert_eq!(rig.log.body_changes(), 0, "it changed the body");
-    for v in &rig.log.visuals {
-        assert!(
-            (v.height - before.height).abs() < 0.01,
-            "the panel moved from {:.1}pt to {:.1}pt",
-            before.height,
-            v.height
-        );
-        assert_eq!(v.selection_y, before.selection_y, "the selection moved");
+    for body in &rig.log.bodies {
+        assert_eq!(*body, before, "the body changed under it");
+    }
+    for row in &rig.log.selected {
+        assert_eq!(*row, selected, "the selection moved");
     }
 }
 
@@ -424,7 +390,7 @@ fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
 
     assert!(rig.state.hits.is_empty());
     assert_eq!(
-        rig.last().content,
+        rig.last(),
         Content::Empty,
         "bodies were {:?}",
         rig.log.bodies()
@@ -464,130 +430,5 @@ fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
         rig.searches, 0,
         "the matcher was asked while the user was still typing"
     );
-    assert_eq!(
-        rig.log.resizes.len(),
-        0,
-        "the window moved while the user was still typing: {:?}",
-        rig.log.resizes
-    );
     assert_eq!(rig.log.body_changes(), 0, "and the body changed under them");
-}
-
-// --- the pane beside the list ----------------------------------------------
-
-/// The panel's width is fixed for the life of a summon.
-///
-/// This is what makes the pane affordable at all. `measure` decides the height
-/// from the row count, and if it decided the *width* from whether anything was
-/// under the pointer, then sweeping a mouse down a list would be one
-/// `SetWindowPos` and one swapchain reconfigure per row - the cost the height
-/// transition was deleted for, arriving sideways.
-#[test]
-fn the_pane_never_changes_the_width_of_the_panel() {
-    let mut rig = Rig::summoned_in(corpus(), Layout::Pane);
-
-    // A list that grows, shrinks, empties and comes back: every row-count
-    // change the panel has.
-    rig.type_code("11-D-0704", KEYSTROKE_GAP);
-    rig.run(SEARCH_SETTLE);
-    rig.type_code("-", KEYSTROKE_GAP);
-    rig.run(SEARCH_SETTLE);
-    rig.state.update(
-        AppEvent::Key(KeyEvent::new(Key::Backspace, Mods::NONE)),
-        rig.now,
-    );
-    rig.run(SEARCH_SETTLE);
-
-    let widths: Vec<f32> = rig.log.resizes.iter().map(|(w, _)| *w).collect();
-    assert!(!widths.is_empty(), "the window was never sized at all");
-    assert!(
-        widths.iter().all(|w| *w == widths[0]),
-        "the panel changed width during a session: {widths:?}"
-    );
-    assert_eq!(
-        widths[0],
-        files::gui::theme::PANEL_WIDE_W,
-        "the pane layout did not get the wide panel"
-    );
-}
-
-/// And in the narrow layout the popup contributes no height, because it is
-/// drawn over the rows rather than under them.
-#[test]
-fn the_popup_does_not_change_how_tall_the_panel_is() {
-    use files::app::event::PreviewMsg;
-    use files::app::state::pointer::Intent;
-    use files::preview::{Facts, Preview};
-
-    let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-D-0704", KEYSTROKE_GAP);
-    rig.run(SEARCH_SETTLE);
-
-    let before = files::gui::overlay::measure(&rig.state, Layout::List).height;
-
-    let hit = rig
-        .state
-        .hits
-        .first()
-        .cloned()
-        .expect("the fixture found nothing");
-    rig.feed(AppEvent::Intent(Intent::Hover(Some(0))));
-    rig.feed(AppEvent::Preview(PreviewMsg::Ready(Arc::new(Preview {
-        path: hit.path.clone(),
-        name: hit.name.clone(),
-        facts: Facts {
-            bytes: Some(1),
-            ..Facts::default()
-        },
-        pages: None,
-    }))));
-    assert!(rig.state.preview.is_some(), "the fixture stored no preview");
-
-    let after = files::gui::overlay::measure(&rig.state, Layout::List).height;
-    assert_eq!(before, after, "the popup made the panel taller");
-}
-
-/// The pane needs room even when the search found one file, so the results
-/// body has a floor - and that floor must not move with what is in the pane.
-#[test]
-fn the_pane_gets_the_same_room_whatever_is_in_it() {
-    use files::app::event::PreviewMsg;
-    use files::app::state::pointer::Intent;
-    use files::preview::{Facts, Pages, Preview};
-
-    let mut rig = Rig::summoned_in(corpus(), Layout::Pane);
-    rig.type_code("11-D-0704", KEYSTROKE_GAP);
-    rig.run(SEARCH_SETTLE);
-
-    let empty = files::gui::overlay::measure(&rig.state, Layout::Pane).height;
-
-    let hit = rig
-        .state
-        .hits
-        .first()
-        .cloned()
-        .expect("the fixture found nothing");
-    rig.feed(AppEvent::Intent(Intent::Hover(Some(0))));
-    rig.feed(AppEvent::Preview(PreviewMsg::Ready(Arc::new(Preview {
-        path: hit.path.clone(),
-        name: hit.name.clone(),
-        facts: Facts {
-            bytes: Some(1),
-            modified: Some(SystemTime::UNIX_EPOCH),
-            share: Some("jobs".into()),
-            folder: Some(r"R:\11d".into()),
-            missing: false,
-        },
-        pages: Some(Pages {
-            total: 13,
-            named: vec![Arc::from("a.pdf"), Arc::from("b.pdf")],
-            capped: false,
-        }),
-    }))));
-
-    let full = files::gui::overlay::measure(&rig.state, Layout::Pane).height;
-    assert_eq!(
-        empty, full,
-        "the panel resized itself around the pane's contents"
-    );
 }

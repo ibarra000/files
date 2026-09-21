@@ -92,10 +92,23 @@ pub enum SettingKey {
     PdfViewer,
     HideExtensions,
     HideSystemFiles,
+    // Appended rather than slotted in beside their neighbours. `bit()` is
+    // the variant's position and `Settings::cli_pinned` is a bitmask of it -
+    // built from the command line at startup and never written down, so a
+    // renumbering costs nothing at rest and everything mid-run. Appending is
+    // how that stays true without anybody having to check.
+    PdfReadOnly,
+    UpdateFrom,
+    IndexLog,
+    Backdrop,
+    ResultLayout,
+    HideOnBlur,
+    HideAfterOpening,
+    HideOnEscape,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 18] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -106,6 +119,14 @@ impl SettingKey {
         Self::PdfViewer,
         Self::HideExtensions,
         Self::HideSystemFiles,
+        Self::PdfReadOnly,
+        Self::UpdateFrom,
+        Self::IndexLog,
+        Self::Backdrop,
+        Self::ResultLayout,
+        Self::HideOnBlur,
+        Self::HideAfterOpening,
+        Self::HideOnEscape,
     ];
 
     /// The spelling in the file.
@@ -121,6 +142,14 @@ impl SettingKey {
             Self::PdfViewer => "pdf_viewer",
             Self::HideExtensions => "hide_extensions",
             Self::HideSystemFiles => "hide_system_files",
+            Self::PdfReadOnly => "pdf_read_only",
+            Self::UpdateFrom => "update_from",
+            Self::IndexLog => "index_log",
+            Self::Backdrop => "backdrop",
+            Self::ResultLayout => "result_layout",
+            Self::HideOnBlur => "hide_on_blur",
+            Self::HideAfterOpening => "hide_after_opening",
+            Self::HideOnEscape => "hide_on_escape",
         }
     }
 
@@ -141,6 +170,14 @@ impl SettingKey {
             Self::PdfViewer => "FILES_PDF_VIEWER",
             Self::HideExtensions => "FILES_HIDE_EXTENSIONS",
             Self::HideSystemFiles => "FILES_HIDE_SYSTEM_FILES",
+            Self::PdfReadOnly => "FILES_PDF_READ_ONLY",
+            Self::UpdateFrom => "FILES_UPDATE_FROM",
+            Self::IndexLog => "FILES_INDEX_LOG",
+            Self::Backdrop => "FILES_BACKDROP",
+            Self::ResultLayout => "FILES_RESULT_LAYOUT",
+            Self::HideOnBlur => "FILES_HIDE_ON_BLUR",
+            Self::HideAfterOpening => "FILES_HIDE_AFTER_OPENING",
+            Self::HideOnEscape => "FILES_HIDE_ON_ESCAPE",
         }
     }
 
@@ -156,8 +193,14 @@ impl SettingKey {
     }
 
     /// Its position, for the bitmask in [`crate::config::Settings`].
-    pub const fn bit(self) -> u16 {
-        1 << (self as u16)
+    ///
+    /// Thirty-two bits for eighteen keys, and the width is checked rather
+    /// than assumed: it was a `u16` and the eighteenth key overflowed the
+    /// shift, which in debug is a panic in every test that builds a
+    /// `Settings` and in release is a pin silently landing on the wrong key.
+    pub const fn bit(self) -> u32 {
+        const _: () = assert!(SettingKey::ALL.len() <= u32::BITS as usize);
+        1 << (self as u32)
     }
 
     /// Whether a change is picked up without restarting.
@@ -174,7 +217,15 @@ impl SettingKey {
     pub const fn applies_at_once(self) -> bool {
         matches!(
             self,
-            Self::Theme | Self::Viewer | Self::History | Self::StaleNotices | Self::DevMode
+            Self::Theme
+                | Self::ResultLayout
+                | Self::Viewer
+                | Self::History
+                | Self::StaleNotices
+                | Self::DevMode
+                | Self::HideOnBlur
+                | Self::HideAfterOpening
+                | Self::HideOnEscape
         )
     }
 }
@@ -324,10 +375,16 @@ impl Edit {
             // An emptied box means "no viewer of my own", which is the
             // default - so the key goes away rather than being written as a
             // path to nowhere.
-            (SettingKey::PdfViewer, Typed::Text(text)) if text.trim().is_empty() => {
+            (
+                SettingKey::PdfViewer | SettingKey::UpdateFrom | SettingKey::IndexLog,
+                Typed::Text(text),
+            ) if text.trim().is_empty() => {
                 return Self::Unset { key };
             }
-            (SettingKey::PdfViewer, Typed::Text(text)) => Scalar::Path(text.trim().to_string()),
+            (
+                SettingKey::PdfViewer | SettingKey::UpdateFrom | SettingKey::IndexLog,
+                Typed::Text(text),
+            ) => Scalar::Path(text.trim().to_string()),
 
             // An empty list is not an absent one. `hide_extensions = []` is
             // the documented way to hide nothing, and unsetting it here would
@@ -338,6 +395,33 @@ impl Edit {
                     .filter(|e| !e.is_empty())
                     .collect(),
             ),
+
+            // Written in the spelling `current` reads back, which is the
+            // canonical one, because that comparison is the only proof a
+            // save did anything.
+            //
+            // Without this, typing `ctrl+alt+j` into the box saved perfectly
+            // well and then reported a failure: the file said `ctrl+alt+j`,
+            // the loader parsed it, `describe` handed back `Ctrl+Alt+J`, and
+            // the read-back check compared that against the lower-case text
+            // that went in and concluded the value had not stuck. A chord is
+            // the one setting whose written form and parsed form differ, and
+            // this is the same knowledge the hide list and the paths above
+            // already carry.
+            //
+            // A chord that does not parse is passed through untouched, so
+            // the refusal comes from the loader with its line and column
+            // rather than from a silent fallback here.
+            (SettingKey::Hotkey, Typed::Text(text)) => {
+                let text = text.trim();
+                let tidy = crate::hotkey::spec::parse(text)
+                    .map(|spec| match spec.bound() {
+                        Some(hk) => crate::hotkey::spec::describe(hk),
+                        None => "off".into(),
+                    })
+                    .unwrap_or_else(|_| text.to_string());
+                Scalar::Str(tidy)
+            }
 
             (_, Typed::Text(text)) => Scalar::Str(text.trim().to_string()),
         };
@@ -528,6 +612,20 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
         SettingKey::HideExtensions => s.hide_extensions.clone().map(Scalar::List),
         SettingKey::HideSystemFiles => s.hide_system_files.map(Scalar::Bool),
+        SettingKey::HideOnBlur => s.hide_on_blur.map(Scalar::Bool),
+        SettingKey::HideAfterOpening => s.hide_after_opening.map(Scalar::Bool),
+        SettingKey::HideOnEscape => s.hide_on_escape.map(Scalar::Bool),
+        SettingKey::PdfReadOnly => s.pdf_read_only.map(Scalar::Bool),
+        SettingKey::UpdateFrom => s
+            .update_from
+            .as_ref()
+            .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
+        SettingKey::IndexLog => s
+            .index_log
+            .as_ref()
+            .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
+        SettingKey::Backdrop => s.backdrop.clone().map(Scalar::Str),
+        SettingKey::ResultLayout => s.result_layout.clone().map(Scalar::Str),
     }
 }
 
@@ -653,6 +751,164 @@ mod tests {
     use super::*;
     use crate::config::file::DEFAULT_CONFIG_TOML;
 
+    /// A value that is not the shipped default, for every key.
+    ///
+    /// Exhaustive on purpose. A key added without one is a compile error
+    /// rather than a key the round trip below silently skips.
+    fn different(key: SettingKey) -> Typed {
+        match key {
+            SettingKey::Viewer => Typed::Text("avwin".into()),
+            SettingKey::Theme => Typed::Text("dark".into()),
+            SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
+            SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
+            // A UNC path, because that is what this one actually gets, and
+            // it is the value that proves `Scalar::Path` writes a literal
+            // string rather than a basic one.
+            SettingKey::UpdateFrom => Typed::Text(r"\\fileserver\software\files".into()),
+            SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
+            SettingKey::Backdrop => Typed::Text("mica".into()),
+            SettingKey::ResultLayout => Typed::Text("detailed".into()),
+            SettingKey::HideExtensions => Typed::Text("zzz".into()),
+            SettingKey::DevMode => Typed::Flag(true),
+            SettingKey::History
+            | SettingKey::StaleNotices
+            | SettingKey::LiveUpdates
+            | SettingKey::PdfReadOnly
+            | SettingKey::HideOnBlur
+            | SettingKey::HideAfterOpening
+            | SettingKey::HideOnEscape
+            | SettingKey::HideSystemFiles => Typed::Flag(false),
+        }
+    }
+
+    /// Every key goes in, comes back out of the parser, and is recognised.
+    ///
+    /// This is the test that catches a missing arm in [`current`], which is
+    /// the one failure in this module with no symptom: the value is written
+    /// correctly, the file reloads, and the read-back check says the save
+    /// did not stick - so a perfectly good save reports itself as a failure,
+    /// or a broken one reports success. Written over `SettingKey::ALL`, so
+    /// the fifteenth key is covered the moment it exists.
+    #[test]
+    fn every_writable_key_goes_into_the_file_and_is_recognised_coming_back() {
+        for key in SettingKey::ALL {
+            let edit = Edit::from_typed(key, different(key));
+            let Edit::Set { value, .. } = &edit else {
+                panic!("{} produced an unset from a real value", key.name());
+            };
+            let expected = value.clone();
+
+            let after = apply(DEFAULT_CONFIG_TOML, std::slice::from_ref(&edit))
+                .unwrap_or_else(|e| panic!("{} would not write: {:?}", key.name(), e));
+            let parsed = reload(&after);
+
+            assert_eq!(
+                current(key, &parsed.settings),
+                Some(expected),
+                "{} was written and not read back",
+                key.name()
+            );
+        }
+    }
+
+    /// A chord typed in any spelling saves, and says it saved.
+    ///
+    /// It did not. The box wrote the text exactly as typed, the loader
+    /// parsed it, and the read-back check compared the canonical spelling
+    /// `describe` produces against the lower-case one that went in - so
+    /// `ctrl+alt+j` was written correctly to the file and then reported as a
+    /// failure. A chord is the one setting whose written and parsed forms
+    /// differ, and every other such setting was already shaped in
+    /// `from_typed`.
+    #[test]
+    fn a_chord_typed_in_lower_case_still_reports_that_it_saved() {
+        let edit = Edit::from_typed(SettingKey::Hotkey, Typed::Text("ctrl+alt+j".into()));
+        let after = apply(DEFAULT_CONFIG_TOML, std::slice::from_ref(&edit)).unwrap();
+
+        let Edit::Set { value, .. } = &edit else {
+            panic!("a chord is not an unset");
+        };
+        assert_eq!(
+            current(SettingKey::Hotkey, &reload(&after).settings).as_ref(),
+            Some(value),
+            "a chord that saved reported that it had not"
+        );
+    }
+
+    /// And "off" is a chord too, in the sense that matters here.
+    #[test]
+    fn claiming_no_key_at_all_also_reports_that_it_saved() {
+        let edit = Edit::from_typed(SettingKey::Hotkey, Typed::Text("OFF".into()));
+        let after = apply(DEFAULT_CONFIG_TOML, std::slice::from_ref(&edit)).unwrap();
+
+        let Edit::Set { value, .. } = &edit else {
+            panic!("off is not an unset");
+        };
+        assert_eq!(
+            current(SettingKey::Hotkey, &reload(&after).settings).as_ref(),
+            Some(value)
+        );
+    }
+
+    /// Emptying a path box removes the key rather than writing a path to
+    /// nowhere, and the reader agrees it is gone.
+    #[test]
+    fn emptying_a_path_box_takes_the_key_out_of_the_file() {
+        for key in [
+            SettingKey::PdfViewer,
+            SettingKey::UpdateFrom,
+            SettingKey::IndexLog,
+        ] {
+            let edit = Edit::from_typed(key, Typed::Text("   ".into()));
+            assert_eq!(
+                edit,
+                Edit::Unset { key },
+                "{} wrote an empty path",
+                key.name()
+            );
+
+            // Set it first, so there is something to remove.
+            let set = apply(
+                DEFAULT_CONFIG_TOML,
+                &[Edit::from_typed(key, different(key))],
+            )
+            .unwrap();
+            let cleared = apply(&set, &[edit]).unwrap();
+            assert_eq!(
+                current(key, &reload(&cleared).settings),
+                None,
+                "{} survived being emptied",
+                key.name()
+            );
+        }
+    }
+
+    /// A UNC folder has to come back out spelled the way it went in.
+    ///
+    /// The one way this breaks is writing it as a basic string, where every
+    /// backslash is an escape and the path quietly loses half of itself.
+    /// `Scalar::Path` writes a literal, and this is what says so.
+    #[test]
+    fn a_unc_folder_survives_the_round_trip_intact() {
+        const UNC: &str = r"\\fileserver\software\files";
+        let after = apply(
+            DEFAULT_CONFIG_TOML,
+            &[Edit::from_typed(
+                SettingKey::UpdateFrom,
+                Typed::Text(UNC.into()),
+            )],
+        )
+        .unwrap();
+        assert!(
+            after.contains(&format!("'{UNC}'")),
+            "the folder was not written as a literal string"
+        );
+        assert_eq!(
+            reload(&after).settings.update_from,
+            Some(PathBuf::from(UNC))
+        );
+    }
+
     fn reload(text: &str) -> super::super::file::ParsedConfig {
         super::super::file::parse(
             text,
@@ -679,7 +935,16 @@ mod tests {
         let once = with_viewer(DEFAULT_CONFIG_TOML, ViewerKind::Avwin).unwrap();
         let twice = with_viewer(&once, ViewerKind::Pdf).unwrap();
 
-        assert_eq!(twice.matches("viewer = ").count(), 1);
+        // Whole lines that are actually the key, rather than every
+        // occurrence of the text. A substring count also matched the `#
+        // pdf_viewer = ...` the shipped file documents the override with,
+        // which is a comment about a different setting and not a duplicate
+        // of this one.
+        let written = twice
+            .lines()
+            .filter(|l| l.trim_start().starts_with("viewer ="))
+            .count();
+        assert_eq!(written, 1, "the viewer was written twice");
         assert_eq!(reload(&twice).settings.viewer.as_deref(), Some("pdf"));
     }
 
@@ -1071,7 +1336,7 @@ settings = {{ persist = true }}
     }
 
     /// The writer must never produce a file the loader refuses - here, an
-    /// alias whose code is too short to search for.
+    /// alias whose code has nothing in it to search for.
     #[test]
     fn an_alias_the_loader_would_refuse_is_refused_by_the_writer_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -1079,7 +1344,7 @@ settings = {{ persist = true }}
         std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
-        let err = save(&path, &[Edit::Aliases(vec![alias("pw", "ab")])]).unwrap_err();
+        let err = save(&path, &[Edit::Aliases(vec![alias("pw", "ext:pdf")])]).unwrap_err();
 
         assert!(matches!(err, WriteError::WouldNotReload(_)), "{err:?}");
         assert_eq!(

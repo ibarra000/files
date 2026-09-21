@@ -164,7 +164,7 @@ impl Ctx<'_> {
 
 /// A boolean, or an error against the line that is not one.
 ///
-/// `and_then(Item::as_bool)` on its own turns `auto_hide = "true"` into
+/// `and_then(Item::as_bool)` on its own turns `hide_on_blur = "true"` into
 /// `None`, which is indistinguishable here from the key being absent - so the
 /// setting silently keeps its default, and the only symptom is a program that
 /// does not do what the file plainly says. The quoting mistake is the likely
@@ -201,16 +201,21 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "max_concurrent_scans",
     "stale_notices",
     "dev_mode",
-    "auto_hide",
+    "hide_on_blur",
+    "hide_after_opening",
+    "hide_on_escape",
     "pdf_read_only",
     "live_updates",
     "cache_dir",
+    "index_log",
     "history",
     "hotkey",
     "viewer",
     "pdf_viewer",
     "update_from",
     "theme",
+    "backdrop",
+    "result_layout",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -227,16 +232,21 @@ pub struct FileSettings {
     pub max_concurrent_scans: Option<usize>,
     pub stale_notices: Option<bool>,
     pub dev_mode: Option<bool>,
-    pub auto_hide: Option<bool>,
+    pub hide_on_blur: Option<bool>,
+    pub hide_after_opening: Option<bool>,
+    pub hide_on_escape: Option<bool>,
     pub pdf_read_only: Option<bool>,
     pub live_updates: Option<bool>,
     pub cache_dir: Option<PathBuf>,
+    pub index_log: Option<PathBuf>,
     pub history: Option<bool>,
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
     pub update_from: Option<PathBuf>,
     pub theme: Option<String>,
+    pub backdrop: Option<String>,
+    pub result_layout: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -667,7 +677,9 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             "persist" => out.persist = bool_at(ctx, key, item),
             "stale_notices" => out.stale_notices = bool_at(ctx, key, item),
             "dev_mode" => out.dev_mode = bool_at(ctx, key, item),
-            "auto_hide" => out.auto_hide = bool_at(ctx, key, item),
+            "hide_on_blur" => out.hide_on_blur = bool_at(ctx, key, item),
+            "hide_after_opening" => out.hide_after_opening = bool_at(ctx, key, item),
+            "hide_on_escape" => out.hide_on_escape = bool_at(ctx, key, item),
             "pdf_read_only" => out.pdf_read_only = bool_at(ctx, key, item),
             "max_concurrent_scans" => {
                 // Rejected rather than clamped. A zero here means "index
@@ -687,6 +699,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
             }
             "live_updates" => out.live_updates = bool_at(ctx, key, item),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
+            "index_log" => out.index_log = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = bool_at(ctx, key, item),
             "hotkey" => {
                 // Rejected here rather than ignored later, for the same reason
@@ -796,6 +809,47 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     );
                 }
                 out.theme = raw.map(str::to_string);
+            }
+            "backdrop" => {
+                let raw = value.and_then(Value::as_str);
+                // Refused rather than ignored, exactly as the theme above is
+                // and for the same reason: a misspelling that fell back
+                // silently would leave somebody looking at a panel that is
+                // still the material they were trying to change.
+                if let Some(v) = raw
+                    && crate::gui::window::Material::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!(
+                            "unknown backdrop {v:?} (expected \"acrylic\", \"mica\", \"tabbed\" or \"none\")"
+                        ),
+                        None,
+                    );
+                }
+                out.backdrop = raw.map(str::to_string);
+            }
+            "result_layout" => {
+                let raw = value.and_then(Value::as_str);
+                // Refused rather than ignored, for the third time and the
+                // same reason: a misspelling that fell back silently leaves
+                // somebody looking at the layout they were trying to change.
+                if let Some(v) = raw
+                    && crate::config::ResultLayout::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!(
+                            "unknown result_layout {v:?} (expected \"compact\" or \"detailed\")"
+                        ),
+                        None,
+                    );
+                }
+                out.result_layout = raw.map(str::to_string);
             }
             _ => {}
         }
@@ -1343,6 +1397,26 @@ hide_system_files = false
         }
     }
 
+    /// Every setting the loader accepts is one the shipped file mentions.
+    ///
+    /// The file somebody is handed on their first run is also the only
+    /// documentation most people will read, and a key that is accepted and
+    /// undocumented is a key nobody finds. `index_log` was exactly that for
+    /// the whole of its life: parseable from the environment, invisible
+    /// everywhere else.
+    ///
+    /// Mentioned rather than uncommented - almost all of these ship
+    /// commented out, which is the point.
+    #[test]
+    fn every_setting_the_loader_accepts_is_one_the_shipped_file_mentions() {
+        for key in SETTINGS_KEYS {
+            assert!(
+                DEFAULT_CONFIG_TOML.contains(key),
+                "{key} is accepted and undocumented"
+            );
+        }
+    }
+
     /// Guards the one silent way to break this file: writing a pattern as a
     /// basic string, where `\d` becomes `d` and still parses.
     #[test]
@@ -1568,10 +1642,10 @@ hide_system_files = false
     #[test]
     fn a_setting_that_should_be_a_boolean_is_rejected_when_it_is_not_one() {
         for value in ["\"true\"", "\"yes\"", "1", "0"] {
-            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            let text = format!("{MINIMAL}\n[settings]\nhide_on_blur = {value}\n");
             let errs = parse_err(&text);
             assert!(
-                messages(&errs).contains("auto_hide must be true or false"),
+                messages(&errs).contains("hide_on_blur must be true or false"),
                 "{value} was accepted or ignored: {:?}",
                 messages(&errs)
             );
@@ -1579,7 +1653,7 @@ hide_system_files = false
 
         // And the two spellings that are booleans still load.
         for value in ["true", "false"] {
-            let text = format!("{MINIMAL}\n[settings]\nauto_hide = {value}\n");
+            let text = format!("{MINIMAL}\n[settings]\nhide_on_blur = {value}\n");
             parse(&text, p(), ConfigSource::BuiltIn).expect(value);
         }
     }
@@ -2038,16 +2112,26 @@ case    = "lower"
         assert_eq!(parsed.aliases.resolve("pw").unwrap().note, None);
     }
 
-    /// The rule the whole feature rests on. A code the matcher would turn down
-    /// is an alias that resolves and then finds nothing, which is worse than
-    /// one that never loaded.
+    /// The rule the whole feature rests on. A code the matcher would turn
+    /// down is an alias that resolves and then finds nothing, which is worse
+    /// than one that never loaded.
+    ///
+    /// `ab` used to be such a code and is not any more - the search floor is
+    /// one character. A filter with no term still is: `ext:pdf` is a line
+    /// with syntax on it and nothing to look for.
     #[test]
-    fn an_alias_whose_code_is_too_short_to_search_for_is_refused() {
-        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+    fn an_alias_whose_code_cannot_be_searched_for_is_refused() {
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ext:pdf\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
         assert!(text.contains("could not be searched for"), "{text}");
-        assert!(text.contains("at least 3 characters"), "{text}");
+    }
+
+    /// And a two-character code is now perfectly good, which it was not.
+    #[test]
+    fn an_alias_may_stand_for_a_two_character_code() {
+        let parsed = parse_ok(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        assert_eq!(parsed.aliases.resolve("pw").unwrap().code.as_ref(), "ab");
     }
 
     #[test]
@@ -2109,7 +2193,7 @@ case    = "lower"
     /// they were already confused by.
     #[test]
     fn an_alias_error_calls_it_an_alias_and_not_a_mapping() {
-        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ext:pdf\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
         assert!(!text.contains("mapping \"pw\""), "{text}");

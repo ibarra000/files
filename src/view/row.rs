@@ -86,6 +86,27 @@ pub fn folder(path: &str) -> &str {
     &path[..cut + usize::from(root)]
 }
 
+/// Which configured drive a hit came off, for the badge at the end of a row.
+///
+/// The one thing worth keeping out of the deleted `crate::preview`, where it
+/// was half of `locate` - the other half was [`folder`], which was already
+/// here and which `locate` called.
+///
+/// Derived at paint time rather than stored on a [`Hit`]. There are a handful
+/// of drives and at most [`crate::config::MAX_RESULTS`] rows, nearly all of
+/// them culled before they are laid out, so this is a few string comparisons
+/// per visible row against a list that is almost always two entries long.
+///
+/// `enabled` rather than `all`: a hit cannot have come off a drive that was
+/// not searched, and naming a switched-off drive on a row would be a label
+/// that contradicts the settings page.
+pub fn drive_of<'a>(routes: &'a crate::paths::Routes, path: &str) -> Option<&'a str> {
+    routes
+        .enabled()
+        .find(|m| crate::util::winpath::contains(&m.path, std::path::Path::new(path)))
+        .map(|m| m.name.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

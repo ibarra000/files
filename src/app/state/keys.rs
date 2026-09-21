@@ -12,13 +12,14 @@
 //! there is no clean shutdown to flush anything at, which is why history is
 //! written as it is recorded rather than on the way out.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::app::key::{Key, KeyEvent};
 
-use super::{AppState, Severity, Urgency};
+use super::{AppState, Severity, Urgency, Wrap};
 use crate::app::event::{Cmd, Redraw, RefreshTarget, Response};
-use crate::config::VISIBLE_ROWS;
+use crate::config::ViewerKind;
 
 impl AppState {
     pub(super) fn on_key(&mut self, key: KeyEvent, now: Instant) -> Response {
@@ -60,6 +61,39 @@ impl AppState {
                     leaving = self.close_shares();
                 }
             }
+        }
+
+        // The actions menu is the same kind of exception the drive picker
+        // and the recall list are, and comes first because it is drawn on top
+        // of both: a menu that could not be shut without taking the panel
+        // with it would be a trap, and a menu left open under a panel that
+        // has gone away would be open again on the next summon.
+        if self.actions_open {
+            match key.key {
+                Key::Esc => {
+                    self.actions_open = false;
+                    return Response::redraw();
+                }
+                // The key that opened it is the key that shuts it, and its
+                // own arm below does that - closing here as well would shut
+                // the menu and let the toggle put it straight back.
+                Key::Char('k') if ctrl => {}
+                // Any other key runs whatever it is bound to and puts the
+                // menu away with it, which is what a menu of shortcuts is
+                // for. Modifiers arrive on their own as Windows repeats
+                // them; closing on one would shut the menu under the hand
+                // reaching for its second key.
+                Key::Char(_) | Key::Enter | Key::F(_) => self.actions_open = false,
+                _ => {}
+            }
+        }
+
+        // The alias list peels the same way, and before the recall check
+        // because the two are mutually exclusive and this one is cheaper to
+        // ask about.
+        if self.alias_cursor().is_some() && key.key == Key::Esc {
+            self.alias_cursor = None;
+            return Response::redraw();
         }
 
         // Escape peels the recall list the way it peels the drive picker, and
@@ -111,6 +145,41 @@ impl AppState {
             // see `gui::input::chord`, and the test in `tests/bindings.rs`
             // that now drives the real input layer rather than this function.
             Key::Char(',') if ctrl && !alt => Response::redraw().with(Cmd::ToggleSettings),
+
+            // The three that act on the selected row without changing the
+            // mode. `OpenRequest` has carried its viewer since it was
+            // written, so each of these is one open with a different one -
+            // not a mode change, an open, and a mode change back.
+            Key::Char('d') if ctrl && !alt => self.act_on_selection(ViewerKind::Pdf, now),
+            Key::Char('e') if ctrl && !alt => self.act_on_selection(ViewerKind::Avwin, now),
+            Key::Char('o') if ctrl && !alt => self.reveal_selection(now),
+            // Everything there is to do with the row, in one press. Ueli's
+            // key, and the reason the footer can be two buttons rather than
+            // a row of chips: nothing has to be advertised along the bottom
+            // if there is one key that lists it.
+            Key::Char('k') if ctrl && !alt => {
+                self.actions_open = !self.actions_open;
+                Response::redraw()
+            }
+            // The arrows, for a hand that does not want to leave the home
+            // row. Ueli's, and routed through the same two handlers rather
+            // than to `move_selection` directly - so they step into the
+            // recent codes and out of the drive picker exactly as Up and
+            // Down do, and there is one rule rather than two.
+            Key::Char('p') if ctrl && !alt => self.on_up(now),
+            Key::Char('n') if ctrl && !alt => self.on_down(),
+            // Select the whole code, which is what focusing a search box
+            // does everywhere else on this machine.
+            //
+            // The same act as `Ctrl+A`, and said plainly rather than
+            // apologised for: the field here never loses the keyboard, so
+            // the "focus" half of what this key means elsewhere has already
+            // happened, and what is left is the selection. It is bound
+            // because `Ctrl+L` is the key a hand reaches for.
+            Key::Char('l') if ctrl && !alt => {
+                self.input.select_all();
+                Response::redraw()
+            }
 
             // AltGr arrives as Ctrl+Alt on Windows, and on a German, Polish
             // or French layout that is how `@`, `{`, `[` and the accented
@@ -168,11 +237,12 @@ impl AppState {
                 Response::redraw()
             }
 
-            // A listful at a time. The list is at most a screenful, so this
-            // reaches either end in one press - which is what makes it worth
-            // having at all now that there is no grid to page through.
-            Key::PageDown => self.move_selection(VISIBLE_ROWS as isize),
-            Key::PageUp => self.move_selection(-(VISIBLE_ROWS as isize)),
+            // A screenful at a time, which is a different number of rows in
+            // each layout - a detailed row is half as tall again, so four of
+            // them fill the band where six compact ones do. Paging by the
+            // wrong one would scroll past rows nobody saw.
+            Key::PageDown => self.move_selection(self.rows_per_page(), Wrap::Stop),
+            Key::PageUp => self.move_selection(-self.rows_per_page(), Wrap::Stop),
 
             Key::Up => self.on_up(now),
             Key::Down => self.on_down(),
@@ -342,7 +412,7 @@ impl AppState {
     /// watching a stale list for another third of a second reads as the
     /// update having done nothing.
     fn after_refresh(&mut self, mut r: Response) -> Response {
-        if self.input.chars().count() >= crate::config::MIN_QUERY_LEN {
+        if self.input.chars().count() >= crate::config::MIN_TERM_LEN {
             // Dispatched here and now, so any debounce armed by the keystroke
             // that opened the picker would only be a second, redundant run.
             self.search_due_at = None;
@@ -376,13 +446,15 @@ impl AppState {
         if self.can_begin_recall() {
             return self.begin_recall();
         }
-        match self.selected_row() {
-            // The top holds rather than wrapping. There is nowhere to hand
-            // focus back to any more - the field never lost it - so a further
-            // Up is simply a key that has run out of list.
-            Some(0) | None => Response::none(),
-            Some(_) => self.move_selection(-1),
+        if self.alias_cursor().is_some() {
+            return self.move_alias(-1);
         }
+        // Off the top and round to the bottom, which is Ueli's arrow and is
+        // the quickest way to the end of three hundred results. It used to
+        // hold here, and the argument was about the *page* snapping back to
+        // the first screen rather than about the cursor - see
+        // `AppState::move_selection`.
+        self.move_selection(-1, Wrap::Around)
     }
 
     fn on_down(&mut self) -> Response {
@@ -396,13 +468,59 @@ impl AppState {
         if self.history.is_browsing() {
             return self.history_newer();
         }
+        // Down is the way into the shortcuts, as Up is the way into the
+        // codes used before. One sentence, and it is the whole of what a
+        // user has to remember: up is what you looked for, down is what you
+        // set up.
+        //
+        // Down is free to mean this because on an empty box it meant
+        // nothing: it deliberately never *started* recall - see the note
+        // above - and with no code typed there is no result list to walk.
+        if self.showing_aliases() {
+            return self.move_alias(1);
+        }
         if self.hits.is_empty() {
             return Response::none();
         }
         // Moves rather than landing on row 0: the top row is already
         // highlighted before the first Down is pressed, so stepping onto it
         // would look like the key did nothing.
-        self.move_selection(1)
+        self.move_selection(1, Wrap::Around)
+    }
+
+    /// Steps through the shortcuts, entering the list from the near end.
+    ///
+    /// Wraps, like the result list and for the same reason: these are a
+    /// handful of entries and the far end of a handful is one press away
+    /// whichever direction you go.
+    fn move_alias(&mut self, delta: isize) -> Response {
+        let len = self.settings.aliases.len() as isize;
+        if len == 0 {
+            return Response::none();
+        }
+        let next = match self.alias_cursor {
+            None if delta > 0 => 0,
+            None => len - 1,
+            Some(at) => (at as isize + delta).rem_euclid(len),
+        };
+        self.alias_cursor = Some(next as usize);
+        Response::redraw()
+    }
+
+    /// Puts the shortcut the cursor is on into the box, and searches for it.
+    ///
+    /// The *name*, not the code it stands for. Typing `pw` is what a user
+    /// does, so that is what this leaves behind - the expansion fires the
+    /// ordinary way, the field says what it stood for at its right-hand end,
+    /// and the box holds something they could have typed themselves.
+    pub(super) fn accept_alias(&mut self, rank: usize, now: Instant) -> Response {
+        let Some(alias) = self.settings.aliases.all().get(rank) else {
+            return Response::none();
+        };
+        let name = alias.name.to_string();
+        self.alias_cursor = None;
+        self.input.set_text(name);
+        self.on_input_changed(now, Urgency::Complete)
     }
 
     /// Drops a hover highlight the pointer has moved on from.
@@ -514,17 +632,85 @@ impl AppState {
 
     // --- clipboard and escape ---------------------------------------------
 
+    /// Copies the run selected in the search box, or the path of the row the
+    /// cursor is on.
+    ///
+    /// Two meanings for one key, and the collision is deliberate rather than
+    /// tolerated. `Ctrl+C` has always copied the text selection here; Ueli
+    /// binds it to copying the file path. Neither should lose, and neither
+    /// has to: a text selection is something the user made a moment ago and
+    /// is unambiguously what they meant, and with no selection the only other
+    /// thing on screen worth copying is the path.
+    ///
+    /// It also retires a toast whose whole content was "nothing happened".
+    /// `view::actions` advertises the key on "Copy the path" only while there
+    /// is no text selection, so nothing on screen ever names a key that would
+    /// do the other thing.
     fn copy_selection(&mut self, now: Instant) -> Response {
-        match self.input.selected_text() {
-            Some(text) => Response::none().with(Cmd::Copy(text.to_string())),
-            None => {
-                // Nothing selected is worth saying: this is the key that used
-                // to quit, so silence here reads as "the program ignored me"
-                // to anyone expecting the old behaviour.
-                self.set_toast("Nothing selected to copy".into(), Severity::Info, now);
-                Response::redraw()
-            }
+        if let Some(text) = self.input.selected_text() {
+            return Response::none().with(Cmd::Copy(text.to_string()));
         }
+        if let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) {
+            return Response::none().with(Cmd::Copy(hit.path.to_string()));
+        }
+        // Nothing selected and nothing found is worth saying: this is the key
+        // that used to quit, so silence reads as "the program ignored me" to
+        // anyone expecting the old behaviour.
+        self.set_toast("Nothing to copy".into(), Severity::Info, now);
+        Response::redraw()
+    }
+
+    /// Copies the path of the row the cursor is on, whatever is selected in
+    /// the search box.
+    ///
+    /// What the actions menu runs, and deliberately not a synthetic
+    /// `Ctrl+C`: that key copies a text selection when there is one, so the
+    /// menu row would do something other than what it says.
+    pub(super) fn copy_path(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to copy".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        Response::none().with(Cmd::Copy(hit.path.to_string()))
+    }
+
+    /// Copies the name of the row the cursor is on.
+    ///
+    /// No key of its own, and that is not an oversight: it is in the actions
+    /// menu because somebody pasting a filename into an email wants it once a
+    /// week, and a chord for that is a chord nobody remembers.
+    pub(super) fn copy_name(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to copy".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        Response::none().with(Cmd::Copy(hit.name.to_string()))
+    }
+
+    /// Opens the row the cursor is on with a viewer other than the current
+    /// one, for this press only.
+    pub(super) fn act_on_selection(&mut self, viewer: ViewerKind, now: Instant) -> Response {
+        if self.hits.is_empty() {
+            return Response::none();
+        }
+        self.open_with(viewer, now)
+    }
+
+    /// Explorer, with the row the cursor is on already picked out.
+    pub(super) fn reveal_selection(&mut self, now: Instant) -> Response {
+        let Some(hit) = self.selected_hit().or_else(|| self.hits.first()) else {
+            self.set_toast("Nothing to show".into(), Severity::Info, now);
+            return Response::redraw();
+        };
+        let mut response = Response::none().with(Cmd::Reveal(Arc::clone(&hit.path)));
+        // On the same terms an open is, and for the same reason: an Explorer
+        // window has just been asked for, and the panel is over where it is
+        // about to appear. `view::actions::Action::hides` says so too, and
+        // `every_hiding_action_hides` is what keeps the two in step.
+        if self.overlay_up && self.settings.hide_after_opening {
+            response.merge(self.request_dismiss());
+        }
+        response
     }
 
     /// Copy, then remove what was copied.
@@ -571,13 +757,17 @@ impl AppState {
         // `on_key` intercepts Escape while it is up and closes it instead. It
         // advertises that in its own key hints, and a list that cannot be shut
         // without taking the panel with it would be a trap.
-        if self.overlay_up {
+        //
+        // A setting since this became one of Ueli's three. Switched off,
+        // Escape falls through to the clearing path below and the shortcut
+        // is the way out - which is what somebody who lives in the panel may
+        // want, and is not what to default to.
+        if self.overlay_up && self.settings.hide_on_escape {
             return self.request_dismiss();
         }
 
-        // Not summoned - which now only happens in a test, since the panel is
-        // only ever on screen because something summoned it. Escape still
-        // undoes rather than quitting.
+        // Not summoned, or summoned with Escape switched off. Escape undoes
+        // rather than quitting.
         if self.input.has_selection() {
             self.input.clear_selection();
             return Response::redraw();

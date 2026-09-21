@@ -34,8 +34,91 @@ use crate::util::rng::Rng;
 
 /// Probes are given a hard ceiling; a blocked SMB call cannot be cancelled,
 /// so the thread is abandoned and the report says so.
+///
+/// This used to be a promise the module note made and nothing kept: the
+/// constant existed, `probe_timeout` returned it, and not one call site
+/// applied it to anything. A blocked share meant `--doctor` never finished,
+/// which on the command line is a hang somebody can Ctrl-C and in the
+/// settings window was a thread that never answered.
+///
+/// It is applied by [`within`], which is the only construction that can:
+/// `std::fs::metadata` against a dead SMB share sits in the kernel, there is
+/// no cancellation token to set, and the thread cannot be killed. So the
+/// work is done on a scratch thread and, past the deadline, the scratch
+/// thread is abandoned and the report says what it was waiting for.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-const RTT_SAMPLES: usize = 32;
+
+/// How many uncached round trips the RTT estimate is averaged over.
+///
+/// Sixteen, halved from thirty-two. These are deliberately uncached - a
+/// fresh random name each time, because the redirector caches a negative
+/// lookup for about five seconds - so every one of them is a real round
+/// trip, and on a link with a 40 ms RTT thirty-two of them is more than a
+/// second per drive. Sixteen samples put the median within a millisecond or
+/// two of where thirty-two put it, which is well inside the precision
+/// anybody reads this number to.
+const RTT_SAMPLES: usize = 16;
+
+/// Runs `work` on a thread of its own and gives up on it after `budget`.
+///
+/// The awkward shape is the point. A blocked SMB call cannot be interrupted:
+/// there is no timeout parameter, no cancellation token, and no safe way to
+/// kill a thread. The only thing a caller can do is stop waiting - so this
+/// leaks a thread, deliberately, in the case where the alternative is
+/// leaking the whole program.
+///
+/// The leak is bounded in practice: the call underneath is a filesystem
+/// operation that the redirector will eventually fail, usually inside a
+/// minute, after which the thread finds nobody listening and exits.
+fn within<T: Send + 'static>(
+    budget: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    if std::thread::Builder::new()
+        .name("files-doctor-probe".to_owned())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .is_err()
+    {
+        return None;
+    }
+    rx.recv_timeout(budget).ok()
+}
+
+/// How much of the budget is left, and whether there is any.
+///
+/// Threaded through the report rather than applied per call, because twenty
+/// seconds each for six sections is two minutes and the promise is twenty
+/// seconds for the reading.
+#[derive(Debug, Clone, Copy)]
+pub struct Deadline(Instant);
+
+impl Deadline {
+    /// Starting now.
+    pub fn new() -> Self {
+        Self(Instant::now() + PROBE_TIMEOUT)
+    }
+
+    /// What is left, or `None` past the end.
+    pub fn left(self) -> Option<Duration> {
+        self.0
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+    }
+
+    /// Whether there is still time to ask something slow.
+    pub fn open(self) -> bool {
+        self.left().is_some()
+    }
+}
+
+impl Default for Deadline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Prints the resolved routing table, and where a code would be searched.
 ///
@@ -161,26 +244,36 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
 }
 
 /// Fast, read-only capability report.
-pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Write) {
+pub fn doctor(
+    settings: &Settings,
+    source: Arc<dyn DirSource>,
+    hotkey: Option<Result<(), String>>,
+    out: &mut dyn Write,
+) {
     let _ = writeln!(out, "files {} - diagnostics", env!("CARGO_PKG_VERSION"));
     let _ = writeln!(out, "source: {}", source.name());
     let _ = writeln!(out);
+
+    // One budget for the whole reading, not one per section: twenty seconds
+    // each across six sections would be two minutes, and the twenty seconds
+    // the module note promises is for the report.
+    let deadline = Deadline::new();
 
     // Every configured mapping, rather than the two derived convenience
     // fields. Those name the first flat and first job-folder mapping, so a
     // configuration without one of those kinds - which the shipped one now is
     // - would have silently reported an empty path as a root.
     for mapping in settings.routes.enabled() {
-        report_root(&mapping.path, source.as_ref(), out);
+        report_root(&mapping.path, &source, deadline, out);
         let _ = writeln!(out);
     }
 
     report_index_cache(settings, out);
     let _ = writeln!(out);
     report_live_shares(settings, out);
-    report_live_updates(settings, out);
+    report_live_updates(settings, deadline, out);
     let _ = writeln!(out);
-    report_quick_search(settings, out);
+    report_quick_search(settings, hotkey, out);
     let _ = writeln!(out);
     report_viewer(settings, out);
     report_directories(settings, out);
@@ -196,9 +289,13 @@ pub fn doctor(settings: &Settings, source: Arc<dyn DirSource>, out: &mut dyn Wri
 /// terminal" is a hidden pseudo-console that accepts every instruction and
 /// acts on none of them. Neither has a symptom inside the running program, so
 /// this is the one place the questions get asked out loud.
-fn report_quick_search(settings: &Settings, out: &mut dyn Write) {
+fn report_quick_search(
+    settings: &Settings,
+    hotkey: Option<Result<(), String>>,
+    out: &mut dyn Write,
+) {
     let _ = writeln!(out, "QUICK SEARCH");
-    let probe = crate::hotkey::probe(settings.hotkey);
+    let probe = crate::hotkey::probe(settings.hotkey, hotkey);
 
     if !probe.supported {
         let _ = writeln!(out, "  unavailable on this platform");
@@ -264,7 +361,7 @@ fn report_quick_search(settings: &Settings, out: &mut dyn Write) {
 /// server that refuses it outright looks identical from inside the running
 /// application to one that is simply quiet. This is the one place the question
 /// gets asked directly.
-fn report_live_updates(settings: &Settings, out: &mut dyn Write) {
+fn report_live_updates(settings: &Settings, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(out, "LIVE UPDATES");
     let trees: Vec<_> = settings
         .routes
@@ -276,13 +373,13 @@ fn report_live_updates(settings: &Settings, out: &mut dyn Write) {
         return;
     }
     for m in trees {
-        report_one_watch(settings, m, out);
+        report_one_watch(settings, m, deadline, out);
     }
 }
 
 /// Asked of each tree separately, because each is a different server and one
 /// of them refusing says nothing about the others.
-fn report_one_watch(settings: &Settings, m: &Mapping, out: &mut dyn Write) {
+fn report_one_watch(settings: &Settings, m: &Mapping, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(
         out,
         "  {} ({})  refresh = {}",
@@ -300,8 +397,28 @@ fn report_one_watch(settings: &Settings, m: &Mapping, out: &mut dyn Write) {
     }
     #[cfg(windows)]
     {
-        match crate::index::win_watch::DirectoryWatcher::open(&m.path) {
-            Ok(_) => {
+        // On a scratch thread: opening a watch handle against a share that
+        // has gone away blocks in the kernel, and this section used to be
+        // where `--doctor` hung.
+        let opened = {
+            let asked = m.path.clone();
+            deadline.left().and_then(|left| {
+                within(left, move || {
+                    crate::index::win_watch::DirectoryWatcher::open(&asked)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                })
+            })
+        };
+        let Some(opened) = opened else {
+            let _ = writeln!(
+                out,
+                "    watch:   GAVE UP - the share did not answer in time"
+            );
+            return;
+        };
+        match opened {
+            Ok(()) => {
                 let _ = writeln!(out, "    watch:   accepted");
                 let _ = writeln!(
                     out,
@@ -339,13 +456,34 @@ fn fallback(m: &Mapping) -> String {
     )
 }
 
-fn report_root(root: &Path, source: &dyn DirSource, out: &mut dyn Write) {
+fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(out, "ROOT  {}", root.display());
+
+    // Once, and read twice: the block below prints it, and the RTT estimate
+    // at the foot asks it whether this is a network share at all. It used to
+    // be called inside the block and again nowhere, and the RTT ran against
+    // local disks because nothing had asked.
+    //
+    // On a scratch thread, because `volume_info` opens a handle to the share
+    // and a dead share is where that blocks. See `within`.
+    #[cfg(windows)]
+    let volume = {
+        let asked = root.to_path_buf();
+        match deadline
+            .left()
+            .and_then(|left| within(left, move || crate::index::volume::volume_info(&asked)))
+        {
+            Some(info) => info,
+            None => {
+                let _ = writeln!(out, "  GAVE UP - the share did not answer in time");
+                return;
+            }
+        }
+    };
 
     #[cfg(windows)]
     {
-        use crate::index::volume;
-        let info = volume::volume_info(root);
+        let info = &volume;
         // Volume-level queries only accept a root, so say which one was
         // interrogated. Otherwise a configured subdirectory looks like it is
         // reporting its own volume identity, and a failure looks like the
@@ -421,9 +559,24 @@ fn report_root(root: &Path, source: &dyn DirSource, out: &mut dyn Write) {
         );
     }
 
-    // Reachability, twice: the first touch pays for session setup.
-    let first = time_it(|| source.probe_stamp(root));
-    let second = time_it(|| source.probe_stamp(root));
+    // Reachability, twice: the first touch pays for session setup. Both on
+    // a scratch thread and under the same budget, because this is the other
+    // call that sits in the kernel against a share that has gone.
+    let probed = {
+        let asked = root.to_path_buf();
+        let source = Arc::clone(source);
+        deadline.left().and_then(move |left| {
+            within(left, move || {
+                let first = time_it(|| source.probe_stamp(&asked));
+                let second = time_it(|| source.probe_stamp(&asked));
+                (first, second)
+            })
+        })
+    };
+    let Some((first, second)) = probed else {
+        let _ = writeln!(out, "  GAVE UP - the share did not answer in time");
+        return;
+    };
     match &first.1 {
         Ok(stamp) => {
             let _ = writeln!(
@@ -444,7 +597,28 @@ fn report_root(root: &Path, source: &dyn DirSource, out: &mut dyn Write) {
         }
     }
 
-    let rtt = measure_rtt(root);
+    // Not on a local disk. An uncached metadata lookup against an SSD is a
+    // page-cache miss measured in microseconds; printing it as an "estimated
+    // round-trip time" invites somebody to compare it with the number beside
+    // a network share, where it means something entirely different.
+    let remote = {
+        #[cfg(windows)]
+        {
+            volume.remote_protocol.is_some() || volume.unc_target.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    };
+    let rtt = {
+        let asked = root.to_path_buf();
+        remote
+            .then(|| deadline.left())
+            .flatten()
+            .and_then(|left| within(left, move || measure_rtt(&asked)))
+            .flatten()
+    };
     if let Some((median, p95)) = rtt {
         let _ = writeln!(
             out,
@@ -685,12 +859,14 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         match &settings.cache_dir {
             Some(dir) => {
                 let pdf_dir = dir.join("pdf");
-                let (count, bytes) = directory_size(&pdf_dir);
+                let (count, bytes, capped) = directory_size(&pdf_dir);
                 format!(
-                    "{} ({} file{}, {})",
+                    "{} ({}{} file{}, {}{})",
                     pdf_dir.display(),
                     count,
+                    if capped { "+" } else { "" },
                     if count == 1 { "" } else { "s" },
+                    if capped { "at least " } else { "" },
                     humanize::bytes(bytes)
                 )
             }
@@ -711,16 +887,36 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out);
 }
 
-/// Counts a directory's files and their total size. Best effort.
-fn directory_size(dir: &Path) -> (usize, u64) {
+/// The most files this will count before giving up and saying so.
+///
+/// A cache directory is expected to hold tens of files. One holding a
+/// hundred thousand is a fault in its own right, and walking all of them -
+/// with a `metadata` call each - to print an exact number nobody needs is
+/// the report making the problem worse. Past this the count is printed with
+/// a `+`.
+const SIZE_CAP: usize = 5_000;
+
+/// Counts a directory's files and their total size, up to [`SIZE_CAP`].
+///
+/// Best effort, and the `bool` is whether it stopped early.
+fn directory_size(dir: &Path) -> (usize, u64, bool) {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return (0, 0);
+        return (0, 0, false);
     };
-    entries
-        .flatten()
-        .filter_map(|e| e.metadata().ok())
-        .filter(|m| m.is_file())
-        .fold((0, 0), |(n, bytes), m| (n + 1, bytes + m.len()))
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        count += 1;
+        bytes += meta.len();
+        if count >= SIZE_CAP {
+            return (count, bytes, true);
+        }
+    }
+    (count, bytes, false)
 }
 
 /// Whether a newer version is published, and whether this machine can see it.
@@ -742,7 +938,7 @@ fn report_updates(settings: &Settings, out: &mut dyn Write) {
     );
 
     match crate::update::look(folder, crate::update::Version::current()) {
-        crate::update::Found::Available { manifest, msi } => {
+        crate::update::Found::Available { manifest, msi, .. } => {
             let _ = writeln!(out, "  available           {}", manifest.version);
             let _ = writeln!(out, "  installer           {}", msi.display());
             let _ = writeln!(
@@ -1481,7 +1677,7 @@ mod tests {
 
     #[test]
     fn doctor_reports_both_roots_without_panicking() {
-        let report = text(|out| doctor(&settings(), source(), out));
+        let report = text(|out| doctor(&settings(), source(), None, out));
         assert!(report.contains("ROOT  R:\\"), "{report}");
         assert!(report.contains("ROOT  V:\\"), "{report}");
         assert!(report.contains("CURRENT CONFIGURATION"));
@@ -1490,7 +1686,7 @@ mod tests {
     #[test]
     fn doctor_reports_an_unreachable_root_rather_than_failing() {
         let src: Arc<dyn DirSource> = Arc::new(FakeDirSource::new());
-        let report = text(|out| doctor(&settings(), Arc::clone(&src), out));
+        let report = text(|out| doctor(&settings(), Arc::clone(&src), None, out));
         assert!(report.contains("reachable           NO"), "{report}");
     }
 
@@ -1500,7 +1696,7 @@ mod tests {
             enum_strategy: EnumStrategy::FindFirstEx,
             ..settings()
         };
-        let report = text(|out| doctor(&s, source(), out));
+        let report = text(|out| doctor(&s, source(), None, out));
         assert!(report.contains("FILES_FS_STRATEGY=findfirstex"), "{report}");
     }
 

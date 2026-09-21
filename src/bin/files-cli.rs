@@ -96,7 +96,11 @@ fn main() -> io::Result<()> {
         Mode::Doctor => {
             let source = source_for(&args, &settings);
             let mut out = io::stdout().lock();
-            doctor::doctor(&settings, source, &mut out);
+            // `None`: this process holds no hotkey, so registering the chord
+            // to see whether it is free is both safe and the honest answer.
+            // The running program passes what its own listener reported -
+            // see `hotkey::Probe`.
+            doctor::doctor(&settings, source, None, &mut out);
             out.flush()
         }
         Mode::Bench {
@@ -120,8 +124,8 @@ fn main() -> io::Result<()> {
         // job. Said plainly rather than by opening one: somebody who typed
         // `files-cli` at a prompt is expecting text back, and a panel appearing
         // over their terminal is a surprise rather than an answer.
-        Mode::Gui => {
-            eprintln!("files-cli prints reports; the search panel is `files`.");
+        Mode::Gui | Mode::Settings { .. } => {
+            eprintln!("files-cli prints reports; the windows are `files`.");
             eprintln!("try `files-cli --doctor`, or run `files` to search.");
             std::process::exit(2);
         }

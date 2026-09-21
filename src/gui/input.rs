@@ -73,6 +73,14 @@ pub fn translate(input: &egui::InputState) -> Vec<AppEvent> {
                 }
             }
             egui::Event::Paste(text) => out.push(AppEvent::Paste(text.clone())),
+            // How the panel learns that somebody clicked on something else,
+            // which is not a thing the hotkey thread can hear about: it owns
+            // the window, not the desktop. Passed through as a fact rather
+            // than acted on here - whether losing focus puts the panel away
+            // is a setting, and settings live one layer up.
+            egui::Event::WindowFocused(has_focus) => {
+                out.push(AppEvent::WindowFocus(*has_focus));
+            }
             // The toolkit ate these keystrokes before they could become keys,
             // so hand back the chord each one stood for. See the module note.
             egui::Event::Copy => {
@@ -167,9 +175,13 @@ fn binding(key: egui::Key) -> Option<Key> {
 /// Reached only when Ctrl is held, which is the whole of the guard against
 /// doubling. `C`, `V` and `X` are absent because the toolkit never lets those
 /// keys through - it turns them into `Event::Copy`, `Event::Paste` and
-/// `Event::Cut` first, and [`translate`] puts the chord back from there. `L`
-/// is absent because nothing binds it: it was listed here and then silently
-/// swallowed one layer up.
+/// `Event::Cut` first, and [`translate`] puts the chord back from there.
+///
+/// Every letter here has to have an arm in `keys.rs` and every arm there has
+/// to have a letter here, or the binding is dead in one direction and silent
+/// about it. `tests/bindings.rs` drives this function rather than the state
+/// machine for exactly that reason - it is how `Ctrl+,` came to ship with a
+/// correct arm, a correct chip and no way for a press to reach either.
 fn chord(key: egui::Key) -> Option<Key> {
     use egui::Key as E;
     Some(match key {
@@ -177,6 +189,16 @@ fn chord(key: egui::Key) -> Option<Key> {
         E::Q => Key::Char('q'),
         E::U => Key::Char('u'),
         E::W => Key::Char('w'),
+        // The actions: open as a document, open in avwin, show in Explorer,
+        // and the menu that lists all of them.
+        E::D => Key::Char('d'),
+        E::E => Key::Char('e'),
+        E::O => Key::Char('o'),
+        E::K => Key::Char('k'),
+        // The arrows and the search box, for a hand on the home row.
+        E::P => Key::Char('p'),
+        E::N => Key::Char('n'),
+        E::L => Key::Char('l'),
         // Ctrl+, opens the settings, which is what this operating system uses
         // the chord for everywhere else. It belongs here rather than in
         // `binding` for the same reason the letters do: a bare comma is text,

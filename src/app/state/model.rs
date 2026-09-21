@@ -14,19 +14,19 @@ use crate::search::live::{LiveCoverage, LiveSkip};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryPhase {
     /// Nothing typed.
+    ///
+    /// There used to be a `TooShort` beside this, for a line under three
+    /// characters. The floor is one now, so "too short" and "nothing typed"
+    /// are the same state, and two names for one state is one of them that
+    /// nothing can ever reach.
     Idle,
-    TooShort {
-        need: usize,
-    },
     /// The line holds search syntax that could not be honoured.
     ///
     /// Its own phase rather than a toast, because it is a property of what is
     /// on the line right now: it has to clear itself the moment the line is
     /// fixed, and a toast would sit there for its five seconds saying
     /// otherwise.
-    BadQuery {
-        detail: String,
-    },
+    BadQuery { detail: String },
     /// Typed, but there is no share to search.
     ///
     /// Was "this does not look like a job code", back when a code had to match
@@ -39,19 +39,12 @@ pub enum QueryPhase {
     /// Showing results from the in-memory index.
     Local,
     /// Local results shown while the server is being consulted.
-    Verifying {
-        since: Instant,
-    },
+    Verifying { since: Instant },
     /// Confirmed against the server, or proven current by an unchanged
     /// directory stamp.
-    Verified {
-        took: Duration,
-        by_stamp: bool,
-    },
+    Verified { took: Duration, by_stamp: bool },
     /// Verification failed; local results remain on screen.
-    VerifyFailed {
-        detail: String,
-    },
+    VerifyFailed { detail: String },
 }
 
 impl QueryPhase {
@@ -96,9 +89,6 @@ pub enum Urgency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmptyReason {
     NoQuery,
-    QueryTooShort {
-        need: usize,
-    },
     /// The line holds search syntax that could not be honoured.
     BadQuery {
         detail: String,

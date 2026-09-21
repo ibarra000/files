@@ -111,7 +111,7 @@ mod imp {
         Ok(None)
     }
 
-    pub fn probe(_spec: HotkeySpec) -> super::Probe {
+    pub fn probe(_spec: HotkeySpec, _known: Option<Result<(), String>>) -> super::Probe {
         super::Probe::unsupported()
     }
 }
@@ -136,9 +136,25 @@ pub fn spawn(
 
 /// What `--doctor` reports about the overlay.
 ///
-/// Assembled without starting the thread: the chord is registered and
-/// immediately released, so asking the question costs nothing and changes
-/// nothing.
+/// Assembled without starting the thread: where nothing already knows the
+/// answer, the chord is registered and immediately released, so asking the
+/// question costs nothing and changes nothing.
+///
+/// # Why the caller can supply the answer
+///
+/// `RegisterHotKey` is *per-thread*. Inside the running program the panel's
+/// hotkey thread already owns the chord, and a second registration of the
+/// same chord from any other thread fails with `ERROR_HOTKEY_ALREADY_
+/// REGISTERED` - including this one. So probing from inside the program told
+/// every user with a perfectly working hotkey that their chord was taken,
+/// and named their own program as the thief.
+///
+/// The fix is not a cleverer probe. It is that the program already knows:
+/// [`spawn`] returns whether the claim was accepted, and where that answer
+/// exists it is the only correct one. `known` is that answer. Where there is
+/// none - `--doctor` on the command line, or a settings window running as
+/// its own process with no panel behind it - the registration is attempted
+/// and the answer is honest, because nothing in that process owns the key.
 #[derive(Debug, Clone, Default)]
 pub struct Probe {
     /// The configured chord, spelled the way a person would write it, or
@@ -159,8 +175,9 @@ impl Probe {
 }
 
 /// Reports on the overlay without starting it.
-pub fn probe(spec: HotkeySpec) -> Probe {
-    imp::probe(spec)
+/// `known` is what [`spawn`] said, where the caller has it. See [`Probe`].
+pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {
+    imp::probe(spec, known)
 }
 
 /// How long the hotkey thread is given to stop.

@@ -69,6 +69,14 @@ pub struct App {
     /// already been thrown away. `logic` feeds and pumps; `ui` asks. Nothing
     /// that survives only between those two can be read from there.
     requested: WindowRequests,
+    /// Whether this process has written the configuration file since the
+    /// shell last asked.
+    ///
+    /// The settings window is reading the same file, so it has to be told.
+    /// Latched on the way past rather than scanned for, exactly as
+    /// `requested` is and for the same reason: by the time `ui` asks, the
+    /// event that carried the news has been applied and dropped.
+    saved: bool,
     /// ...and whether they changed anything on screen.
     redraw: Redraw,
 }
@@ -107,6 +115,7 @@ impl App {
             rx,
             pending: CmdList::new(),
             requested: WindowRequests::default(),
+            saved: false,
             redraw: Redraw::No,
         })
     }
@@ -128,12 +137,25 @@ impl App {
         std::mem::take(&mut self.requested)
     }
 
+    /// Whether this process has written the configuration file since the
+    /// last call. See the field.
+    pub fn take_saved(&mut self) -> bool {
+        std::mem::take(&mut self.saved)
+    }
+
     /// Applies one event, holding on to what it asked for.
     ///
     /// Public so a driver can feed events of its own - a keystroke a window
     /// received directly, rather than one a worker posted - and have them
     /// coalesce into the same turn as everything else.
     pub fn feed(&mut self, event: AppEvent, now: Instant) {
+        // Before the update, because `update` consumes the event. One
+        // variant rather than two: F2 is the only thing left in this
+        // process that writes the configuration file, because the settings
+        // window writes its own.
+        if matches!(&event, AppEvent::Open(event::OpenMsg::ViewerSaved { .. })) {
+            self.saved = true;
+        }
         let response = self.state.update(event, now);
         self.redraw = self.redraw.or(response.redraw);
         // Latched on the way past, because `pending` does not survive the
@@ -199,6 +221,7 @@ impl App {
             rx,
             pending: CmdList::new(),
             requested: WindowRequests::default(),
+            saved: false,
             redraw: Redraw::No,
         }
     }

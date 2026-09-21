@@ -99,6 +99,14 @@ features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
+    # The named pipe the settings window talks to the panel over. Message
+    # mode, so the codec in `src/ipc/wire.rs` is one line per message rather
+    # than a length prefix and a state machine. See `src/ipc`.
+    "Win32_System_Pipes",
+    # `ProcessIdToSessionId`, so that pipe's name is per-session: a
+    # `\.\pipe\` name is machine-global, and on a terminal server two
+    # people signed in at once would otherwise share one.
+    "Win32_System_RemoteDesktop",
     "Win32_NetworkManagement_WNet",
     "Win32_Security",
     # BCrypt, for the SHA-256 of a staged installer. The operating system
