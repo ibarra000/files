@@ -55,6 +55,7 @@
 
 use eframe::egui;
 
+use crate::app::event::AppEvent;
 use crate::app::state::{AppState, SettingChange};
 use crate::config::Settings;
 use crate::config::write::SettingKey;
@@ -242,6 +243,37 @@ pub struct Clicked {
     pub changed: Vec<SettingChange>,
 }
 
+impl Clicked {
+    /// Everything this frame asks the state machine to do.
+    ///
+    /// A function rather than three lines in `Shell::ui`, and the reason is
+    /// the bug it was written to close. Those three lines were *missing*:
+    /// `show` has always returned `changed`, `aliases` and `mappings`
+    /// alongside `actions`, and the caller read `actions` and dropped the
+    /// rest - so every control in this window was decorative, and
+    /// `AppState::on_setting`, `on_aliases`, `on_drives` and
+    /// `Cmd::SaveSetting` were reachable only from `tests/state_machine.rs`.
+    ///
+    /// It was invisible for exactly as long as it lived in `Shell::ui`,
+    /// which owns three threads, a tray icon and a window, and which no
+    /// test drives. Out here it is a pure function over a plain struct, and
+    /// the test below is the thing that was impossible to write.
+    ///
+    /// `actions` is deliberately not in here. Two of them reach outside the
+    /// program and one restarts it, so they are the shell's to run, not the
+    /// state machine's.
+    pub fn events(&mut self) -> Vec<AppEvent> {
+        let mut out: Vec<AppEvent> = self.changed.drain(..).map(AppEvent::Setting).collect();
+        if let Some(aliases) = self.aliases.take() {
+            out.push(AppEvent::Aliases(aliases));
+        }
+        if let Some(mappings) = self.mappings.take() {
+            out.push(AppEvent::Drives(mappings));
+        }
+        out
+    }
+}
+
 /// The window, returning whether it is still open.
 /// `was_editing` is whether a text box had the keyboard when this frame
 /// began. Taken before the pass, because by the time the pass has run the box
@@ -286,6 +318,75 @@ fn show_one(ctx: &egui::Context, was_editing: bool, mut body: impl FnMut(&mut eg
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::write::Typed;
+
+    fn moved(key: SettingKey, label: &'static str) -> SettingChange {
+        SettingChange {
+            key,
+            typed: Typed::Flag(true),
+            label,
+        }
+    }
+
+    /// Everything the window changed reaches the state machine.
+    ///
+    /// The test that was impossible to write while this mapping lived in
+    /// `Shell::ui`, and the one that would have caught the whole window
+    /// being decorative: `changed`, `aliases` and `mappings` were returned
+    /// every frame and read by nobody.
+    #[test]
+    fn everything_the_window_changed_becomes_an_event() {
+        let mut clicked = Clicked {
+            actions: vec![ActionId::CopyReport],
+            aliases: Some(Vec::new()),
+            mappings: Some(Vec::new()),
+            changed: vec![
+                moved(SettingKey::History, "Recent codes"),
+                moved(SettingKey::DevMode, "Developer mode"),
+            ],
+        };
+
+        let events = clicked.events();
+
+        assert_eq!(events.len(), 4, "something was dropped: {events:?}");
+        // The controls first, in the order they were moved.
+        assert!(matches!(
+            &events[0],
+            AppEvent::Setting(SettingChange {
+                key: SettingKey::History,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &events[1],
+            AppEvent::Setting(SettingChange {
+                key: SettingKey::DevMode,
+                ..
+            })
+        ));
+        assert!(matches!(&events[2], AppEvent::Aliases(_)));
+        assert!(matches!(&events[3], AppEvent::Drives(_)));
+    }
+
+    /// The buttons are the shell's, not the state machine's: two of them
+    /// reach outside the program and one restarts it.
+    #[test]
+    fn a_button_is_not_an_event() {
+        let mut clicked = Clicked {
+            actions: vec![ActionId::InstallUpdate, ActionId::ForgetPlacement],
+            ..Clicked::default()
+        };
+        assert!(clicked.events().is_empty());
+        assert_eq!(clicked.actions.len(), 2, "the buttons were consumed");
+    }
+
+    /// A frame in which nothing was touched asks for nothing. Every frame
+    /// the window is up is one of these, so a stray event here would be a
+    /// write to the configuration file sixty times a second.
+    #[test]
+    fn an_untouched_frame_asks_for_nothing() {
+        assert!(Clicked::default().events().is_empty());
+    }
 
     /// What Ctrl+comma does. A toggle used to only ever open, so a second
     /// press was a no-op and the window could be shut by nothing but Escape

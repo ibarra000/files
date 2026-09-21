@@ -649,6 +649,33 @@ impl eframe::App for Shell {
                 || report(&settings),
             )
         };
+        // Everything the window changed, fed back the way a keystroke is.
+        //
+        // This was missing, and it is the whole of why the settings window
+        // did nothing: `Windows::show` has always returned these three
+        // alongside `actions`, and this function has always read `actions`
+        // and dropped the rest on the floor. Every switch, drop-down, text
+        // box, alias row and drive row in that window was decorative -
+        // `AppState::on_setting`, `on_aliases`, `on_drives`, `apply_live`
+        // and `Cmd::SaveSetting` were all unreachable from the running
+        // program, and constructed by nothing but `tests/state_machine.rs`.
+        // The tests passed because they call the state machine directly.
+        //
+        // Fed rather than sent, like the panel's intents below: these were
+        // produced on the drawing thread, and a send would go round the
+        // channel to arrive one frame later.
+        //
+        // In the order they were moved, and before the buttons. A control
+        // and a button in one frame is rare, but a setting is what the
+        // window is for and a button is what somebody does afterwards.
+        //
+        // The mapping is `Clicked::events`, out in `gui::windows` where a
+        // test can reach it - see the note there.
+        let mut clicked = clicked;
+        for event in clicked.events() {
+            self.app.feed(event, now);
+        }
+
         // One list rather than a bool and a pair of flags, and in the order
         // they were pressed: two of these reach outside the window and one
         // of them restarts the program.
