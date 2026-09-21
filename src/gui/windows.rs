@@ -116,6 +116,9 @@ pub struct Windows {
     draft: lists::AliasDraft,
     /// The drive being typed into the "add" row. Same category as `draft`.
     drive: lists::DriveDraft,
+    /// Whether each configured drive is really there. See
+    /// [`crate::gui::settings::exists`].
+    exists: settings::exists::DirCache,
 }
 
 impl Default for Windows {
@@ -127,6 +130,7 @@ impl Default for Windows {
             editing: None,
             draft: lists::AliasDraft::default(),
             drive: lists::DriveDraft::default(),
+            exists: settings::exists::DirCache::default(),
         }
     }
 }
@@ -216,6 +220,7 @@ impl Windows {
             wake.clone(),
         );
 
+        self.exists.forget_stale(now);
         let view = self.report.view();
         let mut chosen = self.page;
         let mut aliases = None;
@@ -225,6 +230,7 @@ impl Windows {
             let editing = &mut self.editing;
             let draft = &mut self.draft;
             let drive = &mut self.drive;
+            let exists = &mut self.exists;
             let changed = &mut clicked.changed;
             let actions = &mut clicked.actions;
             let page = self.page;
@@ -237,6 +243,8 @@ impl Windows {
                     actions,
                     aliases: None,
                     mappings: None,
+                    exists,
+                    now,
                 };
                 chosen = settings::show(ui, theme, &pages, settings, page, view, &mut form);
                 aliases = form.aliases;

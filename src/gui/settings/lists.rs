@@ -79,8 +79,9 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
         // The one error with no symptom, said out loud on the row it is
         // about. A warning rather than a refusal: this file roams, and a
         // laptop at home has none of these drives mapped.
-        let missing =
-            mapping.enabled && !mapping.path.as_os_str().is_empty() && !mapping.path.is_dir();
+        let missing = mapping.enabled
+            && !mapping.path.as_os_str().is_empty()
+            && !form.exists.is_dir(&mapping.path, form.now, |p| p.is_dir());
         let path = mapping.path.display().to_string();
         let entry = widgets::Entry {
             name: mapping.name.as_ref(),

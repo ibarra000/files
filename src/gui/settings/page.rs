@@ -24,6 +24,15 @@ pub struct Form<'a> {
     pub actions: &'a mut Vec<ActionId>,
     pub aliases: Option<Vec<crate::alias::Alias>>,
     pub mappings: Option<Vec<crate::paths::Mapping>>,
+    /// Whether each configured drive is really there.
+    ///
+    /// Here rather than asked at the point of drawing, because asking is a
+    /// `stat` and on an unreachable network drive a `stat` is a call that
+    /// has to time out - sixty times a second, against the share that is
+    /// already not answering. See [`super::exists`].
+    pub exists: &'a mut super::exists::DirCache,
+    /// One reading of the clock for the whole frame.
+    pub now: std::time::Instant,
 }
 
 /// Draws one page.

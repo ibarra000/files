@@ -87,6 +87,7 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                 let page = w.page;
                 let mut changed = Vec::new();
                 let mut actions = Vec::new();
+                let mut exists = files::gui::settings::exists::DirCache::default();
                 let (chosen, mappings) = {
                     let mut form = Form {
                         editing: &mut w.editing,
@@ -96,6 +97,8 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         actions: &mut actions,
                         aliases: None,
                         mappings: None,
+                        exists: &mut exists,
+                        now: std::time::Instant::now(),
                     };
                     let pages = files::view::settings::pages(&w.state, &w.settings, None);
                     let out = settings::show(
