@@ -411,7 +411,7 @@ mod tests {
         settle_index(&mut state);
         assert_eq!(body_of(&state), Content::Empty);
         assert!(
-            crate::view::empty::view(&empty_reason(&state), state.input.text()).is_empty(),
+            crate::view::empty::view(&empty_reason(&state), state.input.text()).is_none(),
             "the first screen has something on it"
         );
     }

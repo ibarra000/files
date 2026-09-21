@@ -46,9 +46,6 @@ use crate::gui::anim::Content;
 use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::{self, Emphasis, Run};
 
-/// How tall one line of the empty state is.
-const LINE_H: f32 = 24.0;
-
 /// A caption's left inset, which is five points less than a row's so that the
 /// heading reads as a label *over* the list rather than as an item in it.
 const HEADING_PAD_X: f32 = 5.0;
@@ -67,8 +64,9 @@ pub fn show(
     // on both axes. So it is drawn straight onto the band with no scroller to
     // put a bar down the side of something that does not scroll.
     if content == Content::Empty {
-        let blocks = view::empty::view(&super::empty_reason(state), state.input.text());
-        centred_blocks(ui, theme, band, &blocks);
+        if let Some(block) = view::empty::view(&super::empty_reason(state), state.input.text()) {
+            centred_block(ui, theme, band, &block);
+        }
         return Vec::new();
     }
 
@@ -496,36 +494,32 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
 ///
 /// `view::empty` is deliberately silent about this: where a block sits is
 /// layout, and the module note there says so.
-fn centred_blocks(ui: &Ui, theme: &Theme, band: Rect, blocks: &[view::Block]) {
+fn centred_block(ui: &Ui, theme: &Theme, band: Rect, block: &view::Block) {
     let painter = ui.painter().clone();
-    let top = band.center().y - blocks.len() as f32 * LINE_H / 2.0;
-
-    for (line, block) in blocks.iter().enumerate() {
-        let mut job = LayoutJob::default();
-        for run in block {
-            job.append(
-                &run.text,
-                0.0,
-                TextFormat {
-                    font_id: weight_of(theme, run),
-                    color: theme.emphasis(run.emphasis),
-                    ..Default::default()
-                },
-            );
-        }
-        let galley = painter.layout_job(job);
-        let at = pos2(
-            band.center().x - galley.rect.width() / 2.0,
-            top + line as f32 * LINE_H,
+    let mut job = LayoutJob::default();
+    for run in block {
+        job.append(
+            &run.text,
+            0.0,
+            TextFormat {
+                font_id: weight_of(theme, run),
+                color: theme.emphasis(run.emphasis),
+                ..Default::default()
+            },
         );
-        super::announce(
-            ui,
-            Rect::from_min_size(at, vec2(galley.rect.width().max(1.0), LINE_H)),
-            ("block", line),
-            &view::plain(block),
-        );
-        painter.galley(at, galley, theme.text);
     }
+    let galley = painter.layout_job(job);
+    let at = pos2(
+        band.center().x - galley.rect.width() / 2.0,
+        band.center().y - galley.rect.height() / 2.0,
+    );
+    super::announce(
+        ui,
+        Rect::from_min_size(at, galley.rect.size()),
+        ("block", 0usize),
+        &view::plain(block),
+    );
+    painter.galley(at, galley, theme.text);
 }
 
 /// The weight the theme asks for a run, at the one size a block is set in.

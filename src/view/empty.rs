@@ -1,172 +1,128 @@
 //! What the results pane says when it has no results.
 //!
-//! For somebody whose code found nothing this is the only screen that can say
-//! what to do next. It gets the whole pane rather than the top corner of it: a
-//! twelve-row box holding one grey sentence reads as a program that has
-//! broken.
+//! One line, centred, or nothing at all. That is the whole of it.
 //!
-//! It is no longer the *first* screen. An untouched panel shows the search box
-//! and nothing under it, and this is where that happens: `NoQuery` produces
-//! no blocks at all. It used to produce five, which is a page of instructions
-//! in front of somebody who summoned a search box to search.
+//! # It used to be five
 //!
-//! There was a `Content::Quiet` beside it for a while, which dropped the body
-//! *and the footer* on the same condition. It is gone: the footer is a fixed
-//! forty points and holds a gear whatever else is happening, so the empty
-//! block list below is the whole of what makes the first screen empty.
+//! Every variant had the same three-part shape - what happened, a fact about
+//! it, then the thing to do - separated by blank rows, on the argument that
+//! the eye learns where to look once and then knows. Read in a screenshot
+//! that argument is sound. Read on a launcher it is not: this pane appears
+//! for a second or two while somebody is still typing, and a paragraph that
+//! appears and disappears under a search box is not read, it is a flicker
+//! that makes the window feel unfinished.
 //!
-//! Every variant has the same three-part shape - what happened, a fact about
-//! it, then the thing to do - so the eye learns where to look once and then
-//! knows. The diagnostics that make a support call solvable are kept verbatim
-//! and given their own line; the sentence around them is the part rewritten
-//! for somebody who does not use a terminal by choice.
+//! Ueli's equivalent is one centred line: `No results found for "x"`. That
+//! is what this is now, and the detail the other four lines carried has
+//! gone to the place somebody can read it at leisure - the Diagnostics page,
+//! which says which drives were searched, how many files each holds, and
+//! what went wrong with the ones that failed.
 //!
-//! Indentation and centring are deliberately *not* here. Where a block sits is
-//! layout, and the two renderers place it differently - but what it says, and
-//! the blank rows that give it its shape, are the same in both.
+//! What is *kept* is the distinction between a search that found nothing and
+//! a search that could not be made: "nothing matched" and "that drive could
+//! not be reached" are different facts and the second one is not the user's
+//! fault. Where a line names a diagnostic it is kept verbatim, because that
+//! is what makes a support call solvable.
+//!
+//! # `Option`, not a list
+//!
+//! `view` returns at most one block, and the type says so. It used to return
+//! a `Vec<Block>` and the renderer had to centre a stack of them, measure
+//! whether they fitted the pane, and fall back if they did not - three
+//! pieces of machinery for a case that cannot arise once there is only ever
+//! one line. `height`, `fits` and the stacking in `centred_blocks` all go
+//! with it.
+//!
+//! A `Block` is still a `Vec<Run>`, because two of the messages mix tones
+//! within one line - a diagnostic in the warning colour with ordinary words
+//! either side of it.
+//!
+//! Indentation and centring are deliberately *not* here. Where a block sits
+//! is layout, and the two renderers place it differently.
 
 use crate::app::state::EmptyReason;
-use crate::util::humanize;
 use crate::view::status::Tone;
 use crate::view::{Block, Run};
 
-/// Plain body text: the headline of each block.
+/// Plain body text.
 fn say(text: impl Into<String>) -> Block {
     vec![Run::body(text.into())]
 }
 
-/// A secondary line: a fact, or what to do about it.
-fn aside(text: impl Into<String>) -> Block {
-    vec![Run::dim(text.into())]
+/// A secondary clause on the same line.
+fn aside(text: impl Into<String>) -> Run {
+    Run::dim(text.into())
 }
 
 /// A diagnostic, kept verbatim because it is what makes a support call
 /// solvable.
-fn detail(text: impl Into<String>) -> Block {
-    vec![Run::toned(text.into(), Tone::Bad)]
+fn detail(text: impl Into<String>) -> Run {
+    Run::toned(text.into(), Tone::Bad)
 }
 
-fn blank() -> Block {
-    vec![Run::blank()]
-}
-
-/// The message, as blocks.
-pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
-    match reason {
-        // Nothing. The panel has no body at all before anything is typed, and
-        // a reason for an empty list is not something to say when nobody has
-        // asked for a list yet.
-        EmptyReason::NoQuery => Vec::new(),
-
-        EmptyReason::LiveIncomplete {
-            name,
-            searched,
-            skipped,
-        } => vec![
-            say(format!(
-                "Nothing matched \u{201c}{query}\u{201d} on {name} yet."
-            )),
-            blank(),
-            aside(format!(
-                "{} of {} folders were searched \u{b7} there may be more",
-                humanize::count(*searched as usize),
-                humanize::count((*searched + *skipped) as usize)
-            )),
-            blank(),
-            aside("Press F5 to look again, or narrow the code."),
-        ],
-
-        EmptyReason::LiveUnavailable { name, detail: why } => vec![
-            say(format!("{name} could not be searched.")),
-            blank(),
-            detail(crate::view::sentence(why)),
-            blank(),
-            aside("Anything found on the other drives is shown above."),
-        ],
-
-        EmptyReason::BadQuery { detail } => vec![
-            say("That is not something this can look for."),
-            blank(),
-            aside(crate::view::sentence(detail)),
-            blank(),
-            aside("A * goes at the start or the end of a code, and ext:pdf narrows by type."),
-        ],
-
-        EmptyReason::NoSharesConfigured => vec![
-            say("No drives are set up yet."),
-            blank(),
-            // The command is kept exactly as it is typed: it is the next
-            // thing whoever installed this has to run. In its own run rather
-            // than set off by extra spaces - padding a string is the
-            // renderer's job done in the wrong place, and it is what gets
-            // ellipsised and read out by a screen reader.
-            vec![
-                Run::dim("Run "),
-                Run::accent("files --check-config"),
-                Run::dim(" in a command prompt to see why."),
-            ],
-        ],
-
-        EmptyReason::NoMatches { searched } => vec![
-            say(if query.is_empty() {
-                "Nothing matched.".to_string()
-            } else {
-                format!("Nothing matched \"{query}\".")
-            }),
-            blank(),
-            aside(format!(
-                "Searched {} files.",
-                humanize::count(*searched as usize)
-            )),
-            aside("Check the code, or press F5 to look again."),
-        ],
-
-        EmptyReason::IndexUnavailable { detail: what } => vec![
-            say("Cannot search right now."),
-            blank(),
-            detail(what.clone()),
-            blank(),
-            aside("Press F5 to try again."),
-        ],
-
-        EmptyReason::PathNotFound { dir } => vec![
-            say("No folder for that job code."),
-            blank(),
-            aside(format!("Looked in {}", dir.display())),
-        ],
-
-        EmptyReason::AccessDenied { dir } => vec![
-            say("You do not have permission to read that folder."),
-            blank(),
-            aside(format!("{}", dir.display())),
-            blank(),
-            aside("Ask IT for access to it."),
-        ],
-
-        // Not "Searching…", which is what the status line says at the same
-        // moment. Two places on one screen saying the same word is how a
-        // reader learns to stop reading one of them - and it is also why a
-        // test asserting the pane had *not* taken over could be satisfied by
-        // the footer instead.
-        EmptyReason::NotSearchedYet => {
-            vec![vec![Run::toned("Looking for it\u{2026}", Tone::Busy)]]
+/// The message, as one block, or nothing.
+pub fn view(reason: &EmptyReason, query: &str) -> Option<Block> {
+    /// `Nothing matched "x"` or `Nothing matched`, depending.
+    fn nothing_matched(query: &str) -> String {
+        if query.is_empty() {
+            "Nothing matched".to_owned()
+        } else {
+            format!("Nothing matched \u{201c}{query}\u{201d}")
         }
     }
-}
 
-/// Height of the block, for the centring above and for tests.
-pub fn height(reason: &EmptyReason, query: &str) -> u16 {
-    view(reason, query).len() as u16
-}
+    match reason {
+        // Nothing. The panel has no body at all before anything is typed,
+        // and a reason for an empty list is not something to say when nobody
+        // has asked for a list yet.
+        EmptyReason::NoQuery => None,
 
-/// Whether the pane has room to say anything at all.
-/// Whether a pane this many rows tall has room to say it.
-///
-/// In rows rather than a rectangle, because it is not really about a
-/// terminal: it is a cap on how verbose a message may become, and every one
-/// of these is read by somebody whose search has just failed.
-pub fn fits(reason: &EmptyReason, query: &str, rows: u16) -> bool {
-    rows >= height(reason, query)
+        // The share answered, incompletely. The counts are gone - they are
+        // in the diagnostics - and what is left is the part that changes
+        // what to do, which is that looking again may find more.
+        EmptyReason::LiveIncomplete { name, .. } => Some(vec![
+            Run::body(nothing_matched(query)),
+            aside(format!(" on {name} yet \u{b7} F5 looks again")),
+        ]),
+
+        EmptyReason::LiveUnavailable { name, detail: why } => Some(vec![
+            Run::body(format!("{name} could not be searched \u{b7} ")),
+            detail(crate::view::sentence(why)),
+        ]),
+
+        EmptyReason::BadQuery { detail: why } => Some(vec![
+            Run::body("That is not something this can look for \u{b7} "),
+            aside(crate::view::sentence(why)),
+        ]),
+
+        EmptyReason::NoSharesConfigured => Some(vec![
+            Run::body("No drives are set up yet \u{b7} "),
+            Run::accent("files --check-config"),
+            aside(" says why"),
+        ]),
+
+        EmptyReason::NoMatches { .. } => Some(say(nothing_matched(query))),
+
+        EmptyReason::IndexUnavailable { detail: what } => Some(vec![
+            Run::body("Cannot search right now \u{b7} "),
+            detail(what.clone()),
+        ]),
+
+        EmptyReason::PathNotFound { dir } => Some(vec![
+            Run::body("No folder for that job code \u{b7} "),
+            aside(format!("looked in {}", dir.display())),
+        ]),
+
+        EmptyReason::AccessDenied { dir } => Some(vec![
+            Run::body("You do not have permission to read "),
+            aside(format!("{}", dir.display())),
+        ]),
+
+        // Not "Searching...", which is what the status line used to say at
+        // the same moment - and does not any more, so this is the only thing
+        // on screen that says a search is in flight.
+        EmptyReason::NotSearchedYet => Some(vec![Run::toned("Looking for it\u{2026}", Tone::Busy)]),
+    }
 }
 
 #[cfg(test)]
@@ -176,10 +132,9 @@ mod tests {
 
     fn text(reason: &EmptyReason, query: &str) -> String {
         view(reason, query)
-            .iter()
+            .as_ref()
             .map(crate::view::plain)
-            .collect::<Vec<_>>()
-            .join("\n")
+            .unwrap_or_default()
     }
 
     fn every_reason() -> Vec<EmptyReason> {
@@ -218,7 +173,7 @@ mod tests {
         let mut lines = Vec::new();
         for reason in every_reason() {
             for query in ["", "11-D-0704"] {
-                for block in view(&reason, query) {
+                if let Some(block) = view(&reason, query) {
                     lines.push(crate::view::plain(&block));
                 }
             }
@@ -258,16 +213,20 @@ mod tests {
     #[test]
     fn the_first_screen_says_nothing_at_all() {
         assert!(
-            view(&EmptyReason::NoQuery, "").is_empty(),
+            view(&EmptyReason::NoQuery, "").is_none(),
             "the untouched panel drew a body"
         );
     }
 
-    /// A no-match names the code that did not match. "No matches" alone leaves
-    /// somebody who has typed two codes in a row unsure which one this is
-    /// about.
+    /// A no-match names the code that did not match, and nothing else.
+    ///
+    /// "No matches" alone leaves somebody who has typed two codes in a row
+    /// unsure which one this is about, so the code stays. The file count and
+    /// the "press F5" that used to sit under it are gone: how many files
+    /// were searched is a fact about the index, which is a page in the
+    /// settings window, and the footer already names what F5 does.
     #[test]
-    fn a_no_match_names_the_code_and_says_how_much_was_searched() {
+    fn a_no_match_names_the_code_and_says_nothing_else() {
         let t = text(
             &EmptyReason::NoMatches {
                 searched: 1_284_551,
@@ -275,8 +234,8 @@ mod tests {
             "11-D-0704",
         );
         assert!(t.contains("11-D-0704"), "{t}");
-        assert!(t.contains("1,284,551"), "{t}");
-        assert!(t.contains("F5"), "nothing says what to try:\n{t}");
+        assert!(!t.contains("1,284,551"), "{t}");
+        assert!(!t.contains('\n'), "more than one line:\n{t}");
     }
 
     /// The diagnostics stay verbatim. `os error 53` is what turns a support
@@ -292,7 +251,6 @@ mod tests {
         );
         assert!(t.contains("unreachable"), "{t}");
         assert!(t.contains("os error 53"), "{t}");
-        assert!(t.contains("F5"), "{t}");
     }
 
     /// Whoever installed this needs the command, exactly as it is typed.
@@ -302,22 +260,28 @@ mod tests {
         assert!(t.contains("files --check-config"), "{t}");
     }
 
-    /// Every variant is short enough to fit the pane it is drawn into.
+    /// Every message is one line, which replaces a test that checked they
+    /// were short enough to fit.
     ///
-    /// [`crate::config::VISIBLE_ROWS`], not the sixteen a terminal used to
-    /// give it: `gui::panel::list` draws these blocks into the same body the
-    /// result rows use and stops at the bottom of it, so a block past that
-    /// count is not scrolled to, it is *dropped* - and the lines these drop
-    /// first are the ones saying what to do about it.
+    /// That test compared a block count against `VISIBLE_ROWS`, because the
+    /// renderer drew a stack into the same band the result rows use and a
+    /// block past the bottom was dropped rather than scrolled to - and the
+    /// lines dropped first were the ones saying what to do. Structurally
+    /// impossible beats bounded: with one block there is nothing to drop,
+    /// and `height` and `fits` are gone with the stacking.
     #[test]
-    fn every_message_fits_the_pane_it_is_drawn_into() {
-        let rows = crate::config::VISIBLE_ROWS as u16;
+    fn every_message_is_one_line() {
         for reason in every_reason() {
-            assert!(
-                fits(&reason, "11-D-0704", rows),
-                "{reason:?} is {} lines, taller than the pane",
-                height(&reason, "11-D-0704")
-            );
+            for query in ["", "11-D-0704"] {
+                let Some(block) = view(&reason, query) else {
+                    continue;
+                };
+                let line = crate::view::plain(&block);
+                assert!(!line.contains('\n'), "{reason:?} is more than a line");
+                // Wide enough to be worth saying, narrow enough to fit a
+                // six-hundred-point panel at fourteen points.
+                assert!(line.chars().count() < 90, "{reason:?}: {line:?}");
+            }
         }
     }
 }
