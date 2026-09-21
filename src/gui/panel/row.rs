@@ -113,11 +113,12 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     // panel no longer knows where a row is either, and the row is the only
     // thing that does.
     //
-    // Raised, then washed. The shading is what says "this one", and the wash
-    // is what says which one - the pair is legible where either alone would
-    // not be, which is the point of shading a monochrome panel.
+    // A fill and a bar, and nothing else. This used to be raised as well -
+    // shaded on two sides and then washed - on the argument that shading is
+    // what says "this one" and the wash is what says which one. The bar says
+    // both, it is what Ueli uses, and two answers to one question read as a
+    // row that has been decorated rather than selected.
     if selected {
-        theme::raise(&painter, theme, rect, theme::RADIUS_MEDIUM);
         painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
         marker(ui, theme, rect);
     } else if response.hovered() {
@@ -166,7 +167,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             ),
             vec2(badge_w, theme::SIZE_CAPTION * 2.0),
         );
-        theme::cap(&painter, theme, pill, theme::RADIUS_MEDIUM);
+        painter.rect_filled(pill, theme::radius(theme::RADIUS_MEDIUM), theme.chip_bg);
         painter.text(
             pill.center(),
             Align2::CENTER_CENTER,

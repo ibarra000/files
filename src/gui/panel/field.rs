@@ -41,11 +41,13 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
     let painter = ui.painter().clone();
     let font = theme::font(theme::SIZE_LARGE, Weight::Regular);
 
-    // The box reads as pressed into the panel rather than drawn on it: a
-    // trough is what a search box looks like in this idiom, and it is the one
-    // element here somebody puts something *into*. Fluent calls the same thing
-    // `filled-darker`.
-    theme::press(&painter, theme, rect, theme::RADIUS_MEDIUM);
+    // A flat fill a shade off the panel, which is Fluent's `filled-darker`
+    // and is the whole of the box. It used to be shaded as well - a light
+    // shadow up and left, a dark one down and right - on the argument that a
+    // search box is a trough. The fill already says that, and the shading on
+    // top of it said it again in a soft-UI accent nothing else on this panel
+    // speaks any more.
+    painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.well);
 
     // A magnifier, which is what every search field on this operating system
     // has, so nobody has to be told what the box is for.

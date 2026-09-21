@@ -20,8 +20,7 @@
 //! somebody nudges a hue, and this one is read by people of every age for hours
 //! a day.
 
-use eframe::egui::epaint::Shadow;
-use eframe::egui::{Color32, CornerRadius, FontId, Rect};
+use eframe::egui::{Color32, CornerRadius, FontId};
 
 use crate::config::ResultLayout;
 use crate::view::Emphasis;
@@ -383,17 +382,6 @@ pub struct Theme {
     /// red already here is the whole message.
     pub good: Color32,
 
-    /// The light that a raised surface catches, up and to the left.
-    ///
-    /// Soft UI models an element as pressed out of the panel rather than drawn
-    /// on top of it, so there is no border and no fill difference - the shape
-    /// is carried entirely by a pair of shadows, one the colour of the light
-    /// and one the colour of its absence. Take either away and the element
-    /// stops reading as a thing and becomes a smudge.
-    pub lit: Color32,
-    /// And the shadow it casts, down and to the right.
-    pub shade: Color32,
-
     /// A key name: ` Enter `.
     pub chip_bg: Color32,
     pub chip_fg: Color32,
@@ -455,8 +443,6 @@ impl Theme {
             accent_fill: rgb(0xE6E6E6),
             accent_fg: rgb(0x1A1A1A),
             good: rgb(0x7FC98A),
-            lit: tint(0xFFFFFF, 0x10),
-            shade: tint(0x000000, 0x2E),
             // Opaque, unlike every other background here. A key cap is the one
             // element that is *not* meant to track its ground.
             chip_bg: rgb(0x3C3C3C),
@@ -513,7 +499,6 @@ impl Theme {
             // Genuinely darker than the panel on both grounds. The warm pair
             // this replaces resolved *brighter* than the surface over black,
             // and passed only because `contrast` is direction-agnostic - so
-            // `press`'s "a trough a shade darker than the panel" is true now.
             well: tint(0xD9D9D9, 0xF6),
             // Darker than the window, which is the direction a tile lifts on a
             // light ground, and lighter than the well below it for the reason
@@ -525,8 +510,6 @@ impl Theme {
             accent_fill: rgb(0x2B2B2B),
             accent_fg: rgb(0xFAFAFA),
             good: rgb(0x1E6B33),
-            lit: tint(0xFFFFFF, 0x9A),
-            shade: tint(0xB4B4B4, 0x76),
             // Opaque, unlike every other background here. A key cap is the one
             // element that is *not* meant to track its ground.
             chip_bg: rgb(0xFFFFFF),
@@ -597,73 +580,28 @@ pub fn faded(color: Color32, alpha: f32) -> Color32 {
     color.linear_multiply(alpha)
 }
 
-/// How far a raised surface is lifted off the panel, in points.
-///
-/// Small. The whole idea is an element a step out of the ground, not a card
-/// floating over it, and a shadow long enough to notice is a shadow that reads
-/// as a drop shadow instead.
-pub const LIFT: f32 = 2.0;
+// -- depth ------------------------------------------------------------------
 
-/// And how soft the lift is.
-pub const BLUR: f32 = 6.0;
-
-/// The pair of shadows, in the given order, behind `rect`.
-///
-/// `Shadow::as_shape` fills the rectangle as well as feathering around it, so
-/// both callers below paint a surface over the top afterwards. Without that the
-/// two stack into a muddy patch and whatever wash goes on it reads as dirt.
-fn shadows(painter: &eframe::egui::Painter, rect: Rect, r: u8, pairs: [(f32, Color32); 2]) {
-    for (offset, colour) in pairs {
-        painter.add(
-            Shadow {
-                offset: [offset as i8, offset as i8],
-                blur: BLUR as u8,
-                spread: 0,
-                color: colour,
-            }
-            .as_shape(rect, radius(r)),
-        );
-    }
-}
-
-/// Draws `rect` as a surface pressed out of the panel.
-///
-/// A light shadow up and to the left, a dark one down and to the right, and
-/// then the panel's own colour over the top: a soft-UI element is the *same*
-/// colour as its ground and is legible only by the shading at its edges. Take
-/// either shadow away and it stops reading as a thing and becomes a smudge.
-///
-/// This used to take the panel's entrance fade, so the shading arrived with
-/// everything else rather than appearing once the panel had landed. There is
-/// no entrance now, so there is nothing to arrive with.
-pub fn raise(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
-    shadows(painter, rect, r, [(-LIFT, theme.lit), (LIFT, theme.shade)]);
-    painter.rect_filled(rect, radius(r), theme.surface);
-}
-
-/// And `rect` as a surface pressed *into* it: the same pair, swapped, over a
-/// slightly recessed fill.
-///
-/// The fill is what carries it. `Shadow` casts outwards and there is no inset
-/// form, so the shading alone would put the light on the wrong side of an
-/// element that is otherwise identical to its ground - and a trough that is a
-/// shade darker than the panel is what says "put something here" anyway.
-/// A key cap: [`raise`]'s shading over a fill of its own.
-///
-/// `raise` paints the panel's *own* colour, because a soft-UI surface is the
-/// colour of its ground and is legible only by the shading at its edges. A key
-/// cap is the one element here that is not - a key on a keyboard is a different
-/// piece of plastic from the case - and with the palette down to greys a
-/// tenth-alpha wash over the panel is not a piece of plastic, it is a stain.
-pub fn cap(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
-    shadows(painter, rect, r, [(-LIFT, theme.lit), (LIFT, theme.shade)]);
-    painter.rect_filled(rect, radius(r), theme.chip_bg);
-}
-
-pub fn press(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, r: u8) {
-    shadows(painter, rect, r, [(LIFT, theme.lit), (-LIFT, theme.shade)]);
-    painter.rect_filled(rect, radius(r), theme.well);
-}
+// There is none, and that is the whole section.
+//
+// What used to be here was a soft-UI kit: a `LIFT` of two points, a `BLUR`
+// of six, a `lit` and a `shade` in the palette, and three helpers - `raise`,
+// `press`, `cap` - each of which drew a pair of offset shadows and then a
+// fill over the top. Six call sites used them: the search box, the selected
+// row in three places, the drive badge and every key cap.
+//
+// Ueli's search window has no shadow anywhere in it. Not a subtle one, not
+// one on the selected row - none. Every surface in it is legible by its fill
+// alone, which is what Fluent's neutral ramp is *for*: the whole point of
+// having `Background1Hover` and `Background1Selected` as published values is
+// that a row does not need shading to be distinguishable from the row above
+// it. Shading it as well is answering a question the palette already
+// answered, in a second voice, at a second angle.
+//
+// So the shadows went, and nothing replaced them. The selected row is its
+// fill and its accent bar. The search box is its fill and, shortly, the rule
+// under it. A key cap is a different colour from the ground and that is all
+// a key cap ever needed to be.
 
 pub fn radius(r: u8) -> CornerRadius {
     CornerRadius::same(r)

@@ -65,7 +65,7 @@ pub fn draw(painter: &Painter, theme: &Theme, shortcut: &str, at: Pos2) {
             .width()
             + PAD_X * 2.0;
         let chip = Rect::from_min_size(pos2(x, at.y - HEIGHT / 2.0), vec2(w, HEIGHT));
-        theme::cap(painter, theme, chip, theme::RADIUS_MEDIUM);
+        painter.rect_filled(chip, theme::radius(theme::RADIUS_MEDIUM), theme.chip_bg);
         painter.text(
             chip.center(),
             Align2::CENTER_CENTER,

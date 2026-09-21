@@ -289,7 +289,6 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         // treatment a result gets, because it is the same thing: the row the
         // field came from.
         if cursor == Some(rank) {
-            theme::raise(painter, theme, rect, theme::RADIUS_MEDIUM);
             painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
             if follow {
@@ -356,7 +355,6 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         });
 
         if cursor == Some(rank) {
-            theme::raise(ui.painter(), theme, rect, theme::RADIUS_MEDIUM);
             ui.painter()
                 .rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
