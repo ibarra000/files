@@ -97,16 +97,9 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         aliases: None,
                         mappings: None,
                     };
-                    let out = settings::show(
-                        ui,
-                        &theme,
-                        &w.state,
-                        &w.settings,
-                        None,
-                        page,
-                        REPORT,
-                        &mut form,
-                    );
+                    let pages = files::view::settings::pages(&w.state, &w.settings, None);
+                    let out =
+                        settings::show(ui, &theme, &pages, &w.settings, page, REPORT, &mut form);
                     let mappings = form.mappings;
                     (out, mappings)
                 };

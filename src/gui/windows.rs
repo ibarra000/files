@@ -199,12 +199,18 @@ impl Windows {
             return clicked;
         }
 
+        // Once per frame, for both readers. This walks the configuration
+        // and allocates eight `Page`s; it used to be done twice on the frame
+        // the window opened, because `wants_report` built its own copy to
+        // answer one question about one of them.
+        let pages = crate::view::settings::pages(state, settings, placement);
+
         // Taken on the first frame the page is showing rather than when the
         // menu item was clicked, so the window appears immediately and the
         // waiting happens with something on screen. Asked of the model
         // rather than of the page id, so a report added to a second page
         // does not silently show a stale one.
-        if self.report.is_none() && settings::wants_report(state, settings, self.page) {
+        if self.report.is_none() && settings::wants_report(&pages, self.page) {
             self.report = Some(report());
         }
         let text = self.report.clone().unwrap_or_default();
@@ -230,9 +236,7 @@ impl Windows {
                     aliases: None,
                     mappings: None,
                 };
-                chosen = settings::show(
-                    ui, theme, state, settings, placement, page, &text, &mut form,
-                );
+                chosen = settings::show(ui, theme, &pages, settings, page, &text, &mut form);
                 aliases = form.aliases;
                 mappings = form.mappings;
             });

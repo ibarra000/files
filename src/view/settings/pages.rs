@@ -376,12 +376,16 @@ fn about(state: &AppState, settings: &Settings) -> Page {
             Some(crate::update::Found::Unavailable { detail }) => {
                 facts.push(Fact::new("Status", detail.clone()));
             }
-            Some(crate::update::Found::Available { manifest, msi }) => {
+            Some(crate::update::Found::Available {
+                manifest,
+                msi_present,
+                ..
+            }) => {
                 facts.push(Fact::new("Available", manifest.version.to_string()));
                 if let Some(notes) = &manifest.notes {
                     facts.push(Fact::new("What changed", notes.clone()));
                 }
-                if !msi.is_file() {
+                if !*msi_present {
                     facts.push(Fact::toned(
                         "Installer",
                         "Not where the manifest says it is \u{b7} ask whoever published it",
@@ -394,7 +398,7 @@ fn about(state: &AppState, settings: &Settings) -> Page {
 
         let ready = matches!(
             &state.update,
-            Some(crate::update::Found::Available { msi, .. }) if msi.is_file()
+            Some(crate::update::Found::Available { msi_present, .. }) if *msi_present
         );
         let mut buttons = vec![Action::new(ActionId::CheckForUpdates, "Check now")];
         if ready {

@@ -742,7 +742,7 @@ fn report_updates(settings: &Settings, out: &mut dyn Write) {
     );
 
     match crate::update::look(folder, crate::update::Version::current()) {
-        crate::update::Found::Available { manifest, msi } => {
+        crate::update::Found::Available { manifest, msi, .. } => {
             let _ = writeln!(out, "  available           {}", manifest.version);
             let _ = writeln!(out, "  installer           {}", msi.display());
             let _ = writeln!(

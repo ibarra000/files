@@ -3027,6 +3027,8 @@ fn available(version: &str) -> Found {
             notes: None,
         },
         msi: std::path::PathBuf::from("files.msi"),
+        // Not on disk, which is what a bare relative name in a test is.
+        msi_present: false,
     }
 }
 

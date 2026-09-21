@@ -36,10 +36,9 @@ pub mod widgets;
 
 use eframe::egui;
 
-use crate::app::state::AppState;
 use crate::config::Settings;
 use crate::gui::theme::{self, Theme};
-use crate::view::settings::{self, PageId};
+use crate::view::settings::{Page, PageId};
 
 pub use page::Form;
 
@@ -49,22 +48,21 @@ pub use page::Form;
 /// next, rather than taking `&mut`, so the caller keeps the only copy. The
 /// same reason the window returns a `Clicked` instead of reaching back into
 /// the shell.
-// Eight arguments, and clippy is right that it is a lot. They are not a
-// struct in disguise, though: five are borrowed from five different owners
-// for exactly this call, and bundling them would mean a type whose only
-// purpose is to be built one line above and destructured one line below.
-#[allow(clippy::too_many_arguments)]
+///
+/// Takes the pages already built, which it did not used to. `view::settings::
+/// pages` walks the whole configuration and allocates a `Page` for each of
+/// the eight, and it was being called twice on the frame the window opened -
+/// once here and once in `wants_report` - for one answer each. Now the
+/// caller builds it once and both read the same slice.
 pub fn show(
     ui: &mut egui::Ui,
     theme: &Theme,
-    state: &AppState,
+    pages: &[Page],
     settings: &Settings,
-    placement: Option<(i32, i32)>,
     current: PageId,
     report: &str,
     form: &mut Form<'_>,
 ) -> PageId {
-    let pages = settings::pages(state, settings, placement);
     let mut chosen = current;
 
     egui::containers::Panel::left("files-settings-nav")
@@ -101,7 +99,7 @@ pub fn show(
                 .id_salt("files-settings-content-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let Some(page) = page::find(&pages, current) else {
+                    let Some(page) = page::find(pages, current) else {
                         return;
                     };
                     page::show(ui, theme, page, settings, report, form);
@@ -112,11 +110,8 @@ pub fn show(
 }
 
 /// Whether the page showing needs the `doctor` report taken.
-pub fn wants_report(state: &AppState, settings: &Settings, current: PageId) -> bool {
-    settings::pages(state, settings, None)
-        .iter()
-        .find(|p| p.id == current)
-        .is_some_and(page::wants_report)
+pub fn wants_report(pages: &[Page], current: PageId) -> bool {
+    page::find(pages, current).is_some_and(page::wants_report)
 }
 
 /// The panel's surface without its transparency.

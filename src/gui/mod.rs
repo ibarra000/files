@@ -400,7 +400,7 @@ impl Shell {
     /// goes back through the ordinary route.
     fn install_update(&mut self, now: Instant) {
         let state = &self.app.state;
-        let Some(crate::update::Found::Available { manifest, msi }) = &state.update else {
+        let Some(crate::update::Found::Available { manifest, msi, .. }) = &state.update else {
             return;
         };
 
