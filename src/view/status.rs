@@ -105,9 +105,12 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
     // queue depth, a file count, a share name, and a reason in brackets -
     // rewriting themselves several times a second in the one place on the
     // panel reserved for things somebody has to act on. Every number in them
-    // is now in the diagnostics, where it can be read at leisure by somebody
-    // who wants it, and the panel says the one fact that changes what to do:
-    // the list is not complete yet, so a code that is missing may not be.
+    // is either in the diagnostics - which report each drive's entry count,
+    // its age and its resident size, at leisure and without rewriting
+    // themselves - or is a progress figure for work in flight, which nothing
+    // keeps once the work is done and which nobody was acting on. What is
+    // left is the one fact that changes what to do: the list is not complete
+    // yet, so a code that is missing may not really be missing.
     if state.index.activity != Activity::Idle {
         return StatusLine {
             text: "Indexing\u{2026}".into(),
