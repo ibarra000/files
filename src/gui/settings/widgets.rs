@@ -83,9 +83,16 @@ pub struct Row<'a> {
     /// written. The control is drawn disabled rather than hidden: hiding it
     /// would answer "why can I not change this?" with silence.
     pub enabled: bool,
-    /// How much room the control needs. Declared rather than measured,
-    /// because the prose is laid out against what is left and something has
-    /// to be decided first. See [`super::measure`].
+    /// How much room the control would *like*. Declared rather than
+    /// measured, because the prose is laid out against what is left and
+    /// something has to be decided first. See [`super::measure`].
+    ///
+    /// A want and not a width: in a narrow window
+    /// [`super::measure::control_width`] takes some of it back. What the
+    /// control is actually given is the rectangle it is built into, and a
+    /// control that ignores that rectangle - which is every egui widget with
+    /// a `desired_width`, and `ComboBox` in particular - will draw straight
+    /// through the prose beside it.
     pub control_w: f32,
 }
 
@@ -102,7 +109,10 @@ pub fn setting_row<R>(
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     let avail = ui.available_width();
-    let prose_w = measure::prose_width(avail, row.control_w);
+    // The control first, because it is the one that gives way. See
+    // `measure::control_width` - this pair of lines is the overlap fix.
+    let control_w = measure::control_width(avail, row.control_w);
+    let prose_w = measure::prose_width(avail, control_w);
     let painter = ui.painter().clone();
 
     // One line, ellipsised. A label that wraps turns every tile into a
@@ -176,12 +186,23 @@ pub fn setting_row<R>(
     let enabled = row.enabled;
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, enabled, &spoken));
 
-    let slot = measure::control_slot(tile, row.control_w, control_h);
+    let slot = measure::control_slot(tile, control_w, control_h);
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(slot)
             .layout(Layout::right_to_left(Align::Center)),
     );
+    // The second half of the overlap fix, and the one that bites at *every*
+    // window width rather than only at narrow ones.
+    //
+    // `ComboBox::width` is a minimum and not a width - egui says so in a
+    // comment beside it - so a drop-down holding a long label grows past
+    // whatever slot it was measured against and runs under the sentence to
+    // its left. Truncating here sets the policy on the child `Ui` that every
+    // control in this window is built into, so it holds for the drop-downs,
+    // the buttons and anything added later, rather than needing a
+    // `.truncate()` remembered at each call site.
+    child.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
     if !row.enabled {
         child.disable();
     }

@@ -43,10 +43,107 @@ pub const GAP: f32 = 16.0;
 ///
 /// At this width a description wraps every three or four words, which is
 /// unpleasant and still readable. Below it the column stops being prose and
-/// becomes a stack of fragments, so the tile is allowed to overflow the card
-/// instead - a row wider than the window can be scrolled to, and a row of
-/// single-word lines cannot be unscrambled.
+/// becomes a stack of fragments.
+///
+/// This note used to end differently: "so the tile is allowed to overflow
+/// the card instead - a row wider than the window can be scrolled to". There
+/// is no horizontal scroller in the settings window and there never was, so
+/// the escape hatch it reasoned from did not exist and the overflow simply
+/// ran the prose under the control. What gives way now is the control, down
+/// to [`MIN_CONTROL_W`], and below *that* the prose gives way after all -
+/// because two columns that overlap are worse than either being narrow.
 pub const MIN_PROSE_W: f32 = 140.0;
+
+/// And the narrowest a control may be squeezed to.
+///
+/// A drop-down at this width still shows a word and a half of its value
+/// before the ellipsis, and a text box still shows enough of a path to tell
+/// two apart. Under it a control is a decoration that reports its own state
+/// in three characters.
+pub const MIN_CONTROL_W: f32 = 120.0;
+
+/// What is left of a tile once its padding is taken off both sides.
+fn inner_w(avail_w: f32) -> f32 {
+    (avail_w - CARD_PAD * 2.0).max(0.0)
+}
+
+/// How wide the control actually gets, having asked for `want`.
+///
+/// `flex: 0 0 auto` until the prose reaches its floor, and `flex: 0 1 auto`
+/// from there down to [`MIN_CONTROL_W`]. The old model was 0-0-auto all the
+/// way down, which is why below about 420 points the prose and the control
+/// overlapped: the control kept every point it asked for, the prose was
+/// handed a negative number that clamped to its floor, and the two then sat
+/// in the same place.
+///
+/// The first clamp is the one that makes overlap impossible rather than
+/// merely unlikely. Whatever else happens a control is never wider than the
+/// tile it is in, so in the worst case the prose is given zero and the two
+/// columns meet rather than cross.
+pub fn control_width(avail_w: f32, want: f32) -> f32 {
+    let inner = inner_w(avail_w);
+    let want = want.min(inner);
+    let room = inner - GAP - MIN_PROSE_W;
+    if want <= room {
+        return want;
+    }
+    let floor = MIN_CONTROL_W.min(want);
+    room.clamp(floor, want)
+}
+
+/// One column of a list row.
+///
+/// A drive row is a mark, a letter, a path, a caveat and two buttons, and
+/// only one of those has any business growing when the window does. Writing
+/// the row as a list of these rather than as six hard numbers is what lets
+/// it be checked without a font atlas - and what turns "the window got
+/// narrower" into a question with one answer instead of six.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cell {
+    /// Takes exactly this much, at every width, and gives none of it back.
+    Fixed(f32),
+    /// Takes at least this much, and an equal share of whatever is spare.
+    Flex(f32),
+}
+
+impl Cell {
+    const fn least(self) -> f32 {
+        match self {
+            Self::Fixed(w) | Self::Flex(w) => w,
+        }
+    }
+}
+
+/// How wide each column of a list row gets, or `None` if they do not fit.
+///
+/// `None` is a real answer rather than a failure: it is the add row's signal
+/// to fall onto two lines. That is the one place in this window where
+/// wrapping beats eliding, because an elided text box is a text box nobody
+/// can use, and it is worth having a shape that can say so instead of a
+/// width that quietly goes negative.
+pub fn row_cells(avail_w: f32, gap: f32, cells: &[Cell]) -> Option<Vec<f32>> {
+    let gaps = gap * cells.len().saturating_sub(1) as f32;
+    let budget = avail_w - gaps;
+    let least: f32 = cells.iter().map(|c| c.least()).sum();
+    if least > budget {
+        return None;
+    }
+    let flexes = cells.iter().filter(|c| matches!(c, Cell::Flex(_))).count();
+    let share = if flexes == 0 {
+        0.0
+    } else {
+        (budget - least) / flexes as f32
+    };
+    Some(
+        cells
+            .iter()
+            .map(|c| match c {
+                Cell::Fixed(w) => *w,
+                Cell::Flex(min) => min + share,
+            })
+            .collect(),
+    )
+}
 
 /// The gap between a label and the sentence under it.
 ///
@@ -58,12 +155,12 @@ pub const LABEL_GAP: f32 = 2.0;
 
 /// How wide the label and the sentence under it may be.
 ///
-/// The control's width is spent first, which is what makes it `flex: 0 0
-/// auto`: a drop-down does not shrink because a description is long.
+/// Whatever the control did not take, which is why [`control_width`] has to
+/// run first. The floor that used to be applied here has moved there, where
+/// it can be honoured by shrinking something rather than by clamping a
+/// negative number and hoping.
 pub fn prose_width(avail_w: f32, control_w: f32) -> f32 {
-    let inner = avail_w - CARD_PAD * 2.0;
-    let left = inner - control_w - GAP;
-    left.max(MIN_PROSE_W)
+    (inner_w(avail_w) - control_w - GAP).max(0.0)
 }
 
 /// How tall the whole tile is, given how tall the prose came out.
@@ -104,21 +201,100 @@ mod tests {
         Rect::from_min_size(pos2(100.0, 200.0), vec2(w, h))
     }
 
-    /// The control is spent first, so a long description costs the prose
-    /// column and never the drop-down.
-    #[test]
-    fn the_control_keeps_its_width_and_the_prose_gets_the_rest() {
-        let w = prose_width(600.0, 220.0);
-        assert_eq!(w, 600.0 - 24.0 - 220.0 - GAP);
+    /// How a row is measured, everywhere: the control first, then whatever
+    /// is left over.
+    fn columns(avail_w: f32, want: f32) -> (f32, f32) {
+        let control = control_width(avail_w, want);
+        (prose_width(avail_w, control), control)
     }
 
-    /// Below the floor the row overflows rather than shredding the sentence.
-    /// A row too wide can be scrolled to; a column of one-word lines cannot be
-    /// unscrambled.
+    /// With room to spare the control keeps every point it asked for and the
+    /// prose gets the rest.
     #[test]
-    fn a_narrow_window_stops_squeezing_the_prose_at_the_floor() {
-        assert_eq!(prose_width(300.0, 220.0), MIN_PROSE_W);
-        assert_eq!(prose_width(0.0, 220.0), MIN_PROSE_W);
+    fn the_control_keeps_its_width_while_there_is_room_for_both() {
+        let (prose, control) = columns(600.0, 220.0);
+        assert_eq!(control, 220.0);
+        assert_eq!(prose, 600.0 - CARD_PAD * 2.0 - 220.0 - GAP);
+    }
+
+    /// And when there is not, the control is what gives way. This is the
+    /// whole of the overlap fix: the old model shrank neither, handed the
+    /// prose a negative width, clamped it to the floor, and drew the two on
+    /// top of each other.
+    #[test]
+    fn the_control_gives_way_before_the_prose_does() {
+        let (prose, control) = columns(300.0, 220.0);
+        assert!(control < 220.0, "the control did not give way");
+        assert_eq!(prose, MIN_PROSE_W, "the prose gave way first");
+    }
+
+    /// It stops giving way at a width where it is still a control.
+    #[test]
+    fn a_control_stops_shrinking_at_its_own_floor() {
+        assert_eq!(control_width(220.0, 220.0), MIN_CONTROL_W);
+    }
+
+    /// A control that wanted less than the floor is not grown to meet it.
+    #[test]
+    fn a_small_control_is_never_inflated_to_the_floor() {
+        assert_eq!(control_width(200.0, 40.0), 40.0);
+    }
+
+    /// The property the whole module exists for, swept rather than sampled.
+    ///
+    /// Every width from a sliver to a wide window, against four control
+    /// widths. Under about 170 points the prose is zero and the two columns
+    /// *meet*; they never cross, which is the claim.
+    #[test]
+    fn the_two_columns_never_overlap() {
+        for tenths in 0..8000u32 {
+            let avail = tenths as f32 / 10.0;
+            for want in [40.0, 120.0, 220.0, 400.0] {
+                let (prose, control) = columns(avail, want);
+                let used = CARD_PAD * 2.0 + prose + control;
+                assert!(
+                    used <= avail.max(CARD_PAD * 2.0) + 0.001,
+                    "at {avail}pt a {want}pt control and {prose:.1}pt of prose came to {used:.1}pt"
+                );
+                assert!(control >= 0.0 && prose >= 0.0);
+            }
+        }
+    }
+
+    /// A row of columns fills its width exactly, and the fixed ones do not
+    /// move.
+    #[test]
+    fn a_list_row_spends_every_point_it_is_given() {
+        let cells = [
+            Cell::Fixed(28.0),
+            Cell::Flex(80.0),
+            Cell::Flex(120.0),
+            Cell::Fixed(56.0),
+        ];
+        let widths = row_cells(600.0, 8.0, &cells).expect("these fit");
+        assert_eq!(widths[0], 28.0);
+        assert_eq!(widths[3], 56.0);
+        let total: f32 = widths.iter().sum::<f32>() + 8.0 * 3.0;
+        assert!((total - 600.0).abs() < 0.001, "{total} of 600");
+        // The spare is shared equally, so two flexible columns that started
+        // forty apart stay forty apart.
+        assert!((widths[2] - widths[1] - 40.0).abs() < 0.001);
+    }
+
+    /// And says so when they do not, rather than handing back widths that
+    /// add up to more than there is.
+    #[test]
+    fn a_list_row_that_cannot_fit_says_so() {
+        let cells = [Cell::Fixed(200.0), Cell::Flex(200.0)];
+        assert!(row_cells(300.0, 8.0, &cells).is_none());
+        assert!(row_cells(408.0, 8.0, &cells).is_some());
+    }
+
+    /// A row of nothing but fixed columns does not stretch to fill.
+    #[test]
+    fn fixed_columns_are_fixed() {
+        let widths = row_cells(600.0, 8.0, &[Cell::Fixed(28.0), Cell::Fixed(56.0)]).unwrap();
+        assert_eq!(widths, vec![28.0, 56.0]);
     }
 
     /// A row holding one switch must be the same height as the row above it,
@@ -170,6 +346,6 @@ mod tests {
 
         let slot = control_slot(tile, 220.0, 28.0);
         assert!(slot.right() <= tile.right() - CARD_PAD + 0.01);
-        assert!(slot.left() > origin.x + prose_width(600.0, 220.0));
+        assert!(slot.left() >= origin.x + prose_width(600.0, 220.0));
     }
 }
