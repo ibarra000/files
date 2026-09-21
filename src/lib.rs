@@ -15,6 +15,7 @@ pub mod gui;
 pub mod history;
 pub mod hotkey;
 pub mod index;
+pub mod ipc;
 pub mod log;
 pub mod notify;
 pub mod open;
