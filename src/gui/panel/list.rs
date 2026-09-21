@@ -172,7 +172,7 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
         pos2(rect.left() + HEADING_PAD_X, rect.top()),
         Align2::LEFT_TOP,
         text,
-        theme::font(theme::SIZE_CHIP, Weight::Semibold),
+        theme::font(theme::SIZE_CAPTION, Weight::Semibold),
         theme.dim,
     );
     super::announce(ui, rect, ("heading", text), text);
@@ -303,7 +303,7 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             pos2(rect.left() + theme::ROW_PAD_X, rect.center().y),
             Align2::LEFT_CENTER,
             &entry,
-            theme::font(theme::SIZE_ROW, theme.weight(Emphasis::Accent)),
+            theme::font(theme::SIZE_BODY, theme.weight(Emphasis::Accent)),
             theme.accent,
         );
         // By rank. This used to push `Hint(Action::Recall)`, which is the Up
@@ -326,7 +326,7 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let mut intents = Vec::new();
     let cursor = state.alias_cursor();
     let follow = selection_changed(ui, "aliases", cursor);
-    let small = theme::font(theme::SIZE_SMALL, Weight::Regular);
+    let small = theme::font(theme::SIZE_CAPTION, Weight::Regular);
 
     for (rank, alias) in state.settings.aliases.all().iter().enumerate() {
         if rank > 0 {
@@ -373,7 +373,7 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             pos2(rect.left() + theme::ROW_PAD_X, rect.center().y),
             Align2::LEFT_CENTER,
             alias.name.as_ref(),
-            theme::font(theme::SIZE_ROW, theme.weight(Emphasis::Accent)),
+            theme::font(theme::SIZE_BODY, theme.weight(Emphasis::Accent)),
             theme.accent,
         );
         painter.text(
@@ -399,8 +399,8 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
 /// hundred simultaneous ones. So the key asks - and asking is a list, which is
 /// the one reason anything still borrows the body.
 fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
-    let font = theme::font(theme::SIZE_ROW, Weight::Regular);
-    let small = theme::font(theme::SIZE_SMALL, Weight::Regular);
+    let font = theme::font(theme::SIZE_BODY, Weight::Regular);
+    let small = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let chosen = state.shares_cursor();
     let follow = selection_changed(ui, "shares", Some(chosen));
 
@@ -507,16 +507,15 @@ fn centred_blocks(ui: &Ui, theme: &Theme, band: Rect, blocks: &[view::Block]) {
     }
 }
 
-/// The size a run is set at, and the weight the theme asks for it.
+/// The weight the theme asks for a run, at the one size a block is set in.
 ///
-/// Size is a property of the *block* - a headline is bigger - and weight is a
-/// property of the emphasis, which is the theme's to decide.
+/// There used to be a second size here: `Emphasis::Strong` was drawn at a
+/// seventeen-point headline. Fluent carries strength with weight and not with
+/// scale - `body1` against `body1Strong` is 400 against 600 at the same 14 -
+/// and Ueli's own empty state is one body-sized line. So the size is no
+/// longer a property of the run, and emphasis is the theme's business alone.
 fn weight_of(theme: &Theme, run: &Run) -> eframe::egui::FontId {
-    let size = match run.emphasis {
-        Emphasis::Strong => theme::SIZE_HEADLINE,
-        _ => theme::SIZE_ROW,
-    };
-    theme::font(size, theme.weight(run.emphasis))
+    theme::font(theme::SIZE_BODY, theme.weight(run.emphasis))
 }
 
 // -- following the selection ------------------------------------------------

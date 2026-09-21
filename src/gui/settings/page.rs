@@ -87,7 +87,7 @@ pub fn show(
                     for action in actions.iter().filter_map(|a| a.help) {
                         ui.label(
                             egui::RichText::new(action)
-                                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                                 .color(theme.dim),
                         );
                     }
@@ -97,7 +97,7 @@ pub fn show(
                 Block::Report { intro } => {
                     ui.label(
                         egui::RichText::new(*intro)
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                            .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                             .color(theme.dim),
                     );
                     ui.add_space(6.0);

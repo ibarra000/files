@@ -38,7 +38,7 @@ fn glyph(part: &str) -> &str {
 
 /// How wide `shortcut` will be.
 pub fn width(painter: &Painter, shortcut: &str) -> f32 {
-    let font = theme::font(theme::SIZE_CHIP, Weight::Regular);
+    let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let mut total = 0.0;
     for (i, part) in shortcut.split('+').enumerate() {
         if i > 0 {
@@ -55,7 +55,7 @@ pub fn width(painter: &Painter, shortcut: &str) -> f32 {
 
 /// Draws `shortcut` with its left edge at `at`, vertically centred on it.
 pub fn draw(painter: &Painter, theme: &Theme, shortcut: &str, at: Pos2) {
-    let font = theme::font(theme::SIZE_CHIP, Weight::Regular);
+    let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let mut x = at.x;
     for part in shortcut.split('+') {
         let text = glyph(part);

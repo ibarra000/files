@@ -39,7 +39,7 @@ const TAIL_PAD: f32 = 12.0;
 pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Intent> {
     let rect = box_of(band);
     let painter = ui.painter().clone();
-    let font = theme::font(theme::SIZE_INPUT, Weight::Regular);
+    let font = theme::font(theme::SIZE_LARGE, Weight::Regular);
 
     // The box reads as pressed into the panel rather than drawn on it: a
     // trough is what a search box looks like in this idiom, and it is the one
@@ -80,7 +80,7 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
             pos2(text_left, rect.center().y),
             Align2::LEFT_CENTER,
             "Search",
-            theme::font(theme::SIZE_ROW, Weight::Regular),
+            theme::font(theme::SIZE_LARGE, Weight::Regular),
             theme.dim,
         );
     }
@@ -101,7 +101,7 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
     let expansion_galley = expansion.as_ref().map(|shown| {
         painter.layout_no_wrap(
             shown.clone(),
-            theme::font(theme::SIZE_ROW, Weight::Regular),
+            theme::font(theme::SIZE_BODY, Weight::Regular),
             theme.dim,
         )
     });
@@ -192,7 +192,8 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
     // thing on screen that says where the keyboard is going.
     painter.vline(
         caret_x,
-        (rect.center().y - theme::SIZE_INPUT * 0.6)..=(rect.center().y + theme::SIZE_INPUT * 0.6),
+        (rect.center().y - theme::line_h(theme::SIZE_LARGE) / 2.0)
+            ..=(rect.center().y + theme::line_h(theme::SIZE_LARGE) / 2.0),
         eframe::egui::Stroke::new(2.0, theme.caret),
     );
 
@@ -236,7 +237,7 @@ fn click_to_caret(ui: &mut Ui, rect: Rect, text_left: f32, text: &str) -> Vec<In
         return Vec::new();
     }
 
-    let font = theme::font(theme::SIZE_INPUT, Weight::Regular);
+    let font = theme::font(theme::SIZE_LARGE, Weight::Regular);
     let galley = ui
         .painter()
         .layout_no_wrap(text.to_owned(), font, Color32::WHITE);

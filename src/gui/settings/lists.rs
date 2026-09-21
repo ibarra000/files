@@ -97,7 +97,7 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                 |ui| {
                     ui.label(
                         egui::RichText::new(mapping.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
+                            .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
                             .color(theme.accent),
                     );
                 },
@@ -108,14 +108,14 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                 |ui| {
                     ui.label(
                         egui::RichText::new(mapping.path.display().to_string())
-                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                            .font(theme::font(theme::SIZE_BODY, Weight::Regular))
                             .color(theme.text),
                     );
                 },
             );
             ui.label(
                 egui::RichText::new(mapping.kind.label())
-                    .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                    .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                     .color(theme.dim),
             );
             // Asked rather than done. This is the one control in the
@@ -134,7 +134,7 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                 ui.add_space(28.0);
                 ui.label(
                     egui::RichText::new(DRIVES.not_there)
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                         .color(theme.tone(view::status::Tone::Warn)),
                 );
             });
@@ -197,7 +197,7 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
     if let Some(problem) = &form.drive.problem {
         ui.label(
             egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                 .color(theme.tone(view::status::Tone::Warn)),
         );
     }
@@ -258,7 +258,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
     if current.is_empty() {
         ui.label(
             egui::RichText::new(ALIASES.empty)
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                 .color(theme.faint),
         );
     }
@@ -271,7 +271,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
                 |ui| {
                     ui.label(
                         egui::RichText::new(alias.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
+                            .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
                             .color(theme.accent),
                     );
                 },
@@ -282,7 +282,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
                 |ui| {
                     ui.label(
                         egui::RichText::new(alias.code.as_ref())
-                            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                            .font(theme::font(theme::SIZE_BODY, Weight::Regular))
                             .color(theme.text),
                     );
                 },
@@ -303,7 +303,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
             if let Some(note) = &alias.note {
                 ui.label(
                     egui::RichText::new(note.as_ref())
-                        .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                         .color(theme.dim),
                 );
             }
@@ -354,7 +354,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
     if let Some(problem) = &form.draft.problem {
         ui.label(
             egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                 .color(theme.tone(view::status::Tone::Warn)),
         );
     }
@@ -369,7 +369,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
 fn intro(ui: &mut egui::Ui, theme: &Theme, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(theme::font(theme::SIZE_SMALL, Weight::Regular))
+            .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
             .color(theme.dim),
     );
     ui.add_space(6.0);

@@ -7,9 +7,7 @@
 use eframe::egui::Color32;
 use eframe::egui::epaint::Shadow;
 
-use super::{
-    PANEL_RADIUS, SIZE_CHIP, SIZE_HEADLINE, SIZE_ROW, SIZE_SMALL, Theme, Weight, font, radius,
-};
+use super::{PANEL_RADIUS, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
 use crate::view::status::Tone;
 
 /// A control's corner. Windows 11 rounds a button and a text box by four.
@@ -107,11 +105,12 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         // this program writes by hand. Without this a button is 14 pt and the
         // label beside it is 15, which reads as a mistake because it is one.
         style.text_styles = [
-            (TextStyle::Small, font(SIZE_CHIP, Weight::Regular)),
-            (TextStyle::Body, font(SIZE_ROW, Weight::Regular)),
-            (TextStyle::Button, font(SIZE_ROW, Weight::Regular)),
-            (TextStyle::Heading, font(SIZE_HEADLINE, Weight::Semibold)),
-            (TextStyle::Monospace, font(SIZE_SMALL, Weight::Regular)),
+            (TextStyle::Small, font(SIZE_CAPTION, Weight::Regular)),
+            (TextStyle::Body, font(SIZE_BODY, Weight::Regular)),
+            (TextStyle::Button, font(SIZE_BODY, Weight::Regular)),
+            // A heading is `body1Strong`: the same size, a heavier weight.
+            (TextStyle::Heading, font(SIZE_BODY, Weight::Semibold)),
+            (TextStyle::Monospace, font(SIZE_CAPTION, Weight::Regular)),
         ]
         .into();
 

@@ -64,13 +64,32 @@ pub const FOOTER_PAD: f32 = 8.0;
 /// have to be the same number.
 pub const DIVIDER: f32 = 1.0;
 
+/// The air above and below a row's text, which is Ueli's `padding: 8`.
+///
+/// Never painted and never positioned against - a row's text is centred as a
+/// block, so the padding falls out rather than being applied. It is here
+/// because it is the term the two row heights below are derived from, and a
+/// height that is derived is a height nobody has to trust.
+const ROW_PAD_Y: f32 = 8.0;
+
 /// A group's caption, and the air under it.
+///
+/// One `caption1` line plus Fluent's `paddingBottom: 5` on a group header.
 pub const HEADING_H: f32 = 21.0;
+const _: () = assert!(HEADING_H == line_h(SIZE_CAPTION) + 5.0);
 
 /// One result, on one line: an icon, a name and a badge.
 pub const ROW_COMPACT_H: f32 = 36.0;
+const _: () = assert!(ROW_COMPACT_H == ROW_PAD_Y * 2.0 + line_h(SIZE_BODY));
+
 /// One result, with the folder under the name.
+///
+/// The two lines sit directly on each other with no gap between them, which
+/// is what a flex column of two `Text`s does and is why 20 + 16 lands exactly
+/// on Ueli's 52.
 pub const ROW_DETAILED_H: f32 = 52.0;
+const _: () = assert!(ROW_DETAILED_H == ROW_PAD_Y * 2.0 + line_h(SIZE_BODY) + line_h(SIZE_CAPTION));
+
 /// The gap between a row's edge and its text.
 pub const ROW_PAD_X: f32 = 12.0;
 
@@ -180,17 +199,58 @@ pub const FALLBACK_FILES: [(&str, &str); 2] = [
     ("segoe-emoji", r"C:\Windows\Fonts\seguiemj.ttf"),
 ];
 
-/// What the user is typing: the biggest thing on screen, because it is the
-/// only thing they are doing.
-pub const SIZE_INPUT: f32 = 22.0;
-/// A filename.
-pub const SIZE_ROW: f32 = 15.0;
-/// The folder beside it, and the status line.
-pub const SIZE_SMALL: f32 = 13.0;
-/// A key name in a shortcut chip, a group caption, and a menu row.
-pub const SIZE_CHIP: f32 = 12.0;
-/// The first-run headline in the empty state.
-pub const SIZE_HEADLINE: f32 = 17.0;
+// -- type -------------------------------------------------------------------
+
+// Fluent's ramp, and nothing between its rungs. Each of the five is a real
+// token out of `@fluentui/tokens`, and what used to be a sixth size is now a
+// change of [`Weight`]: `body1` against `body1Strong` is one size and two
+// weights, which is how the thing being copied does it.
+//
+// Four of the five moved. The loudest is the search box, which was 22 - very
+// nearly a window title - against Fluent's 16 for an input at `size="large"`.
+// The old numbers were a ramp of one program's own invention, and every one
+// of them was a point or two off a rung of the ramp underneath it.
+
+/// A badge over a row's icon. Fluent `caption2`.
+pub const SIZE_BADGE: f32 = 10.0;
+/// The folder under a name, the status line, a group caption, a key cap and a
+/// menu row. Fluent `caption1`.
+pub const SIZE_CAPTION: f32 = 12.0;
+/// A filename, and everything else meant to be read rather than glanced at.
+/// Fluent `body1`.
+pub const SIZE_BODY: f32 = 14.0;
+/// What the user is typing. Fluent `body2`, which is what a large input is
+/// set in.
+pub const SIZE_LARGE: f32 = 16.0;
+/// A settings page's title. Fluent `subtitle1`.
+pub const SIZE_TITLE: f32 = 20.0;
+
+/// The room one line of `size` takes, which is Fluent's `lineHeight` for it.
+///
+/// A table rather than a factor, because the ramp is deliberately not
+/// proportional: 10/14 is 1.40, 12/16 is 1.33, 14/20 is 1.43, 16/22 is 1.375,
+/// 20/28 is 1.40. Any single multiplier is wrong at one end of that, and
+/// being wrong by a point is how a row ends up a point short of the height it
+/// was declared at.
+///
+/// A size that is not on the ramp does not compile. That is the point: the
+/// only way to get a line height here is to add the rung with the number
+/// Microsoft publishes for it, rather than to guess one at a call site.
+pub const fn line_h(size: f32) -> f32 {
+    if size == SIZE_BADGE {
+        14.0
+    } else if size == SIZE_CAPTION {
+        16.0
+    } else if size == SIZE_BODY {
+        20.0
+    } else if size == SIZE_LARGE {
+        22.0
+    } else if size == SIZE_TITLE {
+        28.0
+    } else {
+        panic!("a size off Fluent's ramp has no published line height")
+    }
+}
 
 // -- colour -----------------------------------------------------------------
 

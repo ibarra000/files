@@ -62,7 +62,7 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui) -> R) -> R
 pub fn group_heading(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(theme::font(theme::SIZE_CHIP, Weight::Semibold))
+            .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
             .color(theme.dim),
     );
     ui.add_space(measure::LABEL_GAP);
@@ -111,20 +111,23 @@ pub fn setting_row<R>(
     let label = truncated(
         &painter,
         row.label,
-        theme::font(theme::SIZE_ROW, Weight::Regular),
+        theme::font(theme::SIZE_BODY, Weight::Regular),
         theme.text,
         prose_w,
     );
     let help = painter.layout(
         row.help.to_owned(),
-        theme::font(theme::SIZE_SMALL, Weight::Regular),
+        theme::font(theme::SIZE_CAPTION, Weight::Regular),
         theme.dim,
         prose_w,
     );
     let caveat = row.caveat.map(|text| {
         painter.layout(
             text.to_owned(),
-            theme::font(theme::SIZE_SMALL, theme.weight(crate::view::Emphasis::Body)),
+            theme::font(
+                theme::SIZE_CAPTION,
+                theme.weight(crate::view::Emphasis::Body),
+            ),
             theme.tone(Tone::Warn),
             prose_w,
         )
@@ -369,7 +372,7 @@ pub fn nav_item(
         pos2(text_x, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
-        theme::font(theme::SIZE_ROW, weight),
+        theme::font(theme::SIZE_BODY, weight),
         if selected { theme.strong } else { theme.text },
     );
 
@@ -412,7 +415,7 @@ pub fn primary_button(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
     ui.add(
         egui::Button::new(
             egui::RichText::new(text)
-                .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                .font(theme::font(theme::SIZE_BODY, Weight::Regular))
                 .color(theme.accent_fg),
         )
         .fill(theme.accent_fill)
@@ -437,13 +440,13 @@ pub fn message_bar(ui: &mut Ui, theme: &Theme, tone: Tone, text: &str) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(theme.glyph(tone).to_string())
-                    .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
+                    .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
                     .color(theme.tone(tone)),
             );
             ui.label(
                 egui::RichText::new(text)
                     .font(theme::font(
-                        theme::SIZE_SMALL,
+                        theme::SIZE_CAPTION,
                         theme.weight(crate::view::Emphasis::Tone(tone)),
                     ))
                     .color(theme.tone(tone)),
@@ -464,7 +467,7 @@ pub fn report_box(ui: &mut Ui, theme: &Theme, report: &str) {
             .interactive(false)
             .desired_width(f32::INFINITY)
             .desired_rows(16)
-            .font(FontId::monospace(theme::SIZE_SMALL))
+            .font(FontId::monospace(theme::SIZE_CAPTION))
             .text_color(theme.text),
     );
 }
@@ -480,13 +483,13 @@ pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color3
     let label = truncated(
         &painter,
         label,
-        theme::font(theme::SIZE_ROW, Weight::Regular),
+        theme::font(theme::SIZE_BODY, Weight::Regular),
         theme.text,
         prose_w,
     );
     let value = painter.layout(
         value.to_owned(),
-        theme::font(theme::SIZE_SMALL, Weight::Regular),
+        theme::font(theme::SIZE_CAPTION, Weight::Regular),
         colour,
         prose_w,
     );
@@ -570,11 +573,11 @@ pub fn text_field(
     let response = ui.add(
         egui::TextEdit::singleline(buffer)
             .desired_width(field_w)
-            .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+            .font(theme::font(theme::SIZE_BODY, Weight::Regular))
             .text_color(theme.input)
             .hint_text(
                 egui::RichText::new(hint)
-                    .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                    .font(theme::font(theme::SIZE_BODY, Weight::Regular))
                     .color(theme.faint),
             ),
     );
@@ -639,7 +642,7 @@ pub fn confirm(
             ui.set_max_width(360.0);
             ui.label(
                 egui::RichText::new(question)
-                    .font(theme::font(theme::SIZE_ROW, Weight::Regular))
+                    .font(theme::font(theme::SIZE_BODY, Weight::Regular))
                     .color(theme.text),
             );
             ui.add_space(16.0);

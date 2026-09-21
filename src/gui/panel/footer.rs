@@ -127,7 +127,7 @@ fn default_button(
     intents: &mut Vec<Intent>,
 ) -> f32 {
     let painter = ui.painter().clone();
-    let font = theme::font(theme::SIZE_SMALL, Weight::Regular);
+    let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let label_w = painter
         .layout_no_wrap(action.description.to_owned(), font.clone(), theme.text)
         .rect
@@ -234,7 +234,7 @@ fn status(
 ) {
     let painter = ui.painter().clone();
     let line = view::status::render(state, now, wall);
-    let font = theme::font(theme::SIZE_SMALL, Weight::Regular);
+    let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
 
     let mut left = band.left() + theme::FOOTER_PAD + BUTTON + GAP;
 
@@ -249,7 +249,7 @@ fn status(
             pos2(left, band.center().y),
             Align2::LEFT_CENTER,
             theme.glyph(line.tone),
-            theme::font(theme::SIZE_SMALL, theme.weight(Emphasis::Tone(line.tone))),
+            theme::font(theme::SIZE_CAPTION, theme.weight(Emphasis::Tone(line.tone))),
             theme.tone(line.tone),
         );
     }

@@ -73,12 +73,6 @@ const COLUMN_GAP: f32 = 12.0;
 /// The air inside the badge, left and right of its text.
 const BADGE_PAD_X: f32 = 6.0;
 
-/// The air between a detailed row's two lines.
-const LINE_GAP: f32 = 2.0;
-
-/// How much room a line of text takes beyond its own point size.
-const LINE_SPACING: f32 = 1.3;
-
 /// Everything a row needs that is the same for every row in the list.
 ///
 /// Gathered rather than passed one by one: four of these are read once per
@@ -159,7 +153,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     // it is a fact *about* the row rather than part of what the row is, and
     // in the detailed layout there is a folder on the line below that would
     // otherwise read as the same kind of thing.
-    let badge_font = theme::font(theme::SIZE_CHIP, Weight::Regular);
+    let badge_font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let badge = content::drive_of(style.routes, &hit.path);
     let badge_w = badge
         .map(|name| measure(name, &badge_font) + BADGE_PAD_X * 2.0)
@@ -168,9 +162,9 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
         let pill = Rect::from_min_size(
             pos2(
                 rect.right() - pad - badge_w,
-                rect.center().y - theme::SIZE_CHIP,
+                rect.center().y - theme::SIZE_CAPTION,
             ),
-            vec2(badge_w, theme::SIZE_CHIP * 2.0),
+            vec2(badge_w, theme::SIZE_CAPTION * 2.0),
         );
         theme::cap(&painter, theme, pill, theme::CHIP_RADIUS);
         painter.text(
@@ -211,7 +205,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             text,
             0.0,
             TextFormat {
-                font_id: theme::font(theme::SIZE_ROW, weight),
+                font_id: theme::font(theme::SIZE_BODY, weight),
                 color: colour,
                 ..Default::default()
             },
@@ -238,23 +232,26 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             );
         }
         ResultLayout::Detailed => {
-            let folder_font = theme::font(theme::SIZE_SMALL, Weight::Regular);
+            let folder_font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
             let name_h = galley.rect.height();
             // The two lines stacked and centred as a block, rather than each
             // pinned to an edge of the row: a file at the root of a drive has
             // no second line, and pinning would leave it sitting high in its
             // own rectangle beside neighbours that do not.
+            // No gap between the two: Ueli stacks them in a flex column
+            // with none, and the two published line heights are exactly what
+            // `ROW_DETAILED_H` was derived from.
             let second = if folder.is_empty() {
                 0.0
             } else {
-                LINE_GAP + theme::SIZE_SMALL * LINE_SPACING
+                theme::line_h(theme::SIZE_CAPTION)
             };
             let top = rect.center().y - (name_h + second) / 2.0;
             painter.galley(pos2(text_left, top), galley, body);
             if !folder.is_empty() {
                 let shown = elide_left(folder, text_w, &|text| measure(text, &folder_font));
                 painter.text(
-                    pos2(text_left, top + name_h + LINE_GAP),
+                    pos2(text_left, top + name_h),
                     Align2::LEFT_TOP,
                     shown,
                     folder_font,
