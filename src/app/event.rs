@@ -40,12 +40,6 @@ pub enum AppEvent {
     /// What the pointer meant, already resolved against the layout that drew
     /// it. See [`crate::app::state::pointer`].
     Intent(crate::app::state::pointer::Intent),
-    /// A control in the settings window was moved.
-    Setting(crate::app::state::SettingChange),
-    /// The alias list was changed in the settings window.
-    Aliases(Vec<crate::alias::Alias>),
-    /// The drive list was changed in the settings window.
-    Drives(Vec<crate::paths::Mapping>),
     Paste(String),
     /// The window gained or lost the keyboard.
     ///
@@ -210,14 +204,6 @@ pub enum OpenMsg {
     ViewerSaveFailed {
         detail: String,
     },
-    /// A setting changed in the window reached the configuration file.
-    ///
-    /// Carries the label rather than the key, because what the user is owed
-    /// is confirmation about the thing they just changed, spelled the way the
-    /// form spelled it.
-    SettingSaved {
-        label: &'static str,
-    },
     SettingSaveFailed {
         label: &'static str,
         detail: String,
@@ -298,16 +284,6 @@ pub enum Cmd {
     /// every comment in it. Emitted only when the state machine already knows
     /// the value can stick - see `Settings::can_save`.
     SaveViewer(ViewerKind),
-    /// Write a setting changed in the window back to the configuration file.
-    ///
-    /// Emitted only for a setting `Settings::can_save` has already agreed to,
-    /// so this never reaches the disk to report a save the next start would
-    /// ignore.
-    SaveSetting {
-        edit: crate::config::write::Edit,
-        /// How the form spells it, for the message that reports the outcome.
-        label: &'static str,
-    },
     /// Put text on the system clipboard.
     Copy(String),
     /// Say something the user has to see, with no panel to say it on.

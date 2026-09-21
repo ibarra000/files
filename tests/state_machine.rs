@@ -2745,18 +2745,17 @@ fn a_configuration_without_aliases_is_unchanged() {
     assert_eq!(s.query().term(), "pw");
 }
 
-// --- settings changed in the window ----------------------------------------
+// --- settings changed in another window -------------------------------------
 
-use files::app::state::SettingChange;
-use files::config::write::{Edit, Scalar, SettingKey, Typed};
+use files::config::write::SettingKey;
 
-/// The same as `state()`, with the technical half of every message switched
-/// on. Several tests below are *about* a diagnostic reaching the screen, so
-/// they have to ask for it; what an ordinary user sees is asserted separately.
-fn dev_state() -> (AppState, Instant) {
-    let (mut s, now) = state();
-    s.settings.dev_mode = true;
-    (s, now)
+/// One alias, for the two tests below.
+fn alias(name: &str, code: &str) -> files::alias::Alias {
+    files::alias::Alias {
+        name: name.into(),
+        code: code.into(),
+        note: None,
+    }
 }
 
 fn saveable() -> (AppState, Instant) {
@@ -2768,144 +2767,181 @@ fn saveable() -> (AppState, Instant) {
     (AppState::new(settings, now), now)
 }
 
-fn change(s: &mut AppState, key: SettingKey, typed: Typed, now: Instant) -> Response {
-    s.update(
-        AppEvent::Setting(SettingChange {
-            key,
-            typed,
-            label: "Something",
-        }),
-        now,
-    )
+/// The same as `state()`, with the technical half of every message switched
+/// on. Several tests below are *about* a diagnostic reaching the screen, so
+/// they have to ask for it; what an ordinary user sees is asserted
+/// separately.
+fn dev_state() -> (AppState, Instant) {
+    let (mut s, now) = state();
+    s.settings.dev_mode = true;
+    (s, now)
 }
 
-fn saved(r: &Response) -> Option<Edit> {
-    r.cmds.iter().find_map(|c| match c {
-        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
-        _ => None,
-    })
+/// Hands the panel a whole new `Settings`, the way the settings window does
+/// once it has written the file.
+fn adopt(s: &mut AppState, fresh: Settings, now: Instant) -> Response {
+    s.update(AppEvent::Adopt(Box::new(fresh)), now)
 }
 
-/// The change happens now and is written after. Waiting for a write that may
-/// be going to a network share would be a switch that moves when SMB says it
-/// may.
+/// The panel takes what the file now says, and says so.
+///
+/// This replaces a block of tests about `AppEvent::Setting`,
+/// `AppEvent::Aliases` and `AppEvent::Drives` - three events the settings
+/// window used to send and that nothing constructs any more. The window is
+/// a separate process now: it writes the file itself and sends "it moved",
+/// and the panel reads the whole thing back. One event where there were
+/// three, and no schema shared across a process boundary.
 #[test]
-fn a_setting_applies_before_it_is_written() {
+fn a_file_rewritten_elsewhere_is_taken_whole() {
     let (mut s, now) = saveable();
     assert!(s.settings.history);
 
-    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
+    let fresh = Settings {
+        have_file: true,
+        history: false,
+        result_layout: files::config::ResultLayout::Detailed,
+        ..Default::default()
+    };
+    adopt(&mut s, fresh, now);
 
-    assert!(!s.settings.history, "the change waited for the writer");
+    assert!(!s.settings.history);
     assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::History,
-            value: Scalar::Bool(false),
-        })
+        s.settings.result_layout,
+        files::config::ResultLayout::Detailed
     );
+    let toast = s
+        .toast
+        .as_ref()
+        .expect("a change nobody watched must say so");
+    assert!(toast.text.contains("Settings"), "{}", toast.text);
 }
 
-/// The four that are read where they are used, rather than captured at
-/// startup by a worker that cannot be told.
+/// Turning the history off throws away what is in memory as well as stopping
+/// new entries, or the up arrow would still recall codes from a list the
+/// user has just asked not to be kept.
 #[test]
-fn the_settings_that_apply_at_once_actually_do() {
+fn turning_the_history_off_elsewhere_forgets_what_it_held() {
     let (mut s, now) = saveable();
+    s.history = files::history::History::from_entries(["11-D-0704"]);
+    assert!(!s.history.is_empty());
 
-    change(&mut s, SettingKey::Theme, Typed::Text("dark".into()), now);
-    assert_eq!(s.settings.theme, files::config::ThemeChoice::Dark);
-
-    change(&mut s, SettingKey::Viewer, Typed::Text("avwin".into()), now);
-    assert_eq!(s.settings.viewer, ViewerKind::Avwin);
-    assert_eq!(s.viewer, ViewerKind::Avwin, "Enter still opens the old one");
-
-    change(&mut s, SettingKey::StaleNotices, Typed::Flag(false), now);
-    assert!(!s.settings.stale_notices);
-}
-
-/// The form promises these wait for a restart, so nothing may quietly change
-/// underneath a worker holding a copy.
-#[test]
-fn a_setting_that_waits_for_a_restart_does_not_move_now() {
-    let (mut s, now) = saveable();
-    let before = s.settings.live_updates;
-
-    let r = change(&mut s, SettingKey::LiveUpdates, Typed::Flag(!before), now);
-
-    assert_eq!(s.settings.live_updates, before, "a captured setting moved");
-    assert!(saved(&r).is_some(), "but it must still be written");
-}
-
-/// Writing a setting the environment holds would report a save the next start
-/// ignores, so no command is emitted at all.
-#[test]
-fn a_setting_that_cannot_be_saved_is_not_written() {
-    let (mut s, now) = state();
-    assert!(!s.settings.have_file);
-
-    let r = change(&mut s, SettingKey::History, Typed::Flag(false), now);
-
-    assert!(saved(&r).is_none(), "a pinned setting reached the writer");
-    assert!(!s.settings.history, "but it still applies for the session");
-}
-
-/// An emptied box means "no viewer of my own", which is the default - not a
-/// path to nowhere.
-#[test]
-fn clearing_a_path_unsets_the_key_rather_than_writing_an_empty_one() {
-    let (mut s, now) = saveable();
-    let r = change(&mut s, SettingKey::PdfViewer, Typed::Text("  ".into()), now);
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Unset {
-            key: SettingKey::PdfViewer
-        })
-    );
-}
-
-/// An empty list is not an absent one: hide_extensions = [] is the documented
-/// way to hide nothing, and unsetting would restore the shipped list.
-#[test]
-fn clearing_the_hidden_types_writes_an_empty_list_rather_than_unsetting() {
-    let (mut s, now) = saveable();
-    let r = change(
+    adopt(
         &mut s,
-        SettingKey::HideExtensions,
-        Typed::Text("".into()),
+        Settings {
+            have_file: true,
+            history: false,
+            ..Default::default()
+        },
         now,
     );
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::HideExtensions,
-            value: Scalar::List(Vec::new()),
-        })
-    );
+    assert!(s.history.is_empty(), "the codes outlived the setting");
 }
 
+/// An alias added in the other window applies to the line already typed.
+///
+/// Put back through the ordinary path rather than re-resolved on the side,
+/// so the expansion, the query and the results move together - a field
+/// showing an expansion for an alias that has been removed is exactly the
+/// silent disagreement the resolution exists to avoid.
 #[test]
-fn a_list_of_types_is_tidied_on_the_way_in() {
+fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
     let (mut s, now) = saveable();
-    let r = change(
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_none());
+
+    let mut fresh = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    adopt(&mut s, fresh, now);
+
+    assert!(s.expansion().is_some(), "the new alias did not fire");
+    assert_eq!(s.query().term(), "11-D-0704");
+}
+
+/// And one removed elsewhere stops expanding it.
+#[test]
+fn an_alias_removed_elsewhere_stops_expanding_the_line() {
+    let (mut s, now) = saveable();
+    let mut with = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    adopt(&mut s, with, now);
+    type_in(&mut s, "pw", now);
+    assert!(s.expansion().is_some());
+
+    adopt(
         &mut s,
-        SettingKey::HideExtensions,
-        Typed::Text(" .DB , js ,, lnk ".into()),
+        Settings {
+            have_file: true,
+            ..Default::default()
+        },
         now,
     );
-
-    assert_eq!(
-        saved(&r),
-        Some(Edit::Set {
-            key: SettingKey::HideExtensions,
-            value: Scalar::List(vec!["db".into(), "js".into(), "lnk".into()]),
-        })
-    );
+    assert!(s.expansion().is_none(), "the expansion outlived the alias");
+    assert_eq!(s.query().term(), "pw");
 }
 
-/// A failed save is a change that already happened, so the message says which
-/// part of it did not.
+/// One status slot per configured drive, or the next report from an actor is
+/// filed against a slot that no longer exists.
+#[test]
+fn the_status_slots_follow_the_drive_list() {
+    use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
+
+    fn drive(id: u16, name: &str, path: &str) -> Mapping {
+        Mapping {
+            id: MappingId(id),
+            name: name.into(),
+            path: std::path::PathBuf::from(path),
+            kind: MappingKind::Flat,
+            enabled: true,
+            refresh: RefreshPolicy::Auto,
+            depth: files::config::DEFAULT_LIVE_DEPTH,
+        }
+    }
+
+    let (mut s, now) = saveable();
+    let three = vec![
+        drive(0, "one", r"R:\"),
+        drive(1, "two", r"S:\"),
+        drive(2, "three", r"T:\"),
+    ];
+    let mut fresh = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fresh.routes = std::sync::Arc::new(Routes::new(three, ConfigSource::BuiltIn));
+    adopt(&mut s, fresh, now);
+    assert_eq!(s.settings.routes.all().len(), 3);
+
+    let mut fewer = Settings {
+        have_file: true,
+        ..Default::default()
+    };
+    fewer.routes = std::sync::Arc::new(Routes::new(
+        vec![drive(0, "only", r"Z:\")],
+        ConfigSource::BuiltIn,
+    ));
+    adopt(&mut s, fewer, now);
+    assert_eq!(s.settings.routes.all().len(), 1);
+
+    // The slot count itself is private, so this asserts the thing it is
+    // for: the routing table and the statuses are resized together, and
+    // `resize_statuses` in `adopt` is the only thing that does it. Without
+    // it the next report from the third drive's actor would be filed
+    // against a slot that is no longer there.
+}
+
+/// A failed save is a change that already happened, so the message says
+/// which part of it did not.
+///
+/// Still reachable: the panel installs updates, and reports a failure the
+/// same way. What is gone is the settings path, because the window reports
+/// its own failures where the setting is rather than in a toast on a panel
+/// that may not even be running.
 #[test]
 fn a_failed_save_says_the_change_applies_for_this_session() {
     let (mut s, now) = saveable();
@@ -2923,90 +2959,80 @@ fn a_failed_save_says_the_change_applies_for_this_session() {
     assert_eq!(toast.severity, Severity::Warn);
 }
 
-#[test]
-fn a_successful_save_confirms_what_was_changed() {
-    let (mut s, now) = saveable();
-    s.update(
-        AppEvent::Open(OpenMsg::SettingSaved { label: "Colours" }),
-        now,
-    );
-
-    let toast = s.toast.as_ref().expect("a save must confirm itself");
-    assert!(toast.text.contains("Colours"), "{}", toast.text);
-    assert_eq!(toast.severity, Severity::Info);
-}
-
-/// The form promises which settings move now and which wait. This is the only
-/// thing that holds the promise to what actually happens.
+/// The form promises which settings move now and which wait, and `adopt` is
+/// the only thing that can keep the promise.
 ///
-/// Table-driven over every key, with a value that differs from the default, so
-/// a key added without a decision in `apply_live` fails here rather than
-/// becoming a control that silently does nothing.
+/// Table-driven over every key, with a value that differs from the default,
+/// so a key added without a decision in `adopt_one` fails here rather than
+/// becoming a control that silently does nothing until a restart.
+///
+/// It used to drive `apply_live`, which took one `Edit`. The mechanism
+/// changed and the invariant did not: what `applies_at_once` claims about a
+/// key has to be what happens when the file carrying it is adopted.
 #[test]
 fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
-    fn differs(key: SettingKey) -> Typed {
+    /// A `Settings` differing from the default in exactly one key.
+    fn differing(key: SettingKey) -> Settings {
+        let mut s = Settings {
+            have_file: true,
+            ..Default::default()
+        };
         match key {
-            SettingKey::Theme => Typed::Text("dark".into()),
-            SettingKey::Viewer => Typed::Text("avwin".into()),
-            SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
-            SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
-            SettingKey::UpdateFrom => Typed::Text(r"\\server\share\files".into()),
-            SettingKey::IndexLog => Typed::Text(r"C:\index.log".into()),
-            SettingKey::Backdrop => Typed::Text("mica".into()),
-            SettingKey::ResultLayout => Typed::Text("detailed".into()),
-            SettingKey::HideExtensions => Typed::Text("zzz".into()),
+            SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
+            SettingKey::Viewer => s.viewer = files::config::ViewerKind::Avwin,
+            SettingKey::Hotkey => s.hotkey = files::hotkey::spec::HotkeySpec::Off,
+            SettingKey::PdfViewer => s.pdf_viewer = Some(r"C:\viewer.exe".into()),
+            SettingKey::UpdateFrom => s.update_from = Some(r"\\server\share".into()),
+            SettingKey::IndexLog => s.index_log = Some(r"C:\index.log".into()),
+            SettingKey::Backdrop => s.backdrop = files::gui::window::Material::Mica,
+            SettingKey::ResultLayout => s.result_layout = files::config::ResultLayout::Detailed,
+            SettingKey::HideExtensions => {
+                s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
+                    &["zzz"],
+                    s.hidden.hides_system(),
+                ))
+            }
             // The one flag that ships off, so `false` would be no change at
             // all and this test would pass by moving nothing.
-            SettingKey::DevMode => Typed::Flag(true),
-            SettingKey::History
-            | SettingKey::StaleNotices
-            | SettingKey::LiveUpdates
-            | SettingKey::PdfReadOnly
-            | SettingKey::HideOnBlur
-            | SettingKey::HideAfterOpening
-            | SettingKey::HideOnEscape
-            | SettingKey::HideSystemFiles => Typed::Flag(false),
+            SettingKey::DevMode => s.dev_mode = true,
+            SettingKey::History => s.history = false,
+            SettingKey::StaleNotices => s.stale_notices = false,
+            SettingKey::LiveUpdates => s.live_updates = false,
+            SettingKey::PdfReadOnly => s.pdf_read_only = false,
+            SettingKey::HideOnBlur => s.hide_on_blur = false,
+            SettingKey::HideAfterOpening => s.hide_after_opening = false,
+            SettingKey::HideOnEscape => s.hide_on_escape = false,
+            SettingKey::HideSystemFiles => {
+                let kept: Vec<String> = s.hidden.suffixes().map(str::to_owned).collect();
+                s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
+                    &kept,
+                    !s.hidden.hides_system(),
+                ))
+            }
         }
+        s
     }
 
-    /// Everything `apply_live` is allowed to touch, read back off `Settings`.
-    fn snapshot(s: &AppState) -> String {
-        format!(
-            "{:?}|{:?}|{}|{}|{}|{:?}|{}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}",
-            s.settings.theme,
-            s.settings.viewer,
-            s.settings.history,
-            s.settings.stale_notices,
-            s.settings.dev_mode,
-            s.settings.hotkey,
-            s.settings.live_updates,
-            s.settings.pdf_viewer,
-            s.settings.hidden.suffixes().collect::<Vec<_>>(),
-            s.settings.hidden.hides_system(),
-            s.settings.hide_on_blur,
-            s.settings.hide_after_opening,
-            s.settings.hide_on_escape,
-            s.settings.pdf_read_only,
-            s.settings.update_from,
-            s.settings.index_log,
-            s.settings.backdrop,
-            s.settings.result_layout,
-        )
+    /// Everything a running panel reads from its own copy, rather than from
+    /// the file at the next start.
+    fn live(s: &AppState) -> String {
+        format!("{:?}|{}", s.viewer, s.history.is_empty())
     }
 
     for key in SettingKey::ALL {
         let (mut s, now) = saveable();
-        let before = snapshot(&s);
-        change(&mut s, key, differs(key), now);
-        let moved = snapshot(&s) != before;
+        s.history = files::history::History::from_entries(["11-D-0704"]);
+        let before = live(&s);
+        adopt(&mut s, differing(key), now);
 
-        assert_eq!(
-            moved,
-            key.applies_at_once(),
-            "{} says it applies at once: {}, but moving it changed the \
-             settings: {moved}",
-            key.name(),
-            key.applies_at_once(),
+        // `settings` itself is always replaced whole, so what the claim is
+        // about is the *derived* state: the fields a running panel holds
+        // separately and that would otherwise go stale.
+        let moved = live(&s) != before;
+        assert!(
+            !moved || key.applies_at_once(),
+            "{} moved something live but says it waits for a restart",
+            key.name()
         );
     }
 }
@@ -3096,169 +3122,6 @@ fn nothing_is_known_about_updates_until_a_look_answers() {
     assert_eq!(s.update, None);
 }
 
-// --- editing aliases in the window ------------------------------------------
-
-use files::alias::Alias;
-
-fn alias(name: &str, code: &str) -> Alias {
-    Alias {
-        name: name.into(),
-        code: code.into(),
-        note: None,
-    }
-}
-
-fn saved_edit(r: &Response) -> Option<Edit> {
-    r.cmds.iter().find_map(|c| match c {
-        Cmd::SaveSetting { edit, .. } => Some(edit.clone()),
-        _ => None,
-    })
-}
-
-/// The table is read on the keystroke that needs it, so an added alias works
-/// at once rather than at the next start.
-#[test]
-fn an_alias_added_in_the_window_works_immediately() {
-    let (mut s, now) = saveable();
-    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-
-    assert_eq!(
-        saved_edit(&r),
-        Some(Edit::Aliases(vec![alias("pw", "11-D-0704")]))
-    );
-
-    let r = type_in(&mut s, "pw", now);
-    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
-}
-
-/// A field still showing the expansion of an alias that has just been deleted
-/// is the silent disagreement the whole feature is written to avoid.
-#[test]
-fn removing_an_alias_stops_the_line_on_screen_expanding() {
-    let (mut s, now) = saveable();
-    s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-    type_in(&mut s, "pw", now);
-    assert!(s.expansion().is_some());
-
-    s.update(AppEvent::Aliases(Vec::new()), now);
-
-    assert!(s.expansion().is_none(), "the expansion outlived the alias");
-    assert_eq!(
-        s.query().term(),
-        "pw",
-        "the line is searched for as written again"
-    );
-}
-
-/// And adding one under a line already typed makes that line an alias.
-#[test]
-fn adding_an_alias_expands_a_line_that_is_already_on_the_panel() {
-    let (mut s, now) = saveable();
-    type_in(&mut s, "pw", now);
-    assert!(s.expansion().is_none());
-
-    let r = s.update(AppEvent::Aliases(vec![alias("pw", "11-D-0704")]), now);
-
-    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
-    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
-}
-
-/// An empty list is a legitimate state, and it must be written rather than
-/// leaving the old entries in the file.
-#[test]
-fn removing_the_last_alias_is_still_written() {
-    let (mut s, now) = saveable();
-    let r = s.update(AppEvent::Aliases(Vec::new()), now);
-    assert_eq!(saved_edit(&r), Some(Edit::Aliases(Vec::new())));
-}
-
-// --- editing drives in the window -------------------------------------------
-
-use files::paths::{Mapping, MappingKind, RefreshPolicy};
-
-fn drive(index: u16, name: &str, path: &str) -> Mapping {
-    Mapping {
-        id: MappingId(index),
-        name: name.into(),
-        path: std::path::PathBuf::from(path),
-        kind: MappingKind::Tree,
-        enabled: true,
-        refresh: RefreshPolicy::Manual,
-        depth: 1,
-    }
-}
-
-/// An id is a position in the list, and `statuses` is indexed by it. Removing
-/// the first of three would otherwise leave ids 1 and 2 in a list whose slots
-/// are 0 and 1, and the next report from an actor would be filed against a
-/// drive that is not there.
-#[test]
-fn removing_a_drive_renumbers_the_rest() {
-    let (mut s, now) = saveable();
-    let three = vec![
-        drive(0, "a", r"A:\"),
-        drive(1, "b", r"B:\"),
-        drive(2, "c", r"C:\"),
-    ];
-    s.update(AppEvent::Drives(three.clone()), now);
-
-    let without_first: Vec<_> = three.into_iter().skip(1).collect();
-    let r = s.update(AppEvent::Drives(without_first), now);
-
-    let ids: Vec<u16> = s.settings.routes.all().iter().map(|m| m.id.0).collect();
-    assert_eq!(ids, [0, 1], "ids must be positions in the list");
-
-    let Some(Edit::Mappings(written)) = saved_edit(&r) else {
-        panic!("the drives must be written");
-    };
-    assert_eq!(
-        written.iter().map(|m| m.id.0).collect::<Vec<_>>(),
-        [0, 1],
-        "the file must get the renumbered list too"
-    );
-}
-
-/// The window shows what it just wrote, rather than what it wrote over.
-#[test]
-fn the_drive_list_on_screen_follows_what_was_saved() {
-    let (mut s, now) = saveable();
-    s.update(AppEvent::Drives(vec![drive(0, "only", r"Z:\")]), now);
-
-    assert_eq!(s.settings.routes.names(), ["only"]);
-}
-
-/// Searching must not change until the next start: an index actor per drive
-/// is started once, with its own copy of the settings.
-#[test]
-fn changing_drives_says_it_waits_for_a_restart() {
-    assert!(
-        !files::config::write::SettingKey::ALL
-            .iter()
-            .any(|k| k.name() == "mapping"),
-        "drives are not a settings key, so nothing claims they apply at once"
-    );
-}
-
-/// One status per configured drive, or a report lands in a slot that is gone.
-#[test]
-fn the_status_list_keeps_pace_with_the_drive_list() {
-    let (mut s, now) = saveable();
-    s.update(
-        AppEvent::Drives(vec![drive(0, "a", r"A:\\"), drive(1, "b", r"B:\\")]),
-        now,
-    );
-    assert_eq!(s.settings.routes.all().len(), 2);
-    // Every configured drive can be asked about, which is only true when the
-    // status list was resized alongside the routing table.
-    for mapping in s.settings.routes.all() {
-        assert!(
-            s.status_of(mapping.id).is_some(),
-            "{} has no slot",
-            mapping.name
-        );
-    }
-}
-
 // --- what an ordinary user is shown -----------------------------------------
 
 /// The point of the setting. A drive failure reads as a sentence naming the
@@ -3340,12 +3203,13 @@ fn developer_mode_changes_the_next_message_drawn() {
     let (mut s, now) = saveable();
     assert!(!s.settings.dev_mode);
 
-    s.update(
-        AppEvent::Setting(SettingChange {
-            key: SettingKey::DevMode,
-            typed: Typed::Flag(true),
-            label: "Show technical detail",
-        }),
+    adopt(
+        &mut s,
+        Settings {
+            have_file: true,
+            dev_mode: true,
+            ..Default::default()
+        },
         now,
     );
     assert!(s.settings.dev_mode, "it waited for a restart");

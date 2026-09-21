@@ -149,15 +149,11 @@ impl App {
     /// received directly, rather than one a worker posted - and have them
     /// coalesce into the same turn as everything else.
     pub fn feed(&mut self, event: AppEvent, now: Instant) {
-        // Before the update, because `update` consumes the event. Both of
-        // these mean "the file on disk is now different from what another
-        // process last read".
-        if matches!(
-            &event,
-            AppEvent::Open(
-                event::OpenMsg::SettingSaved { .. } | event::OpenMsg::ViewerSaved { .. }
-            )
-        ) {
+        // Before the update, because `update` consumes the event. One
+        // variant rather than two: F2 is the only thing left in this
+        // process that writes the configuration file, because the settings
+        // window writes its own.
+        if matches!(&event, AppEvent::Open(event::OpenMsg::ViewerSaved { .. })) {
             self.saved = true;
         }
         let response = self.state.update(event, now);

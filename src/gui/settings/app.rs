@@ -347,6 +347,20 @@ impl eframe::App for App {
                     exists: &mut self.exists,
                     now,
                 };
+                // A save that did not land, said where the setting is
+                // rather than in a toast on a panel that may not be
+                // running. The change is already in force for this
+                // session - the form drew it the moment it moved - so the
+                // wording has to say what did and did not happen.
+                if let Some(problem) = &self.problem {
+                    super::widgets::message_bar(
+                        ui,
+                        &self.theme,
+                        crate::view::status::Tone::Bad,
+                        &format!("Not saved \u{b7} {problem}"),
+                    );
+                    ui.add_space(8.0);
+                }
                 let chosen = super::show(
                     ui,
                     &self.theme,

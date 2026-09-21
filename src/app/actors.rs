@@ -362,27 +362,6 @@ impl Actors {
                     viewer,
                     self.events.clone(),
                 ),
-                // The settings window is reading this file too, and is
-                // told it moved by `Shell` once the write lands. See
-                // `gui::link`.
-                Cmd::SaveSetting { edit, label } => crate::config::write::save_async(
-                    self.backend
-                        .settings
-                        .routes
-                        .source()
-                        .path()
-                        .map(Path::to_path_buf),
-                    vec![edit],
-                    self.events.clone(),
-                    move |outcome| {
-                        AppEvent::Open(match outcome {
-                            Ok(()) => crate::app::event::OpenMsg::SettingSaved { label },
-                            Err(detail) => {
-                                crate::app::event::OpenMsg::SettingSaveFailed { label, detail }
-                            }
-                        })
-                    },
-                ),
                 // On the spot rather than on a worker. Explorer either
                 // starts or it does not; there is no share to read and
                 // nothing to merge, so the round trip through a thread would
