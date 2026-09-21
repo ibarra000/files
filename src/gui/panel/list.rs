@@ -303,7 +303,7 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             Align2::LEFT_CENTER,
             &entry,
             theme::font(theme::SIZE_BODY, theme.weight(Emphasis::Accent)),
-            theme.accent,
+            theme.text,
         );
         // By rank. This used to push `Hint(Action::Recall)`, which is the Up
         // arrow with the rank thrown away - so clicking the fifth code stepped
@@ -372,7 +372,7 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             Align2::LEFT_CENTER,
             alias.name.as_ref(),
             theme::font(theme::SIZE_BODY, theme.weight(Emphasis::Accent)),
-            theme.accent,
+            theme.text,
         );
         painter.text(
             pos2(rect.right() - theme::ROW_PAD_X, rect.center().y),

@@ -284,76 +284,168 @@ pub fn tint(hex: u32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied((hex >> 16) as u8, (hex >> 8) as u8, hex as u8, alpha)
 }
 
-/// Every colour the panel is drawn with.
+/// Every colour the panel is drawn with, and every one of them is Fluent's.
+///
+/// # The names are roles, the values are tokens
+///
+/// The field names stay semantic - a caller asks for "the ground under a
+/// selected row", not for `NeutralBackground1Selected` - because that is the
+/// bargain the rest of this module keeps: one place turns a meaning into a
+/// picture. What changed is that every value below is now a transcription
+/// rather than a decision. Each doc comment names the token it came from, so
+/// a disagreement with Fluent is a thing you can look up rather than argue
+/// about.
+///
+/// They come from `webLightTheme` and `webDarkTheme` in `@fluentui/tokens`,
+/// which is what Ueli uses with no customisation whatsoever - the entire
+/// contents of its theme file is a choice between those two objects.
+///
+/// # What this cost
+///
+/// The palette this replaces was a hand-tuned warm grey scheme carried over
+/// from a terminal build, and it was *better* by some measures: every pair in
+/// it cleared a ratio somebody had picked on purpose. Fluent's does not, in
+/// two places, and both are noted where they happen - a subtle divider is
+/// 1.3:1 against its own ground, and in the dark theme a hovered row is
+/// slightly louder than a selected one. Those are Microsoft's numbers in
+/// Microsoft's theme, and the alternative to living with them is inventing a
+/// palette again, which is the thing this is undoing.
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub dark: bool,
 
-    /// What the panel paints when the compositor will not supply a backdrop.
+    // -- grounds ------------------------------------------------------------
+    /// The window's own ground. `NeutralBackground1`.
     ///
-    /// Translucent on purpose: on the fallback path this is all the depth
-    /// there is, and an opaque rectangle over somebody's drawing reads as a
-    /// dialog rather than as an overlay.
+    /// Opaque, which is new. It used to be a tint at alpha `0xF0` so that the
+    /// painted fallback path still read as an overlay rather than as a dialog.
+    /// Ueli's `None` material is a flat opaque background and its acrylic path
+    /// paints [`Self::wash`] over the compositor's blur instead, and copying
+    /// that arrangement is what makes every ratio below arithmetic: the ground
+    /// under this program's text is now a colour this program picked, not a
+    /// blur of somebody's spreadsheet.
+    ///
+    /// Translucency did not go away - it moved to the path that can actually
+    /// do it well. See [`Self::wash`].
     pub surface: Color32,
-    /// The hairline at the panel's edge, and the rules between its bands.
-    pub edge: Color32,
 
-    /// A filename, and body text generally.
-    pub text: Color32,
-    /// A heading, or the selected row.
-    pub strong: Color32,
-    /// Labels, folders, the status line.
-    pub dim: Color32,
-    /// Rules and separators. Never text.
-    pub faint: Color32,
-    /// The one hue that means "this".
-    pub accent: Color32,
-    /// The code being typed.
-    pub input: Color32,
-    /// Where the caret is.
-    pub caret: Color32,
-
-    /// The row the arrows are on.
+    /// What goes over a compositor backdrop instead of [`Self::surface`].
     ///
-    /// A *tint*, not a colour. Every background in this group is translucent
-    /// and painted over the panel's own surface, which is itself translucent
-    /// over the desktop. An opaque fill looks right over a dark window and
-    /// disappears entirely over a bright one - the panel's surface lightens
-    /// with what is behind it and the fill does not follow, so on the painted
-    /// fallback path the highlight silently stops existing. A tint tracks its
-    /// ground by construction.
+    /// Black at 60% in the dark theme, white at 60% in the light one, exactly
+    /// as Ueli's acrylic path does it. DWM's acrylic is already a blur tinted
+    /// hard toward the system theme; this drives it the rest of the way to a
+    /// ground the palette can predict, while leaving enough through that the
+    /// panel still reads as a sheet over the desktop rather than as a box on
+    /// it.
+    pub wash: Color32,
+
+    /// A tile in the settings window, and the trough a text box sits in.
+    /// `NeutralBackground3`.
+    ///
+    /// One token for both, which is Fluent's arrangement and was not ours: a
+    /// filled input really is the same colour as the card around it, and it
+    /// reads as a box because of the rule under it rather than because of a
+    /// step in the fill. See [`Self::accessible`].
+    pub card: Color32,
+    /// The search field, and a text box in the settings window.
+    /// `NeutralBackground3` - the same value as [`Self::card`], deliberately.
+    pub well: Color32,
+    /// Behind a scroll-bar's thumb. `NeutralBackground4`.
+    pub track: Color32,
+
+    // -- rows ---------------------------------------------------------------
+    /// The row the arrows are on. `NeutralBackground1Selected`.
+    ///
+    /// Opaque, where it used to be a tint. The tint existed because the panel
+    /// was translucent and an opaque fill would stop tracking its ground; with
+    /// the ground opaque there is nothing to track, and a published value
+    /// beats a computed one.
     pub selection: Color32,
-    /// The row under the pointer. Strictly weaker than [`Self::selection`]:
-    /// Enter opens the selection, and the two must never be confusable.
+    /// The row under the pointer. `NeutralBackground1Hover`.
+    ///
+    /// **Not** strictly weaker than [`Self::selection`], which it used to be
+    /// required to be. In stock Fluent dark, hover `#3d3d3d` is a shade
+    /// *louder* than selected `#383838`, and no amount of tuning inside the
+    /// ramp changes that. What keeps Enter from opening the wrong file is the
+    /// accent bar, which only the selected row has. See
+    /// `the_selected_row_is_never_confusable_with_the_hovered_one`.
     pub hover: Color32,
     /// The run the user is about to copy out of the search field.
+    ///
+    /// Still a tint, and the last one here. Fluent publishes no selected-text
+    /// colour - a browser supplies it - and a tint is the only form that is
+    /// right over both a field and a label.
     pub text_selection: Color32,
-    /// The matched substring, so the eye lands on why a row is there.
+
+    // -- text ---------------------------------------------------------------
+    /// A filename, and body text generally. `NeutralForeground1`.
+    pub text: Color32,
+    /// A heading, or the name on the selected row. `NeutralForeground1`.
+    ///
+    /// The same value as [`Self::text`], which is the point: Fluent separates
+    /// `body1` from `body1Strong` by weight and not by colour. A selected
+    /// row's name no longer brightens, because there is nowhere brighter for
+    /// it to go and it never needed to - the fill and the bar say which row it
+    /// is.
+    pub strong: Color32,
+    /// The code being typed. `NeutralForeground1`.
+    pub input: Color32,
+    /// The matched substring. `NeutralForeground1`, carried by weight.
     pub match_run: Color32,
+    /// Labels, folders, the status line. `NeutralForeground3`.
+    pub dim: Color32,
+    /// A group caption and a placeholder: present, and not asking to be read
+    /// first. `NeutralForeground4`.
+    pub caption: Color32,
+    /// Where the caret is. `NeutralForeground1`.
+    ///
+    /// It used to be [`Self::accent`], on the reasoning that the caret is the
+    /// one thing that says where the keyboard is going. A Fluent caret is
+    /// `currentColor` - the colour of the text it sits in - and the focus
+    /// signal is the rule under the field, not a coloured bar in the middle of
+    /// a word.
+    pub caret: Color32,
 
-    /// A surface recessed into the panel: the search field.
+    // -- boundaries ---------------------------------------------------------
+    /// The rule between two bands. `NeutralStroke2`, which is what Fluent's
+    /// `Divider` uses.
     ///
-    /// A shade off [`Self::surface`] and no more. The code being typed sits on
-    /// it, so it is a text ground and is held to the same ratio as one.
-    pub well: Color32,
+    /// Faint - 1.3:1 against its own ground in the light theme - and that is
+    /// the published value for a divider rather than an oversight. A rule
+    /// between two bands is a hint about structure; it is not a boundary
+    /// anybody has to find. [`Self::accessible`] is the one that is.
+    pub edge: Color32,
+    /// The outline of a control at rest. `NeutralStroke1`.
+    pub stroke: Color32,
+    /// The rule that makes a filled input a box. `NeutralStrokeAccessible`.
+    ///
+    /// The load-bearing one, and the reason [`Self::well`] is allowed to be
+    /// the same colour as [`Self::card`]. Fluent's filled text input has no
+    /// step in its fill at all; what says "type here" is a 1 px rule along the
+    /// bottom edge at this colour, which clears 3:1 in both themes. Take it
+    /// away and the box genuinely disappears.
+    pub accessible: Color32,
+    /// A scroll-bar's thumb at rest. `NeutralForeground4`.
+    pub grip: Color32,
 
-    /// A setting row in the settings window.
+    // -- brand --------------------------------------------------------------
+    /// The one hue that means "this". `BrandForeground1`.
     ///
-    /// The one surface here that is not part of the panel, and the reason it
-    /// exists: the settings window is a *document*, drawn with widgets rather
-    /// than painted, and its layout is carried by a stack of small tiles - one
-    /// per setting - rather than by shading. So it needs a ground one step off
-    /// the window's, which [`Self::well`] cannot be because a text box sits
-    /// recessed *inside* one of these tiles and the two have to differ.
-    ///
-    /// Opaque, unlike most of this group. These windows are read for minutes
-    /// at a time and nothing shows through them.
-    ///
-    /// Lighter than the window on a dark theme and darker on a light one,
-    /// which is the direction a tile lifts in each.
-    pub card: Color32,
+    /// The accent bar down a selected row, the nav indicator, a link. Not
+    /// small body text on the panel: `#479ef5` on the dark theme's ground
+    /// comes to 5.2:1, which is fine, but on the acrylic path over a bright
+    /// desktop it can fall to about 4:1, and a twelve-point line is the wrong
+    /// place to spend that margin. Where a run used to be accented it is now
+    /// full-strength and Semibold, which is how Fluent emphasises anyway.
+    pub accent: Color32,
+    /// A surface that means "this one": a switch that is on, a primary button.
+    /// `CompoundBrandBackground`.
+    pub accent_fill: Color32,
+    /// And what reads on it: white, in both themes, as Fluent specifies.
+    pub accent_fg: Color32,
 
-    /// The fill behind a control: a drop-down, a text box, a button.
+    // -- controls -----------------------------------------------------------
+    /// The fill behind a control. `NeutralBackground1{,Hover,Pressed}`.
     ///
     /// Three of them rather than one, because egui asks for a colour per
     /// interaction state up front rather than tinting one at paint time, and a
@@ -363,28 +455,25 @@ pub struct Theme {
     pub control_hover: Color32,
     pub control_active: Color32,
 
-    /// A surface that means "this one": the nav indicator, a switch that is on,
-    /// a primary button.
+    // -- small surfaces -----------------------------------------------------
+    /// The pill at the end of a row that names its drive.
     ///
-    /// Not [`Self::accent`], which is a *text* colour one shade off
-    /// [`Self::text`] and would be invisible as a fill. This is the other end
-    /// of the range, and [`Self::accent_fg`] is what reads on it.
-    pub accent_fill: Color32,
-    pub accent_fg: Color32,
+    /// `NeutralBackground3` and `NeutralForeground1`. Fluent's own Badge fills
+    /// with `NeutralBackground1`, which works there because a badge sits *on*
+    /// an icon; ours sits on the row's own ground, where `Background1` would
+    /// be the same colour as the ground and the pill would not exist. One
+    /// step off, which is the smallest move that keeps it a pill.
+    pub badge_bg: Color32,
+    pub badge_fg: Color32,
 
-    /// A success foreground: a hotkey that parses, a check that passed.
+    /// A key name: ` Enter `. `NeutralBackground5` and `NeutralForeground1`.
     ///
-    /// [`Self::tones`] has Warn and Bad with hues of their own and Good
-    /// without one, because on the status line a tick carries it and colour
-    /// would be the second signal for something nobody needs told twice. A
-    /// form is not the status line: a field that validates as you leave it has
-    /// no glyph and no room for a sentence, and green against the amber and
-    /// red already here is the whole message.
-    pub good: Color32,
-
-    /// A key name: ` Enter `.
-    pub chip_bg: Color32,
-    pub chip_fg: Color32,
+    /// Background5 is the far end of the neutral ramp - near-black in the dark
+    /// theme, and a light grey in the light one - which is why a key cap is
+    /// the one small surface here that is unmistakably a different piece of
+    /// material from what it sits on. That is what a key cap is.
+    pub key_bg: Color32,
+    pub key_fg: Color32,
 
     tones: [Color32; 5],
 }
@@ -393,131 +482,100 @@ pub struct Theme {
 pub const TONE_GLYPH: [char; 5] = ['\u{2022}', '\u{2219}', '\u{2713}', '\u{25B2}', '\u{00D7}'];
 
 impl Theme {
-    /// The dark palette: the same warm scheme on a low ground.
+    /// `webDarkTheme`, transcribed.
     ///
-    /// Softened from the near-black `0x10141C` and cold blue it carried over
-    /// from the terminal build. It shares the light theme's hue family so the
-    /// two read as one program rather than two, and it is lifted well off
-    /// black so the surface has somewhere to put a highlight.
+    /// Every value here is a token out of `@fluentui/tokens`, named in the
+    /// comment beside it. Nothing is tuned and nothing is ours; where two
+    /// fields hold the same number that is Fluent holding them the same, not
+    /// a copy-paste.
     pub fn dark() -> Self {
-        let text = rgb(0xDCDCDC);
-        let strong = rgb(0xFFFFFF);
-        let dim = rgb(0xA6A6A6);
-        // Rules and borders. Must clear 3:1 - WCAG 1.4.11 asks it of a
-        // boundary you are meant to be able to see - and must still be
-        // fainter than `dim`, or a separator competes with a label.
-        let faint = rgb(0x828282);
-        let accent = rgb(0xF0F0F0);
+        let fg1 = rgb(0xFFFFFF); // NeutralForeground1
+        let fg3 = rgb(0xADADAD); // NeutralForeground3
+        let fg4 = rgb(0x999999); // NeutralForeground4
+        let bg1 = rgb(0x292929); // NeutralBackground1
+        let bg3 = rgb(0x1F1F1F); // NeutralBackground3
         Self {
             dark: true,
-            surface: tint(0x1E1E1E, 0xF0),
-            edge: tint(0xC8C8C8, 0x3D),
-            text,
-            strong,
-            dim,
-            faint,
-            accent,
-            input: rgb(0xFAFAFA),
-            caret: accent,
-            selection: tint(0xFFFFFF, 0x26),
-            hover: tint(0xFFFFFF, 0x14),
+            surface: bg1,
+            // Black at 60%, over whatever the compositor produced.
+            wash: tint(0x000000, 0x99),
+            card: bg3,
+            well: bg3,
+            track: rgb(0x141414),     // NeutralBackground4
+            selection: rgb(0x383838), // NeutralBackground1Selected
+            hover: rgb(0x3D3D3D),     // NeutralBackground1Hover
             text_selection: tint(0xFFFFFF, 0x3A),
-            // Brightest and bold, rather than a hue of its own. `row::show`
-            // already draws a matched run in `Weight::Semibold`.
-            match_run: strong,
-            // Weaker than the light theme's pair. On a low ground the eye has
-            // far less headroom above the surface, so the same strength reads
-            // as a glow rather than as a shape.
-            well: tint(0x141414, 0xF4),
-            // A tile lifts *off* a dark ground, so it is lighter than the
-            // window; the well below goes the other way, and the gap between
-            // the two is what makes a text box read as recessed into a card
-            // rather than as another card.
-            card: rgb(0x282828),
-            control: rgb(0x333333),
-            control_hover: rgb(0x3A3A3A),
-            control_active: rgb(0x2B2B2B),
-            // Near-white and near-black, not a hue. The palette gave up its
-            // colours to `TONE_GLYPH` and to weight, and a blue filled bar
-            // would be the only saturated thing in the program.
-            accent_fill: rgb(0xE6E6E6),
-            accent_fg: rgb(0x1A1A1A),
-            good: rgb(0x7FC98A),
-            // Opaque, unlike every other background here. A key cap is the one
-            // element that is *not* meant to track its ground.
-            chip_bg: rgb(0x3C3C3C),
-            chip_fg: rgb(0xF0F0F0),
-            // Busy and Good give up their hues to `TONE_GLYPH`; Warn and Bad
-            // keep theirs, because a failure has to be unmissable and they are
-            // now the only colour on the panel.
-            tones: [text, dim, strong, rgb(0xEFC05A), rgb(0xF09184)],
+            text: fg1,
+            strong: fg1,
+            input: fg1,
+            match_run: fg1,
+            dim: fg3,
+            caption: fg4,
+            caret: fg1,
+            edge: rgb(0x333333),       // NeutralStroke2
+            stroke: rgb(0x666666),     // NeutralStroke1
+            accessible: rgb(0xADADAD), // NeutralStrokeAccessible
+            grip: fg4,
+            accent: rgb(0x479EF5),      // BrandForeground1
+            accent_fill: rgb(0x115EA3), // CompoundBrandBackground
+            accent_fg: rgb(0xFFFFFF),
+            control: bg1,
+            control_hover: rgb(0x3D3D3D),  // NeutralBackground1Hover
+            control_active: rgb(0x333333), // NeutralBackground1Pressed
+            badge_bg: bg3,
+            badge_fg: fg1,
+            key_bg: rgb(0x0A0A0A), // NeutralBackground5
+            key_fg: fg1,
+            // Warn and Bad keep hues of our own rather than Fluent's.
+            // `colorPaletteRedForeground1` is 4.16:1 on this ground, under the
+            // 4.5 the drive-unreachable line has always been held to, and that
+            // line is the one that has to land. Busy and Good give up their
+            // hues to `TONE_GLYPH`.
+            tones: [fg1, fg3, fg1, rgb(0xEFC05A), rgb(0xF09184)],
         }
     }
 
-    /// The light palette: warm sand, a sage accent, soft edges.
-    ///
-    /// Not the dark one inverted - inverting a palette tuned for a dark ground
-    /// gives washed-out pastels - but the same *roles* re-picked against a warm
-    /// near-white surface at the same contrast ratios, which is what the tests
-    /// at the bottom of this file actually check.
-    ///
-    /// # Why the type is darker than the reference it came from
-    ///
-    /// The look this is drawn from is soft-UI: surfaces shaded rather than
-    /// outlined, everything a step or two from the ground, nothing shouting.
-    /// The *surfaces* are exactly that. The type is not, and deliberately.
-    ///
-    /// A neumorphic mood board picks its secondary greys around `#8F887C` and
-    /// its accents around `#6F8F63`; on this ground those are 2.6:1 and 2.7:1,
-    /// against the 4.5:1 the tests below hold every one of these to. This is a
-    /// tool somebody reads all day, at a glance, over whatever window they had
-    /// open - so the shading carries the style and the contrast stays where it
-    /// was. Where the two disagree, the lever is the surface, never the text.
+    /// `webLightTheme`, transcribed. See [`Self::dark`].
     pub fn light() -> Self {
-        let text = rgb(0x333333);
-        let strong = rgb(0x0D0D0D);
-        let dim = rgb(0x565656);
-        let faint = rgb(0x787878);
-        let accent = rgb(0x1F1F1F);
+        let fg1 = rgb(0x242424); // NeutralForeground1
+        let fg3 = rgb(0x616161); // NeutralForeground3
+        let fg4 = rgb(0x707070); // NeutralForeground4
+        let bg1 = rgb(0xFFFFFF); // NeutralBackground1
+        let bg3 = rgb(0xF5F5F5); // NeutralBackground3
         Self {
             dark: false,
-            surface: tint(0xF0F0F0, 0xF0),
-            edge: tint(0x3C3C3C, 0x33),
-            text,
-            strong,
-            dim,
-            faint,
-            accent,
-            input: rgb(0x141414),
-            caret: accent,
-            selection: tint(0x000000, 0x24),
-            hover: tint(0x000000, 0x12),
+            surface: bg1,
+            // White at 60%, over whatever the compositor produced.
+            wash: tint(0xFFFFFF, 0x99),
+            card: bg3,
+            well: bg3,
+            track: rgb(0xF0F0F0),     // NeutralBackground4
+            selection: rgb(0xEBEBEB), // NeutralBackground1Selected
+            hover: rgb(0xF5F5F5),     // NeutralBackground1Hover
             text_selection: tint(0x000000, 0x32),
-            // Darkest and bold, rather than a hue of its own. `row::show`
-            // already draws a matched run in `Weight::Semibold`.
-            match_run: strong,
-            // Genuinely darker than the panel on both grounds. The warm pair
-            // this replaces resolved *brighter* than the surface over black,
-            // and passed only because `contrast` is direction-agnostic - so
-            well: tint(0xD9D9D9, 0xF6),
-            // Darker than the window, which is the direction a tile lifts on a
-            // light ground, and lighter than the well below it for the reason
-            // the dark theme's note gives.
-            card: rgb(0xE6E6E6),
-            control: rgb(0xFBFBFB),
-            control_hover: rgb(0xF4F4F4),
-            control_active: rgb(0xECECEC),
-            accent_fill: rgb(0x2B2B2B),
-            accent_fg: rgb(0xFAFAFA),
-            good: rgb(0x1E6B33),
-            // Opaque, unlike every other background here. A key cap is the one
-            // element that is *not* meant to track its ground.
-            chip_bg: rgb(0xFFFFFF),
-            chip_fg: rgb(0x2A2A2A),
-            // Busy and Good give up their hues to `TONE_GLYPH`; Warn and Bad
-            // keep theirs, because a failure has to be unmissable and they are
-            // now the only colour on the panel.
-            tones: [text, dim, strong, rgb(0x8A4B00), rgb(0xA32820)],
+            text: fg1,
+            strong: fg1,
+            input: fg1,
+            match_run: fg1,
+            dim: fg3,
+            caption: fg4,
+            caret: fg1,
+            edge: rgb(0xE0E0E0),       // NeutralStroke2
+            stroke: rgb(0xD1D1D1),     // NeutralStroke1
+            accessible: rgb(0x616161), // NeutralStrokeAccessible
+            grip: fg4,
+            accent: rgb(0x0F6CBD),      // BrandForeground1
+            accent_fill: rgb(0x0F6CBD), // CompoundBrandBackground
+            accent_fg: rgb(0xFFFFFF),
+            control: bg1,
+            control_hover: rgb(0xF5F5F5),  // NeutralBackground1Hover
+            control_active: rgb(0xE0E0E0), // NeutralBackground1Pressed
+            badge_bg: bg3,
+            badge_fg: fg1,
+            key_bg: rgb(0xEBEBEB), // NeutralBackground5
+            key_fg: fg1,
+            // See the dark theme's note.
+            tones: [fg1, fg3, fg1, rgb(0x8A4B00), rgb(0xA32820)],
         }
     }
 

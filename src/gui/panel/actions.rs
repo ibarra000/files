@@ -18,7 +18,7 @@
 //! `Popup` would have supplied - a press outside shuts it - is the explicit
 //! check at the bottom of [`show`].
 
-use eframe::egui::{Align2, Area, Color32, Id, Order, Rect, Sense, Ui, pos2, vec2};
+use eframe::egui::{Align2, Area, Id, Order, Rect, Sense, Ui, pos2, vec2};
 
 use super::chip;
 use crate::app::state::AppState;
@@ -146,10 +146,10 @@ fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
 fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &mut Vec<Intent>) {
     let painter = ui.painter().clone();
     let radius = theme::radius(theme::RADIUS_MEDIUM);
-    // Opaque, unlike the panel under it. A translucent menu over a
-    // translucent panel over somebody's drawing is three layers of ground
-    // under twelve-point text.
-    painter.rect_filled(card, radius, opaque(theme.card));
+    // The window's own ground rather than a tile's. A key cap is
+    // `NeutralBackground5`, which against `NeutralBackground3` comes to
+    // 1.07:1 in the light theme - the caps would be invisible on a card.
+    painter.rect_filled(card, radius, theme.surface);
     painter.rect_stroke(
         card,
         radius,
@@ -231,11 +231,6 @@ const fn icon_of(id: ActionId) -> Option<Icon> {
         ActionId::Refresh => Some(Icon::Reset),
         ActionId::Settings => Some(Icon::Gear),
     }
-}
-
-/// The card's fill, with whatever transparency the palette gave it removed.
-fn opaque(c: Color32) -> Color32 {
-    Color32::from_rgb(c.r(), c.g(), c.b())
 }
 
 #[cfg(test)]

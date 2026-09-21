@@ -193,11 +193,26 @@ pub(crate) fn announce(
     });
 }
 
-/// The panel's own background.
+/// The panel's own background, on whichever path it got.
 ///
-/// Skipped entirely when the compositor granted a backdrop: painting a fill
-/// behind acrylic is painting over it. On the fallback path this fill *is* the
-/// depth, so it is drawn.
+/// Two fills, not one and a skip. This used to paint nothing at all when the
+/// compositor granted a backdrop, on the argument that a fill behind acrylic
+/// is painting over it - and to compensate, the fill on the other path was
+/// translucent so that it still read as an overlay.
+///
+/// Ueli has it the other way round and the other way round is better. Its
+/// `None` material is a flat opaque `NeutralBackground1`; its acrylic path
+/// paints a sixty-percent wash *over* the compositor's blur. The wash is what
+/// this program gets out of the arrangement: DWM's acrylic already tints hard
+/// toward the system theme, and the wash drives the rest of the way to a
+/// ground the palette can predict, so the contrast arithmetic in
+/// `theme::tests` is against a colour this program picked rather than against
+/// a blur of somebody's spreadsheet. Enough still comes through that the
+/// panel reads as a sheet over the desktop.
+///
+/// The cost is on the fallback path, which is now a solid window. That is
+/// Windows too old for acrylic, or a machine with transparency switched off -
+/// which is a setting somebody chose.
 ///
 /// # Square, and with no outline
 ///
@@ -218,10 +233,12 @@ pub(crate) fn announce(
 /// exactly what Ueli does: `roundedCorners: true` and no CSS radius on the
 /// root element.
 fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>) {
-    if backdrop != Some(Backdrop::Compositor) {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::ZERO, theme.surface);
-    }
+    let fill = if backdrop == Some(Backdrop::Compositor) {
+        theme.wash
+    } else {
+        theme.surface
+    };
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
 }
 
 fn take(cursor: &mut Rect, height: f32) -> Rect {

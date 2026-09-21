@@ -167,13 +167,13 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             ),
             vec2(badge_w, theme::SIZE_CAPTION * 2.0),
         );
-        painter.rect_filled(pill, theme::radius(theme::RADIUS_MEDIUM), theme.chip_bg);
+        painter.rect_filled(pill, theme::radius(theme::RADIUS_MEDIUM), theme.badge_bg);
         painter.text(
             pill.center(),
             Align2::CENTER_CENTER,
             name,
             badge_font,
-            theme.dim,
+            theme.badge_fg,
         );
     }
 
@@ -181,13 +181,18 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     let text_w = (text_right - text_left).max(0.0);
 
     // A row that is here because its *folder* matched has nothing in its own
-    // name to pick out, so the explanation moves to the other line: the
-    // folder is drawn in the accent colour rather than dimmed. That says
-    // "this one is about the folder" without claiming which characters
-    // matched - which is the claim `match_pos` explicitly declines to make.
+    // name to pick out, so the explanation moves to the other line: the folder
+    // is drawn at full strength instead of dimmed. That says "this one is
+    // about the folder" without claiming which characters matched - which is
+    // the claim `match_pos` explicitly declines to make.
+    //
+    // Strength rather than the accent hue, which is what this used to be.
+    // Brand blue on a twelve-point line is the one place a Fluent token runs
+    // short of AA on the acrylic path, and emphasis-by-weight-and-value is
+    // how Fluent does this everywhere else anyway.
     let inherited = hit.is_inherited();
     let folder = content::folder(&hit.path);
-    let folder_colour = if inherited { theme.accent } else { theme.dim };
+    let folder_colour = if inherited { theme.text } else { theme.dim };
 
     let body = if selected { theme.strong } else { theme.text };
     let name = content::highlight(hit, style.query_len);

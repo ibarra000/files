@@ -64,8 +64,7 @@ pub const CONTROL_H: f32 = 28.0;
 pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
     use eframe::egui::{Margin, Stroke, TextStyle, Vec2};
 
-    let solid = |c: Color32| Color32::from_rgb(c.r(), c.g(), c.b());
-    let hairline = Stroke::new(1.0, theme.faint);
+    let hairline = Stroke::new(1.0, theme.stroke);
 
     // A control's states, which differ in the fill and in how firm the outline
     // is. The text on all of them is the same colour: a button whose label
@@ -134,23 +133,24 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         // Opaque, unlike the panel's. These windows are documents: they sit
         // over other programs for minutes at a time, and text on a translucent
         // ground is harder to read the longer you read it.
-        v.panel_fill = solid(theme.surface);
-        v.window_fill = solid(theme.surface);
-        v.window_stroke = Stroke::new(1.0, solid(theme.edge));
+        v.panel_fill = theme.surface;
+        v.window_fill = theme.surface;
+        v.window_stroke = Stroke::new(1.0, theme.edge);
         v.window_corner_radius = radius(RADIUS_MEDIUM);
         v.menu_corner_radius = radius(RADIUS_MEDIUM);
         v.faint_bg_color = theme.card;
         // The scroll-bar *track*, which is what this field actually is - the
         // text box below only falls back to it when `text_edit_bg_color` is
-        // unset, and it is not. A track the colour of a tile is a groove in
-        // the page; a track the colour of the well would be a black stripe
-        // down the edge of a light window.
-        v.extreme_bg_color = theme.card;
+        // unset, and it is not. `NeutralBackground4`, which is the far side of
+        // the tile from the window: a groove in the page rather than another
+        // tile on it. It has to differ from the box below or egui draws the
+        // two as one surface, which is a test.
+        v.extreme_bg_color = theme.track;
         // What a text box is sunk into. The same trough the search field uses,
         // so a box in the settings window and the one on the panel are the
         // same idea rather than two.
-        v.text_edit_bg_color = Some(solid(theme.well));
-        v.code_bg_color = solid(theme.well);
+        v.text_edit_bg_color = Some(theme.well);
+        v.code_bg_color = theme.well;
         // Selected *text*, which is what this is: egui uses it inside a
         // `TextEdit` and behind a selectable label. The window's own "this
         // one" is `accent_fill`, painted by hand where it is meant.
@@ -177,8 +177,8 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         // A label, a group heading, a panel separator: not interactive, so not
         // outlined in anything firmer than a rule. Its `bg_stroke` is what
         // `SidePanel` draws its dividing line with.
-        w.noninteractive = widget(theme.card, theme.faint, Stroke::new(1.0, theme.edge));
-        w.inactive = widget(theme.control, theme.faint, hairline);
+        w.noninteractive = widget(theme.card, theme.grip, Stroke::new(1.0, theme.edge));
+        w.inactive = widget(theme.control, theme.grip, hairline);
         w.hovered = widget(theme.control_hover, theme.dim, Stroke::new(1.0, theme.dim));
         w.active = widget(
             theme.control_active,

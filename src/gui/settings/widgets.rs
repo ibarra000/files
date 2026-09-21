@@ -245,7 +245,7 @@ pub fn switch(ui: &mut Ui, theme: &Theme, on: &mut bool, label: &str) -> Respons
         painter.rect_stroke(
             rect,
             radius,
-            Stroke::new(1.0, fade(gray(ui, theme.faint), 1.0 - t)),
+            Stroke::new(1.0, fade(gray(ui, theme.stroke), 1.0 - t)),
             StrokeKind::Inside,
         );
     }
@@ -337,11 +337,13 @@ pub fn nav_item(
             pos2(rect.left() + 2.0 + theme::MARKER_W / 2.0, rect.center().y),
             vec2(theme::MARKER_W, NAV_H * 0.5),
         );
-        painter.rect_filled(
-            bar,
-            CornerRadius::same((theme::MARKER_W / 2.0) as u8),
-            theme.accent_fill,
-        );
+        // `accent`, not `accent_fill`. A bar is read against the ground it
+        // sits on rather than against text drawn on top of it, and in the
+        // dark theme `CompoundBrandBackground` is 2.5:1 on a tile - under the
+        // 3:1 WCAG asks of a boundary. `BrandForeground1` clears it in both.
+        // The same value the panel's selected-row bar uses, which is the
+        // point: they are the same mark.
+        painter.rect_filled(bar, theme::radius(theme::RADIUS_LARGE), theme.accent);
     }
 
     // The gutter closes up entirely where there is no icon font, rather than
@@ -578,7 +580,7 @@ pub fn text_field(
             .hint_text(
                 egui::RichText::new(hint)
                     .font(theme::font(theme::SIZE_BODY, Weight::Regular))
-                    .color(theme.faint),
+                    .color(theme.caption),
             ),
     );
 

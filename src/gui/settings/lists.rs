@@ -259,7 +259,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
         ui.label(
             egui::RichText::new(ALIASES.empty)
                 .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                .color(theme.faint),
+                .color(theme.caption),
         );
     }
 

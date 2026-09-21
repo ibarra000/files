@@ -104,7 +104,7 @@ pub fn show(
         ui.painter().vline(
             divider,
             (rect.center().y - 8.0)..=(rect.center().y + 8.0),
-            Stroke::new(1.0, theme.faint),
+            Stroke::new(1.0, theme.stroke),
         );
         right = divider - GAP;
 

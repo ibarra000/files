@@ -60,18 +60,18 @@ pub fn draw(painter: &Painter, theme: &Theme, shortcut: &str, at: Pos2) {
     for part in shortcut.split('+') {
         let text = glyph(part);
         let w = painter
-            .layout_no_wrap(text.to_owned(), font.clone(), theme.chip_fg)
+            .layout_no_wrap(text.to_owned(), font.clone(), theme.key_fg)
             .rect
             .width()
             + PAD_X * 2.0;
         let chip = Rect::from_min_size(pos2(x, at.y - HEIGHT / 2.0), vec2(w, HEIGHT));
-        painter.rect_filled(chip, theme::radius(theme::RADIUS_MEDIUM), theme.chip_bg);
+        painter.rect_filled(chip, theme::radius(theme::RADIUS_MEDIUM), theme.key_bg);
         painter.text(
             chip.center(),
             Align2::CENTER_CENTER,
             text,
             font.clone(),
-            theme.chip_fg,
+            theme.key_fg,
         );
         x += w + PART_GAP;
     }
