@@ -30,14 +30,13 @@ use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align2, Color32, FontId, Rect, Response, Sense, Ui, Vec2, pos2, vec2};
 
 use crate::config::ResultLayout;
+use crate::gui::text;
 use crate::gui::theme::{self, Theme, Weight};
 use crate::paths::Routes;
 use crate::search::matcher::Hit;
 use crate::view::row as content;
 
 /// The character that says something was left out.
-const ELLIPSIS: char = '\u{2026}';
-
 /// The air at a row's left and right edges.
 ///
 /// Ueli's `padding`, which is eight on a compact row and ten on a detailed
@@ -239,7 +238,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     job.wrap.max_width = text_w;
     job.wrap.max_rows = 1;
     job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some(ELLIPSIS);
+    job.wrap.overflow_character = Some(text::ELLIPSIS);
     let galley = painter.layout_job(job);
 
     match style.layout {
@@ -268,7 +267,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             let top = rect.center().y - (name_h + second) / 2.0;
             painter.galley(pos2(text_left, top), galley, body);
             if !folder.is_empty() {
-                let shown = elide_left(folder, text_w, &|text| measure(text, &folder_font));
+                let shown = text::elide_left(folder, text_w, &|text| measure(text, &folder_font));
                 painter.text(
                     pos2(text_left, top + name_h),
                     Align2::LEFT_TOP,
@@ -324,129 +323,9 @@ pub fn marker(ui: &Ui, theme: &Theme, row: Rect) {
         .rect_filled(bar, theme::radius(theme::RADIUS_LARGE), theme.accent);
 }
 
-/// Drops characters from the front until what is left fits, marking the cut
-/// with a leading ellipsis.
-///
-/// Takes a measuring function rather than a font, so the policy - how much is
-/// dropped, and whether the ellipsis is accounted for - can be checked without
-/// a font atlas.
-fn elide_left(text: &str, max_w: f32, measure: &impl Fn(&str) -> f32) -> String {
-    if measure(text) <= max_w {
-        return text.to_owned();
-    }
-
-    // One character at a time from the front. A path has at most a few hundred,
-    // at most a handful of rows are ever on screen, and this only runs at all
-    // for the ones that did not fit - so the simple loop is also the fast one.
-    let mut start = 0;
-    while start < text.len() {
-        // `char_indices` rather than byte arithmetic: a share name can hold
-        // characters that are not one byte long, and slicing inside one panics.
-        let next = text[start..]
-            .char_indices()
-            .nth(1)
-            .map_or(text.len(), |(offset, _)| start + offset);
-        let candidate = format!("{ELLIPSIS}{}", &text[next..]);
-        if measure(&candidate) <= max_w {
-            return candidate;
-        }
-        start = next;
-    }
-
-    // Not even the ellipsis fits. Returning it anyway would draw outside the
-    // column; an empty string is at least honest about having no room.
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A font where every character is one unit wide, so the assertions below
-    /// are about the policy rather than about Segoe UI's metrics.
-    fn monospaced(text: &str) -> f32 {
-        text.chars().count() as f32
-    }
-
-    #[test]
-    fn a_folder_that_fits_is_left_alone() {
-        let path = r"R:\11d\11-D-0704";
-        assert_eq!(elide_left(path, 100.0, &monospaced), path);
-        // Exactly the available width is still fitting.
-        assert_eq!(
-            elide_left(path, monospaced(path), &monospaced),
-            path,
-            "a folder was truncated to make room for nothing"
-        );
-    }
-
-    /// The end of the path is what tells two rows apart, so the end is what
-    /// survives.
-    #[test]
-    fn a_long_folder_loses_its_front_and_keeps_its_tail() {
-        let path = r"R:\jobs\2024\11d\11-D-0704";
-        let shown = elide_left(path, 12.0, &monospaced);
-
-        assert!(monospaced(&shown) <= 12.0, "{shown:?} does not fit");
-        assert!(shown.starts_with(ELLIPSIS), "{shown:?} hides nothing");
-        assert!(
-            path.ends_with(shown.trim_start_matches(ELLIPSIS)),
-            "{shown:?} is not a tail of the path"
-        );
-        assert!(shown.ends_with("11-D-0704"), "{shown:?} lost the job code");
-    }
-
-    /// It must drop as little as it can get away with - an elision that
-    /// overshoots throws away the very part it was keeping.
-    #[test]
-    fn no_more_is_dropped_than_has_to_be() {
-        let path = r"R:\jobs\2024\11d\11-D-0704";
-        for width in 4..=26 {
-            let shown = elide_left(path, width as f32, &monospaced);
-            assert!(monospaced(&shown) <= width as f32, "{width}: {shown:?}");
-            if !shown.starts_with(ELLIPSIS) {
-                continue;
-            }
-            // Putting one more character back must overflow, or the elision
-            // was greedier than it needed to be.
-            let tail = shown.chars().count() - 1;
-            let total = path.chars().count();
-            if tail >= total {
-                continue;
-            }
-            let candidate: String = std::iter::once(ELLIPSIS)
-                .chain(path.chars().skip(total - tail - 1))
-                .collect();
-            assert!(
-                monospaced(&candidate) > width as f32,
-                "{width}: {shown:?} dropped more than it had to"
-            );
-        }
-    }
-
-    /// Slicing inside a character is a panic, and share names are not all
-    /// ASCII.
-    #[test]
-    fn eliding_a_path_with_wide_characters_does_not_panic() {
-        let path = "R:\\Zeichnungen\\Prüfung\\日本語のフォルダ\\11-D-0704";
-        for width in 0..=40 {
-            let shown = elide_left(path, width as f32, &monospaced);
-            assert!(monospaced(&shown) <= width as f32, "{width}: {shown:?}");
-        }
-    }
-
-    /// A column with no room draws nothing rather than spilling an ellipsis
-    /// into the filename beside it.
-    #[test]
-    fn a_column_too_narrow_for_anything_draws_nothing() {
-        assert_eq!(elide_left(r"R:\jobs", 0.0, &monospaced), "");
-        assert_eq!(elide_left(r"R:\jobs", 0.5, &monospaced), "");
-    }
-
-    #[test]
-    fn an_empty_folder_stays_empty() {
-        assert_eq!(elide_left("", 0.0, &monospaced), "");
-    }
 
     /// The two layouts have to differ in more than their height, or the
     /// setting is a row that is taller for no reason.

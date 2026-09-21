@@ -29,6 +29,7 @@ pub mod frame;
 pub mod input;
 pub mod panel;
 pub mod settings;
+pub mod text;
 pub mod theme;
 #[cfg(windows)]
 pub mod tray;
