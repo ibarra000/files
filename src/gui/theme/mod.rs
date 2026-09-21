@@ -137,6 +137,15 @@ const _: () = assert!(
 /// The accent bar down the selected row.
 pub const MARKER_W: f32 = 3.0;
 
+/// How wide a scroll-bar is, in both windows.
+///
+/// Six, which is Ueli's and is half what egui gives one. It takes layout
+/// space rather than floating over the content, which is also Ueli's: a
+/// launcher that is scrolled with a wheel still has to say how far down the
+/// list it is, and a bar that appears only while the wheel is moving says it
+/// exactly when nobody is looking.
+pub const SCROLL_W: f32 = 6.0;
+
 // -- corners ----------------------------------------------------------------
 
 // Fluent's radius ramp, named by size rather than by role - which is what

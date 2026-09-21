@@ -158,6 +158,14 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
                 // them and draws nothing, and every frame after is the panel.
                 if !panel.fonts_ready {
                     files::gui::fonts::install_bundled(ui.ctx());
+                    // And the style, which these pictures went without for
+                    // as long as they have existed. Nothing the panel paints
+                    // by hand reads it - but the scroll-bar down the results
+                    // is an egui widget, and without this it was drawn from
+                    // egui's defaults: floating, over the content, twice the
+                    // width. So the snapshots were of a scrollbar the program
+                    // does not ship.
+                    files::gui::theme::apply_style(ui.ctx(), &panel.theme);
                     panel.fonts_ready = true;
                     return;
                 }

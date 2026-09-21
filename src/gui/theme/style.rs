@@ -7,7 +7,7 @@
 use eframe::egui::Color32;
 use eframe::egui::epaint::Shadow;
 
-use super::{RADIUS_MEDIUM, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
+use super::{RADIUS_MEDIUM, SCROLL_W, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
 use crate::view::status::Tone;
 
 /// The padding inside the tile a setting is drawn on. Its corner is
@@ -122,8 +122,14 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         // Ueli's scrollbar, which is thinner than egui's and always there. A
         // form this long needs a position indicator; it does not need a
         // twelve-point gutter taken out of the reading column to get one.
+        //
+        // The four-point inner margin is for *this* window, where a bar hard
+        // against a column of prose reads as a mistake. The panel overrides
+        // it to zero, because the results band already has padding of its own
+        // and the two together would be a ten-point gutter. See
+        // `gui::panel::list`.
         let scroll = &mut spacing.scroll;
-        scroll.bar_width = 6.0;
+        scroll.bar_width = SCROLL_W;
         scroll.bar_inner_margin = 4.0;
         scroll.bar_outer_margin = 0.0;
         scroll.floating = false;

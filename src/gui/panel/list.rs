@@ -87,6 +87,27 @@ pub fn show(
             .layout(Layout::top_down(Align::Min)),
     );
 
+    // The scrollbar, set here rather than taken from `theme::style`. That
+    // one dresses the settings window, where four points of inner margin
+    // hold the bar off a column of prose; the results band has padding of
+    // its own and the two together would be a ten-point gutter down a
+    // six-hundred-point window. Ueli's is six points of layout, hard against
+    // the edge, and never floating.
+    //
+    // Set on the child rather than on the context, so it is scoped to this
+    // scroller and cannot leak into a window that wants the other one.
+    {
+        let scroll = &mut child.spacing_mut().scroll;
+        scroll.bar_width = theme::SCROLL_W;
+        scroll.bar_inner_margin = 0.0;
+        scroll.bar_outer_margin = 0.0;
+        // Always there, never over the content. A floating bar appears while
+        // the wheel is moving and fades once it stops, which is to say it
+        // says how far down the list you are at exactly the moments nobody
+        // is looking.
+        scroll.floating = false;
+    }
+
     ScrollArea::vertical()
         // One offset per body, so stepping into the drive picker from halfway
         // down three hundred results does not open the picker scrolled past
