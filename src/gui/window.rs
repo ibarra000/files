@@ -39,9 +39,8 @@ use windows_sys::Win32::Foundation::{HWND, S_OK};
 #[cfg(windows)]
 use windows_sys::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
-    DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-    DwmSetWindowAttribute,
+    DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Controls::MARGINS;
@@ -213,6 +212,13 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material) -> Backdrop {
     // Eight points, which is the radius Windows 11 gives an ordinary window.
     // `DWMWCP_ROUNDSMALL` is the four-point menu radius, and on a panel this
     // wide it reads as a rendering mistake rather than as a choice.
+    //
+    // This is the *only* thing that rounds the panel, and the border below is
+    // the only thing that outlines it. There used to be a `DWMWA_BORDER_COLOR`
+    // of `DWMWA_COLOR_NONE` here, suppressing the system border so the panel
+    // could paint its own at its own radius in its own units - see
+    // `paint_surface`. Two curves computed two ways cannot be relied on to
+    // land on each other, so there is one of each now and it is DWM's.
     set(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND);
 
     // The hairline Windows draws around a rounded window. Attribute 20 since
@@ -222,10 +228,6 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material) -> Backdrop {
     if !set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_flag) {
         set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1, &dark_flag);
     }
-
-    // No accent-coloured edge: the panel draws its own. `DWMWA_COLOR_NONE`
-    // wants a `COLORREF`, so it goes in as a `u32` rather than an `i32`.
-    set(hwnd, DWMWA_BORDER_COLOR, &DWMWA_COLOR_NONE);
 
     backdrop
 }

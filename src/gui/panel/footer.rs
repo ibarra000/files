@@ -157,7 +157,7 @@ fn default_button(
     });
 
     if response.hovered() {
-        painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+        painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
     }
     painter.text(
         pos2(rect.left() + LABEL_PAD_X, rect.center().y),
@@ -204,7 +204,7 @@ fn icon_button(
 
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+        painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
     }
     if theme::has_icon(ui.ctx(), icon) {
         painter.text(

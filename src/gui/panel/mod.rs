@@ -46,7 +46,7 @@ pub mod icons;
 pub mod list;
 pub mod row;
 
-use eframe::egui::{Id, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use eframe::egui::{CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 use std::time::{Instant, SystemTime};
 
 use crate::app::state::pointer::Intent;
@@ -198,21 +198,30 @@ pub(crate) fn announce(
 /// Skipped entirely when the compositor granted a backdrop: painting a fill
 /// behind acrylic is painting over it. On the fallback path this fill *is* the
 /// depth, so it is drawn.
+///
+/// # Square, and with no outline
+///
+/// It used to be rounded and stroked, and both were the same mistake. Three
+/// things were drawing the panel's edge and they did not agree about where it
+/// was: DWM clips the window at `DWMWCP_ROUND` in *device pixels*, and this
+/// filled and stroked at eight *egui points*. Points are device pixels only
+/// while `pixels_per_point` is exactly the monitor's scale - not under a zoom
+/// factor, not in the frames either side of a `WM_DPICHANGED`, not while the
+/// window straddles two monitors scaled differently. Wherever the two curves
+/// parted, a sliver of the fill sat outside the clip or a sliver of ground
+/// sat inside it, which is the misaligned edge that got reported.
+///
+/// A square fill under a rounded clip is correct at every scale, because the
+/// clip is the corner and nothing else has an opinion about it. The outline
+/// is DWM's again too, and getting it back was a deletion in
+/// [`crate::gui::window`] rather than anything added here. This is also
+/// exactly what Ueli does: `roundedCorners: true` and no CSS radius on the
+/// root element.
 fn paint_surface(ui: &Ui, theme: &Theme, rect: Rect, backdrop: Option<Backdrop>) {
-    let painter = ui.painter();
-    let radius = theme::radius(theme::PANEL_RADIUS);
     if backdrop != Some(Backdrop::Compositor) {
-        painter.rect_filled(rect, radius, theme.surface);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, theme.surface);
     }
-    // The hairline stays on both paths: Windows draws its own border around a
-    // rounded window, and without one of ours the panel's edge is whatever
-    // happens to be behind it.
-    painter.rect_stroke(
-        rect,
-        radius,
-        Stroke::new(1.0, theme.edge),
-        StrokeKind::Inside,
-    );
 }
 
 fn take(cursor: &mut Rect, height: f32) -> Rect {

@@ -6,7 +6,10 @@
 //! palette and nothing reads them.
 //!
 //! The arguments for each rule are in the module note above. What follows is
-//! only the arithmetic.
+//! mostly the arithmetic. The one thing here that is not about colour is at
+//! the foot of the file: the corner ramp, which lives with these because it
+//! is the same kind of claim - a number this module publishes that something
+//! outside it has to be prevented from getting wrong.
 
 use super::*;
 
@@ -570,4 +573,45 @@ fn a_full_page_fits_the_content_band() {
             "another {layout:?} row would fit: {wanted}pt of {CONTENT_H}pt used"
         );
     }
+}
+
+// -- corners ----------------------------------------------------------------
+
+/// No corner this program paints is a window corner.
+///
+/// Three things used to draw the panel's edge and none of them agreed with
+/// the others about where it was. DWM clips the window at `DWMWCP_ROUND`, in
+/// device pixels, at whatever radius the running build of Windows uses. This
+/// module published eight, and `paint_surface` filled and stroked at eight
+/// *egui points*. A point is a device pixel only while `pixels_per_point` is
+/// exactly the monitor's scale - which it is not under a zoom factor, not in
+/// the frames either side of a `WM_DPICHANGED`, and not while the window
+/// straddles two monitors scaled differently. Wherever those two curves
+/// parted company the difference showed as a bad edge.
+///
+/// The panel no longer paints a corner at all, and the ramp is now cut short
+/// of the number that would let anything paint one by accident. Eight is
+/// Windows', DWM is the only thing that has it, and this is the test that
+/// keeps it that way.
+#[test]
+fn nothing_this_program_paints_is_rounded_like_a_window() {
+    /// What Windows 11 gives an ordinary window, and Fluent calls
+    /// `borderRadiusXLarge`.
+    const WINDOW_CORNER: u8 = 8;
+    for r in [RADIUS_SMALL, RADIUS_MEDIUM, RADIUS_LARGE] {
+        assert!(
+            r < WINDOW_CORNER,
+            "{r} is a window corner, and this program does not draw those"
+        );
+    }
+}
+
+/// The ramp is Fluent's, and it is a ramp: three rungs, all different, in
+/// order. A duplicate would be the state this replaced, where four constants
+/// with four names all held 4.
+#[test]
+fn the_three_rungs_are_three_different_numbers() {
+    let ramp = [RADIUS_SMALL, RADIUS_MEDIUM, RADIUS_LARGE];
+    assert_eq!(ramp, [2, 4, 6], "these are Fluent's published radii");
+    assert!(ramp.windows(2).all(|w| w[0] < w[1]), "out of order");
 }

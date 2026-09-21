@@ -7,14 +7,11 @@
 use eframe::egui::Color32;
 use eframe::egui::epaint::Shadow;
 
-use super::{PANEL_RADIUS, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
+use super::{RADIUS_MEDIUM, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
 use crate::view::status::Tone;
 
-/// A control's corner. Windows 11 rounds a button and a text box by four.
-pub const CONTROL_RADIUS: u8 = 4;
-
-/// The tile a setting is drawn on, and the padding inside it.
-pub const CARD_RADIUS: u8 = 4;
+/// The padding inside the tile a setting is drawn on. Its corner is
+/// [`super::RADIUS_MEDIUM`], like every other corner this size.
 pub const CARD_PAD: f32 = 12.0;
 
 /// Between one row and the next: two settings, or two results.
@@ -91,7 +88,7 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
             weak_bg_fill: fill,
             bg_fill: grip,
             bg_stroke: stroke,
-            corner_radius: radius(CONTROL_RADIUS),
+            corner_radius: radius(RADIUS_MEDIUM),
             fg_stroke: Stroke::new(1.0, theme.text),
             // Zero, deliberately. egui's default grows a hovered widget by a
             // point; in a column of tiles that have to line up, that reads as
@@ -140,8 +137,8 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         v.panel_fill = solid(theme.surface);
         v.window_fill = solid(theme.surface);
         v.window_stroke = Stroke::new(1.0, solid(theme.edge));
-        v.window_corner_radius = radius(PANEL_RADIUS);
-        v.menu_corner_radius = radius(CONTROL_RADIUS);
+        v.window_corner_radius = radius(RADIUS_MEDIUM);
+        v.menu_corner_radius = radius(RADIUS_MEDIUM);
         v.faint_bg_color = theme.card;
         // The scroll-bar *track*, which is what this field actually is - the
         // text box below only falls back to it when `text_edit_bg_color` is

@@ -46,7 +46,7 @@ const ICON_BTN: f32 = 24.0;
 pub fn card<R>(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::new()
         .fill(theme.card)
-        .corner_radius(theme::radius(theme::CARD_RADIUS))
+        .corner_radius(theme::radius(theme::RADIUS_MEDIUM))
         .inner_margin(measure::CARD_PAD)
         .show(ui, body)
         .inner
@@ -142,7 +142,7 @@ pub fn setting_row<R>(
     let height = measure::tile_height(prose_h, control_h);
     let (tile, response) = ui.allocate_exact_size(vec2(avail, height), Sense::hover());
 
-    painter.rect_filled(tile, theme::radius(theme::CARD_RADIUS), theme.card);
+    painter.rect_filled(tile, theme::radius(theme::RADIUS_MEDIUM), theme.card);
 
     let mut at = measure::prose_origin(tile);
     painter.galley(at, label.clone(), theme.text);
@@ -325,7 +325,7 @@ pub fn nav_item(
     }
 
     let painter = ui.painter();
-    let radius = theme::radius(theme::CARD_RADIUS);
+    let radius = theme::radius(theme::RADIUS_MEDIUM);
     if selected {
         painter.rect_filled(rect, radius, theme.selection);
     } else if response.hovered() {
@@ -391,7 +391,7 @@ pub fn subtle_icon_button(ui: &mut Ui, theme: &Theme, icon: Icon, tooltip: &str)
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         if response.hovered() {
-            painter.rect_filled(rect, theme::radius(theme::CARD_RADIUS), theme.hover);
+            painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
         }
         let colour = if response.hovered() {
             theme.strong
@@ -419,7 +419,7 @@ pub fn primary_button(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
                 .color(theme.accent_fg),
         )
         .fill(theme.accent_fill)
-        .corner_radius(theme::radius(theme::CONTROL_RADIUS))
+        .corner_radius(theme::radius(theme::RADIUS_MEDIUM))
         .min_size(vec2(0.0, theme::CONTROL_H)),
     )
 }
@@ -505,7 +505,7 @@ pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color3
     let spoken = format!("{label_text}. {value_text}");
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
 
-    painter.rect_filled(tile, theme::radius(theme::CARD_RADIUS), theme.card);
+    painter.rect_filled(tile, theme::radius(theme::RADIUS_MEDIUM), theme.card);
     let mut at = measure::prose_origin(tile);
     painter.galley(at, label.clone(), theme.text);
     at.y += label.rect.height() + measure::LABEL_GAP;
@@ -634,7 +634,7 @@ pub fn confirm(
         .frame(
             egui::Frame::new()
                 .fill(theme.card)
-                .corner_radius(theme::radius(theme::PANEL_RADIUS))
+                .corner_radius(theme::radius(theme::RADIUS_MEDIUM))
                 .inner_margin(20.0),
         )
         .backdrop_color(theme::tint(0x000000, 0x80))

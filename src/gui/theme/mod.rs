@@ -138,10 +138,27 @@ const _: () = assert!(
 /// The accent bar down the selected row.
 pub const MARKER_W: f32 = 3.0;
 
-/// Matches the radius Windows 11 gives an ordinary window.
-pub const PANEL_RADIUS: u8 = 8;
-pub const ROW_RADIUS: u8 = 4;
-pub const CHIP_RADIUS: u8 = 4;
+// -- corners ----------------------------------------------------------------
+
+// Fluent's radius ramp, named by size rather than by role - which is what
+// replaced five role-named constants, four of which were the same number.
+// `ROW_RADIUS`, `CHIP_RADIUS`, `CONTROL_RADIUS` and `CARD_RADIUS` were all 4,
+// and a vocabulary where four words mean one thing is four chances to change
+// one of them and not the others.
+//
+// The ramp stops at six. Fluent has a `borderRadiusXLarge` of 8 and nothing
+// here may use it, because 8 is the radius Windows 11 gives a window and this
+// program no longer draws window corners at all. See `paint_surface`.
+
+/// A hairline indicator, and anything else too small for a real curve.
+pub const RADIUS_SMALL: u8 = 2;
+/// A row, a tile, a text box, a button, a key cap, a menu.
+pub const RADIUS_MEDIUM: u8 = 4;
+/// The accent bar down a selected row, which this fully rounds.
+pub const RADIUS_LARGE: u8 = 6;
+
+/// Six on a three-point bar is a capsule, which is what Ueli's is.
+const _: () = assert!(RADIUS_LARGE as f32 * 2.0 >= MARKER_W);
 
 // -- type -------------------------------------------------------------------
 
@@ -652,7 +669,7 @@ pub fn radius(r: u8) -> CornerRadius {
     CornerRadius::same(r)
 }
 
-/// The two weights, by role.
+/// A size off the ramp above, in one of the two weights.
 pub fn font(size: f32, weight: Weight) -> FontId {
     FontId::new(size, eframe::egui::FontFamily::Name(weight.family().into()))
 }
@@ -690,10 +707,7 @@ impl Weight {
 pub mod icons;
 pub mod style;
 pub use icons::{ICON_INLINE, ICON_NAV, Icon, has_icon, icon_font};
-pub use style::{
-    CARD_PAD, CARD_RADIUS, CONTENT_PAD, CONTROL_H, CONTROL_RADIUS, GROUP_GAP, NAV_W, ROW_GAP,
-    apply_style,
-};
+pub use style::{CARD_PAD, CONTENT_PAD, CONTROL_H, GROUP_GAP, NAV_W, ROW_GAP, apply_style};
 
 #[cfg(test)]
 mod tests;

@@ -289,15 +289,15 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         // treatment a result gets, because it is the same thing: the row the
         // field came from.
         if cursor == Some(rank) {
-            theme::raise(painter, theme, rect, theme::ROW_RADIUS);
-            painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+            theme::raise(painter, theme, rect, theme::RADIUS_MEDIUM);
+            painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
             if follow {
                 bring_into_view(ui, rect);
             }
         } else if response.hovered() {
             ui.painter()
-                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+                .rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
         }
         ui.painter().text(
             pos2(rect.left() + theme::ROW_PAD_X, rect.center().y),
@@ -356,16 +356,16 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         });
 
         if cursor == Some(rank) {
-            theme::raise(ui.painter(), theme, rect, theme::ROW_RADIUS);
+            theme::raise(ui.painter(), theme, rect, theme::RADIUS_MEDIUM);
             ui.painter()
-                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+                .rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
             if follow {
                 bring_into_view(ui, rect);
             }
         } else if response.hovered() {
             ui.painter()
-                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+                .rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
         }
 
         let painter = ui.painter().clone();
@@ -414,7 +414,7 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
         );
         if rank == chosen {
             ui.painter()
-                .rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+                .rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
             if follow {
                 bring_into_view(ui, rect);

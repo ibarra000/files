@@ -45,7 +45,7 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
     // trough is what a search box looks like in this idiom, and it is the one
     // element here somebody puts something *into*. Fluent calls the same thing
     // `filled-darker`.
-    theme::press(&painter, theme, rect, theme::ROW_RADIUS);
+    theme::press(&painter, theme, rect, theme::RADIUS_MEDIUM);
 
     // A magnifier, which is what every search field on this operating system
     // has, so nobody has to be told what the box is for.
@@ -165,7 +165,7 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
                 pos2(x0, baseline.y),
                 pos2(x1, baseline.y + galley.rect.height()),
             ),
-            theme::radius(theme::CHIP_RADIUS),
+            theme::radius(theme::RADIUS_MEDIUM),
             theme.text_selection,
         );
     }

@@ -145,7 +145,7 @@ fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
 
 fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &mut Vec<Intent>) {
     let painter = ui.painter().clone();
-    let radius = theme::radius(theme::PANEL_RADIUS);
+    let radius = theme::radius(theme::RADIUS_MEDIUM);
     // Opaque, unlike the panel under it. A translucent menu over a
     // translucent panel over somebody's drawing is three layers of ground
     // under twelve-point text.
@@ -178,7 +178,7 @@ fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &m
             eframe::egui::WidgetInfo::labeled(eframe::egui::WidgetType::Button, true, &spoken)
         });
         if response.hovered() {
-            painter.rect_filled(row, theme::radius(theme::ROW_RADIUS), theme.hover);
+            painter.rect_filled(row, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
         }
         if response.clicked() {
             intents.push(Intent::Act(action.id));

@@ -117,11 +117,11 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     // is what says which one - the pair is legible where either alone would
     // not be, which is the point of shading a monochrome panel.
     if selected {
-        theme::raise(&painter, theme, rect, theme::ROW_RADIUS);
-        painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.selection);
+        theme::raise(&painter, theme, rect, theme::RADIUS_MEDIUM);
+        painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
         marker(ui, theme, rect);
     } else if response.hovered() {
-        painter.rect_filled(rect, theme::radius(theme::ROW_RADIUS), theme.hover);
+        painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.hover);
     }
 
     let measure = |text: &str, font: &FontId| {
@@ -166,7 +166,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
             ),
             vec2(badge_w, theme::SIZE_CAPTION * 2.0),
         );
-        theme::cap(&painter, theme, pill, theme::CHIP_RADIUS);
+        theme::cap(&painter, theme, pill, theme::RADIUS_MEDIUM);
         painter.text(
             pill.center(),
             Align2::CENTER_CENTER,
@@ -302,7 +302,7 @@ pub fn marker(ui: &Ui, theme: &Theme, row: Rect) {
         Vec2::new(theme::MARKER_W, h),
     );
     ui.painter()
-        .rect_filled(bar, theme::radius(2), theme.accent);
+        .rect_filled(bar, theme::radius(theme::RADIUS_LARGE), theme.accent);
 }
 
 /// Drops characters from the front until what is left fits, marking the cut
