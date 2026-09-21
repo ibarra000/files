@@ -638,6 +638,7 @@ impl eframe::App for Shell {
         // not fighting a panel that also does.
         let clicked = {
             let context = ui.ctx().clone();
+            let context_for_wake = context.clone();
             let settings = self.app.state.settings.clone();
             let theme = self.theme;
             let placement = self.app.actors.panel.remembered();
@@ -647,7 +648,11 @@ impl eframe::App for Shell {
                 &self.app.state,
                 &settings,
                 placement,
-                || report(&settings),
+                // What a finished diagnostics run calls. The worker has no
+                // way back into the frame loop otherwise, and a report that
+                // arrives without one sits in its channel until something
+                // else happens to cause a repaint.
+                move || context_for_wake.request_repaint(),
             )
         };
         // Everything the window changed, fed back the way a keystroke is.
@@ -696,6 +701,8 @@ impl eframe::App for Shell {
                 // Handled where it is pressed, because it needs the report
                 // text and nothing else. See `gui::settings::page`.
                 ActionId::CopyReport => {}
+                // Handled by the window, which owns the reporter.
+                ActionId::RefreshReport => {}
             }
         }
 
@@ -750,16 +757,4 @@ impl eframe::App for Shell {
         }
         let _ = self.app.pump(now);
     }
-}
-
-/// The `--doctor` report, as text.
-///
-/// The same function the console build runs, rendered into a string instead of
-/// onto a terminal - so the window and the command line cannot come to disagree
-/// about what the program thinks is wrong with itself.
-fn report(settings: &Settings) -> String {
-    let source = crate::app::actors::default_source(settings);
-    let mut out = Vec::new();
-    crate::doctor::doctor(settings, source, &mut out);
-    String::from_utf8_lossy(&out).into_owned()
 }

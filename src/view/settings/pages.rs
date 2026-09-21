@@ -473,6 +473,9 @@ fn diagnostics(settings: &Settings) -> Page {
                     Block::Actions(vec![
                         Action::new(ActionId::CopyReport, "Copy to clipboard")
                             .saying("Paste this into an email if you are asking for help."),
+                        Action::new(ActionId::RefreshReport, "Take it again").saying(
+                            "This reading is kept for a minute. Use this after changing something.",
+                        ),
                     ]),
                     Block::Report {
                         intro: "Everything below is also what files --doctor prints.",

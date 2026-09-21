@@ -23,7 +23,7 @@ use eframe::egui::{
     Ui, UiBuilder, WidgetInfo, WidgetText, WidgetType, pos2, vec2,
 };
 
-use super::measure;
+use super::{measure, report};
 use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::status::Tone;
 
@@ -686,7 +686,38 @@ pub fn message_bar(ui: &mut Ui, theme: &Theme, tone: Tone, text: &str) {
 /// A `TextEdit` rather than a `Label` because the point of this box is to end
 /// up in an email, and a label cannot be selected with the mouse. Not
 /// interactive, so it takes no focus and answers no keystroke.
-pub fn report_box(ui: &mut Ui, theme: &Theme, report: &str) {
+///
+/// Takes a [`report::View`] rather than a string, because there are three
+/// things to draw and only one of them is a box. A reading that has not
+/// arrived is a spinner and no box at all - an empty box is a report that
+/// found nothing, which is the opposite of what is true.
+pub fn report_box(ui: &mut Ui, theme: &Theme, view: report::View<'_>) {
+    let report = match view {
+        report::View::Waiting => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("Taking a reading\u{2026}")
+                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
+                        .color(theme.dim),
+                );
+            });
+            return;
+        }
+        report::View::Stale(text) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new("Taking a fresh reading\u{2026}")
+                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
+                        .color(theme.dim),
+                );
+            });
+            ui.add_space(6.0);
+            text
+        }
+        report::View::Ready(text) => text,
+    };
     let mut text = report.to_owned();
     ui.add(
         egui::TextEdit::multiline(&mut text)

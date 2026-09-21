@@ -198,6 +198,13 @@ pub enum ActionId {
     CheckForUpdates,
     InstallUpdate,
     CopyReport,
+    /// Take the reading again now.
+    ///
+    /// An answer is kept for a minute, so that stepping to another page and
+    /// back does not re-run a multi-second network probe. This is the button
+    /// for the case the minute is wrong: somebody who has just plugged a
+    /// drive in wants the new answer, not the one from forty seconds ago.
+    RefreshReport,
 }
 
 impl Page {

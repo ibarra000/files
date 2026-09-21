@@ -32,7 +32,7 @@ pub fn show(
     theme: &Theme,
     page: &Page,
     settings: &Settings,
-    report: &str,
+    report: super::report::View<'_>,
     form: &mut Form<'_>,
 ) {
     for (i, group) in page.groups.iter().enumerate() {
@@ -78,7 +78,14 @@ pub fn show(
                                 // something that would have to be given the
                                 // report all over again.
                                 if action.id == ActionId::CopyReport {
-                                    ui.ctx().copy_text(report.to_owned());
+                                    // Whatever there is. A reading that has
+                                    // not arrived copies nothing, which is
+                                    // better than copying the word "empty".
+                                    if let super::report::View::Ready(text)
+                                    | super::report::View::Stale(text) = report
+                                    {
+                                        ui.ctx().copy_text(text.to_owned());
+                                    }
                                 }
                                 form.actions.push(action.id);
                             }

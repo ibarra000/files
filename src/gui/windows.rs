@@ -59,7 +59,7 @@ use crate::app::event::AppEvent;
 use crate::app::state::{AppState, SettingChange};
 use crate::config::Settings;
 use crate::config::write::SettingKey;
-use crate::gui::settings::{self, Form, lists};
+use crate::gui::settings::{self, Form, lists, report};
 use crate::gui::theme::Theme;
 use crate::view::settings::{ActionId, PageId};
 
@@ -96,15 +96,16 @@ pub struct Windows {
     /// Survives a close, so Ctrl+comma brings back the page you were last
     /// on. A named menu item deliberately does not: see `Shell::serve_requests`.
     page: PageId,
-    /// The diagnostic report, taken once per arrival on the page that shows
-    /// it.
+    /// The diagnostic report, and whatever is being done about it.
     ///
-    /// Not per frame, and not per opening of the window either: `doctor`
-    /// touches the network drives, so running it sixty times a second would
-    /// turn the page into a load test against the thing being diagnosed, and
-    /// running it because somebody opened the window on Appearance would
-    /// charge them for a page they never looked at.
-    report: Option<String>,
+    /// A state machine on a worker thread rather than a `String` taken
+    /// inline. `doctor` reads volume flags, times round trips to every
+    /// enabled share, decodes the whole index and walks a cache directory;
+    /// it was being run on the frame thread *before the viewport was
+    /// created*, so opening the window on this page showed nothing at all -
+    /// no title bar, no nav - until it came back. See
+    /// [`crate::gui::settings::report`].
+    report: report::Reporter,
     /// The text box being typed in, and what is in it.
     ///
     /// Not a second copy of the settings: it exists between the moment a box
@@ -122,7 +123,7 @@ impl Default for Windows {
         Self {
             open: false,
             page: PageId::General,
-            report: None,
+            report: report::Reporter::default(),
             editing: None,
             draft: lists::AliasDraft::default(),
             drive: lists::DriveDraft::default(),
@@ -137,12 +138,6 @@ impl Windows {
     /// on the diagnostics, not on wherever the window was last left.
     pub fn open_at(&mut self, page: PageId) {
         self.go_to(page);
-        // Unconditionally, unlike `go_to`: re-opening on the page it is
-        // already on must still take a fresh report, or somebody who fixed a
-        // drive and looked again would be shown the old answer.
-        if page == PageId::Diagnostics {
-            self.report = None;
-        }
         self.open = true;
     }
 
@@ -157,16 +152,18 @@ impl Windows {
         self.open = !self.open;
     }
 
+    /// Moves to a page.
+    ///
+    /// This used to throw the diagnostics report away on every arrival, so
+    /// that somebody who had fixed a drive and come back saw the new answer
+    /// rather than the old one. That is the right instinct and the wrong
+    /// lever: it also meant clicking Diagnostics, stepping to About to check
+    /// a version, and clicking back re-ran a multi-second network probe. The
+    /// freshness question belongs to the thing that knows when the answer
+    /// was taken, which is [`report::Reporter`] and its one-minute life - and
+    /// the case the old rule was really about now has a button.
     fn go_to(&mut self, page: PageId) {
-        if self.page == page {
-            return;
-        }
         self.page = page;
-        // Cleared on arrival rather than on departure, so somebody who fixed
-        // a drive and came back sees the new answer rather than the old one.
-        if page == PageId::Diagnostics {
-            self.report = None;
-        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -192,7 +189,7 @@ impl Windows {
         state: &AppState,
         settings: &Settings,
         placement: Option<(i32, i32)>,
-        report: impl Fn() -> String,
+        wake: impl Fn() + Clone + Send + 'static,
     ) -> Clicked {
         let mut clicked = Clicked::default();
         if !self.open {
@@ -205,16 +202,21 @@ impl Windows {
         // answer one question about one of them.
         let pages = crate::view::settings::pages(state, settings, placement);
 
-        // Taken on the first frame the page is showing rather than when the
-        // menu item was clicked, so the window appears immediately and the
-        // waiting happens with something on screen. Asked of the model
+        // Asked for on the first frame the page is showing rather than when
+        // the menu item was clicked, so the window appears immediately and
+        // the waiting happens with something on screen. Asked of the model
         // rather than of the page id, so a report added to a second page
         // does not silently show a stale one.
-        if self.report.is_none() && settings::wants_report(&pages, self.page) {
-            self.report = Some(report());
-        }
-        let text = self.report.clone().unwrap_or_default();
+        let now = std::time::Instant::now();
+        self.report.poll(now);
+        self.report.wanted(
+            settings::wants_report(&pages, self.page),
+            settings,
+            now,
+            wake.clone(),
+        );
 
+        let view = self.report.view();
         let mut chosen = self.page;
         let mut aliases = None;
         let mut mappings = None;
@@ -236,11 +238,16 @@ impl Windows {
                     aliases: None,
                     mappings: None,
                 };
-                chosen = settings::show(ui, theme, &pages, settings, page, &text, &mut form);
+                chosen = settings::show(ui, theme, &pages, settings, page, view, &mut form);
                 aliases = form.aliases;
                 mappings = form.mappings;
             });
             self.open = open;
+        }
+        // Before the caller sees it, because the reporter is here and
+        // nowhere else. The shell has the same arm and does nothing in it.
+        if clicked.actions.contains(&ActionId::RefreshReport) {
+            self.report.refresh(settings, wake);
         }
         self.go_to(chosen);
         clicked.aliases = aliases;
@@ -450,53 +457,21 @@ mod tests {
         assert_eq!(windows.page, PageId::Diagnostics);
     }
 
-    /// `doctor` touches the network drives, so the report is taken once per
-    /// arrival rather than once per frame. Coming back to the page must take
-    /// a fresh one, or somebody who fixed a drive and looked again would see
-    /// the old answer.
+    /// A window that has not asked for a report has nothing to show, and
+    /// moving between pages does not change that on its own.
+    ///
+    /// Four tests used to live here, all about when the cached report was
+    /// thrown away on arrival at a page. That rule is gone: throwing it away
+    /// on arrival meant that stepping to About to check a version and
+    /// stepping back re-ran a multi-second network probe. Freshness is now
+    /// `report::Reporter`'s, which knows when the answer was taken, and the
+    /// tests that matter are beside it.
     #[test]
-    fn arriving_at_the_diagnostics_discards_the_previous_report() {
+    fn moving_between_pages_does_not_take_a_reading_by_itself() {
         let mut windows = Windows::default();
         windows.open_at(PageId::Diagnostics);
-        windows.report = Some("stale".into());
-
         windows.go_to(PageId::General);
         windows.go_to(PageId::Diagnostics);
-        assert_eq!(
-            windows.report, None,
-            "a second arrival would have shown the first one's answer"
-        );
-    }
-
-    /// Staying put is not arriving. Re-taking the report every frame is the
-    /// failure this whole arrangement is here to avoid.
-    #[test]
-    fn staying_on_the_diagnostics_keeps_the_report_it_has() {
-        let mut windows = Windows::default();
-        windows.open_at(PageId::Diagnostics);
-        windows.report = Some("taken once".into());
-
-        windows.go_to(PageId::Diagnostics);
-        assert_eq!(windows.report.as_deref(), Some("taken once"));
-    }
-
-    /// And a window opened somewhere else pays for nothing.
-    #[test]
-    fn opening_the_window_on_another_page_takes_no_report() {
-        let mut windows = Windows::default();
-        windows.open_at(PageId::General);
-        assert_eq!(windows.report, None);
-    }
-
-    /// Re-opening on the diagnostics, from the diagnostics, still refreshes.
-    /// `go_to` alone would not, because the page did not change.
-    #[test]
-    fn re_opening_on_the_diagnostics_still_takes_a_fresh_report() {
-        let mut windows = Windows::default();
-        windows.open_at(PageId::Diagnostics);
-        windows.report = Some("stale".into());
-
-        windows.open_at(PageId::Diagnostics);
-        assert_eq!(windows.report, None);
+        assert_eq!(windows.report.text(), "");
     }
 }

@@ -32,6 +32,7 @@ pub mod lists;
 pub mod measure;
 pub mod nav;
 pub mod page;
+pub mod report;
 pub mod widgets;
 
 use eframe::egui;
@@ -60,7 +61,7 @@ pub fn show(
     pages: &[Page],
     settings: &Settings,
     current: PageId,
-    report: &str,
+    report: report::View<'_>,
     form: &mut Form<'_>,
 ) -> PageId {
     let mut chosen = current;
