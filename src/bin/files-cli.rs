@@ -96,7 +96,11 @@ fn main() -> io::Result<()> {
         Mode::Doctor => {
             let source = source_for(&args, &settings);
             let mut out = io::stdout().lock();
-            doctor::doctor(&settings, source, &mut out);
+            // `None`: this process holds no hotkey, so registering the chord
+            // to see whether it is free is both safe and the honest answer.
+            // The running program passes what its own listener reported -
+            // see `hotkey::Probe`.
+            doctor::doctor(&settings, source, None, &mut out);
             out.flush()
         }
         Mode::Bench {

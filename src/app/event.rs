@@ -85,6 +85,15 @@ pub enum HotkeyMsg {
     Summoned,
     /// The window has been put back and minimised. Return to the full layout.
     Dismissed,
+    /// The chord was claimed, and this process owns it.
+    ///
+    /// Sent once, at startup. Nothing on screen changes; it is recorded so
+    /// that the diagnostics can say "accepted" without asking Windows a
+    /// question it cannot answer correctly from in here. `RegisterHotKey` is
+    /// per-thread, so a second registration of a chord this program already
+    /// holds fails - and the report used to tell people their own program
+    /// had stolen their hotkey. See [`crate::hotkey::Probe`].
+    Claimed,
     /// The hotkey, or the window behind it, is not available on this machine.
     ///
     /// Sent at most once. The compact layout still toggles on the hotkey - a

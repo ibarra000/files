@@ -295,10 +295,14 @@ pub fn spawn(
         })?;
 
     match ready_rx.recv_timeout(READY_TIMEOUT) {
-        Ok(Ready::Registered { tid }) => Ok(Some(HotkeyThread {
-            tid,
-            handle: Some(handle),
-        })),
+        Ok(Ready::Registered { tid }) => {
+            // Recorded rather than re-asked later. See `HotkeyMsg::Claimed`.
+            let _ = events.send(AppEvent::Hotkey(HotkeyMsg::Claimed));
+            Ok(Some(HotkeyThread {
+                tid,
+                handle: Some(handle),
+            }))
+        }
         Ok(Ready::Failed(code)) => {
             let _ = events.send(AppEvent::Hotkey(HotkeyMsg::Unavailable {
                 reason: registration_detail(hk, code),
@@ -576,21 +580,29 @@ fn place(hwnd: HWND, at: Option<(i32, i32)>) -> RectPx {
     }
 }
 
-pub fn probe(spec: HotkeySpec) -> Probe {
+pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {
     let chord = spec.bound().map(super::spec::describe);
-    let registered = spec.bound().map(|hk| {
-        // SAFETY: registered and immediately released, on whatever thread the
-        // caller is on. Asking the question must not leave the key claimed.
-        unsafe {
-            if RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, hk.mods, hk.vk as u32) == 0 {
-                let code = GetLastError();
-                Err(registration_detail(hk, code))
-            } else {
-                UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
-                Ok(())
+    // What the caller already knows beats what this can find out, and the
+    // reason is in `super::Probe`: `RegisterHotKey` is per-thread, so asking
+    // again from inside a process whose own hotkey thread holds the chord
+    // reports it as taken - by itself.
+    let registered = match known {
+        Some(answer) => spec.bound().map(|_| answer),
+        None => spec.bound().map(|hk| {
+            // SAFETY: registered and immediately released, on whatever thread
+            // the caller is on. Asking the question must not leave the key
+            // claimed.
+            unsafe {
+                if RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, hk.mods, hk.vk as u32) == 0 {
+                    let code = GetLastError();
+                    Err(registration_detail(hk, code))
+                } else {
+                    UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                    Ok(())
+                }
             }
-        }
-    });
+        }),
+    };
     // The window is this program's own, so there is nothing to find and nothing
     // that can go wrong in finding it. What is still worth reporting is where
     // the panel would land, which is the answer somebody with two monitors

@@ -216,6 +216,7 @@ impl Windows {
         self.report.wanted(
             settings::wants_report(&pages, self.page),
             settings,
+            state.hotkey_claim.clone(),
             now,
             wake.clone(),
         );
@@ -255,7 +256,8 @@ impl Windows {
         // Before the caller sees it, because the reporter is here and
         // nowhere else. The shell has the same arm and does nothing in it.
         if clicked.actions.contains(&ActionId::RefreshReport) {
-            self.report.refresh(settings, wake);
+            self.report
+                .refresh(settings, state.hotkey_claim.clone(), wake);
         }
         self.go_to(chosen);
         clicked.aliases = aliases;

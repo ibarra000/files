@@ -161,6 +161,14 @@ pub struct AppState {
     /// from having looked and found nothing - the settings window says so
     /// rather than claiming to be up to date before it knows.
     pub update: Option<crate::update::Found>,
+    /// Whether this process holds the global chord, as the hotkey thread
+    /// reported it at startup.
+    ///
+    /// `None` until it has said, which for a hotkey that is switched off or
+    /// a platform that has none is for ever. Recorded rather than asked
+    /// again later because `RegisterHotKey` is per-thread and cannot be
+    /// asked again correctly from in here - see [`crate::hotkey::Probe`].
+    pub hotkey_claim: Option<Result<(), String>>,
 
     query_epoch: u64,
     /// When the code on the line becomes worth matching against the index.
@@ -304,6 +312,7 @@ impl AppState {
             query: Query::default(),
             expansion: None,
             update: None,
+            hotkey_claim: None,
             last_verified_query: None,
             help_scroll: 0,
             hovered: None,

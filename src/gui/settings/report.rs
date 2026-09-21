@@ -132,6 +132,7 @@ impl Reporter {
         &mut self,
         wanted: bool,
         settings: &Settings,
+        hotkey: Option<Result<(), String>>,
         now: Instant,
         wake: impl FnOnce() + Send + 'static,
     ) {
@@ -149,12 +150,17 @@ impl Reporter {
             return;
         }
         self.state = State::Running;
-        self.job = Some(spawn(settings.clone(), wake));
+        self.job = Some(spawn(settings.clone(), hotkey, wake));
     }
 
     /// Takes a fresh reading whatever the cache says, keeping the old one on
     /// screen while it runs.
-    pub fn refresh(&mut self, settings: &Settings, wake: impl FnOnce() + Send + 'static) {
+    pub fn refresh(
+        &mut self,
+        settings: &Settings,
+        hotkey: Option<Result<(), String>>,
+        wake: impl FnOnce() + Send + 'static,
+    ) {
         if self.job.is_some() {
             return;
         }
@@ -162,7 +168,7 @@ impl Reporter {
             State::Ready { text, .. } | State::Refreshing { text } => State::Refreshing { text },
             _ => State::Running,
         };
-        self.job = Some(spawn(settings.clone(), wake));
+        self.job = Some(spawn(settings.clone(), hotkey, wake));
     }
 
     /// What to draw.
@@ -188,7 +194,11 @@ impl Reporter {
 /// Named, because a thread with no name is a thread nobody can find in a
 /// debugger, and this is the one most likely to be sitting in a blocked SMB
 /// call when somebody looks.
-fn spawn(settings: Settings, wake: impl FnOnce() + Send + 'static) -> Receiver<String> {
+fn spawn(
+    settings: Settings,
+    hotkey: Option<Result<(), String>>,
+    wake: impl FnOnce() + Send + 'static,
+) -> Receiver<String> {
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("files-doctor".to_owned())
@@ -196,7 +206,7 @@ fn spawn(settings: Settings, wake: impl FnOnce() + Send + 'static) -> Receiver<S
             let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let source = crate::app::actors::default_source(&settings);
                 let mut out = Vec::new();
-                crate::doctor::doctor(&settings, source, &mut out);
+                crate::doctor::doctor(&settings, source, hotkey, &mut out);
                 String::from_utf8_lossy(&out).into_owned()
             }))
             .unwrap_or_else(|_| {
@@ -252,7 +262,7 @@ mod tests {
         let mut reporter = ready("all fine", now);
         let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&woken);
-        reporter.wanted(true, &Settings::default(), now + TTL / 2, move || {
+        reporter.wanted(true, &Settings::default(), None, now + TTL / 2, move || {
             flag.store(true, std::sync::atomic::Ordering::Relaxed)
         });
         assert!(reporter.job.is_none(), "a second run was started");
@@ -265,7 +275,7 @@ mod tests {
     fn an_answer_older_than_the_minute_is_taken_again() {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
-        reporter.wanted(true, &Settings::default(), now + TTL * 2, || {});
+        reporter.wanted(true, &Settings::default(), None, now + TTL * 2, || {});
         assert!(reporter.job.is_some(), "no second run was started");
         assert_eq!(reporter.view(), View::Waiting);
     }
@@ -275,7 +285,7 @@ mod tests {
     fn a_page_that_wants_nothing_starts_nothing() {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
-        reporter.wanted(false, &Settings::default(), now + TTL * 2, || {});
+        reporter.wanted(false, &Settings::default(), None, now + TTL * 2, || {});
         assert!(reporter.job.is_none());
         assert_eq!(reporter.view(), View::Ready("all fine"));
     }
@@ -285,7 +295,7 @@ mod tests {
     #[test]
     fn refreshing_keeps_the_old_report_on_screen() {
         let mut reporter = ready("all fine", Instant::now());
-        reporter.refresh(&Settings::default(), || {});
+        reporter.refresh(&Settings::default(), None, || {});
         assert_eq!(reporter.view(), View::Stale("all fine"));
         assert_eq!(reporter.text(), "all fine");
     }
@@ -294,7 +304,7 @@ mod tests {
     #[test]
     fn refreshing_from_nothing_is_a_plain_wait() {
         let mut reporter = Reporter::default();
-        reporter.refresh(&Settings::default(), || {});
+        reporter.refresh(&Settings::default(), None, || {});
         assert_eq!(reporter.view(), View::Waiting);
     }
 
@@ -329,7 +339,7 @@ mod tests {
         reporter.poll(Instant::now());
         assert!(reporter.job.is_none());
         // And asking again starts a new one.
-        reporter.wanted(true, &Settings::default(), Instant::now(), || {});
+        reporter.wanted(true, &Settings::default(), None, Instant::now(), || {});
         assert!(reporter.job.is_some());
     }
 }

@@ -16,7 +16,12 @@ impl AppState {
         match msg {
             HotkeyMsg::Summoned => self.enter_overlay(),
             HotkeyMsg::Dismissed => self.leave_overlay(),
+            HotkeyMsg::Claimed => {
+                self.hotkey_claim = Some(Ok(()));
+                Response::none()
+            }
             HotkeyMsg::Unavailable { reason } => {
+                self.hotkey_claim = Some(Err(reason.clone()));
                 // Said once, by the thread, and shown as a warning rather than
                 // an error: the shortcut still switches to the compact layout,
                 // so this is a reduced feature and not a broken one.
