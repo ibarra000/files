@@ -14,6 +14,7 @@
 use eframe::egui;
 
 use crate::config::Settings;
+use crate::gui::settings::measure;
 use crate::gui::settings::page::Form;
 use crate::gui::settings::widgets;
 use crate::gui::theme::{self, Theme, Weight};
@@ -75,87 +76,68 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
 
     let current = settings.routes.all();
     for mapping in current {
-        ui.horizontal(|ui| {
-            let mut enabled = mapping.enabled;
-            if ui.checkbox(&mut enabled, "").changed() {
-                form.mappings = Some(
-                    current
-                        .iter()
-                        .map(|m| {
-                            let mut m = m.clone();
-                            if m.id == mapping.id {
-                                m.enabled = enabled;
-                            }
-                            m
-                        })
-                        .collect(),
-                );
-            }
-            ui.allocate_ui_with_layout(
-                egui::vec2(84.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(mapping.name.as_ref())
-                            .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
-                            .color(theme.accent),
+        // The one error with no symptom, said out loud on the row it is
+        // about. A warning rather than a refusal: this file roams, and a
+        // laptop at home has none of these drives mapped.
+        let missing =
+            mapping.enabled && !mapping.path.as_os_str().is_empty() && !mapping.path.is_dir();
+        let path = mapping.path.display().to_string();
+        let entry = widgets::Entry {
+            name: mapping.name.as_ref(),
+            detail: &path,
+            note: Some(mapping.kind.label()),
+            caveat: missing.then_some(DRIVES.not_there),
+            lead_w: CHECKBOX_W,
+            control_w: BUTTON_W,
+        };
+        widgets::list_row(
+            ui,
+            theme,
+            entry,
+            |ui| {
+                let mut enabled = mapping.enabled;
+                if ui.checkbox(&mut enabled, "").changed() {
+                    form.mappings = Some(
+                        current
+                            .iter()
+                            .map(|m| {
+                                let mut m = m.clone();
+                                if m.id == mapping.id {
+                                    m.enabled = enabled;
+                                }
+                                m
+                            })
+                            .collect(),
                     );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(220.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(mapping.path.display().to_string())
-                            .font(theme::font(theme::SIZE_BODY, Weight::Regular))
-                            .color(theme.text),
-                    );
-                },
-            );
-            ui.label(
-                egui::RichText::new(mapping.kind.label())
-                    .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                    .color(theme.dim),
-            );
-            // Asked rather than done. This is the one control in the
-            // window that cannot be undone by pressing it again: the path
-            // is the part nobody remembers, and the rewrite costs the
-            // comments around the drive list in the configuration file.
-            if ui.button(DRIVES.remove).clicked() {
-                form.drive.confirming = Some(mapping.id);
-            }
-        });
-
-        // The one error with no symptom, said out loud. A warning rather than
-        // a refusal: this file roams, and a laptop at home has none of them.
-        if mapping.enabled && !mapping.path.as_os_str().is_empty() && !mapping.path.is_dir() {
-            ui.horizontal(|ui| {
-                ui.add_space(28.0);
-                ui.label(
-                    egui::RichText::new(DRIVES.not_there)
-                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                        .color(theme.tone(view::status::Tone::Warn)),
-                );
-            });
-        }
+                }
+            },
+            |ui| {
+                // Asked rather than done. This is the one control in the
+                // window that cannot be undone by pressing it again: the
+                // path is the part nobody remembers, and the rewrite costs
+                // the comments around the drive list in the file.
+                if ui.button(DRIVES.remove).clicked() {
+                    form.drive.confirming = Some(mapping.id);
+                }
+            },
+        );
     }
 
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    add_row(ui, |ui, widths| {
         ui.add(
             egui::TextEdit::singleline(&mut form.drive.name)
                 .hint_text(DRIVES.name_hint)
-                .desired_width(84.0),
+                .desired_width(widths[0]),
         );
         ui.add(
             egui::TextEdit::singleline(&mut form.drive.path)
                 .hint_text(DRIVES.path_hint)
-                .desired_width(214.0),
+                .desired_width(widths[1]),
         );
         egui::ComboBox::from_id_salt("files-drive-kind")
             .selected_text(form.drive.kind.label())
-            .width(76.0)
+            .width(widths[2])
             .show_ui(ui, |ui| {
                 for kind in [
                     crate::paths::MappingKind::Flat,
@@ -195,10 +177,11 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
     }
 
     if let Some(problem) = &form.drive.problem {
-        ui.label(
-            egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                .color(theme.tone(view::status::Tone::Warn)),
+        widgets::message_bar(
+            ui,
+            theme,
+            view::status::Tone::Warn,
+            &crate::view::sentence(problem),
         );
     }
 }
@@ -264,68 +247,53 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
     }
 
     for alias in current {
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(90.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(alias.name.as_ref())
-                            .font(theme::font(theme::SIZE_CAPTION, Weight::Semibold))
-                            .color(theme.accent),
+        let entry = widgets::Entry {
+            name: alias.name.as_ref(),
+            detail: alias.code.as_ref(),
+            note: alias.note.as_deref(),
+            caveat: None,
+            lead_w: 0.0,
+            control_w: BUTTON_W,
+        };
+        widgets::list_row(
+            ui,
+            theme,
+            entry,
+            |_| {},
+            |ui| {
+                if ui.button(ALIASES.remove).clicked() {
+                    // The whole list, minus this one. Rewriting the array
+                    // wholesale is what keeps "what the window shows" and
+                    // "what the file says" the same object rather than two
+                    // that have to be kept in step.
+                    form.aliases = Some(
+                        current
+                            .iter()
+                            .filter(|a| a.name != alias.name)
+                            .cloned()
+                            .collect(),
                     );
-                },
-            );
-            ui.allocate_ui_with_layout(
-                egui::vec2(200.0, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.label(
-                        egui::RichText::new(alias.code.as_ref())
-                            .font(theme::font(theme::SIZE_BODY, Weight::Regular))
-                            .color(theme.text),
-                    );
-                },
-            );
-            if ui.button(ALIASES.remove).clicked() {
-                // The whole list, minus this one. Rewriting the array wholesale
-                // is what keeps "what the window shows" and "what the file
-                // says" the same object rather than two that have to be kept
-                // in step.
-                form.aliases = Some(
-                    current
-                        .iter()
-                        .filter(|a| a.name != alias.name)
-                        .cloned()
-                        .collect(),
-                );
-            }
-            if let Some(note) = &alias.note {
-                ui.label(
-                    egui::RichText::new(note.as_ref())
-                        .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                        .color(theme.dim),
-                );
-            }
-        });
+                }
+            },
+        );
     }
 
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    add_row(ui, |ui, widths| {
         ui.add(
             egui::TextEdit::singleline(&mut form.draft.name)
                 .hint_text(ALIASES.name_hint)
-                .desired_width(84.0),
+                .desired_width(widths[0]),
         );
         ui.add(
             egui::TextEdit::singleline(&mut form.draft.code)
                 .hint_text(ALIASES.code_hint)
-                .desired_width(194.0),
+                .desired_width(widths[1]),
         );
         ui.add(
             egui::TextEdit::singleline(&mut form.draft.note)
                 .hint_text(ALIASES.note_hint)
-                .desired_width(150.0),
+                .desired_width(widths[2]),
         );
         if ui.button(ALIASES.add).clicked() {
             // The very same check the loader applies, from the same function.
@@ -352,13 +320,60 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
     // Only after an attempt. Complaining that a name is empty before anybody
     // has typed one is nagging at somebody who has done nothing wrong.
     if let Some(problem) = &form.draft.problem {
-        ui.label(
-            egui::RichText::new(crate::view::sentence(problem))
-                .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
-                .color(theme.tone(view::status::Tone::Warn)),
+        widgets::message_bar(
+            ui,
+            theme,
+            view::status::Tone::Warn,
+            &crate::view::sentence(problem),
         );
     }
 }
+
+/// Room for the checkbox that turns a drive off, and for a button after it.
+///
+/// Two numbers where there used to be twelve. Both are what a control of
+/// that kind actually occupies rather than a column somebody sized by eye,
+/// and neither varies with the window - which is the point of declaring
+/// them as `Cell::Fixed`.
+const CHECKBOX_W: f32 = 24.0;
+const BUTTON_W: f32 = 84.0;
+
+/// The row at the foot of a list, with three boxes and a button.
+///
+/// The one place in this window where a narrow window wraps rather than
+/// elides. Everywhere else an over-long value is cut with an ellipsis and
+/// the eye fills it in; a text box treated that way is a box somebody cannot
+/// type a path into, so when the three will not fit on one line they go onto
+/// two. That is what `row_cells` returning `None` means, and this is the
+/// only caller that acts on it.
+fn add_row(ui: &mut egui::Ui, build: impl FnOnce(&mut egui::Ui, [f32; 3])) {
+    /// What each of the three boxes would like, and the least each can be.
+    const WANT: [f32; 3] = [84.0, 214.0, 150.0];
+    const LEAST: [f32; 3] = [56.0, 120.0, 72.0];
+
+    let avail = ui.available_width();
+    let cells: Vec<_> = LEAST.iter().map(|w| measure::Cell::Flex(*w)).collect();
+    let room = avail - BUTTON_W - CELL_GAP * 4.0;
+    match measure::row_cells(room, CELL_GAP, &cells) {
+        Some(widths) => {
+            let capped = [
+                widths[0].min(WANT[0]),
+                widths[1].min(WANT[1]),
+                widths[2].min(WANT[2]),
+            ];
+            ui.horizontal(|ui| build(ui, capped));
+        }
+        None => {
+            // Two lines. Each box gets the whole width, which is the one
+            // arrangement that is never cramped.
+            let full = (avail - CELL_GAP).max(LEAST[0]);
+            ui.vertical(|ui| build(ui, [full, full, full]));
+        }
+    }
+}
+
+/// Between the boxes on the add row, and the same gap a list row uses.
+const CELL_GAP: f32 = 8.0;
 
 /// The sentence over a list, saying what the list is for.
 ///

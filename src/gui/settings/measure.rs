@@ -107,7 +107,7 @@ pub enum Cell {
 }
 
 impl Cell {
-    const fn least(self) -> f32 {
+    pub const fn least(self) -> f32 {
         match self {
             Self::Fixed(w) | Self::Flex(w) => w,
         }

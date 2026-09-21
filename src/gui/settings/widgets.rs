@@ -209,6 +209,209 @@ pub fn setting_row<R>(
     control(&mut child)
 }
 
+/// One entry in a list: a drive, or an alias.
+///
+/// The sibling of [`Row`], for the two blocks in this window that are not
+/// settings. A setting has one value and one control; an entry has three or
+/// four facts about a thing, side by side, and a button that takes it away.
+pub struct Entry<'a> {
+    /// A drive letter or an alias name. Short, Semibold, and the column the
+    /// eye scans down.
+    pub name: &'a str,
+    /// What it stands for: a path, or a job code. Elided from the *left*,
+    /// because the tail of a path is what tells two of them apart.
+    pub detail: &'a str,
+    /// A kind, or somebody's note about why the alias exists.
+    pub note: Option<&'a str>,
+    /// Why this entry will not do what it says. Drawn under the row in the
+    /// warning tone - the same place and the same colour a setting puts its
+    /// caveat, because it is the same kind of disappointment.
+    pub caveat: Option<&'a str>,
+    /// Room for a control before the name: the checkbox that turns a drive
+    /// off. Zero where there is none.
+    pub lead_w: f32,
+    /// And room for the ones after the note.
+    pub control_w: f32,
+}
+
+/// The name column, which does not grow.
+///
+/// A drive letter is two characters and the longest alias anybody has is
+/// about eight, so a name column that took a share of a widening window
+/// would be a column of air with a word at the front of it.
+const NAME_W: f32 = 84.0;
+
+/// The narrowest the two flexible columns may be squeezed to.
+///
+/// A path at 120 still shows a folder and a half after the ellipsis, which
+/// is what distinguishes two rows; a note at 60 shows a word.
+const MIN_DETAIL_W: f32 = 120.0;
+const MIN_NOTE_W: f32 = 60.0;
+
+/// Between one column of a list row and the next.
+const CELL_GAP: f32 = 8.0;
+
+/// One row of a list: the entry, a control before it, and controls after.
+///
+/// Measured with [`measure::row_cells`] rather than with a run of hard pixel
+/// widths, which is what the two lists used to do - twelve of them between
+/// them, none of which ever read `available_width`, which is why the window
+/// was resizable and resizing it changed nothing. Two of the five columns
+/// are flexible and the rest are what they are.
+pub fn list_row<R>(
+    ui: &mut Ui,
+    theme: &Theme,
+    entry: Entry<'_>,
+    lead: impl FnOnce(&mut Ui),
+    trailing: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let avail = ui.available_width();
+    let inner = (avail - measure::CARD_PAD * 2.0).max(0.0);
+
+    // The note is the column that goes first. A drive whose kind is not
+    // shown is a drive missing a fact; a drive whose *path* is not shown is
+    // a row about nothing.
+    let with_note = entry.note.is_some();
+    let cells = |note: bool| {
+        let mut v = vec![
+            measure::Cell::Fixed(entry.lead_w),
+            measure::Cell::Fixed(NAME_W),
+            measure::Cell::Flex(MIN_DETAIL_W),
+        ];
+        if note {
+            v.push(measure::Cell::Flex(MIN_NOTE_W));
+        }
+        v.push(measure::Cell::Fixed(entry.control_w));
+        v
+    };
+    let (shown_note, widths) = match measure::row_cells(inner, CELL_GAP, &cells(with_note)) {
+        Some(w) if with_note => (true, w),
+        Some(w) => (false, w),
+        None => match measure::row_cells(inner, CELL_GAP, &cells(false)) {
+            Some(w) => (false, w),
+            // Narrower than the minimums. Everything gets its least and the
+            // row is as wide as it is - which at this point is a window
+            // below `MIN_SIZE`, i.e. a window Windows will not make.
+            None => (
+                false,
+                cells(false).iter().map(|c| c.least()).collect::<Vec<_>>(),
+            ),
+        },
+    };
+
+    let painter = ui.painter().clone();
+    let name_font = theme::font(theme::SIZE_BODY, Weight::Semibold);
+    let detail_font = theme::font(theme::SIZE_BODY, Weight::Regular);
+    let note_font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
+
+    let name = truncated(&painter, entry.name, name_font, theme.text, widths[1]);
+    let detail = crate::gui::text::elide_left(entry.detail, widths[2], &|text| {
+        painter
+            .layout_no_wrap(text.to_owned(), detail_font.clone(), theme.text)
+            .rect
+            .width()
+    });
+    let detail = truncated(&painter, &detail, detail_font, theme.text, widths[2]);
+    let note = (shown_note && entry.note.is_some()).then(|| {
+        truncated(
+            &painter,
+            entry.note.unwrap_or_default(),
+            note_font.clone(),
+            theme.dim,
+            widths[3],
+        )
+    });
+    let caveat = entry.caveat.map(|text| {
+        painter.layout(
+            text.to_owned(),
+            note_font.clone(),
+            theme.tone(Tone::Warn),
+            (inner - entry.lead_w - CELL_GAP).max(MIN_DETAIL_W),
+        )
+    });
+
+    let line_h = detail.rect.height().max(name.rect.height());
+    let mut prose_h = line_h;
+    if let Some(caveat) = &caveat {
+        prose_h += measure::LABEL_GAP + caveat.rect.height();
+    }
+    let control_h = theme::CONTROL_H;
+    let height = measure::tile_height(prose_h, control_h);
+    let (tile, response) = ui.allocate_exact_size(vec2(avail, height), Sense::hover());
+    painter.rect_filled(tile, theme::radius(theme::RADIUS_MEDIUM), theme.card);
+
+    // Left to right along the top line, whatever the tile ended up being
+    // tall enough for.
+    let top = measure::prose_origin(tile).y;
+    let mut x = measure::prose_origin(tile).x;
+    let slot = |x: f32, w: f32, h: f32| {
+        Rect::from_min_size(pos2(x, tile.center().y - h / 2.0), vec2(w, h))
+    };
+    let lead_slot = slot(x, widths[0], control_h);
+    x += widths[0] + if widths[0] > 0.0 { CELL_GAP } else { 0.0 };
+
+    let text_y = if caveat.is_some() {
+        top
+    } else {
+        tile.center().y - line_h / 2.0
+    };
+    // Each galley centred on the line rather than hung from its top. The
+    // note is set two points smaller than the name beside it, and three
+    // galleys sharing one `y` puts the small one visibly high.
+    let centred = |g: &std::sync::Arc<egui::Galley>| text_y + (line_h - g.rect.height()) / 2.0;
+    painter.galley(pos2(x, centred(&name)), name, theme.text);
+    x += widths[1] + CELL_GAP;
+    painter.galley(pos2(x, centred(&detail)), detail, theme.text);
+    x += widths[2] + CELL_GAP;
+    if let Some(note) = note {
+        painter.galley(pos2(x, centred(&note)), note, theme.dim);
+        x += widths[3] + CELL_GAP;
+    }
+    let _ = x;
+
+    if let Some(caveat) = caveat {
+        let under = measure::prose_origin(tile).x
+            + entry.lead_w
+            + if entry.lead_w > 0.0 { CELL_GAP } else { 0.0 };
+        painter.galley(
+            pos2(under, text_y + line_h + measure::LABEL_GAP),
+            caveat,
+            theme.tone(Tone::Warn),
+        );
+    }
+
+    // One thing to a screen reader, like a setting row: a drive letter on its
+    // own says nothing and a path on its own says nothing about which drive.
+    let spoken = [
+        Some(entry.name),
+        Some(entry.detail),
+        entry.note,
+        entry.caveat,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ");
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Other, true, &spoken));
+
+    if entry.lead_w > 0.0 {
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(lead_slot)
+                .layout(Layout::left_to_right(Align::Center)),
+        );
+        lead(&mut child);
+    }
+
+    let mut child = ui.new_child(
+        UiBuilder::new()
+            .max_rect(measure::control_slot(tile, entry.control_w, control_h))
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    child.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+    trailing(&mut child)
+}
+
 /// A label laid out to one line, with an ellipsis where it ran out.
 fn truncated(
     painter: &egui::Painter,
