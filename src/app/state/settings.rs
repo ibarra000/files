@@ -29,9 +29,9 @@
 
 use std::time::Instant;
 
-use super::{AppState, Cmd, Response};
+use super::{AppState, Cmd, Response, Severity};
 use crate::config::write::{Edit, Scalar, SettingKey};
-use crate::config::{ThemeChoice, ViewerKind};
+use crate::config::{Settings, ThemeChoice, ViewerKind};
 
 /// A setting the window changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +124,76 @@ impl AppState {
             return Response::redraw();
         }
         Response::redraw().with(Cmd::SaveSetting { edit, label })
+    }
+
+    /// Takes a whole new `Settings`, and re-applies whatever is derived
+    /// from it.
+    ///
+    /// The replacement for `apply_live`, which took one `Edit` and matched
+    /// exhaustively over [`SettingKey`] so that a key added without a
+    /// decision was a compile error rather than a control that silently
+    /// did nothing. That guarantee is kept and the mechanism is inverted:
+    /// this assigns the whole struct and then asks, key by key, what else
+    /// has to happen - and the `match` below is exhaustive for the same
+    /// reason the old one was.
+    ///
+    /// Why the whole struct: the settings window is a separate process, and
+    /// the only thing it and the panel both see is the file. It writes,
+    /// then says so. Sending the edit instead would mean putting the
+    /// configuration schema on the wire and trusting two processes to agree
+    /// about what each field means, to save a read of a file that is a few
+    /// kilobytes long.
+    pub(super) fn on_adopt(&mut self, fresh: Settings, now: Instant) -> Response {
+        let was = std::mem::replace(&mut self.settings, fresh);
+        for key in SettingKey::ALL {
+            self.adopt_one(key, &was);
+        }
+        // A toast rather than silence, because a change made in another
+        // window is a change nobody watching this one saw happen.
+        self.set_toast("Settings updated".into(), Severity::Info, now);
+        Response::redraw()
+    }
+
+    /// What has to happen beyond the field itself, for one key.
+    ///
+    /// Exhaustive on purpose: see [`Self::on_adopt`]. Most keys are read
+    /// where they are used and need nothing here, and saying so key by key
+    /// is what makes the next one somebody adds a decision rather than an
+    /// omission.
+    fn adopt_one(&mut self, key: SettingKey, was: &Settings) {
+        match key {
+            // Read at the moment they are used, by something that is about
+            // to read them anyway.
+            SettingKey::Theme
+            | SettingKey::ResultLayout
+            | SettingKey::Backdrop
+            | SettingKey::HideOnBlur
+            | SettingKey::HideAfterOpening
+            | SettingKey::HideOnEscape
+            | SettingKey::HideExtensions
+            | SettingKey::HideSystemFiles
+            | SettingKey::PdfReadOnly
+            | SettingKey::DevMode
+            | SettingKey::LiveUpdates
+            | SettingKey::StaleNotices
+            | SettingKey::PdfViewer
+            | SettingKey::IndexLog
+            | SettingKey::Hotkey
+            | SettingKey::UpdateFrom => {}
+            // The viewer is two fields, and they are not the same thing:
+            // `settings.viewer` is what the form reads back and `self.viewer`
+            // is what Enter uses. F2 moves only the second.
+            SettingKey::Viewer => self.viewer = self.settings.viewer,
+            // Turning the history off throws away what is in memory as
+            // well as stopping new entries, or the up arrow would still
+            // recall codes from a list the user has just asked not to be
+            // kept.
+            SettingKey::History => {
+                if was.history && !self.settings.history {
+                    self.history = crate::history::History::new();
+                }
+            }
+        }
     }
 
     /// Applies the settings nothing else is holding a copy of.

@@ -602,6 +602,7 @@ impl AppState {
             AppEvent::Key(key) => self.on_key(key, now),
             AppEvent::Intent(intent) => self.on_intent(intent, now),
             AppEvent::Setting(change) => self.on_setting(change, now),
+            AppEvent::Adopt(fresh) => self.on_adopt(*fresh, now),
             AppEvent::Update(msg) => self.on_update(msg, now),
             AppEvent::Aliases(list) => self.on_aliases(list, now),
             AppEvent::Drives(list) => self.on_drives(list),

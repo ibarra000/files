@@ -27,6 +27,7 @@ pub mod drag;
 pub mod fonts;
 pub mod frame;
 pub mod input;
+pub mod link;
 pub mod panel;
 pub mod settings;
 pub mod text;
@@ -34,7 +35,6 @@ pub mod theme;
 #[cfg(windows)]
 pub mod tray;
 pub mod window;
-pub mod windows;
 
 use eframe::egui;
 
@@ -46,8 +46,7 @@ use crate::app::event::AppEvent;
 use crate::config::Settings;
 use crate::index::enumerate::DirSource;
 use crate::placement;
-use crate::view::settings::{ActionId, PageId};
-use windows::Windows;
+use crate::view::settings::PageId;
 
 pub use theme::{PANEL_H, PANEL_W};
 
@@ -79,7 +78,11 @@ pub enum Request {
 }
 
 /// Runs the application until the user quits.
-pub fn run(settings: Settings, source: Arc<dyn DirSource>) -> eframe::Result<()> {
+pub fn run(
+    settings: Settings,
+    choice: crate::config::ConfigChoice,
+    source: Arc<dyn DirSource>,
+) -> eframe::Result<()> {
     // Built here rather than taken from the creation context, because the
     // workers need something to wake *before* there is a window to draw in -
     // and `run_native_ext` exists precisely so the context can outlive that
@@ -155,7 +158,7 @@ pub fn run(settings: Settings, source: Arc<dyn DirSource>) -> eframe::Result<()>
     let build = {
         let ctx = ctx.clone();
         move |cc: &eframe::CreationContext<'_>| {
-            let shell = Shell::new(cc, ctx, settings, source, requests_rx, post)?;
+            let shell = Shell::new(cc, ctx, settings, choice, source, requests_rx, post)?;
             Ok(Box::new(shell) as Box<dyn eframe::App>)
         }
     };
@@ -204,8 +207,15 @@ struct Shell {
     up: bool,
     /// Gestures from outside the frame loop: the tray, and a second launch.
     requests: crossbeam_channel::Receiver<Request>,
-    /// Settings and Diagnostics, which are ordinary windows.
-    windows: Windows,
+    /// The settings window, which is a separate process.
+    link: link::PanelLink,
+    /// Which configuration file this run is using.
+    ///
+    /// Held so that a file the settings window has just rewritten can be
+    /// read again from the same place. `--config` is a flag on this
+    /// process and nothing in `Settings` records which of the three
+    /// choices produced it.
+    config: crate::config::ConfigChoice,
     /// The notification-area icon. Held for the life of the process, because
     /// dropping it takes the icon out of the tray.
     #[cfg(windows)]
@@ -229,6 +239,7 @@ impl Shell {
         cc: &eframe::CreationContext<'_>,
         ctx: egui::Context,
         settings: Settings,
+        choice: crate::config::ConfigChoice,
         source: Arc<dyn DirSource>,
         requests: crossbeam_channel::Receiver<Request>,
         post: impl Fn(Request) + Clone + Send + Sync + 'static,
@@ -306,7 +317,11 @@ impl Shell {
             up: false,
             parked: true,
             requests,
-            windows: Windows::default(),
+            config: choice,
+            link: link::PanelLink::new({
+                let ctx = ctx.clone();
+                move || ctx.request_repaint()
+            }),
             #[cfg(windows)]
             _tray,
             drag: drag::Drag::new(),
@@ -356,8 +371,10 @@ impl Shell {
                 // A named menu item is a destination; the toggle key is a
                 // resumption. So this always names a page and
                 // `Cmd::ToggleSettings` never does.
-                Request::Settings => self.windows.open_at(PageId::General),
-                Request::Diagnostics => self.windows.open_at(PageId::Diagnostics),
+                Request::Settings => self.link.open_at(PageId::General, &self.app.state.settings),
+                Request::Diagnostics => self
+                    .link
+                    .open_at(PageId::Diagnostics, &self.app.state.settings),
                 Request::Quit => self.app.state.should_quit = true,
             }
         }
@@ -430,16 +447,16 @@ impl Shell {
         }
     }
 
+    /// Hides the window once the exit has finished.
+    ///
+    /// Unconditional, which it was not. There used to be a guard here: the
+    /// settings window was an immediate viewport drawn from `ui`, `ui` only
+    /// runs while the panel is up, and parking would have taken the form
+    /// away mid-edit - so the panel refused to go while a window was open.
+    /// That is why a panel that had been dismissed stayed on screen, in
+    /// front of the settings window it was refusing to leave. The window is
+    /// its own process now and nothing here can take it with us.
     fn park(&mut self) {
-        // An auxiliary window is a task somebody is in the middle of, and all
-        // three are drawn from `ui`, which only runs while the panel is up.
-        // Parking now would take the settings window with it, mid-edit. See
-        // the note at the top of `windows`: not hiding the panel is the only
-        // way a child outlives it, and for as long as one is open that is the
-        // trade being made.
-        if self.windows.any_open() {
-            return;
-        }
         if !self.frame.motion.is_hidden() || self.parked {
             return;
         }
@@ -509,6 +526,32 @@ impl Shell {
     /// *next summon* reads, and the file is what the *next session* reads.
     /// Clearing one without the other is how a position comes back from the
     /// dead after a restart.
+    /// Re-reads the configuration file, because the settings window wrote
+    /// to it.
+    ///
+    /// The whole file rather than one edit. The window is a separate
+    /// process and the file is the only thing both of them can see, so
+    /// "something changed" is the most either can honestly say - and
+    /// re-reading is cheap next to being wrong about which fields moved.
+    ///
+    /// This replaces `AppState::apply_live`, which took an `Edit` and was
+    /// exhaustive over `SettingKey` so that a key added without a decision
+    /// was a compile error. That guarantee moves to `AppState::adopt`,
+    /// which is exhaustive over the same enum for the same reason.
+    fn adopt_config(&mut self, now: Instant) {
+        let choice = self.config.clone();
+        let Ok(mut fresh) = crate::config::Settings::load(&choice) else {
+            // A file that will not parse is a file the window would have
+            // refused to write, so this is somebody editing it by hand
+            // while the panel is up. Keeping what is loaded is the only
+            // safe answer; the next start will say what is wrong with it.
+            return;
+        };
+        // Command-line pins belong to this process, not to the file.
+        fresh.cli_pinned = self.app.state.settings.cli_pinned;
+        self.app.feed(AppEvent::Adopt(Box::new(fresh)), now);
+    }
+
     fn forget_placement(&mut self) {
         self.app.actors.panel.remember(None);
         if let Some(writer) = &self.placement {
@@ -533,18 +576,17 @@ impl eframe::App for Shell {
         // Keystrokes first, so a character typed this frame is searched for on
         // this frame rather than on the next one.
         //
-        // A lost focus is dropped while a window of ours has the keyboard,
-        // and this is the only place that can be known: the settings window
-        // is a viewport of this one, so opening it *is* the panel losing
-        // focus - and a panel that dismissed itself over that would take
-        // away the window the user had just clicked into. The state machine
-        // cannot make the distinction, because which windows are open is
-        // deliberately not something it is asked to be right about.
-        let guard_blur = self.windows.any_open();
+        // Every event, including a lost focus. There used to be a filter
+        // here: the settings window was a viewport of this one, so opening
+        // it *was* the panel losing focus, and a panel that dismissed
+        // itself over that would have taken away the window somebody had
+        // just clicked into. So `hide_on_blur` was suppressed whenever a
+        // window was open - which is to say the setting stopped meaning
+        // what the form says it means, in exactly the case where somebody
+        // had gone looking for it. Clicking on the settings window now is
+        // clicking on another program, and the panel puts itself away,
+        // which is what the setting promises.
         for event in ctx.input(input::translate) {
-            if guard_blur && matches!(event, AppEvent::WindowFocus(false)) {
-                continue;
-            }
             self.app.feed(event, now);
         }
 
@@ -567,6 +609,13 @@ impl eframe::App for Shell {
         self.app.state.note_frame(now, wall);
 
         if self.app.should_quit() {
+            // Said before the window goes, so a settings window that is
+            // open finds out by being told rather than by a write failing.
+            // The pipe breaking would say the same thing a moment later;
+            // this is the difference between a form that greys out its
+            // three panel-dependent controls and one that greys them out
+            // after somebody has pressed one.
+            self.link.exiting();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -595,26 +644,15 @@ impl eframe::App for Shell {
             .next_deadline()
             .map(|due| due.saturating_duration_since(now));
 
-        if self.windows.any_open() {
-            // An ordinary window, driven by its own input.
-            //
-            // Sixty a second rather than as fast as the display will go. The
-            // old unconditional `request_repaint` was written when this was a
-            // 620 by 480 read-only document; it is now a 940 by 700 form of
-            // real widgets, and on a 144 Hz monitor it was redrawing all of
-            // it a hundred and forty-four times a second to show a page that
-            // is not moving.
-            //
-            // Not narrowed further than that on purpose. The obvious next
-            // step is "only when something is animating", and the things
-            // that animate here - a switch knob, a hover, a scroll handle -
-            // already ask for their own frames through
-            // `animate_bool_responsive`. Which means the conditional version
-            // is probably correct and definitely not provable by anything in
-            // this repository, so it would be a change made on an argument
-            // rather than on a measurement.
-            ctx.request_repaint_after(Duration::from_millis(16));
-        } else if let Some(wait) = [animating, deadline].into_iter().flatten().min() {
+        // The sixty-a-second repaint that used to be here is gone with the
+        // viewport it was for. The settings window was drawn inside this
+        // window's pass, so it only got frames when the panel asked for
+        // them, and it asked for one every sixteen milliseconds for as long
+        // as a form was open - a 940 by 700 page of widgets redrawn
+        // continuously to show something that was not moving. As its own
+        // process it asks for its own frames, and winit gives it one when
+        // something happens to it.
+        if let Some(wait) = [animating, deadline].into_iter().flatten().min() {
             // A floor of a millisecond: `request_repaint_after(ZERO)` means
             // "again immediately", and a deadline already in the past would pin
             // a core.
@@ -634,77 +672,44 @@ impl eframe::App for Shell {
 
         self.park();
 
-        // Before the panel, so an auxiliary window that wants the keyboard is
-        // not fighting a panel that also does.
-        let clicked = {
-            let context = ui.ctx().clone();
-            let context_for_wake = context.clone();
-            let settings = self.app.state.settings.clone();
-            let theme = self.theme;
-            let placement = self.app.actors.panel.remembered();
-            self.windows.show(
-                &context,
-                &theme,
-                &self.app.state,
-                &settings,
-                placement,
-                // What a finished diagnostics run calls. The worker has no
-                // way back into the frame loop otherwise, and a report that
-                // arrives without one sits in its channel until something
-                // else happens to cause a repaint.
-                move || context_for_wake.request_repaint(),
-            )
-        };
-        // Everything the window changed, fed back the way a keystroke is.
+        // What the settings window has asked for. Four messages, and each
+        // of them is a thing only this process can do.
         //
-        // This was missing, and it is the whole of why the settings window
-        // did nothing: `Windows::show` has always returned these three
-        // alongside `actions`, and this function has always read `actions`
-        // and dropped the rest on the floor. Every switch, drop-down, text
-        // box, alias row and drive row in that window was decorative -
-        // `AppState::on_setting`, `on_aliases`, `on_drives`, `apply_live`
-        // and `Cmd::SaveSetting` were all unreachable from the running
-        // program, and constructed by nothing but `tests/state_machine.rs`.
-        // The tests passed because they call the state machine directly.
-        //
-        // Fed rather than sent, like the panel's intents below: these were
-        // produced on the drawing thread, and a send would go round the
-        // channel to arrive one frame later.
-        //
-        // In the order they were moved, and before the buttons. A control
-        // and a button in one frame is rare, but a setting is what the
-        // window is for and a button is what somebody does afterwards.
-        //
-        // The mapping is `Clicked::events`, out in `gui::windows` where a
-        // test can reach it - see the note there.
-        let mut clicked = clicked;
-        for event in clicked.events() {
-            self.app.feed(event, now);
+        // This used to be three hundred lines of `Windows::show` drawing a
+        // form into a viewport, and the events it produced were dropped on
+        // the floor - `Clicked` carried `changed`, `aliases` and `mappings`
+        // and this function read `actions` and nothing else, so every
+        // control in that window was decorative. The window writes the file
+        // itself now, which is why what arrives here is "the file moved"
+        // rather than an edit to apply.
+        for msg in self.link.poll() {
+            match msg {
+                crate::ipc::ToPanel::Changed => self.adopt_config(now),
+                crate::ipc::ToPanel::InstallUpdate => self.install_update(now),
+                crate::ipc::ToPanel::ForgetPlacement => self.forget_placement(),
+                // Nothing to do but notice, and `link.open()` already has.
+                crate::ipc::ToPanel::Closing => {}
+            }
         }
+
+        // The panel writes the configuration file too - F2 moves the
+        // viewer, F5 and the window toggles go through `Cmd::SaveSetting` -
+        // and the settings window is reading the same file. Told once the
+        // write has landed rather than when it was asked for, because a
+        // write that failed is not a change to go and re-read.
+        if self.app.take_saved() {
+            self.link.reload();
+        }
+
+        // And the two facts only this process knows, when they move.
+        self.link.live(
+            self.app.actors.panel.remembered(),
+            &self.app.state.hotkey_claim,
+        );
 
         // One list rather than a bool and a pair of flags, and in the order
         // they were pressed: two of these reach outside the window and one
         // of them restarts the program.
-        for action in &clicked.actions {
-            match action {
-                ActionId::ForgetPlacement => self.forget_placement(),
-                ActionId::CheckForUpdates => self.app.actors.check_for_updates(),
-                ActionId::InstallUpdate => self.install_update(now),
-                ActionId::OpenConfigFile => {
-                    // Whatever the user has registered for .toml, which is
-                    // what "open" means everywhere else on this machine.
-                    #[cfg(windows)]
-                    if let Some(path) = crate::config::file::default_config_path() {
-                        let _ = crate::open::shell_open(&path.to_string_lossy());
-                    }
-                }
-                // Handled where it is pressed, because it needs the report
-                // text and nothing else. See `gui::settings::page`.
-                ActionId::CopyReport => {}
-                // Handled by the window, which owns the reporter.
-                ActionId::RefreshReport => {}
-            }
-        }
 
         // The header and the footer, underneath everything that goes in them,
         // so the search box and the chips take their own presses and the air
@@ -752,7 +757,7 @@ impl eframe::App for Shell {
         }
         let requested = self.app.take_window_requests();
         if requested.settings {
-            self.windows.toggle();
+            self.link.toggle(&self.app.state.settings);
         }
         let _ = self.app.pump(now);
     }

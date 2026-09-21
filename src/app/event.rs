@@ -26,6 +26,16 @@ use crate::search::verify::VerifyOutcome;
 /// Something happened.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    /// The configuration file was rewritten, and here is what it now says.
+    ///
+    /// The settings window writes the file and then says so; this is the
+    /// panel reading it again. The whole of `Settings` rather than one
+    /// edit, because the two processes share the file and nothing else, so
+    /// "it changed" is the most either can honestly report.
+    ///
+    /// Boxed because `Settings` is the largest thing in this enum by a
+    /// wide margin and every other variant would pay for it.
+    Adopt(Box<crate::config::Settings>),
     Key(KeyEvent),
     /// What the pointer meant, already resolved against the layout that drew
     /// it. See [`crate::app::state::pointer`].

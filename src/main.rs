@@ -130,7 +130,7 @@ fn run_gui(args: cli::Args, settings: Settings) -> io::Result<()> {
 
     prewarm(&settings, Arc::clone(&source));
 
-    if let Err(err) = files::gui::run(settings, source) {
+    if let Err(err) = files::gui::run(settings, args.config.clone(), source) {
         tell(&format!("The search panel could not be opened.\n\n{err}"));
         std::process::exit(1);
     }

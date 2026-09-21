@@ -362,6 +362,9 @@ impl Actors {
                     viewer,
                     self.events.clone(),
                 ),
+                // The settings window is reading this file too, and is
+                // told it moved by `Shell` once the write lands. See
+                // `gui::link`.
                 Cmd::SaveSetting { edit, label } => crate::config::write::save_async(
                     self.backend
                         .settings
