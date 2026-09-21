@@ -1,17 +1,11 @@
 //! What the form promises, asserted.
 
 use super::*;
-use crate::app::state::AppState;
 use crate::config::ThemeChoice;
 use crate::view::style;
-use std::time::Instant;
-
-fn state() -> AppState {
-    AppState::new(Settings::default(), Instant::now())
-}
 
 fn form(settings: &Settings) -> Vec<Page> {
-    pages(&state(), settings, None)
+    pages(None, settings, None, true)
 }
 
 fn rows(settings: &Settings) -> Vec<Row> {
@@ -366,7 +360,7 @@ fn every_action_on_the_form_is_one_the_shell_can_act_on() {
 /// And it appears as soon as there is something to forget.
 #[test]
 fn a_remembered_position_brings_a_way_to_forget_it() {
-    let pages = pages(&state(), &Settings::default(), Some((100, 200)));
+    let pages = pages(None, &Settings::default(), Some((100, 200)), true);
     let has = pages
         .iter()
         .flat_map(|p| &p.groups)

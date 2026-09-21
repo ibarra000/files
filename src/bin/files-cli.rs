@@ -124,8 +124,8 @@ fn main() -> io::Result<()> {
         // job. Said plainly rather than by opening one: somebody who typed
         // `files-cli` at a prompt is expecting text back, and a panel appearing
         // over their terminal is a surprise rather than an answer.
-        Mode::Gui => {
-            eprintln!("files-cli prints reports; the search panel is `files`.");
+        Mode::Gui | Mode::Settings { .. } => {
+            eprintln!("files-cli prints reports; the windows are `files`.");
             eprintln!("try `files-cli --doctor`, or run `files` to search.");
             std::process::exit(2);
         }

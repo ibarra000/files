@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crate::config::file::ConfigError;
 use crate::config::write::SettingKey;
 use crate::config::{ConfigChoice, EnumStrategy, MatcherKind, Settings, ViewerKind};
+use crate::view::settings::PageId;
 
 /// How a `--bench --walk` run is bounded.
 ///
@@ -25,6 +26,32 @@ pub struct WalkArgs {
 pub enum Mode {
     /// Run the search panel. The default, and what the program is.
     Gui,
+    /// Run the settings window, and nothing else.
+    ///
+    /// Not a debugging aid. It is how the settings window is opened at all:
+    /// the panel starts a copy of itself this way rather than drawing the
+    /// form inside its own viewport, which is how Ueli does it and is the
+    /// only arrangement in which the window is genuinely independent of the
+    /// panel - resizable, in the taskbar, and not fighting a panel that is
+    /// always on top.
+    ///
+    /// It is also a legitimate thing to type. With no panel running the
+    /// window opens anyway, reads the configuration file, and writes to it;
+    /// what it cannot do is the three things that need a running panel, and
+    /// it says so rather than failing when pressed.
+    Settings {
+        /// Which page to open on. `None` means the one it was last left on,
+        /// which is what a toggle should do.
+        page: Option<PageId>,
+        /// Which settings a command-line flag on the *panel* is holding.
+        ///
+        /// Without this the window would be a second process with a second
+        /// view of what is overridden, and `files --viewer pdf` would give a
+        /// settings window that offers to save the viewer, reports success,
+        /// and changes nothing at all. The panel passes its own
+        /// `Settings::cli_pinned` across. See `config::Pin`.
+        pinned: u32,
+    },
     /// Fast, read-only capability report.
     Doctor,
     /// Timing comparison across enumeration strategies.
@@ -139,6 +166,13 @@ impl Args {
             self.overrides.index_log.clone(),
             |s, v| s.index_log = Some(v),
         );
+        // And whatever the *panel's* flags are holding, where this process
+        // is the settings window rather than the panel. Merged rather than
+        // assigned: a `--viewer` on this line pins the viewer here too, and
+        // the two sets are both true.
+        if let Mode::Settings { pinned, .. } = self.mode {
+            s.cli_pinned |= pinned;
+        }
         Ok(s)
     }
 }
@@ -164,6 +198,9 @@ USAGE:
 
 MODES:
     (none)              interactive search
+    --settings          the settings window on its own. The panel starts one
+                        of these; typing it with no panel running opens the
+                        window anyway, and every setting still saves.
     --doctor            report drive type, SMB dialect, and capabilities
                         (fast, read-only, safe to run any time)
     --bench             time every enumeration strategy against the real
@@ -278,6 +315,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     let mut msi: Option<PathBuf> = None;
     let mut wait_pid: Option<u32> = None;
     let mut relaunch: Option<PathBuf> = None;
+    let mut settings_window = false;
+    let mut page: Option<PageId> = None;
+    let mut pinned = 0u32;
 
     let mut it = args.into_iter().peekable();
     while let Some(arg) = it.next() {
@@ -324,6 +364,22 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                     .parse()
                     .map_err(|_| ArgError(format!("--max-depth expects a number, got {d:?}")))?;
                 walk.get_or_insert_with(WalkArgs::default).max_depth = Some(d.max(1));
+            }
+            "--settings" => settings_window = true,
+            "--page" => {
+                let raw = value("--page")?;
+                page = Some(
+                    PageId::ALL
+                        .into_iter()
+                        .find(|p| p.slug() == raw)
+                        .ok_or_else(|| ArgError(format!("there is no {raw:?} page")))?,
+                );
+            }
+            "--pinned" => {
+                let raw = value("--pinned")?;
+                pinned = raw
+                    .parse::<u32>()
+                    .map_err(|_| ArgError(format!("--pinned wants a number, not {raw:?}")))?;
             }
             "--check-config" => check_config = true,
             "--apply-update" => apply_update = true,
@@ -406,6 +462,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
                 wait_pid,
                 relaunch,
             },
+            config,
+            overrides,
+            demo,
+        });
+    }
+
+    // Above the text modes and below `--apply-update`, for the same reason
+    // as the latter: it is an instruction from the copy of this program that
+    // is already running, not a preference somebody expressed alongside
+    // others.
+    if settings_window {
+        return Ok(Args {
+            mode: Mode::Settings { page, pinned },
             config,
             overrides,
             demo,

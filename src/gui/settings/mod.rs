@@ -28,6 +28,7 @@
 //! is the only one that behaves when the two columns differ in height, which
 //! they almost always do.
 
+pub mod app;
 pub mod exists;
 pub mod lists;
 pub mod measure;

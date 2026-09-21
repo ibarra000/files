@@ -69,6 +69,19 @@ fn main() -> io::Result<()> {
 
     match args.mode {
         Mode::Gui => run_gui(args, settings),
+        // Its own window and its own process. See `gui::settings::app`.
+        Mode::Settings { page, .. } => {
+            let choice = args.config.clone();
+            if let Err(err) = files::gui::settings::app::run(settings, choice, page) {
+                tell(&format!(
+                    "The settings window could not be opened.
+
+{err}"
+                ));
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         // Everything that answers in text. This program has no console to
         // answer with, so rather than printing into the void it says where the
         // answer lives - once, in the one way a windowed program can.

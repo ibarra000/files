@@ -6,7 +6,6 @@
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId};
 use super::{BACKDROPS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
-use crate::app::state::AppState;
 use crate::config::Settings;
 use crate::config::write::SettingKey;
 use crate::view::status::Tone;
@@ -14,10 +13,20 @@ use crate::view::status::Tone;
 /// The whole form.
 ///
 /// Three arguments rather than one because three things are being described:
-/// the settings, the runtime state the About page reads, and the remembered
-/// window position, which is neither. The same shape `view::status::render`
-/// and `view::actions::actions` already have.
-pub fn pages(state: &AppState, settings: &Settings, placement: Option<(i32, i32)>) -> Vec<Page> {
+/// the settings, the one piece of runtime state the About page reads, and
+/// the remembered window position, which is neither.
+///
+/// The first used to be the whole of `AppState`, which was a lie about the
+/// dependency: this reads `state.update` and nothing else. Naming the fact
+/// rather than the struct is what lets the settings window run in a process
+/// that has no `AppState` at all - it looks for an update itself, on a
+/// worker, and hands the answer in here.
+pub fn pages(
+    update: Option<&crate::update::Found>,
+    settings: &Settings,
+    placement: Option<(i32, i32)>,
+    panel: bool,
+) -> Vec<Page> {
     vec![
         general(settings),
         appearance(settings, placement),
@@ -25,7 +34,7 @@ pub fn pages(state: &AppState, settings: &Settings, placement: Option<(i32, i32)
         aliases(),
         searching(settings),
         opening(settings),
-        about(state, settings),
+        about(update, settings, panel),
         diagnostics(settings),
     ]
 }
@@ -346,7 +355,7 @@ fn opening(settings: &Settings) -> Page {
     }
 }
 
-fn about(state: &AppState, settings: &Settings) -> Page {
+fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool) -> Page {
     let mut updates = vec![Block::Rows(vec![row(
         settings,
         SettingKey::UpdateFrom,
@@ -364,7 +373,7 @@ fn about(state: &AppState, settings: &Settings) -> Page {
     // See `app::state::settings::apply_live`.
     if settings.update_from.is_some() {
         let mut facts = Vec::new();
-        match &state.update {
+        match update {
             // Three states, and the third is not the second. "Looking" means
             // the checker has not answered, which is a different thing from
             // having looked and found nothing - claiming to be up to date
@@ -397,17 +406,29 @@ fn about(state: &AppState, settings: &Settings) -> Page {
         updates.push(Block::Facts(facts));
 
         let ready = matches!(
-            &state.update,
+            update,
             Some(crate::update::Found::Available { msi_present, .. }) if *msi_present
         );
         let mut buttons = vec![Action::new(ActionId::CheckForUpdates, "Check now")];
-        if ready {
+        // Only with a panel behind the window. Installing an update means
+        // waiting for the running program to exit, replacing it, and
+        // starting it again - `update::apply::hand_over` bakes in the pid
+        // and the executable path of the process that calls it, so a
+        // settings window doing it on its own would wait on itself and
+        // relaunch itself. With nothing running there is also nothing to
+        // replace: the next start picks up whatever is installed.
+        if ready && panel {
             buttons.push(
                 Action::new(ActionId::InstallUpdate, "Install and restart").saying(
                     "Installing closes files, asks Windows for permission, and opens it \
                      again.",
                 ),
             );
+        } else if ready {
+            updates.push(Block::Facts(vec![Fact::new(
+                "Installing",
+                "Start files first \u{b7} an update replaces the running program",
+            )]));
         }
         updates.push(Block::Actions(buttons));
     }

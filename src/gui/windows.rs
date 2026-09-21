@@ -204,7 +204,7 @@ impl Windows {
         // and allocates eight `Page`s; it used to be done twice on the frame
         // the window opened, because `wants_report` built its own copy to
         // answer one question about one of them.
-        let pages = crate::view::settings::pages(state, settings, placement);
+        let pages = crate::view::settings::pages(state.update.as_ref(), settings, placement, true);
 
         // Asked for on the first frame the page is showing rather than when
         // the menu item was clicked, so the window appears immediately and

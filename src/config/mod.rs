@@ -825,6 +825,21 @@ pub enum ConfigChoice {
     None,
 }
 
+impl ConfigChoice {
+    /// The file this resolves to, where there is one.
+    ///
+    /// `Default` answers the same path `Settings::load` would use, so a
+    /// process that loaded from the default and then wants to write to it
+    /// does not have to work out where it was.
+    pub fn path(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Self::Explicit(path) => Some(path.clone()),
+            Self::Default => file::default_config_path(),
+            Self::None => None,
+        }
+    }
+}
+
 /// Why a setting cannot be written back to the configuration file.
 ///
 /// Carried rather than flattened to a bool because the three have different

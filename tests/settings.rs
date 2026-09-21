@@ -18,7 +18,7 @@ use eframe::egui::accesskit;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{AccessKitNode, NodeT};
 
-use files::app::state::{AppState, SettingChange};
+use files::app::state::SettingChange;
 use files::config::Settings;
 use files::gui::settings::lists::{AliasDraft, DriveDraft};
 use files::gui::settings::{self, Form};
@@ -30,7 +30,6 @@ const REPORT: &str = "drive jobs   reachable   120000 files";
 /// What one frame of the harness is looking at.
 struct Window {
     theme: Theme,
-    state: AppState,
     settings: Settings,
     fonts_ready: bool,
     page: PageId,
@@ -51,7 +50,6 @@ fn window(page: PageId, dark: bool, have_file: bool) -> Window {
     };
     Window {
         theme: Theme::of(dark),
-        state: AppState::new(settings.clone(), std::time::Instant::now()),
         settings,
         fonts_ready: false,
         page,
@@ -100,7 +98,7 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         exists: &mut exists,
                         now: std::time::Instant::now(),
                     };
-                    let pages = files::view::settings::pages(&w.state, &w.settings, None);
+                    let pages = files::view::settings::pages(None, &w.settings, None, true);
                     let out = settings::show(
                         ui,
                         &theme,
