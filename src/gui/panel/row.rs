@@ -199,7 +199,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     let weight = match style.layout {
         // Semibold, as Ueli sets it: with a second line under it the name has
         // to be the one the eye lands on.
-        ResultLayout::Detailed => Weight::Bold,
+        ResultLayout::Detailed => Weight::Semibold,
         ResultLayout::Compact => Weight::Regular,
     };
     let mut job = LayoutJob::default();
@@ -218,7 +218,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
         );
     };
     push(name.before, body, weight);
-    push(name.matched, theme.match_run, Weight::Bold);
+    push(name.matched, theme.match_run, Weight::Semibold);
     push(name.after, body, weight);
     // One line, truncated with an ellipsis. `break_anywhere` because a job
     // code has no spaces to break at, so without it a long name wraps to

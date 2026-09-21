@@ -126,26 +126,37 @@ pub const CHIP_RADIUS: u8 = 4;
 
 // -- type -------------------------------------------------------------------
 
-/// The system's own typeface, in the two weights this draws with.
+/// The system's own typeface, in the two weights Fluent draws with.
 ///
 /// Loaded from disk rather than bundled: shipping Segoe UI would be a licence
 /// violation, and a Windows without it is a Windows that cannot boot.
+///
+/// # Static, and not Segoe UI Variable
+///
+/// There used to be a second list preferred over this one - Windows 11's
+/// `SegUIVar.ttf` and `SegUIVarB.ttf`, on the argument that the variable cut
+/// stays crisp across sizes where the original has one set of outlines doing
+/// both jobs. It was wrong three times over, and each is checkable.
+///
+/// `SegUIVarB.ttf` does not exist. Not "is missing on this machine" - Windows
+/// does not ship a bold variable file, so the pair could never be one
+/// typeface and the bold slot always fell through to `segoeuib.ttf` in
+/// silence.
+///
+/// `SegUIVar.ttf` is a *variable* font, and epaint's rasteriser cannot select
+/// a `wght` or `opsz` axis. It draws the default instance, which is Segoe UI
+/// Variable **Display** - the cut meant for headlines, tighter and more
+/// closely spaced than the Text cut a fourteen-point row wants. So the panel
+/// was already setting its regular text in a display face and its bold in a
+/// text face: two typefaces on one line.
+///
+/// And Fluent's own `fontFamilyBase` is `'Segoe UI'`, the static family.
+/// Matching the thing being copied means matching that.
 pub const FONT_FILES: [(&str, &str); 2] = [
     ("segoe", r"C:\Windows\Fonts\segoeui.ttf"),
-    ("segoe-bold", r"C:\Windows\Fonts\segoeuib.ttf"),
-];
-
-/// Preferred over [`FONT_FILES`] where the machine has them.
-///
-/// Segoe UI Variable is Windows 11's redraw of Segoe, cut specifically to stay
-/// crisp across sizes: `Display` for large text, `Text` for small, where the
-/// original has one set of outlines doing both jobs. Tried first and skipped in
-/// silence on Windows 10, which has neither file.
-///
-/// Same two names, so nothing downstream knows which of the two files it got.
-pub const VARIABLE_FONT_FILES: [(&str, &str); 2] = [
-    ("segoe", r"C:\Windows\Fonts\SegUIVar.ttf"),
-    ("segoe-bold", r"C:\Windows\Fonts\SegUIVarB.ttf"),
+    // Semibold, not Bold. Fluent's ramp is 400 and 600; 700 appears nowhere
+    // in what this is drawn from. See [`Weight`].
+    ("segoe-semibold", r"C:\Windows\Fonts\seguisb.ttf"),
 ];
 
 /// The tail of every family: the glyphs Segoe UI has not got.
@@ -347,7 +358,7 @@ impl Theme {
             hover: tint(0xFFFFFF, 0x14),
             text_selection: tint(0xFFFFFF, 0x3A),
             // Brightest and bold, rather than a hue of its own. `row::show`
-            // already draws a matched run in `Weight::Bold`.
+            // already draws a matched run in `Weight::Semibold`.
             match_run: strong,
             // Weaker than the light theme's pair. On a low ground the eye has
             // far less headroom above the surface, so the same strength reads
@@ -420,7 +431,7 @@ impl Theme {
             hover: tint(0x000000, 0x12),
             text_selection: tint(0x000000, 0x32),
             // Darkest and bold, rather than a hue of its own. `row::show`
-            // already draws a matched run in `Weight::Bold`.
+            // already draws a matched run in `Weight::Semibold`.
             match_run: strong,
             // Genuinely darker than the panel on both grounds. The warm pair
             // this replaces resolved *brighter* than the surface over black,
@@ -487,10 +498,10 @@ impl Theme {
     pub const fn weight(self, emphasis: Emphasis) -> Weight {
         match emphasis {
             Emphasis::Body | Emphasis::Dim => Weight::Regular,
-            Emphasis::Strong | Emphasis::Accent => Weight::Bold,
+            Emphasis::Strong | Emphasis::Accent => Weight::Semibold,
             // The two lines that have to land, in the one place where a glyph
             // and a colour were already not quite enough.
-            Emphasis::Tone(Tone::Warn | Tone::Bad) => Weight::Bold,
+            Emphasis::Tone(Tone::Warn | Tone::Bad) => Weight::Semibold,
             Emphasis::Tone(_) => Weight::Regular,
         }
     }
@@ -586,17 +597,32 @@ pub fn font(size: f32, weight: Weight) -> FontId {
     FontId::new(size, eframe::egui::FontFamily::Name(weight.family().into()))
 }
 
+/// The two weights, by role.
+///
+/// Fluent's ramp uses 400 and 600 and nothing else: `body1` against
+/// `body1Strong`, `caption1` against `caption1Strong`. There is no Bold here
+/// because there is no 700 in the thing this is drawn from, and a third
+/// weight with no legitimate caller is a third font to load and the one a
+/// hand reaches for by habit.
+///
+/// Semibold is also what Windows resolves Fluent's `fontWeightMedium` (500)
+/// to, because Segoe UI ships no Medium - so the group captions Ueli sets at
+/// 500 land here too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Weight {
     Regular,
-    Bold,
+    Semibold,
 }
 
 impl Weight {
+    /// Every one, so the enum and [`FONT_FILES`] cannot drift apart. The two
+    /// tests in [`crate::gui::fonts`] are what hold them together.
+    pub const ALL: [Self; 2] = [Self::Regular, Self::Semibold];
+
     pub const fn family(self) -> &'static str {
         match self {
             Self::Regular => "segoe",
-            Self::Bold => "segoe-bold",
+            Self::Semibold => "segoe-semibold",
         }
     }
 }

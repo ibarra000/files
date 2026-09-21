@@ -62,7 +62,7 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui) -> R) -> R
 pub fn group_heading(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .font(theme::font(theme::SIZE_CHIP, Weight::Bold))
+            .font(theme::font(theme::SIZE_CHIP, Weight::Semibold))
             .color(theme.dim),
     );
     ui.add_space(measure::LABEL_GAP);
@@ -361,7 +361,7 @@ pub fn nav_item(
     // records that brightness alone carries about three steps before two of
     // them stop being two.
     let weight = if selected {
-        Weight::Bold
+        Weight::Semibold
     } else {
         Weight::Regular
     };
@@ -437,7 +437,7 @@ pub fn message_bar(ui: &mut Ui, theme: &Theme, tone: Tone, text: &str) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(theme.glyph(tone).to_string())
-                    .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                    .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
                     .color(theme.tone(tone)),
             );
             ui.label(

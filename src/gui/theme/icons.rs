@@ -34,8 +34,7 @@ pub const ICON_FAMILY: &str = "segoe-icons";
 /// Tried in order, first one found wins.
 ///
 /// Windows 11 has both and Windows 10 has only the second. Nothing downstream
-/// knows which it got, which is the same arrangement
-/// [`super::VARIABLE_FONT_FILES`] has with [`super::FONT_FILES`].
+/// knows which it got.
 pub const ICON_FILES: [&str; 2] = [
     r"C:\Windows\Fonts\SegoeIcons.ttf",
     r"C:\Windows\Fonts\segmdl2.ttf",

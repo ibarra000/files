@@ -97,7 +97,7 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                 |ui| {
                     ui.label(
                         egui::RichText::new(mapping.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                            .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
                             .color(theme.accent),
                     );
                 },
@@ -271,7 +271,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
                 |ui| {
                     ui.label(
                         egui::RichText::new(alias.name.as_ref())
-                            .font(theme::font(theme::SIZE_SMALL, Weight::Bold))
+                            .font(theme::font(theme::SIZE_SMALL, Weight::Semibold))
                             .color(theme.accent),
                     );
                 },

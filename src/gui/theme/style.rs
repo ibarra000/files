@@ -110,7 +110,7 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
             (TextStyle::Small, font(SIZE_CHIP, Weight::Regular)),
             (TextStyle::Body, font(SIZE_ROW, Weight::Regular)),
             (TextStyle::Button, font(SIZE_ROW, Weight::Regular)),
-            (TextStyle::Heading, font(SIZE_HEADLINE, Weight::Bold)),
+            (TextStyle::Heading, font(SIZE_HEADLINE, Weight::Semibold)),
             (TextStyle::Monospace, font(SIZE_SMALL, Weight::Regular)),
         ]
         .into();

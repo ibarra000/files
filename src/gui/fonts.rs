@@ -18,7 +18,7 @@ use std::sync::Arc;
 use eframe::egui::{FontData, FontDefinitions, FontFamily};
 
 use crate::gui::theme::icons::{ICON_FAMILY, ICON_FILES};
-use crate::gui::theme::{FALLBACK_FILES, FONT_FILES, VARIABLE_FONT_FILES, Weight};
+use crate::gui::theme::{FALLBACK_FILES, FONT_FILES, Weight};
 
 /// Which of the fonts this program would like were actually there.
 ///
@@ -89,15 +89,14 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
     tail.extend(bundled.iter().cloned());
 
     let mut found_all = true;
-    for (i, (name, path)) in FONT_FILES.iter().enumerate() {
+    for (name, path) in FONT_FILES.iter() {
         let mut stack: Vec<String> = Vec::new();
-        // Segoe UI Variable first where the machine has it - it is the same
-        // typeface cut to stay crisp at a given size, which is the whole
-        // complaint - and the original where it does not. Both are read the
-        // same way and registered under the same name, so nothing downstream
-        // knows which it got.
+        // One file per family. There used to be a second list read first,
+        // indexed against this one by position - a landmine that only held
+        // while the two stayed the same length and the same order. See the
+        // note on `FONT_FILES` for why it is gone rather than made safe.
         let read = |p: &str| use_system.then(|| std::fs::read(p).ok()).flatten();
-        match read(VARIABLE_FONT_FILES[i].1).or_else(|| read(path)) {
+        match read(path) {
             Some(bytes) => {
                 defs.font_data
                     .insert((*name).to_owned(), Arc::new(FontData::from_owned(bytes)));
@@ -188,17 +187,17 @@ mod tests {
     /// are drawn the same are one weight and a wasted load.
     #[test]
     fn every_weight_names_a_distinct_family() {
-        let mut names: Vec<_> = [Weight::Regular, Weight::Bold].map(|w| w.family()).to_vec();
+        let mut names: Vec<_> = Weight::ALL.map(|w| w.family()).to_vec();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 2);
+        assert_eq!(names.len(), Weight::ALL.len());
     }
 
     /// `theme::font` asks for these by name, and egui panics on a family it was
     /// never given. The two lists have to agree.
     #[test]
     fn every_family_the_panel_asks_for_is_one_that_gets_registered() {
-        for weight in [Weight::Regular, Weight::Bold] {
+        for weight in Weight::ALL {
             assert!(
                 FONT_FILES.iter().any(|(name, _)| *name == weight.family()),
                 "{:?} asks for a family nothing registers",

@@ -113,7 +113,7 @@ fn more_button(panel: Rect) -> Rect {
 /// frameless and a menu hanging off its edge would have no surface to sit on.
 fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
     let painter = ui.painter();
-    let label_font = theme::font(theme::SIZE_CHIP, Weight::Bold);
+    let label_font = theme::font(theme::SIZE_CHIP, Weight::Semibold);
 
     let marks = entries.iter().any(|a| icon_of(a.id).is_some());
     let gutter = if marks { ICON_SLOT + ICON_GAP } else { 0.0 };
@@ -157,7 +157,7 @@ fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &m
         eframe::egui::StrokeKind::Inside,
     );
 
-    let label_font = theme::font(theme::SIZE_CHIP, Weight::Bold);
+    let label_font = theme::font(theme::SIZE_CHIP, Weight::Semibold);
     let marks = entries.iter().any(|a| icon_of(a.id).is_some());
     let gutter = if marks { ICON_SLOT + ICON_GAP } else { 0.0 };
 

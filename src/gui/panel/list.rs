@@ -172,7 +172,7 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
         pos2(rect.left() + HEADING_PAD_X, rect.top()),
         Align2::LEFT_TOP,
         text,
-        theme::font(theme::SIZE_CHIP, Weight::Bold),
+        theme::font(theme::SIZE_CHIP, Weight::Semibold),
         theme.dim,
     );
     super::announce(ui, rect, ("heading", text), text);
