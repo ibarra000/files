@@ -173,7 +173,9 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
         Align2::LEFT_TOP,
         text,
         theme::font(theme::SIZE_CAPTION, Weight::Semibold),
-        theme.dim,
+        // Ueli's group caption is `NeutralForeground4` at weight 500, which
+        // Windows resolves to Semibold because Segoe UI ships no Medium.
+        theme.caption,
     );
     super::announce(ui, rect, ("heading", text), text);
 }

@@ -584,6 +584,8 @@ pub fn text_field(
             ),
     );
 
+    theme::focus_rule(ui.painter(), theme, response.rect, response.has_focus());
+
     if let Some((icon, tooltip)) = trailing {
         pressed = subtle_icon_button(ui, theme, icon, tooltip).clicked();
     }

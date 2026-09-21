@@ -20,7 +20,7 @@
 //! somebody nudges a hue, and this one is read by people of every age for hours
 //! a day.
 
-use eframe::egui::{Color32, CornerRadius, FontId};
+use eframe::egui::{Color32, CornerRadius, FontId, Rect, pos2};
 
 use crate::config::ResultLayout;
 use crate::view::Emphasis;
@@ -660,6 +660,42 @@ pub fn faded(color: Color32, alpha: f32) -> Color32 {
 // fill and its accent bar. The search box is its fill and, shortly, the rule
 // under it. A key cap is a different colour from the ground and that is all
 // a key cap ever needed to be.
+
+/// The rule along the bottom of a text box, which is what makes it one.
+///
+/// Fluent's filled input has no step in its fill - it is `NeutralBackground3`
+/// and so is the card around it, the same colour, 1.000:1 - and no outline
+/// worth the name on three sides. What says "type here" is a rule along the
+/// bottom edge: one point of [`Theme::accessible`] at rest, two points of the
+/// brand colour while the box has the keyboard. Take it away and a text box
+/// is a rectangle of card drawn on card, which is the state this program was
+/// in for exactly as long as it took to transcribe the palette.
+///
+/// This is also the whole of the focus indication. There is no ring, no glow
+/// and no border change, because there is none in the thing being copied: a
+/// Fluent input goes from a hairline to a brand bar and that is the event.
+///
+/// Drawn over the bottom edge rather than under it, and with the bottom
+/// corners rounded to the box's own - a square rule under a rounded box is a
+/// rule with two small horns on it.
+pub fn focus_rule(painter: &eframe::egui::Painter, theme: &Theme, rect: Rect, focused: bool) {
+    let (thickness, colour) = if focused {
+        (2.0, theme.accent)
+    } else {
+        (1.0, theme.accessible)
+    };
+    let bar = Rect::from_min_max(pos2(rect.left(), rect.bottom() - thickness), rect.max);
+    painter.rect_filled(
+        bar,
+        CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: RADIUS_MEDIUM,
+            se: RADIUS_MEDIUM,
+        },
+        colour,
+    );
+}
 
 pub fn radius(r: u8) -> CornerRadius {
     CornerRadius::same(r)

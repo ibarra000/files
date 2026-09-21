@@ -48,6 +48,11 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
     // top of it said it again in a soft-UI accent nothing else on this panel
     // speaks any more.
     painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.well);
+    // Always on, because this box always has the keyboard: the panel exists
+    // to be typed into and nothing else on it takes focus. Elsewhere the same
+    // rule is a hairline until a box is clicked into; here there is no resting
+    // state to draw.
+    theme::focus_rule(&painter, theme, rect, true);
 
     // A magnifier, which is what every search field on this operating system
     // has, so nobody has to be told what the box is for.
@@ -83,7 +88,10 @@ pub fn show(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect) -> Vec<Int
             Align2::LEFT_CENTER,
             "Search",
             theme::font(theme::SIZE_LARGE, Weight::Regular),
-            theme.dim,
+            // `caption`, not `dim`. A placeholder is the quietest thing
+            // Fluent draws - `NeutralForeground4` - because it is a label for
+            // an empty box and not a line anybody is meant to read twice.
+            theme.caption,
         );
     }
 
