@@ -38,7 +38,36 @@ pub const CUSTPRO_PATH: &str = r"V:\Documents\custpro";
 
 // --- Query -----------------------------------------------------------------
 
-pub const MIN_QUERY_LEN: usize = 3;
+/// The shortest term this program will search for.
+///
+/// One. It was three, and dropping it is what Ueli does - it has no minimum
+/// and no debounce, and typing one character gives you results.
+///
+/// The three constants below used to be one, and that is the important part
+/// of this change rather than the number. `MIN_QUERY_LEN` was doing three
+/// different jobs under one name - a floor on the local search, a floor on
+/// what gets sent to a file server, and, by accident, a floor on what gets
+/// remembered - and two of those jobs still want a three.
+pub const MIN_TERM_LEN: usize = 1;
+
+/// The shortest term worth sending to a *file server*.
+///
+/// Still three, and for a reason that has nothing to do with the local
+/// search. A server-side filter is a network round trip per share, and a
+/// one-character filter matches most of the share - so the round trip costs
+/// a full listing and saves nothing. Below this the local index answers and
+/// the live shares are left alone.
+pub const MIN_SERVER_QUERY_LEN: usize = 3;
+
+/// The shortest code worth writing into the history file.
+///
+/// Three, and this one used to be enforced by accident. `query_settled`
+/// accepts only a query that reached a settled phase, and short queries sat
+/// in a `TooShort` phase that never settled - so the floor was a side effect
+/// of a rejection, and lowering the search floor without naming this job
+/// would have quietly filled the recent-codes list with every one- and
+/// two-character prefix anybody typed on the way to a real code.
+pub const MIN_REMEMBERED_LEN: usize = 3;
 
 /// Results retained and reachable by scrolling.
 ///
@@ -1781,8 +1810,10 @@ mod tests {
     /// Checked at compile time: a shorter needle would make `memmem` weak
     /// and would make a leading wildcard match an unreasonable share of a
     /// million-entry directory.
-    const _: () = assert!(MIN_QUERY_LEN >= 3);
-    const _: () = assert!(MAX_SERVER_QUERY_LEN > MIN_QUERY_LEN);
+    const _: () = assert!(MIN_TERM_LEN >= 1);
+    const _: () = assert!(MIN_SERVER_QUERY_LEN >= MIN_TERM_LEN);
+    const _: () = assert!(MIN_REMEMBERED_LEN >= MIN_TERM_LEN);
+    const _: () = assert!(MAX_SERVER_QUERY_LEN > MIN_SERVER_QUERY_LEN);
 
     // --- what may be written back -------------------------------------------
 

@@ -1336,7 +1336,7 @@ settings = {{ persist = true }}
     }
 
     /// The writer must never produce a file the loader refuses - here, an
-    /// alias whose code is too short to search for.
+    /// alias whose code has nothing in it to search for.
     #[test]
     fn an_alias_the_loader_would_refuse_is_refused_by_the_writer_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -1344,7 +1344,7 @@ settings = {{ persist = true }}
         std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
         let before = std::fs::read_to_string(&path).unwrap();
 
-        let err = save(&path, &[Edit::Aliases(vec![alias("pw", "ab")])]).unwrap_err();
+        let err = save(&path, &[Edit::Aliases(vec![alias("pw", "ext:pdf")])]).unwrap_err();
 
         assert!(matches!(err, WriteError::WouldNotReload(_)), "{err:?}");
         assert_eq!(

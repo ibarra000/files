@@ -102,7 +102,15 @@ fn query_shape(c: &mut Criterion) {
 
     // rare: nothing matches. common: matches roughly one entry in a thousand.
     // dense: matches nearly everything.
+    // `one_char` is the worst case the search floor allows, and it only
+    // became reachable when that floor went from three to one. A single
+    // character matches nearly every name, so the prefilter fires on almost
+    // every position and `topk` ranks the whole arena rather than a handful
+    // of candidates. If anything here is going to be slow it is this, and
+    // the fix if it is would be an early-out in `topk` rather than a floor
+    // put back.
     for (label, query) in [
+        ("one_char", "j"),
         ("rare_zzz", "zzzzzz"),
         ("short_job", "job"),
         ("selective", "job_0123456"),

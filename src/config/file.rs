@@ -2112,16 +2112,26 @@ case    = "lower"
         assert_eq!(parsed.aliases.resolve("pw").unwrap().note, None);
     }
 
-    /// The rule the whole feature rests on. A code the matcher would turn down
-    /// is an alias that resolves and then finds nothing, which is worse than
-    /// one that never loaded.
+    /// The rule the whole feature rests on. A code the matcher would turn
+    /// down is an alias that resolves and then finds nothing, which is worse
+    /// than one that never loaded.
+    ///
+    /// `ab` used to be such a code and is not any more - the search floor is
+    /// one character. A filter with no term still is: `ext:pdf` is a line
+    /// with syntax on it and nothing to look for.
     #[test]
-    fn an_alias_whose_code_is_too_short_to_search_for_is_refused() {
-        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+    fn an_alias_whose_code_cannot_be_searched_for_is_refused() {
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ext:pdf\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
         assert!(text.contains("could not be searched for"), "{text}");
-        assert!(text.contains("at least 3 characters"), "{text}");
+    }
+
+    /// And a two-character code is now perfectly good, which it was not.
+    #[test]
+    fn an_alias_may_stand_for_a_two_character_code() {
+        let parsed = parse_ok(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        assert_eq!(parsed.aliases.resolve("pw").unwrap().code.as_ref(), "ab");
     }
 
     #[test]
@@ -2183,7 +2193,7 @@ case    = "lower"
     /// they were already confused by.
     #[test]
     fn an_alias_error_calls_it_an_alias_and_not_a_mapping() {
-        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ab\""));
+        let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ext:pdf\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
         assert!(!text.contains("mapping \"pw\""), "{text}");

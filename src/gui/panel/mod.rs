@@ -47,7 +47,7 @@ pub mod list;
 pub mod row;
 
 use eframe::egui::{CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use crate::app::state::pointer::Intent;
 use crate::app::state::{AppState, EmptyReason};
@@ -135,7 +135,6 @@ pub fn show(
     theme: &Theme,
     content: Content,
     backdrop: Option<Backdrop>,
-    now: Instant,
     wall: SystemTime,
 ) -> Vec<Intent> {
     let rect = ui.max_rect();
@@ -152,7 +151,7 @@ pub fn show(
     rule(ui, theme, upper);
     rule(ui, theme, lower);
 
-    intents.extend(footer::show(ui, state, theme, band, now, wall));
+    intents.extend(footer::show(ui, state, theme, band, wall));
     intents.extend(list::show(ui, state, theme, cursor, content, wall));
     // Last, and over everything: the menu floats above the footer that opens
     // it and the list it is about.
@@ -282,6 +281,7 @@ mod tests {
     use crate::config::Settings;
     use crate::search::matcher::Hit;
     use std::sync::Arc;
+    use std::time::Instant;
 
     /// Puts the cursor on `row` the way a click does.
     ///

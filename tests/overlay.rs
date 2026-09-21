@@ -827,8 +827,17 @@ fn browsing_recall_and_then_closing_the_overlay_does_not_reorder_the_list() {
     assert_eq!(saves(&r) + saves(&r2), 0);
 }
 
+/// Two characters is a search now, and still not a code worth recalling
+/// tomorrow.
+///
+/// This used to hold for free: a short query was rejected outright and sat
+/// in a phase `query_settled` does not accept, so the floor on the history
+/// was a side effect of the floor on the search. The search floor is one
+/// now, so the history has a floor of its own - and this is the test that
+/// would have caught the recent-codes list filling with every prefix
+/// anybody typed on the way to a real code.
 #[test]
-fn a_query_below_the_minimum_length_is_never_remembered() {
+fn a_query_below_the_remembering_length_is_never_remembered() {
     let (mut s, now) = state();
     summon(&mut s, now);
     type_in(&mut s, "in", now);
@@ -837,12 +846,7 @@ fn a_query_below_the_minimum_length_is_never_remembered() {
 
     let r = s.update(press(Key::Esc), later);
 
-    assert_eq!(
-        s.phase,
-        QueryPhase::TooShort {
-            need: files::config::MIN_QUERY_LEN
-        }
-    );
+    assert!("in".chars().count() < files::config::MIN_REMEMBERED_LEN);
     assert!(s.history.is_empty());
     assert_eq!(saves(&r), 0);
 }

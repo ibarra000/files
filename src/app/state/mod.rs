@@ -40,8 +40,8 @@ use super::event::{AppEvent, ClipboardMsg, Cmd, IndexMsg, OpenMsg, Redraw, Respo
 use super::input::{self, Input};
 use crate::config::COUNTDOWN_TICK;
 use crate::config::{
-    ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_QUERY_LEN, REMEMBER_DEBOUNCE, SEARCH_DEBOUNCE, Settings,
-    VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
+    ENTER_WATCHDOG, LIVE_DEBOUNCE, MIN_SERVER_QUERY_LEN, MIN_TERM_LEN, REMEMBER_DEBOUNCE,
+    SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, ViewerKind,
 };
 use crate::history::History;
 use crate::index::store::{IndexOverview, IndexStatus};
@@ -766,18 +766,17 @@ impl AppState {
             self.clear_results();
             return Response::redraw();
         }
-        // Judged on the *term*, not the line: `ab ext:pdf` is a ten-character
-        // line and a two-character sweep across every name on the share, which
-        // is the work the minimum exists to prevent.
+        // Judged on the *term*, not the line: `ext:pdf` is a seven-character
+        // line with nothing on it to search for.
         if let Err(reject) = self.query.check() {
             self.phase = match reject {
-                QueryReject::TooShort { need } => QueryPhase::TooShort { need },
+                QueryReject::Empty => QueryPhase::Idle,
                 _ => QueryPhase::BadQuery {
                     detail: reject.detail(),
                 },
             };
             self.empty_reason = Some(match reject {
-                QueryReject::TooShort { need } => EmptyReason::QueryTooShort { need },
+                QueryReject::Empty => EmptyReason::NoQuery,
                 _ => EmptyReason::BadQuery {
                     detail: reject.detail(),
                 },
@@ -1130,9 +1129,9 @@ impl AppState {
                 self.clear_results();
                 Response::redraw()
             }
-            Err(QueryReject::TooShort { need }) => {
-                self.phase = QueryPhase::TooShort { need };
-                self.empty_reason = Some(EmptyReason::QueryTooShort { need });
+            Err(QueryReject::Empty) => {
+                self.phase = QueryPhase::Idle;
+                self.empty_reason = Some(EmptyReason::NoQuery);
                 Response::redraw()
             }
             Err(QueryReject::ContainsNul) => {
@@ -1730,7 +1729,14 @@ impl AppState {
             && now >= due
         {
             self.live_due_at = None;
-            if self.query.is_searchable() {
+            // The server's floor as well as the panel's. `is_searchable` is
+            // about to be true for a single character, and dispatching that
+            // would be a network round trip to every live share on the first
+            // keystroke - which the footer would then report as "asking" and
+            // "not searched" in the same second.
+            if self.query.is_searchable()
+                && self.query.term().chars().count() >= MIN_SERVER_QUERY_LEN
+            {
                 let outstanding = self.settings.routes.live().count();
                 self.live = Some(LiveProgress::asking(now, outstanding));
                 response.merge(Response::redraw().with(Cmd::Live {
@@ -1744,7 +1750,7 @@ impl AppState {
             && now >= due
         {
             self.verify_due_at = None;
-            if self.input.chars().count() >= MIN_QUERY_LEN {
+            if self.input.chars().count() >= MIN_TERM_LEN {
                 self.phase = QueryPhase::Verifying { since: now };
                 self.verify_watchdog_at = Some(now + VERIFY_WATCHDOG);
                 response.merge(Response::redraw().with(Cmd::Verify {

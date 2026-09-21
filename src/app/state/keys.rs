@@ -412,7 +412,7 @@ impl AppState {
     /// watching a stale list for another third of a second reads as the
     /// update having done nothing.
     fn after_refresh(&mut self, mut r: Response) -> Response {
-        if self.input.chars().count() >= crate::config::MIN_QUERY_LEN {
+        if self.input.chars().count() >= crate::config::MIN_TERM_LEN {
             // Dispatched here and now, so any debounce armed by the keystroke
             // that opened the picker would only be a second, redundant run.
             self.search_due_at = None;

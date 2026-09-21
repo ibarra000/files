@@ -99,13 +99,12 @@ struct Panel {
     state: AppState,
     frame: Frame,
     theme: Theme,
-    now: Instant,
     wall: SystemTime,
     fonts_ready: bool,
 }
 
 impl Panel {
-    fn new(state: AppState, now: Instant) -> Self {
+    fn new(state: AppState) -> Self {
         let mut frame = Frame::new();
         frame.motion.summon();
         Self {
@@ -114,7 +113,6 @@ impl Panel {
             // Pinned rather than followed from the system, so a machine in
             // dark mode and a machine in light mode agree about the pictures.
             theme: Theme::light(),
-            now,
             // A fixed wall clock, because the status line renders an age from
             // it and "updated 4s ago" is not a stable snapshot.
             wall: SystemTime::UNIX_EPOCH,
@@ -129,7 +127,6 @@ impl Panel {
 /// one where the panel paints its own surface, which is what there is to look
 /// at.
 fn harness(state: AppState) -> Harness<'static, Panel> {
-    let now = Instant::now();
     let mut harness = Harness::builder()
         // The harness frames whatever it is given in an eight-point outer
         // margin. `eframe::App::ui` hands over a `Ui` with no margin at all,
@@ -170,17 +167,9 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
                     return;
                 }
                 let content = panel.frame.advance(&panel.state, DT);
-                files::gui::panel::show(
-                    ui,
-                    &panel.state,
-                    &panel.theme,
-                    content,
-                    None,
-                    panel.now,
-                    panel.wall,
-                );
+                files::gui::panel::show(ui, &panel.state, &panel.theme, content, None, panel.wall);
             },
-            Panel::new(state, now),
+            Panel::new(state),
         );
 
     // Past the entrance, so nothing here is a test of a half-arrived panel.
@@ -217,7 +206,7 @@ fn quiet_state() -> (AppState, Instant) {
     // Read off the line the footer would draw, which is the only public
     // answer to "has this panel anything to say" now that `is_quiet` has
     // gone with `Content::Quiet`.
-    let said = files::view::status::render(&s, now, SystemTime::UNIX_EPOCH).text;
+    let said = files::view::status::render(&s, SystemTime::UNIX_EPOCH).text;
     assert!(
         said.is_empty(),
         "the fixture has something to say - {said:?} - so it proves nothing"
@@ -410,11 +399,18 @@ fn a_missing_avwin_is_reported_before_it_is_needed() {
     assert!(screen.contains("F2"), "and says how to fix it:\n{screen}");
 }
 
-/// Browsing a long list of remembered codes without knowing where you are in
-/// it is what the terminal build's " History (2 of 3) " title existed to
-/// prevent.
+/// Browsing the remembered codes puts the code on the line, and the list
+/// itself says what it is.
+///
+/// The status line used to carry "Codes you used before - 2 of 3", on the
+/// argument that browsing a list without knowing where you are in it is what
+/// the terminal build's " History (2 of 3) " title existed to prevent. It is
+/// gone with the rest of the panel's prose: the list is at most a handful of
+/// codes and is on screen, the group heading over it already names what it
+/// is, and the status line is the one place reserved for things somebody has
+/// to act on.
 #[test]
-fn browsing_the_recent_codes_says_where_you_are_in_them() {
+fn browsing_the_recent_codes_puts_the_code_on_the_line() {
     let (mut s, now) = state();
     s.seed_history(vec![
         "11-D-0704".into(),
@@ -429,10 +425,11 @@ fn browsing_the_recent_codes_says_where_you_are_in_them() {
 
     let h = harness(s);
     let screen = on_screen(&h);
-    assert!(screen.contains("Codes you used before"), "{screen}");
+    assert!(screen.contains("P12345-001"), "{screen}");
+    assert!(screen.contains("Recent codes"), "{screen}");
     assert!(
-        screen.contains("of 3"),
-        "no position in the list:\n{screen}"
+        !screen.contains("Codes you used before"),
+        "the status line is still narrating:\n{screen}"
     );
 }
 

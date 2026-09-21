@@ -727,7 +727,6 @@ impl eframe::App for Shell {
             &self.theme,
             content,
             self.backdrop,
-            now,
             wall,
         );
 

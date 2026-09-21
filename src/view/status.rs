@@ -9,7 +9,7 @@
 //! The previous implementation showed `0 / 0 files matched` for every one of
 //! them.
 
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use crate::app::state::{AppState, QueryPhase, Severity};
 use crate::index::store::{Activity, Health};
@@ -38,7 +38,7 @@ pub struct StatusLine {
 /// something is in flight - is added by [`crate::gui::panel::footer`], which is the one
 /// place that knows the whole frame's clock. Putting it here as well is how the
 /// line came to be drawn with two spinners on it.
-pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
+pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
     // Something that just happened outranks everything standing: it is the
     // answer to a key the user pressed a moment ago, and it goes away on its
     // own after `TOAST_LIFETIME`.
@@ -72,26 +72,15 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     // wrong, so a tree failure was reported against the flat share - and with
     // no flat mapping configured it rendered a leading space and an error code
     // attached to nothing, which is the reported "random os error 03".
-    if let Some((
-        id,
-        Health::Unreachable {
-            err, next_retry_at, ..
-        },
-    )) = state.index.unreachable()
-    {
-        let retry = next_retry_at.saturating_duration_since(now);
-        // `humanize::elapsed(ZERO)` is "0us", which reads as a stopwatch
-        // rather than as a retry that is already due.
-        let when = if retry.is_zero() {
-            "retrying now".to_string()
-        } else {
-            format!("retrying in {}", humanize::elapsed(retry))
-        };
+    //
+    // The countdown to the next automatic retry used to be on this line, and
+    // it is gone with the rest of the panel's prose. It was a second thing
+    // to read on the one line that has to land, it was the reason the panel
+    // asked for a repaint once a second for as long as a drive stayed down,
+    // and "F5" is the answer to the question it was answering anyway.
+    if let Some((id, Health::Unreachable { err, .. })) = state.index.unreachable() {
         return StatusLine {
-            text: format!(
-                "{} · {when} · F5 to retry now",
-                state.describe_drive_error(id, *err)
-            ),
+            text: format!("{} \u{b7} F5", state.describe_drive_error(id, *err)),
             tone: Tone::Bad,
         };
     }
@@ -110,87 +99,18 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
         };
     }
 
-    // Browsing the codes used before. Carries the position, so stepping
-    // through a long list does not feel bottomless - which is what the
-    // terminal build's " History (2 of 3) " title said.
+    // One line for all five of them.
     //
-    // The position and nothing else. This used to add "Enter to use it, Esc
-    // to go back", which is what the footer says two inches to the right on
-    // the button that names the default action - and saying it twice cost
-    // exactly the room the position needs, so the one thing only this line
-    // can say was the thing that got truncated away.
-    if let Some(cursor) = state.history.cursor() {
+    // There used to be five, and between them they carried a folder count, a
+    // queue depth, a file count, a share name, and a reason in brackets -
+    // rewriting themselves several times a second in the one place on the
+    // panel reserved for things somebody has to act on. Every number in them
+    // is now in the diagnostics, where it can be read at leisure by somebody
+    // who wants it, and the panel says the one fact that changes what to do:
+    // the list is not complete yet, so a code that is missing may not be.
+    if state.index.activity != Activity::Idle {
         return StatusLine {
-            text: format!(
-                "Codes you used before · {} of {}",
-                cursor + 1,
-                state.history.len()
-            ),
-            tone: Tone::Normal,
-        };
-    }
-
-    if let Activity::Scanning { seen } = state.index.activity {
-        // Named, not bare. A rebuild the user can attribute is one they can
-        // live with; an unexplained one appearing mid-search is what got
-        // reported as "random indexing reloads".
-        let why = match busy_scan_reason(state) {
-            Some(reason) => format!(" ({})", reason.label()),
-            None => String::new(),
-        };
-        return StatusLine {
-            text: format!(
-                "Building the list{}{why} \u{b7} {} files",
-                busy_where(state),
-                humanize::count(seen)
-            ),
-            tone: Tone::Busy,
-        };
-    }
-    if state.index.activity == Activity::Queued {
-        // Its own line rather than silence. A share waiting behind two walks
-        // for three minutes while reporting nothing is exactly the
-        // unexplained wait the other states here exist to replace.
-        return StatusLine {
-            text: format!(
-                "{} waiting to be read\u{2026}",
-                shares_phrase(state.index.busy)
-            ),
-            tone: Tone::Busy,
-        };
-    }
-    if let Activity::Walking {
-        dirs,
-        queued,
-        files,
-    } = state.index.activity
-    {
-        // Folders, not only files. A climbing file count says it is moving; a
-        // folder count with a queue beside it also says roughly how much is
-        // left, which over a walk lasting minutes is the difference between
-        // progress and an unexplained wait.
-        return StatusLine {
-            text: format!(
-                "Reading folders{} \u{b7} {} read \u{b7} {} to go \u{b7} {} files",
-                busy_where(state),
-                humanize::count(dirs),
-                humanize::count(queued),
-                humanize::count(files)
-            ),
-            tone: Tone::Busy,
-        };
-    }
-    if state.index.activity == Activity::LoadingDisk {
-        return StatusLine {
-            text: "Loading the list\u{2026}".into(),
-            tone: Tone::Busy,
-        };
-    }
-    if state.index.activity == Activity::Persisting {
-        // Busy, and previously unlabelled: it drives the animation tick, so
-        // the screen spun with nothing on it to explain why.
-        return StatusLine {
-            text: "Saving the list\u{2026}".into(),
+            text: "Indexing\u{2026}".into(),
             tone: Tone::Busy,
         };
     }
@@ -221,20 +141,10 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
     // local one: the phase can only say the indexes are current, and the live
     // share is the part of the answer that may be missing.
     if let Some(live) = &state.live {
-        if live.is_asking() {
-            let n = live.outstanding;
-            let text = match n {
-                1 => match state.settings.routes.live().next() {
-                    Some(m) => format!("Asking {}\u{2026}", m.name),
-                    None => "Asking the drive\u{2026}".into(),
-                },
-                _ => format!("Asking {} drives\u{2026}", n),
-            };
-            return StatusLine {
-                text,
-                tone: Tone::Busy,
-            };
-        }
+        // "Asking jobs..." is gone. A live share answers in well under a
+        // second, and a line that appears and disappears inside one is a
+        // flicker rather than information - the spinner beside the count
+        // already says something is in flight.
         if let Some((id, detail)) = live.failed.first() {
             return StatusLine {
                 text: format!(
@@ -270,10 +180,7 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
 
     let phase = match &state.phase {
         QueryPhase::Idle | QueryPhase::Local => None,
-        QueryPhase::TooShort { need } => Some(StatusLine {
-            text: format!("Keep typing \u{b7} a code needs {need} characters"),
-            tone: Tone::Normal,
-        }),
+
         QueryPhase::BadQuery { detail } => Some(StatusLine {
             text: crate::view::sentence(detail),
             tone: Tone::Warn,
@@ -282,28 +189,14 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
             text: "No drives are set up \u{b7} run files --check-config".into(),
             tone: Tone::Warn,
         }),
-        QueryPhase::LocalPending => Some(StatusLine {
-            text: "Searching\u{2026}".into(),
-            tone: Tone::Busy,
-        }),
-        QueryPhase::Verifying { .. } => Some(StatusLine {
-            text: "Checking the drive\u{2026}".into(),
-            tone: Tone::Busy,
-        }),
-        // Short, and without the match count or the round-trip time it used to
-        // carry: the count is in the reserved slot to the left of this line,
-        // and how many milliseconds the server took is a fact about the server.
-        // What is worth a word is that somebody else has now confirmed what is
-        // on screen.
-        QueryPhase::Verified { by_stamp, .. } => Some(StatusLine {
-            text: if *by_stamp {
-                "Up to date"
-            } else {
-                "Checked just now"
-            }
-            .into(),
-            tone: Tone::Good,
-        }),
+        // Silent, all three. A local search finishes in a few milliseconds
+        // and a verification in a few hundred, so these were three lines
+        // that appeared and vanished faster than they could be read - and
+        // the last of them, "Up to date", is the line that says nothing is
+        // wrong, which is what an empty status line already says.
+        QueryPhase::LocalPending | QueryPhase::Verifying { .. } | QueryPhase::Verified { .. } => {
+            None
+        }
         QueryPhase::VerifyFailed { detail } => Some(StatusLine {
             text: format!("Showing the saved list \u{b7} {detail}"),
             tone: Tone::Warn,
@@ -331,46 +224,6 @@ pub fn render(state: &AppState, now: Instant, wall: SystemTime) -> StatusLine {
             tone: Tone::Normal,
         },
     }
-}
-
-/// Which share is busy, when saying so helps.
-///
-/// Named when it is the only one, so the ordinary case reads "walking jobs..."
-/// rather than "walking 1 share...". Counted when several are, because three
-/// sets of folder counters do not fit on one line and averaging them would be
-/// fiction.
-fn busy_where(state: &AppState) -> String {
-    // Silent with one share configured: "building index custompro..." tells
-    // somebody with a single share nothing they did not already know.
-    if state.index.configured <= 1 {
-        return String::new();
-    }
-    match state.index.busy_only {
-        Some(id) => format!(" {}", state.settings.routes.label(id)),
-        None if state.index.busy > 1 => format!(" {} drives", state.index.busy),
-        None => String::new(),
-    }
-}
-
-/// How many drives, for the status line.
-///
-/// "Drive", not "share": the code calls `R:\` a share because that is what SMB
-/// calls it, and nobody outside this repository does.
-fn shares_phrase(n: usize) -> String {
-    if n == 1 {
-        "1 drive".to_string()
-    } else {
-        format!("{n} drives")
-    }
-}
-
-/// Why the share that is currently scanning started.
-fn busy_scan_reason(state: &AppState) -> Option<crate::index::schedule::ScanReason> {
-    state
-        .index
-        .busy_only
-        .and_then(|id| state.status_of(id))
-        .and_then(|s| s.last_scan_reason)
 }
 
 /// What is wrong with the index, if anything.
@@ -486,6 +339,7 @@ pub fn found(state: &AppState) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use std::time::Instant;
 
     use crate::app::event::{AppEvent, IndexMsg};
     use crate::app::key::{Key, KeyEvent, Mods};
@@ -599,7 +453,7 @@ mod tests {
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(1_284_551, Duration::ZERO));
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert_eq!(line.text, "", "a healthy footer is a quiet one");
         assert_eq!(line.tone, Tone::Normal);
     }
@@ -619,24 +473,26 @@ mod tests {
         type_code(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 1_284_551);
 
-        let line = render(&s, now, EPOCH + Duration::from_secs(180)).text;
+        let line = render(&s, EPOCH + Duration::from_secs(180)).text;
         for gone in ["Ready", "1,284,551", "updated", "3m", "match"] {
             assert!(!line.contains(gone), "{gone:?} is still there: {line:?}");
         }
     }
 
+    /// One character is a search now, so the line that used to say "keep
+    /// typing" says what it says for any other search in flight. The old
+    /// line, and the phase behind it, are gone: there is no such thing as a
+    /// query that is too short any more, only one with nothing on it.
     #[test]
-    fn a_short_query_says_how_many_characters_are_needed() {
+    fn one_character_is_searched_for_rather_than_refused() {
         let now = Instant::now();
         let mut s = state_at(now);
         s.update(
             AppEvent::Key(KeyEvent::new(Key::Char('a'), Mods::NONE)),
             now,
         );
-        assert_eq!(
-            render(&s, now, EPOCH).text,
-            "Keep typing \u{b7} a code needs 3 characters"
-        );
+        let line = render(&s, EPOCH).text;
+        assert!(!line.contains("Keep typing"), "{line:?}");
     }
 
     #[test]
@@ -655,7 +511,7 @@ mod tests {
         for c in "!!!".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert_ne!(line.text, "not a recognised job code");
         assert_eq!(s.phase, QueryPhase::LocalPending);
     }
@@ -683,7 +539,7 @@ mod tests {
         for c in "11-D-0704".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert_eq!(
             line.text,
             "No drives are set up \u{b7} run files --check-config"
@@ -750,13 +606,13 @@ mod tests {
         type_code(&mut s, now);
         give_results(&mut s, now, vec![], 0, 9_000);
 
-        assert_eq!(render(&s, now, EPOCH).text, "");
+        assert_eq!(render(&s, EPOCH).text, "");
         assert_eq!(found(&s), "");
     }
 
     /// The condition the previous implementation rendered as `0 / 0 files`.
     #[test]
-    fn an_unreachable_drive_says_so_and_when_it_will_retry() {
+    fn an_unreachable_drive_says_so_and_what_to_press() {
         let now = Instant::now();
         let mut s = dev_state_at(now);
         with_index(&mut s, now, |st| {
@@ -768,74 +624,67 @@ mod tests {
             };
         });
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert_eq!(line.tone, Tone::Bad);
         assert!(line.text.contains("unreachable"), "{}", line.text);
         assert!(line.text.contains("os error 53"), "{}", line.text);
-        assert!(line.text.contains("retrying in"), "{}", line.text);
         assert!(
             line.text.contains("F5"),
             "the user needs a way out: {}",
             line.text
         );
+        // The countdown to the next automatic retry is deliberately not
+        // here. It was a second thing to read on the one line that has to
+        // land, and it was the reason the panel woke once a second for as
+        // long as a drive stayed down.
+        assert!(!line.text.contains("retrying"), "{}", line.text);
     }
 
+    /// Every kind of index work says the same five characters.
+    ///
+    /// There used to be five tests here and five branches behind them, and
+    /// between them they asserted a folder count, a queue depth, a file
+    /// count, a share name and a reason in brackets - all of it rewriting
+    /// itself several times a second in the one place on the panel reserved
+    /// for things somebody has to act on. Every one of those numbers is in
+    /// the diagnostics now. What the panel says is the fact that changes
+    /// what to do: the list is not finished, so a code that is missing may
+    /// not really be missing.
     #[test]
-    fn a_running_scan_reports_progress() {
+    fn every_kind_of_indexing_reads_the_same() {
+        let now = Instant::now();
+        for activity in [
+            Activity::Scanning { seen: 812_000 },
+            Activity::Queued,
+            Activity::Walking {
+                dirs: 100,
+                queued: 20,
+                files: 4000,
+            },
+            Activity::LoadingDisk,
+            Activity::Persisting,
+        ] {
+            let named = format!("{activity:?}");
+            let mut s = state_at(now);
+            with_index(&mut s, now, |st| st.activity = activity);
+            let line = render(&s, EPOCH);
+            assert_eq!(line.text, "Indexing\u{2026}", "{named}");
+            assert_eq!(line.tone, Tone::Busy, "{named}");
+        }
+    }
+
+    /// And none of them carries a number, which is the point.
+    #[test]
+    fn indexing_never_puts_a_count_on_the_status_line() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, |st| {
-            st.activity = Activity::Scanning { seen: 812_000 }
-        });
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("Building the list"), "{}", line.text);
-        assert!(line.text.contains("812,000"));
-        assert_eq!(line.tone, Tone::Busy);
-    }
-
-    /// The reported bug was not that the index rebuilds - it has to - but that
-    /// a rebuild appeared mid-search with no explanation.
-    #[test]
-    fn a_running_scan_says_why_it_is_happening() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| {
-            st.activity = Activity::Scanning { seen: 1000 };
+            st.activity = Activity::Scanning { seen: 812_000 };
             st.last_scan_reason = Some(ScanReason::StampMoved);
         });
-        let line = render(&s, now, EPOCH);
-        assert!(
-            line.text.contains("Building the list (directory changed)"),
-            "{}",
-            line.text
-        );
-    }
-
-    #[test]
-    fn a_scan_with_no_recorded_reason_still_reads_cleanly() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| {
-            st.activity = Activity::Scanning { seen: 1000 };
-            st.last_scan_reason = None;
-        });
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("Building the list"), "{}", line.text);
-        assert!(
-            !line.text.contains("()"),
-            "no empty parentheses: {}",
-            line.text
-        );
-    }
-
-    /// `Persisting` counts as busy, so it drives the 100ms animation tick.
-    /// Without a branch here the screen span with nothing to explain it.
-    #[test]
-    fn saving_the_index_is_visible() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| st.activity = Activity::Persisting);
-        assert_eq!(render(&s, now, EPOCH).text, "Saving the list\u{2026}");
+        let line = render(&s, EPOCH);
+        assert!(!line.text.contains("812"), "{}", line.text);
+        assert!(!line.text.contains('('), "{}", line.text);
     }
 
     /// A healthy index says nothing at all.
@@ -850,63 +699,38 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(10, Duration::ZERO));
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert_eq!(line.text, "", "the quiet case is quiet");
     }
 
+    /// A search in flight says nothing, and neither does one that came back
+    /// clean.
+    ///
+    /// Three lines used to live here - "Searching...", "Checking the
+    /// drive...", and "Up to date" or "Checked just now". A local search
+    /// finishes in a few milliseconds and a verification in a few hundred,
+    /// so the first two appeared and vanished faster than they could be
+    /// read; the third is the line that says nothing is wrong, which is
+    /// exactly what an empty status line already says.
+    ///
+    /// What is still on screen while a search is in flight is the spinner
+    /// beside the count, which does not rewrite itself and does not occupy
+    /// the line reserved for things that matter.
     #[test]
-    fn loading_the_disk_cache_is_visible() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, |st| st.activity = Activity::LoadingDisk);
-        assert_eq!(render(&s, now, EPOCH).text, "Loading the list\u{2026}");
-    }
-
-    #[test]
-    fn verification_in_flight_says_so_and_keeps_the_counts_beside_it() {
+    fn a_search_in_flight_and_a_search_confirmed_both_say_nothing() {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(100, Duration::ZERO));
         type_code(&mut s, now);
+        assert_eq!(render(&s, EPOCH).text, "", "a search was announced");
+
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 100);
         s.update(AppEvent::Tick, now + crate::config::VERIFY_DEBOUNCE);
-
-        let line = render(&s, now + crate::config::VERIFY_DEBOUNCE, EPOCH);
-        assert!(line.text.contains("Checking the drive"));
-        assert_eq!(line.tone, Tone::Busy);
-        // The count is beside the line, not in it, so a round trip in flight
-        // does not cost the number somebody is reading.
+        assert_eq!(render(&s, EPOCH).text, "", "a verification was announced");
+        // The count is beside the line, not in it, so a round trip in
+        // flight never costs the number somebody is reading.
         assert_eq!(found(&s), "1");
-    }
 
-    #[test]
-    fn a_stamp_proven_result_is_labelled_up_to_date() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        with_index(&mut s, now, healthy_status(100, Duration::ZERO));
-        type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a.pdf")], 1, 100);
-        s.update(
-            AppEvent::Verify(crate::app::event::VerifyMsg {
-                epoch: s.query_epoch(),
-                query: crate::search::query::Query::parse(s.input.text()),
-                elapsed: Duration::from_millis(2),
-                outcome: crate::search::verify::VerifyOutcome::IndexAuthoritative { stamp: None },
-            }),
-            now,
-        );
-
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.starts_with("Up to date"), "{}", line.text);
-        assert_eq!(line.tone, Tone::Good);
-    }
-
-    #[test]
-    fn a_server_verified_result_is_labelled_verified() {
-        let now = Instant::now();
-        let mut s = state_at(now);
-        type_code(&mut s, now);
-        give_results(&mut s, now, vec![hit("a.pdf")], 1, 100);
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
                 epoch: s.query_epoch(),
@@ -921,11 +745,7 @@ mod tests {
             }),
             now,
         );
-        // Short, and about the *check*: the count is in the reserved slot and
-        // how many milliseconds the server took is a fact about the server.
-        let line = render(&s, now, EPOCH);
-        assert_eq!(line.text, "Checked just now");
-        assert_eq!(line.tone, Tone::Good);
+        assert_eq!(render(&s, EPOCH).text, "", "good news was reported");
     }
 
     #[test]
@@ -944,7 +764,7 @@ mod tests {
         type_code(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 10);
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert!(
             line.text.contains("Server filter disabled"),
             "{}",
@@ -960,7 +780,7 @@ mod tests {
     fn a_missing_index_is_described_rather_than_faked() {
         let now = Instant::now();
         let s = state_at(now);
-        assert!(render(&s, now, EPOCH).text.contains("No file list yet"));
+        assert!(render(&s, EPOCH).text.contains("No file list yet"));
     }
     // --- naming the share that actually failed --------------------------
     //
@@ -993,7 +813,7 @@ mod tests {
             unreachable(EnumError::PathNotFound(3)),
         );
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert!(
             line.text.contains("R:"),
             "the failing share must be named: {}",
@@ -1019,7 +839,7 @@ mod tests {
             unreachable(EnumError::PathNotFound(3)),
         );
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert!(
             !line.text.starts_with(' '),
             "the reported 'random os error 03': {}",
@@ -1028,24 +848,32 @@ mod tests {
         assert!(line.text.contains("os error 3"), "{}", line.text);
     }
 
-    /// `humanize::elapsed(ZERO)` is "0us", which reads as a stopwatch rather
-    /// than as a retry that is due.
+    /// The line reads the same however close the next retry is.
+    ///
+    /// It used to carry a countdown, which needed a special case at zero -
+    /// `humanize::elapsed(ZERO)` is "0us", and a drive reported as "retrying
+    /// in 0us" reads as a stopwatch rather than as a retry that is due. Both
+    /// the countdown and its special case are gone: it was a second thing to
+    /// read on the one line that has to land, and it was the reason the
+    /// panel asked for a repaint once a second for as long as a drive stayed
+    /// down.
     #[test]
-    fn a_due_retry_says_so_rather_than_counting_down_to_zero() {
+    fn the_unreachable_line_does_not_change_as_the_retry_approaches() {
         let now = Instant::now();
-        let mut s = state_at(now);
-        publish(&mut s, MappingId(0), now, |st| {
-            st.health = Health::Unreachable {
-                err: EnumError::Transient(53),
-                since: now,
-                attempt: 1,
-                next_retry_at: now,
-            };
-        });
-
-        let line = render(&s, now, EPOCH);
-        assert!(line.text.contains("retrying now"), "{}", line.text);
-        assert!(!line.text.contains("0us"), "{}", line.text);
+        let mut far = state_at(now);
+        let mut due = state_at(now);
+        for (s, at) in [(&mut far, now + Duration::from_secs(42)), (&mut due, now)] {
+            publish(s, MappingId(0), now, move |st| {
+                st.health = Health::Unreachable {
+                    err: EnumError::Transient(53),
+                    since: now,
+                    attempt: 1,
+                    next_retry_at: at,
+                };
+            });
+        }
+        assert_eq!(render(&far, EPOCH).text, render(&due, EPOCH).text);
+        assert!(!render(&due, EPOCH).text.contains("0us"));
     }
 
     // --- several shares -------------------------------------------------
@@ -1071,23 +899,26 @@ mod tests {
         type_code(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 20);
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert!(line.text.contains("jobs: no live updates"), "{}", line.text);
     }
 
+    /// A share waiting behind another share's walk is still indexing, and
+    /// must not look idle.
+    ///
+    /// It used to have a line of its own naming how many shares were
+    /// waiting. Which share is queued behind which is in the diagnostics;
+    /// what the panel has to say is that the list is not finished.
     #[test]
-    fn a_share_queued_behind_a_walk_says_so() {
+    fn a_share_queued_behind_a_walk_does_not_look_idle() {
         let now = Instant::now();
         let mut s = state_with_two_shares(now);
         publish(&mut s, MappingId(1), now, |st| {
             st.activity = Activity::Queued;
         });
-        let line = render(&s, now, EPOCH);
-        assert!(
-            line.text.contains("waiting to be read"),
-            "a queued share must not look idle: {}",
-            line.text
-        );
+        let line = render(&s, EPOCH);
+        assert_eq!(line.text, "Indexing\u{2026}", "{}", line.text);
+        assert_eq!(line.tone, Tone::Busy);
     }
     // --- which share to refresh ------------------------------------------
     //
@@ -1119,7 +950,7 @@ mod tests {
         });
         typed_with_results(&mut s, now, 20);
 
-        let line = render(&s, now, EPOCH);
+        let line = render(&s, EPOCH);
         assert!(line.text.contains("jobs"), "{}", line.text);
         assert!(line.text.contains("changes were missed"), "{}", line.text);
         assert!(line.text.contains("F5"), "{}", line.text);
@@ -1140,7 +971,7 @@ mod tests {
 
         // Old enough that age alone would also have fired.
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
-        let line = render(&s, now, wall);
+        let line = render(&s, wall);
         assert!(line.text.contains("Changes were missed"), "{}", line.text);
         assert!(
             !line.text.contains("not refreshed recently"),
@@ -1159,7 +990,7 @@ mod tests {
         publish(&mut s, MappingId(0), now, ready(10));
         typed_with_results(&mut s, now, 10);
 
-        let fresh = render(&s, now, EPOCH + Duration::from_secs(60));
+        let fresh = render(&s, EPOCH + Duration::from_secs(60));
         assert!(
             !fresh.text.to_lowercase().contains("not refreshed"),
             "{}",
@@ -1167,7 +998,7 @@ mod tests {
         );
 
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
-        let old = render(&s, now, wall);
+        let old = render(&s, wall);
         assert!(old.text.contains("Not refreshed recently"), "{}", old.text);
     }
 
@@ -1188,7 +1019,7 @@ mod tests {
         typed_with_results(&mut s, now, 10);
 
         let wall = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
-        let line = render(&s, now, wall);
+        let line = render(&s, wall);
         assert_eq!(
             line.text, "",
             "silent mode must not nag, about events or about age"
@@ -1215,7 +1046,7 @@ mod tests {
         let now = Instant::now();
         let wall_old = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
         let mut out = Vec::new();
-        let mut say = |s: &AppState, wall| out.push(render(s, now, wall).text);
+        let mut say = |s: &AppState, wall| out.push(render(s, wall).text);
 
         // Nothing happening, and nothing wrong.
         let mut quiet = state_at(now);

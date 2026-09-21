@@ -33,7 +33,7 @@
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align2, Color32, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use super::chip;
 use crate::app::state::AppState;
@@ -67,7 +67,6 @@ pub fn show(
     state: &AppState,
     theme: &Theme,
     rect: Rect,
-    now: Instant,
     wall: SystemTime,
 ) -> Vec<Intent> {
     let mut intents = Vec::new();
@@ -111,7 +110,7 @@ pub fn show(
         right = default_button(ui, theme, action, rect, right, &mut intents);
     }
 
-    status(ui, state, theme, rect, right, now, wall);
+    status(ui, state, theme, rect, right, wall);
     intents
 }
 
@@ -223,17 +222,9 @@ fn icon_button(
 }
 
 /// The tone glyph, the count, and whatever the program has to say.
-fn status(
-    ui: &mut Ui,
-    state: &AppState,
-    theme: &Theme,
-    band: Rect,
-    right: f32,
-    now: Instant,
-    wall: SystemTime,
-) {
+fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, wall: SystemTime) {
     let painter = ui.painter().clone();
-    let line = view::status::render(state, now, wall);
+    let line = view::status::render(state, wall);
     let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
 
     let mut left = band.left() + theme::FOOTER_PAD + BUTTON + GAP;

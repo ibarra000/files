@@ -121,6 +121,16 @@ impl AppState {
         if self.remember_due_at.is_some() {
             return false;
         }
+        // Long enough to be worth recalling tomorrow. This used to be
+        // enforced by accident: a query under three characters was rejected
+        // outright and sat in a phase the match below does not accept, so
+        // the floor on the history was a side effect of the floor on the
+        // search. The search floor is one now, and without this line the
+        // recent-codes list would fill with every one- and two-character
+        // prefix anybody typed on the way to a real code.
+        if self.query.term().chars().count() < crate::config::MIN_REMEMBERED_LEN {
+            return false;
+        }
         matches!(
             self.phase,
             QueryPhase::Local

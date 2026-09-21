@@ -26,7 +26,6 @@
 //! the blank rows that give it its shape, are the same in both.
 
 use crate::app::state::EmptyReason;
-use crate::config::MIN_QUERY_LEN;
 use crate::util::humanize;
 use crate::view::status::Tone;
 use crate::view::{Block, Run};
@@ -91,14 +90,6 @@ pub fn view(reason: &EmptyReason, query: &str) -> Vec<Block> {
             aside(crate::view::sentence(detail)),
             blank(),
             aside("A * goes at the start or the end of a code, and ext:pdf narrows by type."),
-        ],
-
-        EmptyReason::QueryTooShort { .. } => vec![
-            say("Keep typing."),
-            blank(),
-            aside(format!(
-                "A job code needs at least {MIN_QUERY_LEN} characters."
-            )),
         ],
 
         EmptyReason::NoSharesConfigured => vec![
@@ -194,7 +185,6 @@ mod tests {
     fn every_reason() -> Vec<EmptyReason> {
         vec![
             EmptyReason::NoQuery,
-            EmptyReason::QueryTooShort { need: 3 },
             EmptyReason::NoSharesConfigured,
             EmptyReason::NoMatches {
                 searched: 1_284_551,

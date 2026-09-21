@@ -19,8 +19,8 @@ use files::app::key::{Key, KeyEvent, KeyPhase, Mods};
 use files::app::state::{AppState, EmptyReason, QueryPhase, Severity, TOAST_LIFETIME};
 use files::config::LIVE_DEBOUNCE;
 use files::config::{
-    ENTER_WATCHDOG, MIN_QUERY_LEN, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG,
-    VISIBLE_ROWS, ViewerKind,
+    ENTER_WATCHDOG, SEARCH_DEBOUNCE, Settings, VERIFY_DEBOUNCE, VERIFY_WATCHDOG, VISIBLE_ROWS,
+    ViewerKind,
 };
 use files::index::errors::EnumError;
 use files::index::store::{Activity, Health, IndexStatus};
@@ -84,16 +84,22 @@ fn hit(name: &str) -> Hit {
 
 // --- typing -----------------------------------------------------------
 
+/// Two characters is a search now, and so is one. The floor was three and
+/// is one, which is what Ueli does; what is still not a search is a line
+/// with nothing on it to search for.
 #[test]
-fn a_short_query_is_not_dispatched() {
+fn a_two_character_query_is_dispatched() {
     let (mut s, now) = state();
-    let r = type_in(&mut s, "ab", now);
-    assert_eq!(
-        s.phase,
-        QueryPhase::TooShort {
-            need: MIN_QUERY_LEN
-        }
-    );
+    type_in(&mut s, "ab", now);
+    assert_eq!(s.phase, QueryPhase::LocalPending);
+    assert!(s.search_due_at().is_some(), "nothing was armed");
+}
+
+#[test]
+fn a_line_with_no_term_on_it_is_not_dispatched() {
+    let (mut s, now) = state();
+    let r = type_in(&mut s, "ext:pdf", now);
+    assert_eq!(s.phase, QueryPhase::Idle);
     assert!(r.cmds.iter().all(|c| !matches!(c, Cmd::Search { .. })));
 }
 
@@ -718,7 +724,7 @@ fn a_pinned_selection_that_disappears_clamps_and_reports() {
     assert!(s.selection_lost, "the user should be told the list shifted");
     // And is: the flag was maintained and read by nothing but this assertion
     // for the whole of the rewrite, so it is checked here where it comes out.
-    let line = files::view::status::render(&s, now, std::time::SystemTime::now());
+    let line = files::view::status::render(&s, std::time::SystemTime::now());
     assert!(
         line.text.contains("The list changed"),
         "nothing on screen says so: {line:?}"
@@ -2352,14 +2358,13 @@ fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
     assert!(matches!(s.empty_reason, Some(EmptyReason::BadQuery { .. })));
 }
 
-/// The minimum exists to bound the arena sweep, so it is counted on the thing
-/// that is swept for. `ab ext:pdf` is a ten-character line and a
-/// two-character needle.
+/// The floor is counted on the thing that is swept for, not on the line.
+/// `  ext:pdf` is a nine-character line with no needle in it.
 #[test]
 fn the_minimum_length_is_judged_on_the_code_and_not_on_the_whole_line() {
     let (mut s, now) = state();
-    type_in(&mut s, "ab ext:pdf", now);
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    type_in(&mut s, "  ext:pdf", now);
+    assert_eq!(s.phase, QueryPhase::Idle);
 }
 
 // --- shares that are asked rather than indexed -------------------------------
@@ -2641,27 +2646,24 @@ fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// Below `MIN_QUERY_LEN`, and searched anyway, because what reaches the index
-/// is the expansion rather than the name.
+/// Two characters, and what reaches the index is the expansion rather than
+/// the name - which is what makes an alias an alias rather than a short
+/// search that happens to work.
 #[test]
-fn an_alias_shorter_than_the_minimum_is_still_searched_for() {
+fn an_alias_is_searched_for_as_its_expansion() {
     let (mut s, now) = aliased_state();
-    assert!("pw".chars().count() < MIN_QUERY_LEN);
-
     type_in(&mut s, "pw", now);
-    assert!(
-        !matches!(s.phase, QueryPhase::TooShort { .. }),
-        "an alias was judged as though it were the search"
-    );
+    assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// And the minimum is untouched for everything that is not an alias.
+/// And a two-character line that is not an alias is searched for as itself.
+/// It used to be refused; the floor is one now.
 #[test]
-fn a_short_line_that_is_not_an_alias_is_still_too_short() {
+fn a_short_line_that_is_not_an_alias_is_searched_for_as_written() {
     let (mut s, now) = aliased_state();
     type_in(&mut s, "zz", now);
 
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    assert_eq!(s.query().term(), "zz");
     assert!(s.expansion().is_none());
 }
 
@@ -2740,7 +2742,7 @@ fn a_configuration_without_aliases_is_unchanged() {
     type_in(&mut s, "pw", now);
 
     assert!(s.expansion().is_none());
-    assert!(matches!(s.phase, QueryPhase::TooShort { .. }));
+    assert_eq!(s.query().term(), "pw");
 }
 
 // --- settings changed in the window ----------------------------------------
@@ -3141,9 +3143,10 @@ fn removing_an_alias_stops_the_line_on_screen_expanding() {
     s.update(AppEvent::Aliases(Vec::new()), now);
 
     assert!(s.expansion().is_none(), "the expansion outlived the alias");
-    assert!(
-        matches!(s.phase, QueryPhase::TooShort { .. }),
-        "pw is two characters again, so it is too short again"
+    assert_eq!(
+        s.query().term(),
+        "pw",
+        "the line is searched for as written again"
     );
 }
 

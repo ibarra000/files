@@ -949,14 +949,12 @@ mod tests {
         assert_eq!(
             search(
                 &s,
-                &Query::contains("ab"),
+                &Query::contains(""),
                 MatcherKind::Simd,
                 &Hidden::none(),
                 &CancelToken::never()
             ),
-            Err(QueryReject::TooShort {
-                need: crate::config::MIN_QUERY_LEN
-            })
+            Err(QueryReject::Empty)
         );
     }
 
@@ -1401,11 +1399,11 @@ mod tree_tests {
         assert!(matches!(
             search_tree(
                 &ix,
-                &Query::contains("ab"),
+                &Query::contains(""),
                 &Hidden::none(),
                 &CancelToken::never()
             ),
-            Err(QueryReject::TooShort { .. })
+            Err(QueryReject::Empty)
         ));
     }
 
@@ -1514,20 +1512,20 @@ mod tree_tests {
     // --- the query is judged once, not per share -------------------------
 
     #[test]
-    fn check_query_rejects_a_short_query_before_any_index_is_consulted() {
+    fn check_query_rejects_an_empty_query_before_any_index_is_consulted() {
         assert!(matches!(
-            check_query(&Query::contains("ab")),
-            Err(QueryReject::TooShort { .. })
+            check_query(&Query::contains("")),
+            Err(QueryReject::Empty)
         ));
-        assert!(check_query(&Query::contains("abc")).is_ok());
+        assert!(check_query(&Query::contains("a")).is_ok());
     }
 
     /// With nothing indexed yet, asking each share would give no answer at
-    /// all, so a short query would read as "no matches" rather than as "type
-    /// at least 3 characters".
+    /// all, so a query with nothing in it would read as "no matches" rather
+    /// than as "there is nothing here to look for".
     #[test]
-    fn a_short_query_is_rejected_even_with_no_shares_indexed() {
-        assert!(check_query(&Query::contains("ab")).is_err());
+    fn an_empty_query_is_rejected_even_with_no_shares_indexed() {
+        assert!(check_query(&Query::contains("")).is_err());
         assert_eq!(merge_all(Vec::new()).hits.len(), 0);
     }
 }

@@ -31,15 +31,23 @@
 //! its owner wrote down, so watching it fire is confirmation; watching it fire
 //! when it was not meant to is the only way anybody finds out.
 //!
-//! # A short name is not a short search
+//! # A name is not a search
 //!
-//! [`crate::config::MIN_QUERY_LEN`] is three, and nothing here lowers it.
 //! `code` is checked when the file is read, against the same
 //! [`Query::check`](crate::search::query::Query::check) the matcher uses, so
-//! the line that reaches the index is always long enough to be worth sweeping
-//! for. A short *name* is the entire point; a short *search* is the thing the
-//! minimum exists to prevent, and the two stop being the same question the
-//! moment one expands into the other.
+//! a line that reaches the index through an alias is held to exactly what a
+//! line typed by hand is held to. Nothing here lowers that bar and nothing
+//! here raises it.
+//!
+//! This paragraph used to be about length. The search floor was three
+//! characters, and the argument was that a short *name* is the entire point
+//! of an alias while a short *search* is the thing the floor exists to
+//! prevent - two questions that stop being the same one the moment an alias
+//! expands into a search. The floor is one character now, so length is no
+//! longer what separates them. What is left is the part that was always the
+//! real content: one validator, shared, so a code the loader would refuse is
+//! a code the settings window refuses in the same words - and a code with
+//! nothing in it to search for, `ext:pdf` and its kind, is still refused.
 
 /// Why a name or a code cannot be used.
 ///
