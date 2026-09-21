@@ -310,8 +310,8 @@ fn shell_open(path: &str) -> Result<(), LaunchError> {
 
 /// Whether `avwin.exe` can be found, for the startup warning.
 ///
-/// Asks `where` rather than spawning the viewer: the point is to warn someone
-/// before they need it, not to open a window they did not ask for.
+/// Looked up rather than run: the point is to warn someone before they need
+/// it, not to open a window they did not ask for.
 pub fn avwin_available() -> bool {
     program_on_path(AVWIN)
 }
@@ -319,27 +319,171 @@ pub fn avwin_available() -> bool {
 /// Whether a bare program name resolves, for the startup warning and
 /// `--doctor`.
 ///
-/// Asks `where` rather than running the program: the point is to say so before
-/// anybody needs it, not to open a window they did not ask for.
+/// # Why this is a directory walk and not `where`
+///
+/// It used to spawn `where` and read its exit status, which is a correct
+/// answer arrived at in the worst possible way.
+///
+/// This is called from `app::new`, on the frame thread, at every startup.
+/// `files.exe` is a GUI-subsystem binary, so it has no console; spawning a
+/// console program from one makes Windows allocate a console for the child,
+/// and a console window appears on the desktop, flashes, and closes. Every
+/// launch. That is the flicker somebody has been watching for as long as
+/// this function has existed, and no amount of redirecting the child's
+/// handles suppresses it - the window is allocated before the program runs.
+/// `CREATE_NO_WINDOW` would have fixed the flash and left the process
+/// spawn, which is thirty milliseconds of startup to answer a question that
+/// is two environment variables and a handful of `exists` calls.
+///
+/// So it resolves the name itself, the way `CreateProcess` would: the
+/// current directory first, then each entry of `PATH` in order, and against
+/// each of those every extension in `PATHEXT` for a name that has none.
+/// `where` searches in the same order for the same reason, and unlike
+/// `where` this can be tested.
 pub fn program_on_path(program: &str) -> bool {
-    #[cfg(windows)]
-    let mut probe = Command::new("where");
-    #[cfg(not(windows))]
-    let mut probe = Command::new("which");
+    resolve_on_path(program, &path_dirs(), &path_exts()).is_some()
+}
 
-    probe
-        .arg(program)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Where a bare name is looked for, in order.
+///
+/// The current directory first, which is what `CreateProcess` does and what
+/// `where` does. It is a legitimate place for `avwin.exe` to be - somebody
+/// running this from the folder the viewer lives in - and leaving it out
+/// would make this answer "no" where the launch would succeed.
+fn path_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::current_dir().into_iter().collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    dirs
+}
+
+/// And which extensions are tried against a name that has none.
+///
+/// From `PATHEXT`, which is where the answer lives and which a machine can
+/// legitimately have customised. The fallback is Windows' own default, for
+/// the case where it is unset - which happens inside some service
+/// environments and would otherwise make every lookup fail.
+fn path_exts() -> Vec<String> {
+    if cfg!(not(windows)) {
+        return vec![String::new()];
+    }
+    let raw = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC".to_owned());
+    // The empty one first: a name written with its extension is found as
+    // written rather than as `avwin.exe.exe`.
+    std::iter::once(String::new())
+        .chain(
+            raw.split(';')
+                .map(str::trim)
+                .filter(|e| !e.is_empty())
+                .map(str::to_ascii_lowercase),
+        )
+        .collect()
+}
+
+/// The first file that `program` resolves to, if any.
+///
+/// Split out from [`program_on_path`] with its inputs passed in, because the
+/// rule - which directories, in what order, with which extensions appended -
+/// is the whole of the behaviour and the environment is the one thing a test
+/// cannot set safely in parallel with other tests.
+fn resolve_on_path(
+    program: &str,
+    dirs: &[std::path::PathBuf],
+    exts: &[String],
+) -> Option<std::path::PathBuf> {
+    let named = std::path::Path::new(program);
+    // A name with a separator in it is a path and not a lookup. `where`
+    // refuses these outright; resolving it against the current directory is
+    // friendlier and is what `CreateProcess` does.
+    if named.components().count() > 1 {
+        return named.is_file().then(|| named.to_path_buf());
+    }
+
+    for dir in dirs {
+        for ext in exts {
+            let mut name = program.to_owned();
+            name.push_str(ext);
+            let candidate = dir.join(&name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name is found in the first directory that has it, and the order is
+    /// the order it was given in.
+    #[test]
+    fn a_name_is_found_in_the_first_place_it_appears() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("thing.exe"), b"").unwrap();
+
+        let exts = vec![String::new(), ".exe".to_owned()];
+        let found = resolve_on_path("thing", &[first.clone(), second.clone()], &exts);
+        assert_eq!(found, Some(second.join("thing.exe")));
+
+        std::fs::write(first.join("thing.exe"), b"").unwrap();
+        let found = resolve_on_path("thing", &[first.clone(), second], &exts);
+        assert_eq!(found, Some(first.join("thing.exe")), "order was not kept");
+    }
+
+    /// A name written with its extension is found as written, rather than as
+    /// itself with another extension stuck on the end.
+    #[test]
+    fn a_name_that_already_has_its_extension_is_not_given_a_second() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        std::fs::write(dir.path().join("avwin.exe"), b"").unwrap();
+        let exts = vec![String::new(), ".exe".to_owned()];
+        assert_eq!(
+            resolve_on_path("avwin.exe", &[dir.path().to_path_buf()], &exts),
+            Some(dir.path().join("avwin.exe"))
+        );
+    }
+
+    /// A name that is nowhere is nowhere, rather than a directory that
+    /// happens to share its name.
+    #[test]
+    fn a_directory_is_not_a_program() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        std::fs::create_dir_all(dir.path().join("thing")).unwrap();
+        let exts = vec![String::new()];
+        assert_eq!(
+            resolve_on_path("thing", &[dir.path().to_path_buf()], &exts),
+            None
+        );
+    }
+
+    /// The empty extension comes first, and every real one is present.
+    #[test]
+    fn the_extension_list_tries_the_bare_name_first() {
+        let exts = path_exts();
+        assert_eq!(exts.first().map(String::as_str), Some(""));
+        if cfg!(windows) {
+            assert!(exts.iter().any(|e| e == ".exe"), "{exts:?} has no .exe");
+        }
+    }
+
+    /// And the real thing answers without a console appearing, which is the
+    /// whole reason this is a walk. `cmd.exe` is on the path of every
+    /// Windows this program runs on.
+    #[test]
+    #[cfg(windows)]
+    fn a_program_that_is_really_there_is_found() {
+        assert!(program_on_path("cmd"));
+        assert!(program_on_path("cmd.exe"));
+        assert!(!program_on_path("files-no-such-program-anywhere"));
+    }
 
     #[test]
     fn every_error_carries_a_usable_detail() {
