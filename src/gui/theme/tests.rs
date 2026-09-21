@@ -707,6 +707,12 @@ fn a_full_page_fits_the_content_band() {
 /// of the number that would let anything paint one by accident. Eight is
 /// Windows', DWM is the only thing that has it, and this is the test that
 /// keeps it that way.
+///
+/// `RADIUS_CIRCULAR` is exempt and is checked separately. A window corner is
+/// a specific radius on a large rectangle; a circular badge is a sixteen-point
+/// pill with its ends rounded off. Nobody has ever mistaken one for the other,
+/// and a test that could not tell them apart would be a test that banned
+/// pills.
 #[test]
 fn nothing_this_program_paints_is_rounded_like_a_window() {
     /// What Windows 11 gives an ordinary window, and Fluent calls

@@ -21,7 +21,11 @@ const PART_GAP: f32 = 2.0;
 const PAD_X: f32 = 5.0;
 
 /// How tall a chip is.
-pub const HEIGHT: f32 = 18.0;
+///
+/// Sixteen. Fluent's `<kbd>` sets a font size and horizontal padding and
+/// nothing else, so the height is the line box: a twelve-point caption at
+/// `line_h` is sixteen, and the five points of padding are all horizontal.
+pub const HEIGHT: f32 = theme::line_h(theme::SIZE_CAPTION);
 
 /// What one part of a shortcut is drawn as.
 ///

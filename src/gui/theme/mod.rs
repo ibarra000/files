@@ -165,6 +165,22 @@ pub const RADIUS_MEDIUM: u8 = 4;
 /// The accent bar down a selected row, which this fully rounds.
 pub const RADIUS_LARGE: u8 = 6;
 
+/// As round as it goes: a badge, which Fluent calls `shape="circular"`.
+///
+/// Not a rung of the ramp and deliberately not a number. Fluent's
+/// `borderRadiusCircular` is 10000px - a value chosen to exceed any height it
+/// could be applied to - and this is the same idea in a `u8`. Naming it makes
+/// a fully-round pill a *decision* rather than a radius somebody happened to
+/// pick large enough, and keeps it out of the way of
+/// `nothing_this_program_paints_is_rounded_like_a_window`, which is about a
+/// specific number and not about roundness.
+pub const RADIUS_CIRCULAR: u8 = u8::MAX;
+
+/// And it is circular rather than merely large. A radius that only happens to
+/// exceed the things it is currently applied to is one that stops being
+/// circular the first time somebody applies it to something taller.
+const _: () = assert!(RADIUS_CIRCULAR == u8::MAX);
+
 /// Six on a three-point bar is a capsule, which is what Ueli's is.
 const _: () = assert!(RADIUS_LARGE as f32 * 2.0 >= MARKER_W);
 

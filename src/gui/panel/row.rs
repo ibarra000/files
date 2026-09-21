@@ -71,7 +71,16 @@ const fn icon_size(layout: ResultLayout) -> f32 {
 const COLUMN_GAP: f32 = 12.0;
 
 /// The air inside the badge, left and right of its text.
-const BADGE_PAD_X: f32 = 6.0;
+const BADGE_PAD_X: f32 = 4.0;
+
+/// And how tall it is.
+///
+/// Sixteen, which is Fluent's `Badge size="small"`: a ten-point line box of
+/// fourteen with a point of air above and below it. It used to be
+/// twenty-four, computed as twice the caption size, which made it two-thirds
+/// the height of the row it sat on.
+const BADGE_H: f32 = 16.0;
+const _: () = assert!(BADGE_H == theme::line_h(theme::SIZE_BADGE) + 1.0 * 2.0);
 
 /// Everything a row needs that is the same for every row in the list.
 ///
@@ -154,7 +163,10 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     // it is a fact *about* the row rather than part of what the row is, and
     // in the detailed layout there is a folder on the line below that would
     // otherwise read as the same kind of thing.
-    let badge_font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
+    // Ten points and Semibold, which is Fluent's Badge. Small enough that it
+    // is read only when looked for, heavy enough that it is legible when it
+    // is - the same trade a caption on a chart makes.
+    let badge_font = theme::font(theme::SIZE_BADGE, Weight::Semibold);
     let badge = content::drive_of(style.routes, &hit.path);
     let badge_w = badge
         .map(|name| measure(name, &badge_font) + BADGE_PAD_X * 2.0)
@@ -163,11 +175,12 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
         let pill = Rect::from_min_size(
             pos2(
                 rect.right() - pad - badge_w,
-                rect.center().y - theme::SIZE_CAPTION,
+                rect.center().y - BADGE_H / 2.0,
             ),
-            vec2(badge_w, theme::SIZE_CAPTION * 2.0),
+            vec2(badge_w, BADGE_H),
         );
-        painter.rect_filled(pill, theme::radius(theme::RADIUS_MEDIUM), theme.badge_bg);
+        // Circular, not rounded. A Fluent badge is a capsule.
+        painter.rect_filled(pill, theme::radius(theme::RADIUS_CIRCULAR), theme.badge_bg);
         painter.text(
             pill.center(),
             Align2::CENTER_CENTER,
