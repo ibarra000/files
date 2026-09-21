@@ -71,7 +71,22 @@ const ID: &str = "files-settings";
 /// uses 1000 by 800; the 800 is the part not to copy, because this
 /// configuration follows people onto laptops by design.
 const SIZE: [f32; 2] = [940.0, 700.0];
-const MIN_SIZE: [f32; 2] = [720.0, 480.0];
+
+/// The smallest this window may be made.
+///
+/// Eight-twenty by five-sixty, up from seven-twenty by four-eighty. It went
+/// *up* because the layout got better, which sounds backwards and is not:
+/// the old floor was a guess at where things started breaking, and things
+/// started breaking well above it, so the number was doing nothing. Now that
+/// `measure` shrinks a control before it shreds a sentence, nothing breaks
+/// at any width at all - so the floor stops being a damage limit and becomes
+/// a readability one.
+///
+/// Eight-twenty leaves a 509-point content column after the 260-point nav
+/// and the padding, which is above the ~420 where a setting row starts
+/// taking width off its control. A window at this size is one where nothing
+/// is compromised, rather than one where everything is merely still legible.
+const MIN_SIZE: [f32; 2] = [820.0, 560.0];
 
 /// The window, which page it is on, and anything it had to compute.
 pub struct Windows {

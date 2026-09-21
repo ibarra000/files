@@ -11,6 +11,13 @@
 //! outline that then needs Enter. It is what Ueli does, it is what the
 //! Windows settings app does, and it is the behaviour that makes the nav
 //! usable without a mouse at all.
+//!
+//! Two things follow from it that are easy to leave out. An entry that gains
+//! focus has to be scrolled to, because in a short window the arrow key can
+//! otherwise select a page that is off the bottom of the list - the page
+//! changes, the nav does not move, and nothing on screen says why. And the
+//! *current* page has to be scrolled to on arrival, because the window can
+//! be opened straight onto Diagnostics, which is the eighth of eight.
 
 use eframe::egui;
 
@@ -23,6 +30,17 @@ use crate::view::settings::PageId;
 /// One section rather than Ueli's two, because the second of Ueli's was the
 /// extensions and this program has none.
 const HEADING: &str = "Settings";
+
+/// The air between the heading and the first pill.
+///
+/// Eight rather than two. The heading is a twelve-point caption and the pill
+/// under it is a thirty-two point target; two points apart they read as a
+/// label attached to the first entry rather than as a heading over all of
+/// them.
+const HEADING_GAP: f32 = 8.0;
+
+/// And between one pill and the next. See [`show`].
+const PILL_GAP: f32 = 2.0;
 
 /// Which mark a page is drawn with.
 ///
@@ -51,8 +69,21 @@ pub fn show(ui: &mut egui::Ui, theme: &Theme, current: PageId) -> PageId {
     // would not line up.
     let icons = theme::has_icon(ui.ctx(), Icon::Gear);
 
+    // Whether the window has drawn this page before. The reveal below has to
+    // happen once, on arrival, and not on every frame - a `scroll_to_me`
+    // asked for every frame is a nav that cannot be scrolled away from.
+    let seen_id = egui::Id::new("files-settings-nav-seen");
+    let arrived = ui.data(|d| d.get_temp::<PageId>(seen_id)) != Some(current);
+    ui.data_mut(|d| d.insert_temp(seen_id, current));
+
     widgets::group_heading(ui, theme, HEADING);
-    ui.add_space(2.0);
+    ui.add_space(HEADING_GAP);
+
+    // Two points between pills, not the five a list of setting tiles takes.
+    // These are thirty-two points tall and touch the same fill on hover, so
+    // five points of window showing between them reads as eight separate
+    // objects rather than as one list of eight.
+    ui.spacing_mut().item_spacing.y = PILL_GAP;
 
     for page in PageId::ALL {
         let response =
@@ -63,6 +94,12 @@ pub fn show(ui: &mut egui::Ui, theme: &Theme, current: PageId) -> PageId {
         // navigation.
         if response.clicked() || response.gained_focus() {
             chosen = page;
+            // `None` is `block: "nearest"`, the same policy the panel's
+            // result list uses: move by the least it takes, and do nothing
+            // at all when the entry is already on screen.
+            response.scroll_to_me(None);
+        } else if page == current && arrived {
+            response.scroll_to_me(None);
         }
     }
 
