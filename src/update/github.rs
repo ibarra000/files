@@ -28,6 +28,8 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use super::http::{Fetch, HttpError};
 use super::{Found, MANIFEST_NAME, Version, manifest};
@@ -41,6 +43,12 @@ const MSI_LIMIT: u64 = 200 * 1024 * 1024;
 
 /// Where downloads go, under the cache folder's `update`.
 const DOWNLOAD_DIR: &str = "download";
+
+/// How old a scratch file must be before it is taken for a dead download's.
+///
+/// A day: an installer over the slowest VPN arrives in minutes, so nothing
+/// that old is still being written.
+const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `owner/name` on GitHub.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,19 +191,61 @@ fn fetch_installer(
     if std::fs::create_dir_all(dir).is_err() {
         return false;
     }
-    // The process id in the name, because the panel and the settings window
-    // both look, and two downloads into one scratch file would be one
-    // corrupt file.
-    let part = dir.join(format!("{}.{}.part", manifest.msi, std::process::id()));
+    sweep_stale(dir);
+    let part = scratch_for(manifest, dir);
     let url = repo.asset_url(manifest.version, &manifest.msi);
     let fetched = fetch.download(&url, &part, MSI_LIMIT).is_ok() && matches(&part);
     let placed = fetched && std::fs::rename(&part, msi).is_ok();
     if !placed {
         let _ = std::fs::remove_file(&part);
     }
-    // The other process may have renamed its copy into place first, which is
-    // as good as this one having done it.
+    // Another attempt may have renamed its copy into place first, which is as
+    // good as this one having done it.
     placed || matches(msi)
+}
+
+/// A scratch file no other download is using.
+///
+/// The process id, because the panel and the settings window both look. And
+/// a count, because one process can look twice at once: "Check now" pressed
+/// again before the first check answers is a second thread in the settings
+/// window, and two downloads into one scratch file truncate - or delete -
+/// each other halfway through.
+fn scratch_for(manifest: &manifest::Manifest, dir: &Path) -> std::path::PathBuf {
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
+    let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!(
+        "{}.{}.{attempt}.part",
+        manifest.msi,
+        std::process::id()
+    ))
+}
+
+/// Deletes scratch files a crash left behind.
+///
+/// Every finished download is renamed or removed, so a `.part` file that
+/// outlives its download is one whose process died mid-way - and without
+/// this, each one would sit in the cache for good, up to [`MSI_LIMIT`] apiece.
+/// Only old ones, so a download still under way in the other process is
+/// never pulled out from under it.
+fn sweep_stale(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let scratch = path.extension().is_some_and(|e| e == "part");
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| now.duration_since(at).ok())
+            .is_some_and(|age| age > STALE_SCRATCH);
+        if scratch && old {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +399,54 @@ mod tests {
 
         let downloads = fake.asked().iter().filter(|u| u.ends_with(".msi")).count();
         assert_eq!(downloads, 1, "asked for {:?}", fake.asked());
+    }
+
+    /// "Check now" pressed twice in the settings window is two looks in one
+    /// process, at once. Each needs a scratch file of its own, or one
+    /// truncates - or deletes - the other's download halfway through.
+    #[test]
+    fn two_looks_at_once_in_one_process_do_not_share_a_scratch_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = manifest::parse(&manifest("0.3.0", None)).unwrap();
+        let first = scratch_for(&manifest, dir.path());
+        let second = scratch_for(&manifest, dir.path());
+        assert_ne!(first, second, "two attempts were given one scratch file");
+    }
+
+    /// A download a crash cut short is swept up by the next look, rather than
+    /// left in the cache for good.
+    #[test]
+    fn a_scratch_file_left_by_a_dead_download_is_swept_up() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("update").join(DOWNLOAD_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let orphan = dir.join("files-0.2.9-x64.msi.4242.0.part");
+        std::fs::write(&orphan, b"half an installer").unwrap();
+        let two_days_ago = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&orphan)
+            .unwrap()
+            .set_modified(two_days_ago)
+            .unwrap();
+
+        let fake = published("0.3.0", INSTALLER);
+        look(&repo(), Version::new(0, 2, 0), &fake, Some(cache.path()));
+        assert!(!orphan.exists(), "the dead download is still there");
+    }
+
+    /// And one that is still being written - by the other process - is not.
+    #[test]
+    fn a_scratch_file_still_being_written_is_left_alone() {
+        let cache = tempfile::tempdir().unwrap();
+        let dir = cache.path().join("update").join(DOWNLOAD_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("files-0.3.0-x64.msi.4242.0.part");
+        std::fs::write(&live, b"arriving").unwrap();
+
+        let fake = published("0.3.0", INSTALLER);
+        look(&repo(), Version::new(0, 2, 0), &fake, Some(cache.path()));
+        assert!(live.exists(), "a download in progress was swept away");
     }
 
     /// The installer is fetched by the tag the manifest names, not through
