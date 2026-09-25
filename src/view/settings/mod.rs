@@ -170,6 +170,21 @@ pub(super) const DOCKS: &[Choice] = &[
     },
 ];
 
+pub(super) const COLUMNS: &[Choice] = &[
+    Choice {
+        value: "1",
+        label: "One",
+    },
+    Choice {
+        value: "2",
+        label: "Two",
+    },
+    Choice {
+        value: "3",
+        label: "Three",
+    },
+];
+
 pub(super) const THEMES: &[Choice] = &[
     Choice {
         value: "light",

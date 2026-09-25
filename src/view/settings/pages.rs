@@ -5,7 +5,7 @@
 //! remembered.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
-use super::{BACKDROPS, DOCKS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
+use super::{BACKDROPS, COLUMNS, DOCKS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
 use crate::config::write::SettingKey;
 use crate::config::{Dock, Settings};
 use crate::view::status::Tone;
@@ -250,18 +250,32 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
             },
             Group {
                 heading: Some("How a result is listed"),
-                blocks: vec![Block::Rows(vec![row(
-                    settings,
-                    SettingKey::ResultLayout,
-                    "Rows",
-                    "Compact fits six results on screen and shows the name and the \
-                     drive. Detailed fits four and puts the folder under each name, \
-                     which is how you tell two drawings with the same name apart.",
-                    Field::Choice {
-                        options: LAYOUTS,
-                        current: index_of(LAYOUTS, settings.result_layout.name()),
-                    },
-                )])],
+                blocks: vec![Block::Rows(vec![
+                    row(
+                        settings,
+                        SettingKey::ResultLayout,
+                        "Rows",
+                        "Compact fits six results on screen and shows the name and the \
+                         drive. Detailed fits four and puts the folder under each name, \
+                         which is how you tell two drawings with the same name apart.",
+                        Field::Choice {
+                            options: LAYOUTS,
+                            current: index_of(LAYOUTS, settings.result_layout.name()),
+                        },
+                    ),
+                    row(
+                        settings,
+                        SettingKey::Columns,
+                        "Columns",
+                        "More columns show more results at once, with less room for \
+                         each name. Up and down stay in a column, and Tab or Shift+Tab \
+                         moves to the same place in the next one.",
+                        Field::Choice {
+                            options: COLUMNS,
+                            current: index_of(COLUMNS, &settings.columns.to_string()),
+                        },
+                    ),
+                ])],
             },
             Group {
                 heading: Some("Where the panel appears"),

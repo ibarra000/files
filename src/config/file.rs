@@ -217,6 +217,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "backdrop",
     "result_layout",
     "dock",
+    "columns",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -249,6 +250,7 @@ pub struct FileSettings {
     pub backdrop: Option<String>,
     pub result_layout: Option<String>,
     pub dock: Option<String>,
+    pub columns: Option<usize>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -867,6 +869,26 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     );
                 }
                 out.dock = raw.map(str::to_string);
+            }
+            "columns" => {
+                let max = crate::config::MAX_COLUMNS;
+                match value.and_then(Value::as_integer) {
+                    Some(n) if (1..=max as i64).contains(&n) => out.columns = Some(n as usize),
+                    Some(n) => ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("columns must be from 1 to {max}, not {n}"),
+                        None,
+                    ),
+                    None => ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("columns must be a number from 1 to {max}"),
+                        None,
+                    ),
+                }
             }
             _ => {}
         }

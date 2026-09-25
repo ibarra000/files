@@ -1914,6 +1914,135 @@ fn far_more_than_one_screenful_of_results_is_reachable() {
     );
 }
 
+// --- more than one column -----------------------------------------------
+
+/// A state whose results are laid out `columns` to a line.
+fn in_columns(columns: usize) -> (AppState, Instant) {
+    let now = Instant::now();
+    let settings = Settings {
+        columns,
+        ..Settings::default()
+    };
+    (AppState::new(settings, now), now)
+}
+
+/// Down moves a line and stays in its column, and Up comes back.
+///
+/// ```text
+///  0  1  2
+///  3  4  5
+///  ...
+/// ```
+#[test]
+fn in_columns_down_and_up_stay_in_the_column() {
+    let (mut s, now) = in_columns(3);
+    with_results(&mut s, now, 30);
+    assert_eq!(s.selected_row(), Some(0));
+
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(3));
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(6));
+    s.update(press(Key::Up), now);
+    assert_eq!(s.selected_row(), Some(3));
+}
+
+/// Tab moves to the same place one column over, and after that Up and Down
+/// keep to the new column - there is no mode to leave.
+#[test]
+fn tab_moves_to_the_same_line_of_the_next_column() {
+    let (mut s, now) = in_columns(3);
+    with_results(&mut s, now, 30);
+    s.update(press(Key::Down), now);
+    s.update(press(Key::Down), now);
+    assert_eq!(
+        s.selected_row(),
+        Some(6),
+        "precondition: third line, first column"
+    );
+
+    s.update(press(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(7), "the same line, one column over");
+
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(10), "Down stayed in the new column");
+}
+
+/// Shift+Tab is the way back, to the same line.
+#[test]
+fn shift_tab_moves_to_the_same_line_of_the_previous_column() {
+    let (mut s, now) = in_columns(3);
+    with_results(&mut s, now, 30);
+    s.update(press(Key::Down), now);
+    s.update(press(Key::Tab), now);
+    s.update(press(Key::Tab), now);
+    assert_eq!(
+        s.selected_row(),
+        Some(5),
+        "precondition: second line, last column"
+    );
+
+    s.update(shift(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(4));
+    s.update(shift(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(3));
+}
+
+/// The ends of a line hold rather than wrapping onto the next one, which is
+/// Down's job.
+#[test]
+fn tab_holds_at_the_ends_of_the_line() {
+    let (mut s, now) = in_columns(2);
+    with_results(&mut s, now, 10);
+
+    s.update(shift(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(0), "Shift+Tab left the first column");
+
+    s.update(press(Key::Tab), now);
+    s.update(press(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(1), "Tab left the last column");
+}
+
+/// One column has nowhere sideways to go, so Tab does nothing to the list.
+#[test]
+fn tab_leaves_a_single_column_alone() {
+    let (mut s, now) = state();
+    with_results(&mut s, now, 10);
+    s.update(press(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(0));
+}
+
+/// Off the foot of a column is its head, as off the foot of a single list is
+/// its top - never a jump sideways into another column.
+#[test]
+fn in_columns_the_wrap_keeps_to_the_column() {
+    let (mut s, now) = in_columns(3);
+    // Eight results: the last line is two short of full.
+    with_results(&mut s, now, 8);
+    s.update(press(Key::Tab), now);
+    s.update(press(Key::Tab), now);
+    assert_eq!(s.selected_row(), Some(2), "precondition: the third column");
+
+    // Up from its head goes to its foot, which is on the line above the last.
+    s.update(press(Key::Up), now);
+    assert_eq!(s.selected_row(), Some(5));
+    // And Down from there comes back round to its head.
+    s.update(press(Key::Down), now);
+    assert_eq!(s.selected_row(), Some(2));
+}
+
+/// A page is a screen of lines, which in columns is that many times more
+/// results - and the column is kept.
+#[test]
+fn in_columns_a_page_moves_a_screen_of_lines_and_keeps_the_column() {
+    let (mut s, now) = in_columns(2);
+    with_results(&mut s, now, 100);
+    s.update(press(Key::Tab), now);
+
+    s.update(press(Key::PageDown), now);
+    assert_eq!(s.selected_row(), Some(1 + VISIBLE_ROWS * 2));
+}
+
 // --- the pause, and what must not go wrong inside it --------------------
 
 /// Enter typed before the pause elapses must not open the row on screen: that
@@ -2987,6 +3116,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::Backdrop => s.backdrop = files::gui::window::Material::Mica,
             SettingKey::ResultLayout => s.result_layout = files::config::ResultLayout::Detailed,
             SettingKey::Dock => s.dock = files::config::Dock::Bottom,
+            SettingKey::Columns => s.columns = 2,
             SettingKey::HideExtensions => {
                 s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
                     &["zzz"],

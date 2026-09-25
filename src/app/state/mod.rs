@@ -24,6 +24,7 @@
 //! still reads no clock itself, and an hour-old index costs one wakeup an
 //! hour rather than thirty-six hundred.
 
+mod grid;
 mod keys;
 mod model;
 mod overlay;
@@ -1026,14 +1027,45 @@ impl AppState {
     /// key to appeal to. Six rows is not a landmark, so a `PageDown` that
     /// came out somewhere near the top would be indistinguishable from one
     /// that had not moved.
-    /// How far a page key moves.
+    /// How far a page key moves, in ranks.
     ///
-    /// A screenful, which is a different number of rows in each layout. Read
-    /// off the settings rather than off a constant so that switching the
-    /// layout in the settings window changes the page on the next press, the
-    /// same frame the rows change shape.
+    /// A screenful, which is a different number of rows in each layout - and
+    /// in columns, that many lines of them, so a page keeps the column it
+    /// started in. Read off the settings rather than off a constant so that
+    /// switching either in the settings window changes the page on the next
+    /// press, the same frame the rows change shape.
     fn rows_per_page(&self) -> isize {
-        self.settings.result_layout.rows_per_page() as isize
+        (self.settings.result_layout.rows_per_page() * self.columns()) as isize
+    }
+
+    /// How many results sit on a line, held to the range the list can draw.
+    pub fn columns(&self) -> usize {
+        self.settings.columns.clamp(1, crate::config::MAX_COLUMNS)
+    }
+
+    /// Up or Down through the results: a line, in the same column, wrapping
+    /// within it. With one column this is a step with a wrap at each end,
+    /// which is what the arrows always did - see [`grid::vertical`].
+    fn move_vertically(&mut self, down: bool) -> Response {
+        let Some(current) = self.selected_row() else {
+            return self.move_selection(if down { 1 } else { -1 }, Wrap::Around);
+        };
+        let target = grid::vertical(current, self.hits.len(), self.columns(), down);
+        self.move_selection(target as isize - current as isize, Wrap::Stop)
+    }
+
+    /// Tab or Shift+Tab through the results: the next or previous cell on the
+    /// same line, and nothing past either end of it.
+    fn move_across(&mut self, forward: bool) -> Response {
+        let Some(current) = self.selected_row() else {
+            return Response::none();
+        };
+        match grid::across(current, self.hits.len(), self.columns(), forward) {
+            Some(target) => self.jump_selection(target),
+            // Against the end of the line, which pins exactly as a step
+            // against the end of the list does.
+            None => self.move_selection(0, Wrap::Stop),
+        }
     }
 
     fn move_selection(&mut self, delta: isize, wrap: Wrap) -> Response {

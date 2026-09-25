@@ -105,6 +105,7 @@ impl AppState {
             SettingKey::Theme
             | SettingKey::ResultLayout
             | SettingKey::Dock
+            | SettingKey::Columns
             | SettingKey::Backdrop
             | SettingKey::HideOnBlur
             | SettingKey::HideAfterOpening

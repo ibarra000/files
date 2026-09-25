@@ -774,6 +774,87 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     );
 }
 
+/// Where each result row landed, read off the accessibility tree.
+fn result_boxes(h: &Harness<'_, Panel>) -> Vec<(String, egui::Rect)> {
+    h.root()
+        .children_recursive()
+        .filter_map(|node| {
+            let label = node.accesskit_node().label().unwrap_or_default();
+            let b = node.accesskit_node().bounding_box()?;
+            label.contains(".pdf, in ").then(|| {
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                );
+                (label, rect)
+            })
+        })
+        .collect()
+}
+
+/// Two columns are two columns: every row starts at one of two lefts, the
+/// best match is top left with the second beside it, and no row reaches into
+/// the column next to it.
+#[test]
+fn two_columns_lay_the_results_out_side_by_side() {
+    let (mut s, now) = state();
+    s.settings.columns = 2;
+    with_results(&mut s, "11-D-0704", many(20), 20, now);
+    let h = harness(s);
+    let boxes = result_boxes(&h);
+    assert!(boxes.len() >= 4, "only {} rows were drawn", boxes.len());
+
+    let mut lefts: Vec<f32> = boxes.iter().map(|(_, r)| r.left().round()).collect();
+    lefts.sort_by(f32::total_cmp);
+    lefts.dedup();
+    assert_eq!(lefts.len(), 2, "rows start at {lefts:?}");
+
+    let at = |name: &str| {
+        boxes
+            .iter()
+            .find(|(label, _)| label.starts_with(name))
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{name} is not on screen"))
+    };
+    let first = at("11-D-0704-00.pdf");
+    let second = at("11-D-0704-01.pdf");
+    let third = at("11-D-0704-02.pdf");
+    assert_eq!(
+        first.top(),
+        second.top(),
+        "the second is not beside the first"
+    );
+    assert!(
+        second.left() > first.right(),
+        "the first reaches into the second column"
+    );
+    assert_eq!(
+        third.left(),
+        first.left(),
+        "the third did not start the next line"
+    );
+    assert!(
+        third.top() > first.bottom(),
+        "the next line overlaps the first"
+    );
+}
+
+/// More columns, more of the list at once: the reason for the setting.
+#[test]
+fn three_columns_show_more_results_than_one() {
+    let drawn = |columns| {
+        let (mut s, now) = state();
+        s.settings.columns = columns;
+        with_results(&mut s, "11-D-0704", many(60), 60, now);
+        result_boxes(&harness(s)).len()
+    };
+    let (one, three) = (drawn(1), drawn(3));
+    assert!(
+        three >= one * 3,
+        "one column drew {one} and three drew {three}"
+    );
+}
+
 // --- the pictures ----------------------------------------------------------
 
 /// Everything above says what is on the panel. This says what it looks like -
@@ -835,6 +916,21 @@ snapshot!(looks_right_picking_a_drive, || {
 // the footer exists for.
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s
+});
+
+snapshot!(looks_right_in_two_columns, || {
+    let (mut s, now) = state();
+    s.settings.columns = 2;
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Tab, Mods::NONE)), now);
+    s
+});
+
+snapshot!(looks_right_in_three_columns, || {
+    let (mut s, now) = state();
+    s.settings.columns = 3;
     with_results(&mut s, "11-D-0704", many(300), 300, now);
     s
 });
