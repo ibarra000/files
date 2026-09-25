@@ -115,14 +115,18 @@
       <ComponentRef Id="CliExe" />
       <ComponentRef Id="StartMenuShortcut" />
 
-      <!-- `Level="2"` means unselected by default, so clicking straight through
-           the installer does not silently produce a startup program. It is one
-           checkbox away for anybody who wants it - which will be most people
-           who use this dozens of times an hour. -->
+      <!-- Selected by default. This used to be `Level="2"`, unselected, on the
+           argument that clicking through an installer should not produce a
+           startup program - but it is the choice nearly everybody makes, for
+           a tool used dozens of times an hour whose whole point is a shortcut
+           that works without launching anything first. It starts hidden, so
+           the cost is a tray icon. Unticking it here, the switch on the
+           settings window's General page, and Task Manager's Startup tab all
+           move the same value. -->
       <Feature Id="StartWithWindows"
                Title="Start with Windows"
                Description="Run files when you sign in, so the keyboard shortcut works without launching it first."
-               Level="2"
+               Level="1"
                AllowAbsent="yes">
         <ComponentRef Id="RunAtLogin" />
       </Feature>

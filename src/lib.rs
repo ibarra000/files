@@ -7,6 +7,7 @@
 
 pub mod alias;
 pub mod app;
+pub mod autostart;
 pub mod cli;
 pub mod clipboard;
 pub mod config;

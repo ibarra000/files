@@ -4,7 +4,7 @@
 //! module note above gives. Nothing here is a buffer and nothing here is
 //! remembered.
 
-use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId};
+use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
 use super::{BACKDROPS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
 use crate::config::Settings;
 use crate::config::write::SettingKey;
@@ -12,9 +12,11 @@ use crate::view::status::Tone;
 
 /// The whole form.
 ///
-/// Three arguments rather than one because three things are being described:
-/// the settings, the one piece of runtime state the About page reads, and
-/// the remembered window position, which is neither.
+/// Several arguments rather than one because several things are being
+/// described: the settings, the one piece of runtime state the About page
+/// reads, the remembered window position, and whether Windows starts files at
+/// sign-in - the last two being neither settings nor state. `autostart` is
+/// `None` when the registry could not be read.
 ///
 /// The first used to be the whole of `AppState`, which was a lie about the
 /// dependency: this reads `state.update` and nothing else. Naming the fact
@@ -26,9 +28,10 @@ pub fn pages(
     settings: &Settings,
     placement: Option<(i32, i32)>,
     panel: bool,
+    autostart: Option<bool>,
 ) -> Vec<Page> {
     vec![
-        general(settings),
+        general(settings, autostart),
         appearance(settings, placement),
         drives(settings),
         aliases(),
@@ -39,7 +42,7 @@ pub fn pages(
     ]
 }
 
-fn general(settings: &Settings) -> Page {
+fn general(settings: &Settings, autostart: Option<bool>) -> Page {
     let mut remembering = vec![Block::Rows(vec![row(
         settings,
         SettingKey::History,
@@ -76,6 +79,10 @@ fn general(settings: &Settings) -> Page {
                         placeholder: "ctrl+shift+space",
                     },
                 )])],
+            },
+            Group {
+                heading: Some("Starting"),
+                blocks: vec![starting(autostart)],
             },
             Group {
                 heading: Some("Remembering"),
@@ -123,6 +130,30 @@ fn general(settings: &Settings) -> Page {
                 blocks: config_file(),
             },
         ],
+    }
+}
+
+/// The switch for starting at sign-in, or why there is not one.
+///
+/// Hidden is not a choice offered here, because it is not one: the panel
+/// always starts put away, and a launch at sign-in is a tray icon and
+/// nothing else.
+fn starting(autostart: Option<bool>) -> Block {
+    match autostart {
+        Some(on) => Block::Switches(vec![Switch::new(
+            "Start with Windows",
+            "Start files in the tray when you sign in, so the shortcut works \
+             without opening it first. The panel stays out of the way until you \
+             call it up.",
+            on,
+            ActionId::StartWithWindows,
+            ActionId::StopStartingWithWindows,
+        )]),
+        None => Block::Facts(vec![Fact::toned(
+            "Start with Windows",
+            "Unknown \u{b7} the registry could not be read",
+            Tone::Warn,
+        )]),
     }
 }
 

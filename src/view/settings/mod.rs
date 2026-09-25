@@ -56,7 +56,7 @@ mod tests;
 
 pub use lists::{ALIASES, AliasWords, DRIVES, DriveWords};
 pub use pages::pages;
-pub use shape::{Action, ActionId, Block, Fact, Group, Page, PageId, check_prose, prose};
+pub use shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch, check_prose, prose};
 
 /// One option in a [`Field::Choice`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

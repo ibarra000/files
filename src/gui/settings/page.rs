@@ -108,6 +108,24 @@ pub fn show(
                         );
                     }
                 }
+                Block::Switches(switches) => {
+                    for switch in switches {
+                        let spec = widgets::Row {
+                            label: switch.label,
+                            help: switch.help,
+                            caveat: None,
+                            enabled: true,
+                            control_w: widgets::width::SWITCH,
+                        };
+                        let actions = &mut *form.actions;
+                        widgets::setting_row(ui, theme, spec, |ui| {
+                            let mut value = switch.on;
+                            if widgets::switch(ui, theme, &mut value, switch.label).changed() {
+                                actions.push(switch.flipped());
+                            }
+                        });
+                    }
+                }
                 Block::Aliases => lists::aliases(ui, theme, settings, form),
                 Block::Drives => lists::drives(ui, theme, settings, form),
                 Block::Report { intro } => {

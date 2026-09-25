@@ -107,6 +107,8 @@ features = [
     # `\.\pipe\` name is machine-global, and on a terminal server two
     # people signed in at once would otherwise share one.
     "Win32_System_RemoteDesktop",
+    # The `Run` value behind "Start with Windows". See `src/autostart.rs`.
+    "Win32_System_Registry",
     "Win32_NetworkManagement_WNet",
     "Win32_Security",
     # BCrypt, for the SHA-256 of a staged installer. The operating system
