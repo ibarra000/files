@@ -288,7 +288,7 @@ fn the_footer_says_how_many_the_code_found() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains("300"),
+        screen.contains("300 items"),
         "nothing said how many there were:\n{screen}"
     );
 }
