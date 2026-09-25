@@ -421,23 +421,35 @@ fn opening(settings: &Settings) -> Page {
 }
 
 fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool) -> Page {
-    let mut updates = vec![Block::Rows(vec![row(
-        settings,
-        SettingKey::UpdateFrom,
-        "Look for new versions in",
-        "A folder holding latest.toml and the installer beside it. Empty it and no \
-         looking happens at all.",
-        Field::Text {
-            value: path_of(settings.update_from.as_deref()),
-            placeholder: "Nowhere, so nothing is checked",
-        },
-    )])];
+    let source = crate::update::Source::of(settings);
+    let mut updates = vec![Block::Rows(vec![
+        row(
+            settings,
+            SettingKey::CheckForUpdates,
+            "Check GitHub for new versions",
+            "Look for a newer release every few hours, and say so when there is one. \
+             Nothing is installed until you choose to install it. A folder below takes \
+             the place of GitHub.",
+            Field::Toggle {
+                on: settings.check_for_updates,
+            },
+        ),
+        row(
+            settings,
+            SettingKey::UpdateFrom,
+            "Look for new versions in",
+            "A shared folder holding latest.toml and the installer beside it, for an \
+             office that publishes its own. Empty, files looks on GitHub instead.",
+            Field::Text {
+                value: path_of(settings.update_from.as_deref()),
+                placeholder: "GitHub",
+            },
+        ),
+    ])];
 
-    // Everything below the row depends on there being a folder at startup,
-    // because that is when the checker thread was started or not started.
-    // See `app::state::settings::apply_live`.
-    if settings.update_from.is_some() {
-        let mut facts = Vec::new();
+    // Everything below the rows depends on there being somewhere to look.
+    if let Some(source) = &source {
+        let mut facts = vec![Fact::new("Looking in", source.describe())];
         match update {
             // Three states, and the third is not the second. "Looking" means
             // the checker has not answered, which is a different thing from
@@ -462,7 +474,11 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
                 if !*msi_present {
                     facts.push(Fact::toned(
                         "Installer",
-                        "Not where the manifest says it is \u{b7} ask whoever published it",
+                        if source.is_remote() {
+                            "Not downloaded \u{b7} it is tried again at the next check"
+                        } else {
+                            "Not where the manifest says it is \u{b7} ask whoever published it"
+                        },
                         Tone::Warn,
                     ));
                 }

@@ -40,6 +40,9 @@ pub enum TrayAction {
     Show,
     Settings,
     Diagnostics,
+    /// Install the version the menu item names, and start again. Only on the
+    /// menu while there is one - see [`Tray::offer_update`].
+    InstallUpdate,
     Quit,
 }
 
@@ -49,8 +52,19 @@ pub enum TrayAction {
 /// notification area, so a `let _ = ...` here would produce an icon that
 /// flickers into existence and disappears.
 pub struct Tray {
-    _icon: TrayIcon,
-    _menu: Menu,
+    icon: TrayIcon,
+    menu: Menu,
+    /// "Install version X and restart", built once and put on the menu only
+    /// while an installable version is known. Built up front so its id is in
+    /// the handler's table from the start - the handler owns a copy of that
+    /// table and cannot be told about items added later.
+    install: MenuItem,
+    /// The version the menu currently offers, if any. Also what stops the
+    /// notification being shown twice for one version.
+    offered: Option<crate::update::Version>,
+    /// The icon's identity to the shell, for the notification. `None` when
+    /// the icon had to be built without one - see [`Tray::new`].
+    guid: Option<u128>,
     /// Kept for the test below, which is the only thing that reads them: the
     /// handler owns its own copy, because it outlives this struct's borrow.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -70,6 +84,7 @@ impl Tray {
         let settings = MenuItem::new("Settings", true, None);
         let diagnostics = MenuItem::new("Diagnostics", true, None);
         let quit = MenuItem::new("Quit files", true, None);
+        let install = MenuItem::new("Install the new version and restart", true, None);
         menu.append_items(&[
             &show,
             &PredefinedMenuItem::separator(),
@@ -83,20 +98,42 @@ impl Tray {
             (show.id().clone(), TrayAction::Show),
             (settings.id().clone(), TrayAction::Settings),
             (diagnostics.id().clone(), TrayAction::Diagnostics),
+            (install.id().clone(), TrayAction::InstallUpdate),
             (quit.id().clone(), TrayAction::Quit),
         ];
 
-        let icon = TrayIconBuilder::new()
-            .with_menu(Box::new(menu.clone()))
-            // Named, because this is what the user sees when they hover over an
-            // icon they do not recognise at half past four on a Friday.
-            .with_tooltip("files - search job codes")
-            .with_icon(Icon::from_rgba(ICON_RGBA.to_vec(), ICON_SIZE, ICON_SIZE)?)
-            // The menu belongs on the right button only. A left-click that
-            // opens a menu is a left-click that does not open the thing the
-            // icon is for.
-            .with_menu_on_left_click(false)
-            .build()?;
+        // A GUID, because it is the only handle on the icon `tray-icon` lets
+        // anything else hold, and the notification below needs one. Derived
+        // from where this executable is, because Windows binds an icon's GUID
+        // to the path that first registered it and refuses the same GUID from
+        // anywhere else - so a fixed one would make a development build and
+        // an installed copy fight over it, and the loser would have no icon.
+        let guid = std::env::current_exe().ok().map(|exe| guid_for(&exe));
+        let builder = |guid: Option<u128>| {
+            let builder = TrayIconBuilder::new()
+                .with_menu(Box::new(menu.clone()))
+                // Named, because this is what the user sees when they hover
+                // over an icon they do not recognise at half past four on a
+                // Friday.
+                .with_tooltip("files - search job codes")
+                .with_icon(Icon::from_rgba(ICON_RGBA.to_vec(), ICON_SIZE, ICON_SIZE)?)
+                // The menu belongs on the right button only. A left-click
+                // that opens a menu is a left-click that does not open the
+                // thing the icon is for.
+                .with_menu_on_left_click(false);
+            let builder = match guid {
+                Some(guid) => builder.with_guid(guid),
+                None => builder,
+            };
+            Ok::<_, Box<dyn std::error::Error>>(builder.build()?)
+        };
+        // Without the GUID if it is refused: an icon that cannot announce an
+        // update is still an icon, and a missing one is a program that looks
+        // like it did not start.
+        let (icon, guid) = match builder(guid) {
+            Ok(icon) => (icon, guid),
+            Err(_) => (builder(None)?, None),
+        };
 
         let wake = Arc::new(wake);
 
@@ -134,10 +171,72 @@ impl Tray {
         }
 
         Ok(Self {
-            _icon: icon,
-            _menu: menu,
+            icon,
+            menu,
+            install,
+            offered: None,
+            guid,
             ids,
         })
+    }
+
+    /// Puts "Install version X and restart" on the menu, and says so once.
+    ///
+    /// Called every frame while an installable version is known, so it does
+    /// nothing unless the version is one it has not offered yet. The
+    /// notification is Windows' own, from this icon: somebody working in
+    /// another program all day is told without the panel having to be up.
+    pub fn offer_update(&mut self, version: crate::update::Version) {
+        if self.offered == Some(version) {
+            return;
+        }
+        let first = self.offered.is_none();
+        self.offered = Some(version);
+        self.install
+            .set_text(format!("Install version {version} and restart"));
+        // Second, under "Show files": the first item is what a right-click
+        // is usually for, and this is the thing that is new.
+        if first {
+            let _ = self.menu.insert(&self.install, 1);
+        }
+        self.notify(
+            &format!("files {version} is available"),
+            "Right-click the files icon to install it. Nothing changes until you do.",
+        );
+    }
+
+    /// Takes the menu item away again, once there is nothing to install.
+    pub fn withdraw_update(&mut self) {
+        if self.offered.take().is_some() {
+            let _ = self.menu.remove(&self.install);
+        }
+    }
+
+    /// A notification from this icon, which Windows shows as a toast.
+    fn notify(&self, title: &str, body: &str) {
+        use windows_sys::Win32::UI::Shell::{
+            NIF_GUID, NIF_INFO, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_MODIFY, NOTIFYICONDATAW,
+            Shell_NotifyIconW,
+        };
+
+        let Some(guid) = self.guid else {
+            return;
+        };
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.icon.window_handle(),
+            uFlags: NIF_INFO | NIF_GUID,
+            guidItem: windows_sys::core::GUID::from_u128(guid),
+            // Quiet time is the first hour after a new account signs in, and
+            // presentation mode; neither is the moment for this.
+            dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
+            ..Default::default()
+        };
+        copy_truncated(&mut data.szInfoTitle, title);
+        copy_truncated(&mut data.szInfo, body);
+        // SAFETY: `data` is a fully initialised local of the size its first
+        // field claims, and is not retained by the call.
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
     }
 
     /// How many items the menu offers. For the test below, and for nothing
@@ -148,9 +247,61 @@ impl Tray {
     }
 }
 
+/// A GUID that is the same every time for one executable path, and different
+/// for any other.
+///
+/// FNV-1a, twice with different offsets, rather than `DefaultHasher`, whose
+/// output the standard library is free to change between Rust releases - and
+/// an icon whose identity moved with the compiler would lose the user's
+/// "always show this icon" choice on every rebuild.
+fn guid_for(exe: &std::path::Path) -> u128 {
+    let text = exe.to_string_lossy().to_lowercase();
+    let fnv = |offset: u64| {
+        text.bytes().fold(offset, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    };
+    (u128::from(fnv(0xcbf2_9ce4_8422_2325)) << 64) | u128::from(fnv(0x8422_2325_cbf2_9ce4))
+}
+
+/// Copies `text` into a fixed, NUL-terminated UTF-16 field, cutting it short
+/// rather than overrunning it.
+fn copy_truncated(field: &mut [u16], text: &str) {
+    let room = field.len().saturating_sub(1);
+    for (slot, unit) in field.iter_mut().zip(text.encode_utf16().take(room)) {
+        *slot = unit;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same path is the same icon, whatever case Windows reports it in.
+    #[test]
+    fn an_executable_keeps_its_icon_identity_and_another_gets_its_own() {
+        let installed = std::path::Path::new(r"C:\Program Files\files\files.exe");
+        let same = std::path::Path::new(r"C:\PROGRAM FILES\files\files.exe");
+        let dev = std::path::Path::new(r"C:\code\files\target\debug\files.exe");
+        assert_eq!(guid_for(installed), guid_for(same));
+        assert_ne!(guid_for(installed), guid_for(dev));
+    }
+
+    /// A notification that would not fit is cut short, and still ends.
+    #[test]
+    fn a_long_notification_is_cut_to_fit_and_terminated() {
+        let mut field = [0xffffu16; 8];
+        copy_truncated(&mut field, "far longer than eight");
+        assert_eq!(
+            &field[..7],
+            "far lon".encode_utf16().collect::<Vec<_>>().as_slice()
+        );
+        // The last slot was never written, so it is whatever was there - and
+        // the real fields start zeroed, which is the terminator.
+        let mut zeroed = [0u16; 8];
+        copy_truncated(&mut zeroed, "far longer than eight");
+        assert_eq!(zeroed[7], 0);
+    }
 
     /// The icon is embedded, so a wrong length is a build that ships a tray
     /// icon made of whatever happened to be in the file - and `Icon::from_rgba`
@@ -196,11 +347,11 @@ mod tests {
         let Ok(tray) = Tray::new(|_| {}) else {
             return;
         };
-        assert_eq!(tray.len(), 4);
+        assert_eq!(tray.len(), 5);
 
         let mut actions: Vec<_> = tray.ids.iter().map(|(_, a)| *a).collect();
         actions.sort_by_key(|a| format!("{a:?}"));
         actions.dedup();
-        assert_eq!(actions.len(), 4, "two menu items run the same action");
+        assert_eq!(actions.len(), 5, "two menu items run the same action");
     }
 }

@@ -107,10 +107,11 @@ pub enum SettingKey {
     HideOnEscape,
     Dock,
     Columns,
+    CheckForUpdates,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -131,6 +132,7 @@ impl SettingKey {
         Self::HideOnEscape,
         Self::Dock,
         Self::Columns,
+        Self::CheckForUpdates,
     ];
 
     /// The spelling in the file.
@@ -153,6 +155,7 @@ impl SettingKey {
             Self::ResultLayout => "result_layout",
             Self::Dock => "dock",
             Self::Columns => "columns",
+            Self::CheckForUpdates => "check_for_updates",
             Self::HideOnBlur => "hide_on_blur",
             Self::HideAfterOpening => "hide_after_opening",
             Self::HideOnEscape => "hide_on_escape",
@@ -183,6 +186,7 @@ impl SettingKey {
             Self::ResultLayout => "FILES_RESULT_LAYOUT",
             Self::Dock => "FILES_DOCK",
             Self::Columns => "FILES_COLUMNS",
+            Self::CheckForUpdates => "FILES_CHECK_FOR_UPDATES",
             Self::HideOnBlur => "FILES_HIDE_ON_BLUR",
             Self::HideAfterOpening => "FILES_HIDE_AFTER_OPENING",
             Self::HideOnEscape => "FILES_HIDE_ON_ESCAPE",
@@ -649,6 +653,7 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
         SettingKey::ResultLayout => s.result_layout.clone().map(Scalar::Str),
         SettingKey::Dock => s.dock.clone().map(Scalar::Str),
         SettingKey::Columns => s.columns.map(|n| Scalar::Int(n as i64)),
+        SettingKey::CheckForUpdates => s.check_for_updates.map(Scalar::Bool),
     }
 }
 
@@ -793,6 +798,7 @@ mod tests {
             SettingKey::ResultLayout => Typed::Text("detailed".into()),
             SettingKey::Dock => Typed::Text("bottom".into()),
             SettingKey::Columns => Typed::Text("2".into()),
+            SettingKey::CheckForUpdates => Typed::Flag(false),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             SettingKey::DevMode => Typed::Flag(true),
             SettingKey::History

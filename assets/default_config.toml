@@ -317,6 +317,14 @@ refresh = "manual"
 # the screen, which is where three columns have the most room.
 # columns       = 1                  # 1 | 2 | 3
 
+# Whether to look on GitHub for a newer version, every four hours.
+#
+# Only when update_from names no folder: a folder somebody configured is
+# always what is looked in. Nothing is installed without being asked - a new
+# version is announced from the tray, and installed from there or from the
+# About page of the settings window.
+# check_for_updates = true
+
 # How the panel is coloured.
 #
 # "light" is a warm, bright panel and is what you get if this is not set.

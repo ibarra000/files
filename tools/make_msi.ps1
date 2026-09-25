@@ -16,6 +16,14 @@
 
 .EXAMPLE
     pwsh tools/make_msi.ps1
+
+.EXAMPLE
+    pwsh tools/make_msi.ps1 -Release
+
+    Builds the installer and the manifest a GitHub release carries, into
+    target\release\dist, and - if the GitHub CLI is installed - publishes them
+    as release v<version>. Every copy of files that checks GitHub is then
+    offered that version within four hours.
 #>
 [CmdletBinding()]
 param(
@@ -27,10 +35,33 @@ param(
     # written from the same $version, so the manifest and the installer it
     # names cannot disagree - which is the whole reason this lives here rather
     # than in somebody`s notes.
-    [string]$Publish
+    [string]$Publish,
+
+    # Build the two files a GitHub release carries - the installer and the
+    # latest.toml naming it - into target\release\dist, and publish them as
+    # release v<version> with the GitHub CLI if it is installed. The tag's
+    # `v` matters: `update::github` fetches the installer from
+    # releases/download/v<version>/.
+    [switch]$Release
 )
 
 $ErrorActionPreference = 'Stop'
+
+# The manifest every copy of files reads, written beside the installer it
+# names. Both come from the same $Version, so they cannot disagree.
+#
+# UTF-8 without a byte-order mark, whichever PowerShell runs this: Windows
+# PowerShell 5.1's `-Encoding utf8` writes one. The reader copes either way,
+# but a file on a release page should be what it says it is.
+function Write-Manifest([string]$Folder, [string]$Version, [string]$Msi) {
+    $hash = (Get-FileHash -Path (Join-Path $Folder $Msi) -Algorithm SHA256).Hash.ToLowerInvariant()
+    $text = "version = `"$Version`"`nmsi     = `"$Msi`"`nsha256  = `"$hash`"`n"
+    # Written to a temporary name and moved into place, so nobody reads a
+    # half-written manifest off a share.
+    $tmp = Join-Path $Folder 'latest.toml.tmp'
+    [System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding $false))
+    Move-Item -Path $tmp -Destination (Join-Path $Folder 'latest.toml') -Force
+}
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
@@ -72,20 +103,31 @@ try {
         # other order leaves a window in which every client is told about a
         # version whose installer is not there yet - and they would all try.
         Copy-Item -Path $out -Destination (Join-Path $Publish $name) -Force
-
-        $hash = (Get-FileHash -Path $out -Algorithm SHA256).Hash.ToLowerInvariant()
-        $manifest = @"
-version = "$version"
-msi     = "$name"
-sha256  = "$hash"
-"@
-        # Written to a temporary name and moved into place, so nobody reads a
-        # half-written manifest off the share.
-        $tmp = Join-Path $Publish "latest.toml.tmp"
-        Set-Content -Path $tmp -Value $manifest -Encoding utf8 -NoNewline
-        Move-Item -Path $tmp -Destination (Join-Path $Publish "latest.toml") -Force
+        Write-Manifest -Folder $Publish -Version $version -Msi $name
 
         Write-Host "published $version to $Publish"
+    }
+
+    if ($Release) {
+        $dist = Join-Path $target 'dist'
+        New-Item -ItemType Directory -Force -Path $dist | Out-Null
+        $name = Split-Path -Leaf $out
+        Copy-Item -Path $out -Destination (Join-Path $dist $name) -Force
+        Write-Manifest -Folder $dist -Version $version -Msi $name
+        $assets = @((Join-Path $dist $name), (Join-Path $dist 'latest.toml'))
+
+        if (Get-Command gh -ErrorAction SilentlyContinue) {
+            # A full release, not a draft or a pre-release: GitHub's "latest"
+            # skips both, so either would be published and offered to nobody.
+            gh release create "v$version" @assets --title "files $version" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+            Write-Host "released v$version on GitHub"
+        }
+        else {
+            Write-Host "no GitHub CLI, so nothing was uploaded. Create a release tagged v$version"
+            Write-Host "(not a draft, not a pre-release) and attach both of these:"
+            $assets | ForEach-Object { Write-Host "  $_" }
+        }
     }
 }
 finally {

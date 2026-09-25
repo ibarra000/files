@@ -261,14 +261,19 @@ impl App {
 
 /// Starts the update check, or reports that there is nothing to check.
 fn look_for_update(settings: &Settings, wake: impl Fn() + Send + 'static) -> Update {
-    let Some(folder) = settings.update_from.clone() else {
+    let Some(source) = crate::update::Source::of(settings) else {
         return Update::Done(None);
     };
+    let cache_dir = settings.cache_dir.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("files-settings-update".to_owned())
         .spawn(move || {
-            let found = crate::update::look(&folder, crate::update::Version::current());
+            let found = crate::update::look_at(
+                &source,
+                crate::update::Version::current(),
+                cache_dir.as_deref(),
+            );
             let _ = tx.send(found);
             wake();
         });

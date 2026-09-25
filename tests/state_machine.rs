@@ -3117,6 +3117,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::ResultLayout => s.result_layout = files::config::ResultLayout::Detailed,
             SettingKey::Dock => s.dock = files::config::Dock::Bottom,
             SettingKey::Columns => s.columns = 2,
+            SettingKey::CheckForUpdates => s.check_for_updates = false,
             SettingKey::HideExtensions => {
                 s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
                     &["zzz"],

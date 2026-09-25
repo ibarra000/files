@@ -274,7 +274,7 @@ fn a_setting_that_applies_at_once_says_nothing_at_all() {
 /// silent change to a function.
 #[test]
 fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
-    const HOME: [(SettingKey, PageId); 19] = [
+    const HOME: [(SettingKey, PageId); 20] = [
         (SettingKey::Hotkey, PageId::General),
         (SettingKey::History, PageId::General),
         (SettingKey::HideOnBlur, PageId::General),
@@ -292,6 +292,7 @@ fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
         (SettingKey::PdfViewer, PageId::Opening),
         (SettingKey::PdfReadOnly, PageId::Opening),
         (SettingKey::UpdateFrom, PageId::About),
+        (SettingKey::CheckForUpdates, PageId::About),
         (SettingKey::DevMode, PageId::Diagnostics),
         (SettingKey::IndexLog, PageId::Diagnostics),
     ];

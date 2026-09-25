@@ -36,7 +36,7 @@ use crate::update::Manifest;
 ///
 /// Under `%LOCALAPPDATA%`, not `%APPDATA%`: this is a scratch copy of bytes
 /// that already exist on a share, so it should not roam between machines.
-const STAGE_DIR: &str = "update";
+pub(crate) const STAGE_DIR: &str = "update";
 
 /// Why an update could not be applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -247,7 +247,7 @@ fn wait_for_exit(_pid: u32, _timeout: std::time::Duration) {}
 /// implementation would buy is nothing measurable, against a dependency in a
 /// manifest that argues for each one it has.
 #[cfg(windows)]
-fn sha256_of(path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_of(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
     use windows_sys::Win32::Security::Cryptography::*;
 
@@ -327,7 +327,7 @@ fn sha256_of(path: &Path) -> std::io::Result<String> {
 }
 
 #[cfg(not(windows))]
-fn sha256_of(_path: &Path) -> std::io::Result<String> {
+pub(crate) fn sha256_of(_path: &Path) -> std::io::Result<String> {
     Err(std::io::Error::other("no digest implementation"))
 }
 

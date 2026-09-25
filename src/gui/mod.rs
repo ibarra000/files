@@ -74,6 +74,7 @@ pub enum Request {
     Show,
     Settings,
     Diagnostics,
+    InstallUpdate,
     Quit,
 }
 
@@ -219,7 +220,7 @@ struct Shell {
     /// The notification-area icon. Held for the life of the process, because
     /// dropping it takes the icon out of the tray.
     #[cfg(windows)]
-    _tray: Option<tray::Tray>,
+    tray: Option<tray::Tray>,
     /// Whether the window has already been asked to hide for this dismissal.
     parked: bool,
     /// The panel being moved with the pointer, if it is.
@@ -299,11 +300,12 @@ impl Shell {
         // still works, and a search tool that will not start because the
         // notification area is full is a worse tool than one without an icon.
         #[cfg(windows)]
-        let _tray = tray::Tray::new(move |action| {
+        let tray = tray::Tray::new(move |action| {
             post(match action {
                 tray::TrayAction::Show => Request::Show,
                 tray::TrayAction::Settings => Request::Settings,
                 tray::TrayAction::Diagnostics => Request::Diagnostics,
+                tray::TrayAction::InstallUpdate => Request::InstallUpdate,
                 tray::TrayAction::Quit => Request::Quit,
             });
         })
@@ -325,7 +327,7 @@ impl Shell {
                 move || ctx.request_repaint()
             }),
             #[cfg(windows)]
-            _tray,
+            tray,
             drag: drag::Drag::new(),
             placement,
         })
@@ -369,7 +371,7 @@ impl Shell {
     /// Drained rather than taken one at a time, for the same reason
     /// [`crate::app::App::pump`] drains: two clicks that arrived between frames
     /// are one turn's worth of work, not two frames' worth.
-    fn serve_requests(&mut self) {
+    fn serve_requests(&mut self, now: Instant) {
         while let Ok(request) = self.requests.try_recv() {
             match request {
                 // Through the hotkey thread, because showing the panel means
@@ -383,8 +385,30 @@ impl Shell {
                 Request::Diagnostics => self
                     .link
                     .open_at(PageId::Diagnostics, &self.app.state.settings),
+                Request::InstallUpdate => self.install_update(now),
                 Request::Quit => self.app.state.should_quit = true,
             }
+        }
+    }
+
+    /// Keeps the tray's install item in step with what the checker found.
+    ///
+    /// Only an installer that is actually on disk is offered: a menu item
+    /// that answered with "the installer is missing" would be one that should
+    /// not have been there. Every frame, because it compares one version and
+    /// does nothing else unless the answer changed.
+    #[cfg(windows)]
+    fn follow_update(&mut self) {
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        match &self.app.state.update {
+            Some(crate::update::Found::Available {
+                manifest,
+                msi_present: true,
+                ..
+            }) => tray.offer_update(manifest.version),
+            _ => tray.withdraw_update(),
         }
     }
 
@@ -609,7 +633,9 @@ impl eframe::App for Shell {
         // here that it has already been satisfied.
         let _ = self.app.pump(now);
 
-        self.serve_requests();
+        self.serve_requests(now);
+        #[cfg(windows)]
+        self.follow_update();
         self.follow_overlay();
 
         // Every deadline in `next_deadline` is anchored on the last frame, so a

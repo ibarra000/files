@@ -5,6 +5,9 @@ edition = "2024"
 # Read by the installer, by Apps & Features, and by the version block `build.rs`
 # embeds. Absent until there was something to install.
 description = "Search job codes across the drawing shares"
+# Where the update check looks for new releases, unless `update_from` names a
+# share instead. Read at compile time by `update::github::Repo::ours`.
+repository = "https://github.com/ibarra000/files"
 authors = ["files"]
 
 [lib]
@@ -110,6 +113,9 @@ features = [
     # The `Run` value behind "Start with Windows". See `src/autostart.rs`.
     "Win32_System_Registry",
     "Win32_NetworkManagement_WNet",
+    # WinHTTP, for the update check against GitHub. The operating system's
+    # own client and TLS stack rather than a crate - see `src/update/http.rs`.
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     # BCrypt, for the SHA-256 of a staged installer. The operating system
     # already has one; a crate for it would be a dependency to check one file

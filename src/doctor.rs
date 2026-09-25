@@ -926,18 +926,22 @@ fn directory_size(dir: &Path) -> (usize, u64, bool) {
 /// found. Silent when no update folder is configured, because then there is
 /// nothing to be right or wrong about.
 fn report_updates(settings: &Settings, out: &mut dyn Write) {
-    let Some(folder) = &settings.update_from else {
+    let Some(source) = crate::update::Source::of(settings) else {
         return;
     };
     let _ = writeln!(out, "UPDATES");
-    let _ = writeln!(out, "  looking in          {}", folder.display());
+    let _ = writeln!(out, "  looking in          {}", source.describe());
     let _ = writeln!(
         out,
         "  running             {}",
         crate::update::Version::current()
     );
 
-    match crate::update::look(folder, crate::update::Version::current()) {
+    match crate::update::look_at(
+        &source,
+        crate::update::Version::current(),
+        settings.cache_dir.as_deref(),
+    ) {
         crate::update::Found::Available { manifest, msi, .. } => {
             let _ = writeln!(out, "  available           {}", manifest.version);
             let _ = writeln!(out, "  installer           {}", msi.display());

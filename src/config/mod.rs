@@ -1062,6 +1062,10 @@ pub struct Settings {
     /// How many results sit side by side on a line, from one to
     /// [`MAX_COLUMNS`].
     pub columns: usize,
+    /// Whether to look on GitHub for a newer version when no `update_from`
+    /// share is configured. On by default: without it, a machine with no
+    /// share is never told there is anything newer.
+    pub check_for_updates: bool,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -1194,6 +1198,7 @@ impl Settings {
             result_layout: ResultLayout::default(),
             dock: Dock::default(),
             columns: 1,
+            check_for_updates: true,
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1419,6 +1424,11 @@ impl Settings {
         {
             self.columns = v;
         }
+        if env_bool("FILES_CHECK_FOR_UPDATES").is_none()
+            && let Some(v) = f.check_for_updates
+        {
+            self.check_for_updates = v;
+        }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
             // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
@@ -1522,6 +1532,9 @@ impl Settings {
         // environment value here that does not parse.
         if let Some(v) = env_usize("FILES_COLUMNS").filter(|n| *n <= MAX_COLUMNS) {
             s.columns = v;
+        }
+        if let Some(v) = env_bool("FILES_CHECK_FOR_UPDATES") {
+            s.check_for_updates = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

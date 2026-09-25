@@ -215,10 +215,11 @@ impl Actors {
         // Only when there is somewhere to look. Best effort beyond that, like
         // the history writer: a thread that would not start must cost the
         // checking and never the program.
-        let updates = settings.update_from.as_ref().and_then(|folder| {
+        let updates = crate::update::Source::of(&settings).and_then(|source| {
             crate::update::check::Checker::start(
-                folder.clone(),
+                source,
                 crate::update::Version::current(),
+                settings.cache_dir.clone(),
                 tx.clone(),
             )
             .ok()

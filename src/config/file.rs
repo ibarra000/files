@@ -218,6 +218,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "result_layout",
     "dock",
     "columns",
+    "check_for_updates",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -251,6 +252,7 @@ pub struct FileSettings {
     pub result_layout: Option<String>,
     pub dock: Option<String>,
     pub columns: Option<usize>,
+    pub check_for_updates: Option<bool>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -702,6 +704,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 }
             }
             "live_updates" => out.live_updates = bool_at(ctx, key, item),
+            "check_for_updates" => out.check_for_updates = bool_at(ctx, key, item),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
             "index_log" => out.index_log = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = bool_at(ctx, key, item),
