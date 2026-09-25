@@ -301,6 +301,30 @@ refresh = "manual"
 # what tells them apart. The path is on the tooltip either way.
 # result_layout = "compact"          # compact | detailed
 
+# Where the panel sits.
+#
+# "free" is a window that floats twelve per cent down the screen, or wherever
+# you last dragged it. "top" and "bottom" pin it against that edge instead,
+# as wide as the screen and a fixed height, so it never moves or changes size.
+# A bottom bar sits on the taskbar rather than under it.
+# dock          = "free"             # free | top | bottom
+
+# How many results sit side by side, from 1 to 3.
+#
+# More columns show more results at once, each with less room for its name.
+# Up and Down move within a column; Tab and Shift+Tab move to the same place
+# in the next or previous one. Docked along an edge, the panel is as wide as
+# the screen, which is where three columns have the most room.
+# columns       = 1                  # 1 | 2 | 3
+
+# Whether to look on GitHub for a newer version, every four hours.
+#
+# Only when update_from names no folder: a folder somebody configured is
+# always what is looked in. Nothing is installed without being asked - a new
+# version is announced from the tray, and installed from there or from the
+# About page of the settings window.
+# check_for_updates = true
+
 # How the panel is coloured.
 #
 # "light" is a warm, bright panel and is what you get if this is not set.

@@ -330,12 +330,16 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
 /// scrollbar says how far down them you are, and a range printed beside it
 /// would be a second, worse answer to a question the bar already answers. So
 /// what is left is the fact the range was wrapped around: how many there are.
+///
+/// With its noun, because a bare "300" at the foot of a list reads as a page
+/// number, a code, or anything but a count.
 pub fn found(state: &AppState) -> String {
     let found = state.matched as usize;
     if found == 0 || state.hits.is_empty() {
         return String::new();
     }
-    humanize::count(found)
+    let unit = if found == 1 { "item" } else { "items" };
+    format!("{} {unit}", humanize::count(found))
 }
 
 #[cfg(test)]
@@ -559,7 +563,7 @@ mod tests {
         let many: Vec<_> = (0..300).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 300, 9_000);
 
-        assert_eq!(found(&s), "300");
+        assert_eq!(found(&s), "300 items");
 
         // To the foot of the list, the way an arrow key does it. This used to
         // read "295-300 of 300" by the end, because the panel drew a window
@@ -569,7 +573,7 @@ mod tests {
         for _ in 0..299 {
             s.update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
         }
-        assert_eq!(found(&s), "300");
+        assert_eq!(found(&s), "300 items");
     }
 
     /// What the index found, not what came back: the search is capped at
@@ -584,7 +588,7 @@ mod tests {
         let many: Vec<_> = (0..40).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 4321, 9_000);
 
-        assert_eq!(found(&s), "4,321");
+        assert_eq!(found(&s), "4,321 items");
     }
 
     #[test]
@@ -595,7 +599,7 @@ mod tests {
         type_code(&mut s, now);
         give_results(&mut s, now, vec![hit("a"), hit("b")], 2, 9_000);
 
-        assert_eq!(found(&s), "2");
+        assert_eq!(found(&s), "2 items");
     }
 
     #[test]
@@ -732,7 +736,7 @@ mod tests {
         assert_eq!(render(&s, EPOCH).text, "", "a verification was announced");
         // The count is beside the line, not in it, so a round trip in
         // flight never costs the number somebody is reading.
-        assert_eq!(found(&s), "1");
+        assert_eq!(found(&s), "1 item");
 
         s.update(
             AppEvent::Verify(crate::app::event::VerifyMsg {
@@ -776,7 +780,7 @@ mod tests {
         assert_eq!(line.tone, Tone::Warn);
         // And the results are still reachable beside it: a warning about the
         // index must not cost the count of what it found.
-        assert_eq!(found(&s), "1");
+        assert_eq!(found(&s), "1 item");
     }
 
     #[test]

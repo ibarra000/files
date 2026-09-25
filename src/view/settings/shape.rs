@@ -106,6 +106,9 @@ pub enum Block {
     Rows(Vec<Row>),
     Facts(Vec<Fact>),
     Actions(Vec<Action>),
+    /// Switches for things Windows keeps rather than the configuration file.
+    /// See [`Switch`].
+    Switches(Vec<Switch>),
     /// The alias list. The words are [`ALIASES`]; the entries are read off
     /// the live `Settings` by whoever is drawing, because a copy here would
     /// be the second version of the truth this module exists to not hold.
@@ -186,6 +189,47 @@ impl Action {
     }
 }
 
+/// A switch whose state lives outside `config.toml`.
+///
+/// A [`Row`] is a setting, and every setting is a key in the file: the form's
+/// tests, the pin, and the save all hang off [`SettingKey`](crate::config::write::SettingKey). This is for the
+/// other kind - "Start with Windows" is a value in the registry that the
+/// installer and Task Manager also write, so a copy of it in the file would
+/// be a second truth. It is drawn like a row and it acts like a button: the
+/// shell is handed whichever [`ActionId`] moves it to the other state, and
+/// reads the state back afterwards rather than trusting the click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switch {
+    pub label: &'static str,
+    pub help: &'static str,
+    pub on: bool,
+    pub turn_on: ActionId,
+    pub turn_off: ActionId,
+}
+
+impl Switch {
+    pub fn new(
+        label: &'static str,
+        help: &'static str,
+        on: bool,
+        turn_on: ActionId,
+        turn_off: ActionId,
+    ) -> Self {
+        Self {
+            label,
+            help,
+            on,
+            turn_on,
+            turn_off,
+        }
+    }
+
+    /// What flipping it asks for.
+    pub fn flipped(&self) -> ActionId {
+        if self.on { self.turn_off } else { self.turn_on }
+    }
+}
+
 /// Which button, for the shell to act on.
 ///
 /// An id rather than a callback, so this module stays a description of the
@@ -205,6 +249,10 @@ pub enum ActionId {
     /// for the case the minute is wrong: somebody who has just plugged a
     /// drive in wants the new answer, not the one from forty seconds ago.
     RefreshReport,
+    /// Write the `Run` value, so signing in starts files hidden in the tray.
+    StartWithWindows,
+    /// And delete it.
+    StopStartingWithWindows,
 }
 
 impl Page {
@@ -248,6 +296,12 @@ impl Page {
                         for action in actions {
                             out.push(Cow::Borrowed(action.label));
                             out.extend(action.help.map(Cow::Borrowed));
+                        }
+                    }
+                    Block::Switches(switches) => {
+                        for switch in switches {
+                            out.push(Cow::Borrowed(switch.label));
+                            out.push(Cow::Borrowed(switch.help));
                         }
                     }
                     Block::Aliases => out.extend(ALIASES.lines().map(Cow::Borrowed)),

@@ -127,6 +127,11 @@ struct App {
     drive: lists::DriveDraft,
     /// What the last save did, if it failed.
     problem: Option<String>,
+    /// Whether Windows starts files at sign-in. `None` when the registry
+    /// would not say. Read when the window opens and again after every flip
+    /// of the switch, rather than every frame: nothing else this window does
+    /// moves it, and a flip reads back what actually landed.
+    autostart: Option<bool>,
 }
 
 /// The update check, off the frame thread for the same reason the
@@ -174,7 +179,24 @@ impl App {
             draft: lists::AliasDraft::default(),
             drive: lists::DriveDraft::default(),
             problem: None,
+            autostart: crate::autostart::is_on().ok(),
         }
+    }
+
+    /// Writes or deletes the `Run` value, then reads back what landed.
+    ///
+    /// A failure is said on the message bar where a failed save is, because
+    /// it is the same news: the switch moved and Windows did not.
+    fn start_with_windows(&mut self, on: bool) {
+        let done = if on {
+            crate::autostart::enable()
+        } else {
+            crate::autostart::disable()
+        };
+        self.problem = done
+            .err()
+            .map(|err| format!("Start with Windows \u{b7} {err}"));
+        self.autostart = crate::autostart::is_on().ok();
     }
 
     /// Whether there is a panel to act on.
@@ -239,14 +261,19 @@ impl App {
 
 /// Starts the update check, or reports that there is nothing to check.
 fn look_for_update(settings: &Settings, wake: impl Fn() + Send + 'static) -> Update {
-    let Some(folder) = settings.update_from.clone() else {
+    let Some(source) = crate::update::Source::of(settings) else {
         return Update::Done(None);
     };
+    let cache_dir = settings.cache_dir.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let spawned = std::thread::Builder::new()
         .name("files-settings-update".to_owned())
         .spawn(move || {
-            let found = crate::update::look(&folder, crate::update::Version::current());
+            let found = crate::update::look_at(
+                &source,
+                crate::update::Version::current(),
+                cache_dir.as_deref(),
+            );
             let _ = tx.send(found);
             wake();
         });
@@ -305,6 +332,7 @@ impl eframe::App for App {
             &self.settings,
             self.live.placement,
             self.panel(),
+            self.autostart,
         );
         self.report.wanted(
             super::wants_report(&pages, self.page),
@@ -419,6 +447,10 @@ impl eframe::App for App {
                 // Handled where it is pressed, because it needs the report
                 // text and nothing else. See `gui::settings::page`.
                 ActionId::CopyReport => {}
+                // Here rather than in the panel: the `Run` value is the
+                // signed-in user's, and this process is running as them.
+                ActionId::StartWithWindows => self.start_with_windows(true),
+                ActionId::StopStartingWithWindows => self.start_with_windows(false),
             }
         }
 

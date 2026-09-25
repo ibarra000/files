@@ -5,7 +5,21 @@ use crate::config::ThemeChoice;
 use crate::view::style;
 
 fn form(settings: &Settings) -> Vec<Page> {
-    pages(None, settings, None, true)
+    pages(None, settings, None, true, Some(false))
+}
+
+/// Every switch on the form, whichever page it is on.
+fn switches(pages: &[Page]) -> Vec<Switch> {
+    pages
+        .iter()
+        .flat_map(|p| &p.groups)
+        .flat_map(|g| &g.blocks)
+        .filter_map(|b| match b {
+            Block::Switches(list) => Some(list.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
 }
 
 fn rows(settings: &Settings) -> Vec<Row> {
@@ -126,6 +140,13 @@ fn every_kind_of_block_contributes_something_to_the_corpus() {
         Block::Rows(rows(&Settings::default())),
         Block::Facts(vec![Fact::new("Label", "value")]),
         Block::Actions(vec![Action::new(ActionId::CopyReport, "Copy")]),
+        Block::Switches(vec![Switch::new(
+            "Label",
+            "Words.",
+            false,
+            ActionId::StartWithWindows,
+            ActionId::StopStartingWithWindows,
+        )]),
         Block::Aliases,
         Block::Drives,
         Block::Report { intro: "Words." },
@@ -253,7 +274,7 @@ fn a_setting_that_applies_at_once_says_nothing_at_all() {
 /// silent change to a function.
 #[test]
 fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
-    const HOME: [(SettingKey, PageId); 17] = [
+    const HOME: [(SettingKey, PageId); 20] = [
         (SettingKey::Hotkey, PageId::General),
         (SettingKey::History, PageId::General),
         (SettingKey::HideOnBlur, PageId::General),
@@ -261,6 +282,8 @@ fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
         (SettingKey::HideOnEscape, PageId::General),
         (SettingKey::Theme, PageId::Appearance),
         (SettingKey::ResultLayout, PageId::Appearance),
+        (SettingKey::Dock, PageId::Appearance),
+        (SettingKey::Columns, PageId::Appearance),
         (SettingKey::LiveUpdates, PageId::Drives),
         (SettingKey::StaleNotices, PageId::Drives),
         (SettingKey::HideExtensions, PageId::Searching),
@@ -269,6 +292,7 @@ fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
         (SettingKey::PdfViewer, PageId::Opening),
         (SettingKey::PdfReadOnly, PageId::Opening),
         (SettingKey::UpdateFrom, PageId::About),
+        (SettingKey::CheckForUpdates, PageId::About),
         (SettingKey::DevMode, PageId::Diagnostics),
         (SettingKey::IndexLog, PageId::Diagnostics),
     ];
@@ -360,7 +384,13 @@ fn every_action_on_the_form_is_one_the_shell_can_act_on() {
 /// And it appears as soon as there is something to forget.
 #[test]
 fn a_remembered_position_brings_a_way_to_forget_it() {
-    let pages = pages(None, &Settings::default(), Some((100, 200)), true);
+    let pages = pages(
+        None,
+        &Settings::default(),
+        Some((100, 200)),
+        true,
+        Some(false),
+    );
     let has = pages
         .iter()
         .flat_map(|p| &p.groups)
@@ -372,4 +402,44 @@ fn a_remembered_position_brings_a_way_to_forget_it() {
         .flatten()
         .any(|a| a.id == ActionId::ForgetPlacement);
     assert!(has, "there was a position and no way to forget it");
+}
+
+/// The switch says what Windows says, and flipping it asks for the other
+/// state - on reads as on, and the only thing it can be moved to is off.
+#[test]
+fn starting_with_windows_is_a_switch_that_reads_the_registry() {
+    for on in [false, true] {
+        let pages = pages(None, &Settings::default(), None, true, Some(on));
+        let found = switches(&pages);
+        assert_eq!(found.len(), 1, "one switch, not {found:?}");
+        let switch = &found[0];
+        assert_eq!(switch.on, on);
+        assert_eq!(switch.turn_on, ActionId::StartWithWindows);
+        assert_eq!(switch.turn_off, ActionId::StopStartingWithWindows);
+    }
+}
+
+/// On General, because it is about when the program runs rather than what
+/// it looks like or where it searches.
+#[test]
+fn starting_with_windows_is_on_the_general_page() {
+    let pages = form(&Settings::default());
+    let general = pages.iter().find(|p| p.id == PageId::General).unwrap();
+    assert_eq!(switches(std::slice::from_ref(general)).len(), 1);
+}
+
+/// A registry that could not be read is said, not drawn as a switch that is
+/// off - which would be a guess, and the one guess that invites turning it
+/// on over an entry that may already be there.
+#[test]
+fn an_unreadable_registry_is_reported_rather_than_guessed_at() {
+    let pages = pages(None, &Settings::default(), None, true, None);
+    assert!(switches(&pages).is_empty());
+    let said = pages
+        .iter()
+        .find(|p| p.id == PageId::General)
+        .unwrap()
+        .prose()
+        .join(" ");
+    assert!(said.contains("Start with Windows"), "{said}");
 }

@@ -40,7 +40,7 @@ use windows_sys::Win32::Foundation::{HWND, S_OK};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TABBEDWINDOW, DWMSBT_TRANSIENTWINDOW,
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 #[cfg(windows)]
 use windows_sys::Win32::UI::Controls::MARGINS;
@@ -156,12 +156,32 @@ fn set<T>(hwnd: HWND, attr: i32, value: &T) -> bool {
     }
 }
 
+/// Rounds the window's corners, or squares them.
+///
+/// Square when the panel is docked: a bar flush against the edge of the work
+/// area with its corners cut off shows four slivers of whatever is behind it,
+/// and reads as a window that did not quite fit rather than one pinned there.
+#[cfg(windows)]
+pub fn set_rounded(hwnd_bits: isize, rounded: bool) {
+    let preference = if rounded {
+        DWMWCP_ROUND
+    } else {
+        DWMWCP_DONOTROUND
+    };
+    set(
+        hwnd_bits as HWND,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        &preference,
+    );
+}
+
 /// Dresses the window, and reports what it actually got.
 ///
 /// `want` is what the configuration asks for; the answer is what this
-/// Windows agreed to, which may be less.
+/// Windows agreed to, which may be less. `rounded` is false while the panel is
+/// docked - see [`set_rounded`].
 #[cfg(windows)]
-pub fn apply(hwnd_bits: isize, dark: bool, want: Material) -> Backdrop {
+pub fn apply(hwnd_bits: isize, dark: bool, want: Material, rounded: bool) -> Backdrop {
     let hwnd = hwnd_bits as HWND;
 
     let backdrop = match want {
@@ -219,7 +239,10 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material) -> Backdrop {
     // could paint its own at its own radius in its own units - see
     // `paint_surface`. Two curves computed two ways cannot be relied on to
     // land on each other, so there is one of each now and it is DWM's.
-    set(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &DWMWCP_ROUND);
+    //
+    // Square instead while docked, and the hotkey thread re-decides on every
+    // summon, because that is when the dock setting is acted on.
+    set_rounded(hwnd_bits, rounded);
 
     // The hairline Windows draws around a rounded window. Attribute 20 since
     // 20H1, 19 before it, tried in that order - because 20 on an older build
@@ -278,7 +301,11 @@ mod tests {
         // Every attribute is refused, so the honest answer is "paint it
         // yourself" rather than a panic.
         for material in Material::ALL {
-            assert_eq!(apply(0, true, material), Backdrop::Painted, "{material:?}");
+            assert_eq!(
+                apply(0, true, material, true),
+                Backdrop::Painted,
+                "{material:?}"
+            );
         }
         hide_from_taskbar(0);
     }

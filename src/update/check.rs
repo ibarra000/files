@@ -24,10 +24,12 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::Source;
+
 use crossbeam_channel::{Sender, bounded};
 
 use crate::app::event::{AppEvent, Events, UpdateMsg};
-use crate::update::{Version, look};
+use crate::update::{Version, look_at};
 
 /// How long after startup the folder is first read.
 ///
@@ -61,7 +63,13 @@ impl Checker {
     ///
     /// `running` is passed in rather than read, so a test can be a version
     /// other than the one it happens to be compiled as.
-    pub fn start(folder: PathBuf, running: Version, events: Events) -> std::io::Result<Self> {
+    /// `cache_dir` is where a GitHub installer is downloaded to.
+    pub fn start(
+        source: Source,
+        running: Version,
+        cache_dir: Option<PathBuf>,
+        events: Events,
+    ) -> std::io::Result<Self> {
         // One slot. Two "check now" presses a second apart are one question,
         // and the second may be dropped without anybody being misled - the
         // answer to the first is about to arrive.
@@ -86,7 +94,7 @@ impl Checker {
                     // settings window says when it last looked, and a check
                     // that answered nothing at all would leave that reading as
                     // though the thread had died.
-                    let found = look(&folder, running);
+                    let found = look_at(&source, running, cache_dir.as_deref());
                     if events
                         .send(AppEvent::Update(UpdateMsg::Looked(Box::new(found))))
                         .is_err()
@@ -155,8 +163,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = bounded(16);
         let events = Events::headless(tx);
-        let mut checker =
-            Checker::start(dir.path().to_path_buf(), Version::new(0, 2, 0), events).unwrap();
+        let mut checker = Checker::start(
+            Source::Folder(dir.path().to_path_buf()),
+            Version::new(0, 2, 0),
+            None,
+            events,
+        )
+        .unwrap();
 
         assert!(
             checker.shutdown(Duration::from_secs(5)),
@@ -176,8 +189,13 @@ mod tests {
 
         let (tx, rx) = bounded(16);
         let events = Events::headless(tx);
-        let mut checker =
-            Checker::start(dir.path().to_path_buf(), Version::new(0, 2, 0), events).unwrap();
+        let mut checker = Checker::start(
+            Source::Folder(dir.path().to_path_buf()),
+            Version::new(0, 2, 0),
+            None,
+            events,
+        )
+        .unwrap();
         checker.check_now();
 
         let event = rx
@@ -202,8 +220,9 @@ mod tests {
         let (tx, rx) = bounded(16);
         let events = Events::headless(tx);
         let mut checker = Checker::start(
-            PathBuf::from(r"C:\definitely-not-here-5521"),
+            Source::Folder(PathBuf::from(r"C:\definitely-not-here-5521")),
             Version::new(0, 2, 0),
+            None,
             events,
         )
         .unwrap();

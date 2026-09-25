@@ -131,16 +131,15 @@ pub const SEGMENT_MAX_BYTES: usize = 16 << 20;
 /// index was built to remove, wearing a new hat.
 pub const MAX_FILES_PER_FOLDER: usize = 64;
 
-/// Columns in the results grid, when the terminal is wide enough for them.
-pub const GRID_COLUMNS: usize = 3;
-
-/// Below this many cells a column is more marker and ellipsis than filename,
-/// so the grid drops to fewer columns rather than rendering slivers.
-pub const MIN_COLUMN_WIDTH: u16 = 24;
-
-/// Results flow down each column before moving right, so a page divides
-/// evenly and the last page is the only ragged one.
-const _: () = assert!(MAX_RESULTS.is_multiple_of(GRID_COLUMNS));
+/// Most results laid side by side on one line of the list.
+///
+/// Three, because at the panel's 600 points a fourth column is a name cut to
+/// a dozen characters, and a docked bar is the only place there would be
+/// room for more. There was a grid here once, in the terminal build, and it
+/// went with it; this is the setting that brings one back on request, with
+/// the list still a single column unless somebody asks. See
+/// `app::state::grid` for how the keys move through it.
+pub const MAX_COLUMNS: usize = 3;
 
 /// Upper bound on a query we are willing to hand to the server as a wildcard.
 /// Folders below the root a live query descends, unless the mapping says
@@ -681,6 +680,48 @@ impl ResultLayout {
     }
 }
 
+/// Where the panel sits when it is summoned.
+///
+/// [`Self::Free`] is what it has always done: a 600 by 400 window, placed
+/// twelve per cent down the screen or wherever it was last dragged to. The
+/// other two pin it against an edge of the work area, as wide as the screen
+/// and as tall as it always is - a bar rather than a window, and one that
+/// never moves or changes size, so nothing about it has to be animated or
+/// remembered. Against the work area and not the monitor, so a bottom bar
+/// sits on the taskbar rather than under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dock {
+    #[default]
+    Free,
+    Top,
+    Bottom,
+}
+
+impl Dock {
+    pub const ALL: [Self; 3] = [Self::Free, Self::Top, Self::Bottom];
+
+    /// The spelling written back to the config file, so it must be one
+    /// [`Self::parse`] accepts.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| d.name().eq_ignore_ascii_case(text.trim()))
+    }
+
+    /// Whether the panel is against an edge rather than floating.
+    pub const fn is_docked(self) -> bool {
+        !matches!(self, Self::Free)
+    }
+}
+
 /// Which palette the panel is drawn in.
 ///
 /// A setting rather than a follow of the Windows theme, which is what it used
@@ -1016,6 +1057,15 @@ pub struct Settings {
     pub backdrop: crate::gui::window::Material,
     /// How much of itself a result row shows.
     pub result_layout: ResultLayout,
+    /// Whether the panel floats or is pinned to an edge of the screen.
+    pub dock: Dock,
+    /// How many results sit side by side on a line, from one to
+    /// [`MAX_COLUMNS`].
+    pub columns: usize,
+    /// Whether to look on GitHub for a newer version when no `update_from`
+    /// share is configured. On by default: without it, a machine with no
+    /// share is never told there is anything newer.
+    pub check_for_updates: bool,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -1146,6 +1196,9 @@ impl Settings {
             theme: ThemeChoice::default(),
             backdrop: crate::gui::window::Material::default(),
             result_layout: ResultLayout::default(),
+            dock: Dock::default(),
+            columns: 1,
+            check_for_updates: true,
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1361,6 +1414,21 @@ impl Settings {
         {
             self.result_layout = v;
         }
+        if env_str("FILES_DOCK").is_none()
+            && let Some(v) = f.dock.as_deref().and_then(Dock::parse)
+        {
+            self.dock = v;
+        }
+        if env_str("FILES_COLUMNS").is_none()
+            && let Some(v) = f.columns
+        {
+            self.columns = v;
+        }
+        if env_bool("FILES_CHECK_FOR_UPDATES").is_none()
+            && let Some(v) = f.check_for_updates
+        {
+            self.check_for_updates = v;
+        }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
             // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
@@ -1456,6 +1524,17 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_RESULT_LAYOUT").and_then(|v| ResultLayout::parse(&v)) {
             s.result_layout = v;
+        }
+        if let Some(v) = env_str("FILES_DOCK").and_then(|v| Dock::parse(&v)) {
+            s.dock = v;
+        }
+        // Out of range is ignored rather than clamped, like every other
+        // environment value here that does not parse.
+        if let Some(v) = env_usize("FILES_COLUMNS").filter(|n| *n <= MAX_COLUMNS) {
+            s.columns = v;
+        }
+        if let Some(v) = env_bool("FILES_CHECK_FOR_UPDATES") {
+            s.check_for_updates = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

@@ -283,7 +283,8 @@ ENVIRONMENT:
     FILES_PDF_READ_ONLY, FILES_MAX_CONCURRENT_SCANS,
     FILES_UPDATE_FROM, FILES_DEV_MODE, FILES_BACKDROP,
     FILES_RESULT_LAYOUT, FILES_HIDE_ON_BLUR, FILES_HIDE_AFTER_OPENING,
-    FILES_HIDE_ON_ESCAPE
+    FILES_HIDE_ON_ESCAPE, FILES_DOCK, FILES_COLUMNS,
+    FILES_CHECK_FOR_UPDATES, FILES_UPDATE_GITHUB
 
     Any of these outranks the configuration file, so a setting changed in the
     settings window applies for the session and is not saved - the window says

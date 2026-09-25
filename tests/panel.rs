@@ -288,7 +288,7 @@ fn the_footer_says_how_many_the_code_found() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains("300"),
+        screen.contains("300 items"),
         "nothing said how many there were:\n{screen}"
     );
 }
@@ -583,6 +583,38 @@ fn walking_down_a_long_list_carries_the_view_with_it() {
     );
 }
 
+/// The box is a text box, so the pointer over it says so the way every other
+/// one on this machine does - and over the list it goes back to an arrow,
+/// because a row is something to click rather than to type into.
+#[test]
+fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(10), 10, now);
+    let mut h = harness(s);
+
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H / 2.0,
+    ));
+    h.run_steps(2);
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::Text,
+        "no I-beam over the box"
+    );
+
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H + theme::CONTENT_H / 2.0,
+    ));
+    h.run_steps(2);
+    assert_ne!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::Text,
+        "the I-beam followed the pointer onto the list"
+    );
+}
+
 /// And the wheel moves the view without moving the selection, which is the
 /// reason it was unbound in the first place: it used to walk the cursor
 /// through somebody's results whenever a hand rested on the mouse.
@@ -742,6 +774,87 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     );
 }
 
+/// Where each result row landed, read off the accessibility tree.
+fn result_boxes(h: &Harness<'_, Panel>) -> Vec<(String, egui::Rect)> {
+    h.root()
+        .children_recursive()
+        .filter_map(|node| {
+            let label = node.accesskit_node().label().unwrap_or_default();
+            let b = node.accesskit_node().bounding_box()?;
+            label.contains(".pdf, in ").then(|| {
+                let rect = egui::Rect::from_min_max(
+                    egui::pos2(b.x0 as f32, b.y0 as f32),
+                    egui::pos2(b.x1 as f32, b.y1 as f32),
+                );
+                (label, rect)
+            })
+        })
+        .collect()
+}
+
+/// Two columns are two columns: every row starts at one of two lefts, the
+/// best match is top left with the second beside it, and no row reaches into
+/// the column next to it.
+#[test]
+fn two_columns_lay_the_results_out_side_by_side() {
+    let (mut s, now) = state();
+    s.settings.columns = 2;
+    with_results(&mut s, "11-D-0704", many(20), 20, now);
+    let h = harness(s);
+    let boxes = result_boxes(&h);
+    assert!(boxes.len() >= 4, "only {} rows were drawn", boxes.len());
+
+    let mut lefts: Vec<f32> = boxes.iter().map(|(_, r)| r.left().round()).collect();
+    lefts.sort_by(f32::total_cmp);
+    lefts.dedup();
+    assert_eq!(lefts.len(), 2, "rows start at {lefts:?}");
+
+    let at = |name: &str| {
+        boxes
+            .iter()
+            .find(|(label, _)| label.starts_with(name))
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("{name} is not on screen"))
+    };
+    let first = at("11-D-0704-00.pdf");
+    let second = at("11-D-0704-01.pdf");
+    let third = at("11-D-0704-02.pdf");
+    assert_eq!(
+        first.top(),
+        second.top(),
+        "the second is not beside the first"
+    );
+    assert!(
+        second.left() > first.right(),
+        "the first reaches into the second column"
+    );
+    assert_eq!(
+        third.left(),
+        first.left(),
+        "the third did not start the next line"
+    );
+    assert!(
+        third.top() > first.bottom(),
+        "the next line overlaps the first"
+    );
+}
+
+/// More columns, more of the list at once: the reason for the setting.
+#[test]
+fn three_columns_show_more_results_than_one() {
+    let drawn = |columns| {
+        let (mut s, now) = state();
+        s.settings.columns = columns;
+        with_results(&mut s, "11-D-0704", many(60), 60, now);
+        result_boxes(&harness(s)).len()
+    };
+    let (one, three) = (drawn(1), drawn(3));
+    assert!(
+        three >= one * 3,
+        "one column drew {one} and three drew {three}"
+    );
+}
+
 // --- the pictures ----------------------------------------------------------
 
 /// Everything above says what is on the panel. This says what it looks like -
@@ -803,6 +916,21 @@ snapshot!(looks_right_picking_a_drive, || {
 // the footer exists for.
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s
+});
+
+snapshot!(looks_right_in_two_columns, || {
+    let (mut s, now) = state();
+    s.settings.columns = 2;
+    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    s.update(AppEvent::Key(KeyEvent::new(Key::Tab, Mods::NONE)), now);
+    s
+});
+
+snapshot!(looks_right_in_three_columns, || {
+    let (mut s, now) = state();
+    s.settings.columns = 3;
     with_results(&mut s, "11-D-0704", many(300), 300, now);
     s
 });

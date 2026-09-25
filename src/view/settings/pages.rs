@@ -4,17 +4,19 @@
 //! module note above gives. Nothing here is a buffer and nothing here is
 //! remembered.
 
-use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId};
-use super::{BACKDROPS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
-use crate::config::Settings;
+use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
+use super::{BACKDROPS, COLUMNS, DOCKS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
 use crate::config::write::SettingKey;
+use crate::config::{Dock, Settings};
 use crate::view::status::Tone;
 
 /// The whole form.
 ///
-/// Three arguments rather than one because three things are being described:
-/// the settings, the one piece of runtime state the About page reads, and
-/// the remembered window position, which is neither.
+/// Several arguments rather than one because several things are being
+/// described: the settings, the one piece of runtime state the About page
+/// reads, the remembered window position, and whether Windows starts files at
+/// sign-in - the last two being neither settings nor state. `autostart` is
+/// `None` when the registry could not be read.
 ///
 /// The first used to be the whole of `AppState`, which was a lie about the
 /// dependency: this reads `state.update` and nothing else. Naming the fact
@@ -26,9 +28,10 @@ pub fn pages(
     settings: &Settings,
     placement: Option<(i32, i32)>,
     panel: bool,
+    autostart: Option<bool>,
 ) -> Vec<Page> {
     vec![
-        general(settings),
+        general(settings, autostart),
         appearance(settings, placement),
         drives(settings),
         aliases(),
@@ -39,7 +42,7 @@ pub fn pages(
     ]
 }
 
-fn general(settings: &Settings) -> Page {
+fn general(settings: &Settings, autostart: Option<bool>) -> Page {
     let mut remembering = vec![Block::Rows(vec![row(
         settings,
         SettingKey::History,
@@ -76,6 +79,10 @@ fn general(settings: &Settings) -> Page {
                         placeholder: "ctrl+shift+space",
                     },
                 )])],
+            },
+            Group {
+                heading: Some("Starting"),
+                blocks: vec![starting(autostart)],
             },
             Group {
                 heading: Some("Remembering"),
@@ -126,6 +133,30 @@ fn general(settings: &Settings) -> Page {
     }
 }
 
+/// The switch for starting at sign-in, or why there is not one.
+///
+/// Hidden is not a choice offered here, because it is not one: the panel
+/// always starts put away, and a launch at sign-in is a tray icon and
+/// nothing else.
+fn starting(autostart: Option<bool>) -> Block {
+    match autostart {
+        Some(on) => Block::Switches(vec![Switch::new(
+            "Start with Windows",
+            "Start files in the tray when you sign in, so the shortcut works \
+             without opening it first. The panel stays out of the way until you \
+             call it up.",
+            on,
+            ActionId::StartWithWindows,
+            ActionId::StopStartingWithWindows,
+        )]),
+        None => Block::Facts(vec![Fact::toned(
+            "Start with Windows",
+            "Unknown \u{b7} the registry could not be read",
+            Tone::Warn,
+        )]),
+    }
+}
+
 /// The path, and a button to open it in whatever handles a `.toml`.
 ///
 /// On General rather than with the diagnostics, which is where a repair tool
@@ -148,13 +179,33 @@ fn config_file() -> Vec<Block> {
 }
 
 fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
-    let mut where_it_appears = vec![Block::Facts(vec![match placement {
-        Some((left, top)) => Fact::new("Position", format!("Where you left it, {left},{top}")),
-        None => Fact::new(
+    let mut where_it_appears = vec![Block::Rows(vec![row(
+        settings,
+        SettingKey::Dock,
+        "Docked",
+        "Floating is a window you can drag anywhere. Along the top or the bottom \
+         pins it to that edge as a bar the width of the screen, which stays put \
+         and never changes size.",
+        Field::Choice {
+            options: DOCKS,
+            current: index_of(DOCKS, settings.dock.name()),
+        },
+    )])];
+    // A docked panel is not where anybody left it, and cannot be dragged, so
+    // the line says where it is instead of repeating an invitation that would
+    // do nothing. The remembered position is kept either way - it is where
+    // the panel goes back to when it floats again.
+    where_it_appears.push(Block::Facts(vec![match (settings.dock, placement) {
+        (Dock::Top, _) => Fact::new("Position", "Against the top edge of the screen"),
+        (Dock::Bottom, _) => Fact::new("Position", "Against the bottom edge of the screen"),
+        (Dock::Free, Some((left, top))) => {
+            Fact::new("Position", format!("Where you left it, {left},{top}"))
+        }
+        (Dock::Free, None) => Fact::new(
             "Position",
             "Chosen by the program \u{b7} drag the panel to move it",
         ),
-    }])];
+    }]));
     // Only when there is something to forget. A button that does nothing is
     // a button that should not have been there.
     if placement.is_some() {
@@ -199,18 +250,32 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
             },
             Group {
                 heading: Some("How a result is listed"),
-                blocks: vec![Block::Rows(vec![row(
-                    settings,
-                    SettingKey::ResultLayout,
-                    "Rows",
-                    "Compact fits six results on screen and shows the name and the \
-                     drive. Detailed fits four and puts the folder under each name, \
-                     which is how you tell two drawings with the same name apart.",
-                    Field::Choice {
-                        options: LAYOUTS,
-                        current: index_of(LAYOUTS, settings.result_layout.name()),
-                    },
-                )])],
+                blocks: vec![Block::Rows(vec![
+                    row(
+                        settings,
+                        SettingKey::ResultLayout,
+                        "Rows",
+                        "Compact fits six results on screen and shows the name and the \
+                         drive. Detailed fits four and puts the folder under each name, \
+                         which is how you tell two drawings with the same name apart.",
+                        Field::Choice {
+                            options: LAYOUTS,
+                            current: index_of(LAYOUTS, settings.result_layout.name()),
+                        },
+                    ),
+                    row(
+                        settings,
+                        SettingKey::Columns,
+                        "Columns",
+                        "More columns show more results at once, with less room for \
+                         each name. Up and down stay in a column, and Tab or Shift+Tab \
+                         moves to the same place in the next one.",
+                        Field::Choice {
+                            options: COLUMNS,
+                            current: index_of(COLUMNS, &settings.columns.to_string()),
+                        },
+                    ),
+                ])],
             },
             Group {
                 heading: Some("Where the panel appears"),
@@ -356,23 +421,35 @@ fn opening(settings: &Settings) -> Page {
 }
 
 fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool) -> Page {
-    let mut updates = vec![Block::Rows(vec![row(
-        settings,
-        SettingKey::UpdateFrom,
-        "Look for new versions in",
-        "A folder holding latest.toml and the installer beside it. Empty it and no \
-         looking happens at all.",
-        Field::Text {
-            value: path_of(settings.update_from.as_deref()),
-            placeholder: "Nowhere, so nothing is checked",
-        },
-    )])];
+    let source = crate::update::Source::of(settings);
+    let mut updates = vec![Block::Rows(vec![
+        row(
+            settings,
+            SettingKey::CheckForUpdates,
+            "Check GitHub for new versions",
+            "Look for a newer release every few hours, and say so when there is one. \
+             Nothing is installed until you choose to install it. A folder below takes \
+             the place of GitHub.",
+            Field::Toggle {
+                on: settings.check_for_updates,
+            },
+        ),
+        row(
+            settings,
+            SettingKey::UpdateFrom,
+            "Look for new versions in",
+            "A shared folder holding latest.toml and the installer beside it, for an \
+             office that publishes its own. Empty, files looks on GitHub instead.",
+            Field::Text {
+                value: path_of(settings.update_from.as_deref()),
+                placeholder: "GitHub",
+            },
+        ),
+    ])];
 
-    // Everything below the row depends on there being a folder at startup,
-    // because that is when the checker thread was started or not started.
-    // See `app::state::settings::apply_live`.
-    if settings.update_from.is_some() {
-        let mut facts = Vec::new();
+    // Everything below the rows depends on there being somewhere to look.
+    if let Some(source) = &source {
+        let mut facts = vec![Fact::new("Looking in", source.describe())];
         match update {
             // Three states, and the third is not the second. "Looking" means
             // the checker has not answered, which is a different thing from
@@ -397,7 +474,11 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
                 if !*msi_present {
                     facts.push(Fact::toned(
                         "Installer",
-                        "Not where the manifest says it is \u{b7} ask whoever published it",
+                        if source.is_remote() {
+                            "Not downloaded \u{b7} it is tried again at the next check"
+                        } else {
+                            "Not where the manifest says it is \u{b7} ask whoever published it"
+                        },
                         Tone::Warn,
                     ));
                 }

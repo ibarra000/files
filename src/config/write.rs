@@ -105,10 +105,13 @@ pub enum SettingKey {
     HideOnBlur,
     HideAfterOpening,
     HideOnEscape,
+    Dock,
+    Columns,
+    CheckForUpdates,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 21] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -127,6 +130,9 @@ impl SettingKey {
         Self::HideOnBlur,
         Self::HideAfterOpening,
         Self::HideOnEscape,
+        Self::Dock,
+        Self::Columns,
+        Self::CheckForUpdates,
     ];
 
     /// The spelling in the file.
@@ -147,6 +153,9 @@ impl SettingKey {
             Self::IndexLog => "index_log",
             Self::Backdrop => "backdrop",
             Self::ResultLayout => "result_layout",
+            Self::Dock => "dock",
+            Self::Columns => "columns",
+            Self::CheckForUpdates => "check_for_updates",
             Self::HideOnBlur => "hide_on_blur",
             Self::HideAfterOpening => "hide_after_opening",
             Self::HideOnEscape => "hide_on_escape",
@@ -175,6 +184,9 @@ impl SettingKey {
             Self::IndexLog => "FILES_INDEX_LOG",
             Self::Backdrop => "FILES_BACKDROP",
             Self::ResultLayout => "FILES_RESULT_LAYOUT",
+            Self::Dock => "FILES_DOCK",
+            Self::Columns => "FILES_COLUMNS",
+            Self::CheckForUpdates => "FILES_CHECK_FOR_UPDATES",
             Self::HideOnBlur => "FILES_HIDE_ON_BLUR",
             Self::HideAfterOpening => "FILES_HIDE_AFTER_OPENING",
             Self::HideOnEscape => "FILES_HIDE_ON_ESCAPE",
@@ -219,6 +231,8 @@ impl SettingKey {
             self,
             Self::Theme
                 | Self::ResultLayout
+                | Self::Dock
+                | Self::Columns
                 | Self::Viewer
                 | Self::History
                 | Self::StaleNotices
@@ -282,6 +296,8 @@ pub enum Scalar {
     /// program to then do to its own file.
     Path(String),
     List(Vec<String>),
+    /// A whole number, written as one: `columns = 2`, not `columns = "2"`.
+    Int(i64),
 }
 
 impl Scalar {
@@ -289,6 +305,7 @@ impl Scalar {
         match self {
             Self::Str(s) => value(s.as_str()),
             Self::Bool(b) => value(*b),
+            Self::Int(n) => value(*n),
             Self::Path(p) => Item::Value(literal(p)),
             Self::List(items) => {
                 let mut array = toml_edit::Array::new();
@@ -422,6 +439,14 @@ impl Edit {
                     .unwrap_or_else(|_| text.to_string());
                 Scalar::Str(tidy)
             }
+
+            // A number is written as a number. One that does not parse is
+            // passed through as text, so the loader refuses it with its line
+            // and column rather than this guessing at what was meant.
+            (SettingKey::Columns, Typed::Text(text)) => match text.trim().parse() {
+                Ok(n) => Scalar::Int(n),
+                Err(_) => Scalar::Str(text.trim().to_string()),
+            },
 
             (_, Typed::Text(text)) => Scalar::Str(text.trim().to_string()),
         };
@@ -626,6 +651,9 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
         SettingKey::Backdrop => s.backdrop.clone().map(Scalar::Str),
         SettingKey::ResultLayout => s.result_layout.clone().map(Scalar::Str),
+        SettingKey::Dock => s.dock.clone().map(Scalar::Str),
+        SettingKey::Columns => s.columns.map(|n| Scalar::Int(n as i64)),
+        SettingKey::CheckForUpdates => s.check_for_updates.map(Scalar::Bool),
     }
 }
 
@@ -768,6 +796,9 @@ mod tests {
             SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
             SettingKey::Backdrop => Typed::Text("mica".into()),
             SettingKey::ResultLayout => Typed::Text("detailed".into()),
+            SettingKey::Dock => Typed::Text("bottom".into()),
+            SettingKey::Columns => Typed::Text("2".into()),
+            SettingKey::CheckForUpdates => Typed::Flag(false),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             SettingKey::DevMode => Typed::Flag(true),
             SettingKey::History

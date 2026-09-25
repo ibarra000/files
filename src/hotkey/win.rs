@@ -34,17 +34,17 @@
 //!   is undefined behaviour. The hazard is removed by construction.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{ERROR_HOTKEY_ALREADY_REGISTERED, GetLastError, HWND};
 use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetMessageW, GetWindowRect, GetWindowThreadProcessId, HWND_TOPMOST,
-    IsWindow, MSG, PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_HOTKEY, WM_QUIT,
-    WM_USER,
+    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, HWND_TOPMOST, IsWindow, MSG,
+    PM_NOREMOVE, PeekMessageW, PostThreadMessageW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WM_APP, WM_HOTKEY, WM_QUIT, WM_USER,
 };
 
 use super::geometry::{self, RectPx};
@@ -53,6 +53,7 @@ use super::{Probe, win_hwnd};
 use crossbeam_channel::Sender;
 
 use crate::app::event::{AppEvent, Events, HotkeyMsg};
+use crate::config::Dock;
 
 /// Take the panel down, asked for by the user - Escape, or the hotkey pressed
 /// a second time.
@@ -110,6 +111,11 @@ pub struct Panel {
     ///
     /// [`NOWHERE`] means nobody has moved it, and the panel is placed.
     at: AtomicI64,
+    /// Which edge the panel is pinned to, if any: a [`Dock`] as its index in
+    /// [`Dock::ALL`]. Published by the drawing thread every frame, because the
+    /// setting can change under it at any time and this thread reads it only
+    /// on a keypress.
+    dock: AtomicU8,
 }
 
 /// No remembered position.
@@ -143,6 +149,7 @@ impl Default for Panel {
         Self {
             hwnd: AtomicIsize::new(0),
             at: AtomicI64::new(NOWHERE),
+            dock: AtomicU8::new(0),
         }
     }
 }
@@ -175,6 +182,18 @@ impl Panel {
             None => NOWHERE,
         };
         self.at.store(packed, Ordering::Release);
+    }
+
+    /// Published by the drawing thread whenever it has a frame to spare.
+    pub fn set_dock(&self, dock: Dock) {
+        let index = Dock::ALL.iter().position(|&d| d == dock).unwrap_or(0);
+        self.dock.store(index as u8, Ordering::Release);
+    }
+
+    /// Where the next summon will pin the panel.
+    pub fn dock(&self) -> Dock {
+        let index = usize::from(self.dock.load(Ordering::Acquire));
+        Dock::ALL.get(index).copied().unwrap_or_default()
     }
 
     /// Whether a position is being remembered, for `--doctor` and for the
@@ -459,7 +478,10 @@ impl Summoner {
                 self.prev = fg as isize;
             }
 
-            let rect = place(hwnd, panel.placed());
+            let dock = panel.dock();
+            let rect = place(hwnd, panel.placed(), dock);
+            // Before it is shown, so it never appears with the wrong corners.
+            crate::gui::window::set_rounded(hwnd as isize, !dock.is_docked());
             SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -539,12 +561,18 @@ impl Summoner {
     }
 }
 
-/// Where to put the panel, at the size it currently is.
+/// Where to put the panel, and how big to make it.
 ///
-/// The size is read back off the window rather than passed in, because the
-/// drawing thread owns it and reads of a value that is animating would be a
-/// second opinion about it. Reading it here means the placement is exactly
-/// right for the panel as it is at the instant it appears.
+/// The size is the panel's own - [`crate::gui::PANEL_W`] by
+/// [`crate::gui::PANEL_H`] points - in this monitor's pixels. It used to be
+/// read back off the window, which was right while nothing but the drawing
+/// thread ever sized it. Docking does: a panel that was a bar along the bottom
+/// last time is a bar's width now, and asking the window how big it is would
+/// float a bar. So both sizes are worked out from the points every summon.
+///
+/// Docked, it is the width of the work area and the panel's height, against
+/// whichever edge - on the monitor the window is on, for the reason below, and
+/// with any remembered position left alone for when it floats again.
 ///
 /// `at` is the position the user dragged the panel to, if they ever did. Note
 /// which monitor each branch asks about, because it is the difference between
@@ -554,19 +582,18 @@ impl Summoner {
 /// after a cold start - at which point the window is still wherever the toolkit
 /// created it, and asking about the window would quietly drag a position saved
 /// on the second screen back onto the first.
-fn place(hwnd: HWND, at: Option<(i32, i32)>) -> RectPx {
-    // SAFETY: `rect` is a live local; the call reports failure by return value.
-    let want = unsafe {
-        let mut rect = std::mem::zeroed();
-        if GetWindowRect(hwnd, &mut rect) != 0 {
-            (rect.right - rect.left, rect.bottom - rect.top)
-        } else {
-            // Clamped up to `MIN_PX` by both placements, so a window whose size
-            // could not be read still lands somewhere it can be seen and
-            // dismissed.
-            (0, 0)
-        }
+fn place(hwnd: HWND, at: Option<(i32, i32)>, dock: Dock) -> RectPx {
+    let want = natural_px(hwnd);
+
+    let edge = match dock {
+        Dock::Free => None,
+        Dock::Top => Some(geometry::Edge::Top),
+        Dock::Bottom => Some(geometry::Edge::Bottom),
     };
+    if let Some(edge) = edge {
+        let work = win_hwnd::work_area(hwnd).unwrap_or(RectPx::new(0, 0, 1920, 1080));
+        return geometry::place_docked(work, want.1, edge);
+    }
 
     match at {
         Some(at) => {
@@ -578,6 +605,26 @@ fn place(hwnd: HWND, at: Option<(i32, i32)>) -> RectPx {
             geometry::place(work, want)
         }
     }
+}
+
+/// The panel's size in points, in the pixels of the monitor the window is on.
+///
+/// `GetDpiForWindow` answers for the window's current monitor, which is the
+/// one it is about to be placed on in every case but a remembered position on
+/// another screen - and there Windows sends the window its new DPI as it
+/// arrives, and the toolkit resizes to match.
+fn natural_px(hwnd: HWND) -> (i32, i32) {
+    // SAFETY: a window this process owns, checked live by the caller. Zero
+    // means the call failed, and is replaced by the unscaled 96.
+    let dpi = match unsafe { GetDpiForWindow(hwnd) } {
+        0 => 96,
+        dpi => dpi,
+    };
+    let scale = dpi as f32 / 96.0;
+    (
+        (crate::gui::PANEL_W * scale).round() as i32,
+        (crate::gui::PANEL_H * scale).round() as i32,
+    )
 }
 
 pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {

@@ -246,6 +246,11 @@ impl AppState {
 
             Key::Up => self.on_up(now),
             Key::Down => self.on_down(),
+            // Across the results, when they are laid out in columns. Unbound
+            // until there were columns to move across, and still nothing in
+            // one - the text field has the keyboard and there is no other
+            // control on the panel for Tab to move focus to.
+            Key::Tab => self.on_tab(!shift),
 
             Key::Enter => self.on_enter(now),
             Key::Esc => self.on_escape(now),
@@ -453,8 +458,8 @@ impl AppState {
         // the quickest way to the end of three hundred results. It used to
         // hold here, and the argument was about the *page* snapping back to
         // the first screen rather than about the cursor - see
-        // `AppState::move_selection`.
-        self.move_selection(-1, Wrap::Around)
+        // `AppState::move_selection`. In columns, the same within the column.
+        self.move_vertically(false)
     }
 
     fn on_down(&mut self) -> Response {
@@ -485,7 +490,17 @@ impl AppState {
         // Moves rather than landing on row 0: the top row is already
         // highlighted before the first Down is pressed, so stepping onto it
         // would look like the key did nothing.
-        self.move_selection(1, Wrap::Around)
+        self.move_vertically(true)
+    }
+
+    /// Only the results are ever laid out in columns. The drive picker, the
+    /// codes used before and the shortcuts are single lists, and Tab in them
+    /// does nothing rather than something surprising.
+    fn on_tab(&mut self, forward: bool) -> Response {
+        if self.picking_share || self.history.is_browsing() || self.showing_aliases() {
+            return Response::none();
+        }
+        self.move_across(forward)
     }
 
     /// Steps through the shortcuts, entering the list from the near end.

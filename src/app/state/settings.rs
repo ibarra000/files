@@ -104,6 +104,8 @@ impl AppState {
             // to read them anyway.
             SettingKey::Theme
             | SettingKey::ResultLayout
+            | SettingKey::Dock
+            | SettingKey::Columns
             | SettingKey::Backdrop
             | SettingKey::HideOnBlur
             | SettingKey::HideAfterOpening
@@ -117,7 +119,8 @@ impl AppState {
             | SettingKey::PdfViewer
             | SettingKey::IndexLog
             | SettingKey::Hotkey
-            | SettingKey::UpdateFrom => {}
+            | SettingKey::UpdateFrom
+            | SettingKey::CheckForUpdates => {}
             // The viewer is two fields, and they are not the same thing:
             // `settings.viewer` is what the form reads back and `self.viewer`
             // is what Enter uses. F2 moves only the second.

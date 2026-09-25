@@ -5,6 +5,9 @@ edition = "2024"
 # Read by the installer, by Apps & Features, and by the version block `build.rs`
 # embeds. Absent until there was something to install.
 description = "Search job codes across the drawing shares"
+# Where the update check looks for new releases, unless `update_from` names a
+# share instead. Read at compile time by `update::github::Repo::ours`.
+repository = "https://github.com/ibarra000/files"
 authors = ["files"]
 
 [lib]
@@ -107,7 +110,12 @@ features = [
     # `\.\pipe\` name is machine-global, and on a terminal server two
     # people signed in at once would otherwise share one.
     "Win32_System_RemoteDesktop",
+    # The `Run` value behind "Start with Windows". See `src/autostart.rs`.
+    "Win32_System_Registry",
     "Win32_NetworkManagement_WNet",
+    # WinHTTP, for the update check against GitHub. The operating system's
+    # own client and TLS stack rather than a crate - see `src/update/http.rs`.
+    "Win32_Networking_WinHttp",
     "Win32_Security",
     # BCrypt, for the SHA-256 of a staged installer. The operating system
     # already has one; a crate for it would be a dependency to check one file
@@ -136,6 +144,9 @@ features = [
     # `MonitorFromWindow`, so the panel lands on the screen it was summoned on
     # rather than on the primary one.
     "Win32_Graphics_Gdi",
+    # `GetDpiForWindow`, so a docked panel's height - and a floating one's
+    # size after it has been docked - is worked out in the monitor's pixels.
+    "Win32_UI_HiDpi",
 ]
 
 # The notification-area icon and its menu. Windows-only, because the tray is:

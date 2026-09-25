@@ -57,6 +57,7 @@ fn a_key() -> impl Strategy<Value = Step> {
         Just(Key::End),
         Just(Key::PageUp),
         Just(Key::PageDown),
+        Just(Key::Tab),
         Just(Key::Enter),
         Just(Key::Esc),
         Just(Key::Backspace),
@@ -247,8 +248,17 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
 }
 
 fn fresh() -> (AppState, Instant) {
+    fresh_in(1)
+}
+
+/// The same, with the results laid out `columns` to a line.
+fn fresh_in(columns: usize) -> (AppState, Instant) {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let settings = Settings {
+        columns,
+        ..Settings::default()
+    };
+    let mut s = AppState::new(settings, now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
     (s, now)
 }
@@ -259,8 +269,9 @@ proptest! {
     #[test]
     fn no_interleaving_of_keys_and_clicks_can_break_the_invariants(
         steps in prop::collection::vec(a_step(), 1..40),
+        columns in 1usize..=files::config::MAX_COLUMNS,
     ) {
-        let (mut s, mut clock) = fresh();
+        let (mut s, mut clock) = fresh_in(columns);
         for step in &steps {
             let r = apply(&mut s, step, &mut clock);
             holds(&s, &r, step)?;

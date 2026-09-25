@@ -56,7 +56,7 @@ mod tests;
 
 pub use lists::{ALIASES, AliasWords, DRIVES, DriveWords};
 pub use pages::pages;
-pub use shape::{Action, ActionId, Block, Fact, Group, Page, PageId, check_prose, prose};
+pub use shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch, check_prose, prose};
 
 /// One option in a [`Field::Choice`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +152,36 @@ pub(super) const LAYOUTS: &[Choice] = &[
     Choice {
         value: "detailed",
         label: "Detailed",
+    },
+];
+
+pub(super) const DOCKS: &[Choice] = &[
+    Choice {
+        value: "free",
+        label: "Floating",
+    },
+    Choice {
+        value: "top",
+        label: "Along the top",
+    },
+    Choice {
+        value: "bottom",
+        label: "Along the bottom",
+    },
+];
+
+pub(super) const COLUMNS: &[Choice] = &[
+    Choice {
+        value: "1",
+        label: "One",
+    },
+    Choice {
+        value: "2",
+        label: "Two",
+    },
+    Choice {
+        value: "3",
+        label: "Three",
     },
 ];
 

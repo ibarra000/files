@@ -216,6 +216,9 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "theme",
     "backdrop",
     "result_layout",
+    "dock",
+    "columns",
+    "check_for_updates",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -247,6 +250,9 @@ pub struct FileSettings {
     pub theme: Option<String>,
     pub backdrop: Option<String>,
     pub result_layout: Option<String>,
+    pub dock: Option<String>,
+    pub columns: Option<usize>,
+    pub check_for_updates: Option<bool>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -698,6 +704,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 }
             }
             "live_updates" => out.live_updates = bool_at(ctx, key, item),
+            "check_for_updates" => out.check_for_updates = bool_at(ctx, key, item),
             "cache_dir" => out.cache_dir = value.and_then(Value::as_str).map(PathBuf::from),
             "index_log" => out.index_log = value.and_then(Value::as_str).map(PathBuf::from),
             "history" => out.history = bool_at(ctx, key, item),
@@ -850,6 +857,41 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     );
                 }
                 out.result_layout = raw.map(str::to_string);
+            }
+            "dock" => {
+                let raw = value.and_then(Value::as_str);
+                if let Some(v) = raw
+                    && crate::config::Dock::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("unknown dock {v:?} (expected \"free\", \"top\" or \"bottom\")"),
+                        None,
+                    );
+                }
+                out.dock = raw.map(str::to_string);
+            }
+            "columns" => {
+                let max = crate::config::MAX_COLUMNS;
+                match value.and_then(Value::as_integer) {
+                    Some(n) if (1..=max as i64).contains(&n) => out.columns = Some(n as usize),
+                    Some(n) => ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("columns must be from 1 to {max}, not {n}"),
+                        None,
+                    ),
+                    None => ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("columns must be a number from 1 to {max}"),
+                        None,
+                    ),
+                }
             }
             _ => {}
         }

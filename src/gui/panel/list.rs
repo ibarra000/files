@@ -255,11 +255,8 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let follow = selection_changed(ui, "results", selected);
     let mut hovered = None;
 
-    for (rank, hit) in state.hits.iter().enumerate() {
-        if rank > 0 {
-            space(ui, theme::ROW_GAP);
-        }
-        let response = row::show(ui, &style, hit, selected == Some(rank));
+    // What the pointer did to one result, whichever way it was laid out.
+    let mut note = |ui: &Ui, rank: usize, response: eframe::egui::Response| {
         if selected == Some(rank) && follow {
             bring_into_view(ui, response.rect);
         }
@@ -270,6 +267,48 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             intents.push(Intent::Activate(rank));
         } else if response.clicked() {
             intents.push(Intent::Select(rank));
+        }
+    };
+
+    let columns = state.columns();
+    if columns == 1 {
+        for (rank, hit) in state.hits.iter().enumerate() {
+            if rank > 0 {
+                space(ui, theme::ROW_GAP);
+            }
+            let response = row::show(ui, &style, hit, selected == Some(rank));
+            note(ui, rank, response);
+        }
+    } else {
+        // Row-major, the order `app::state::grid` moves in: the best match
+        // top left and the next beside it. Each line is allocated whole and
+        // cut into cells, and each cell is drawn by the same `row::show` in a
+        // child `Ui` the width of the cell - so a row still knows only about
+        // itself, and still hit-tests itself, and nothing here has to map a
+        // pointer to a rank.
+        //
+        // The gap between columns is the gap between lines, so the grid has
+        // one rhythm rather than two.
+        let row_h = theme::row_h(style.layout);
+        let gap = theme::ROW_GAP;
+        for (line, chunk) in state.hits.chunks(columns).enumerate() {
+            if line > 0 {
+                space(ui, gap);
+            }
+            let width = ui.available_width();
+            let cell_w = ((width - gap * (columns - 1) as f32) / columns as f32).max(0.0);
+            let (_, band) = ui.allocate_space(vec2(width, row_h));
+            for (i, hit) in chunk.iter().enumerate() {
+                let rank = line * columns + i;
+                let left = band.left() + i as f32 * (cell_w + gap);
+                let cell = Rect::from_min_size(pos2(left, band.top()), vec2(cell_w, row_h));
+                let response = ui
+                    .scope_builder(UiBuilder::new().max_rect(cell), |ui| {
+                        row::show(ui, &style, hit, selected == Some(rank))
+                    })
+                    .inner;
+                note(ui, rank, response);
+            }
         }
     }
 

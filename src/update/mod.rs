@@ -1,5 +1,21 @@
 //! Finding out that a newer version exists.
 //!
+//! Two places to look, and one is chosen by [`Source::of`]: a share, if
+//! `update_from` names one, and otherwise the GitHub repository this build
+//! came from - unless `check_for_updates` is off. Both publish the same
+//! `latest.toml` beside the same installer, so both answer with the same
+//! [`Found`], and nothing after the look knows which it was.
+//!
+//! # Why a share is still the first choice
+//!
+//! The rest of this note is the argument for the share, and it still holds
+//! where there is one: an office that runs its own update folder decides when
+//! its machines move to a new version, and GitHub would take that decision
+//! away. GitHub is for everybody else - the laptop with no share to read,
+//! which before this was never told about a new version at all. See
+//! [`github`] for what it does differently, and [`http`] for why it needs no
+//! new dependency.
+//!
 //! # Why a file share rather than a URL
 //!
 //! This program already lives in an SMB world: every drive it searches is one,
@@ -26,6 +42,8 @@
 
 pub mod apply;
 pub mod check;
+pub mod github;
+pub mod http;
 pub mod manifest;
 pub mod version;
 
@@ -33,6 +51,8 @@ pub use manifest::Manifest;
 pub use version::Version;
 
 use std::path::{Path, PathBuf};
+
+use crate::config::Settings;
 
 /// What the manifest is called, in the configured folder.
 pub const MANIFEST_NAME: &str = "latest.toml";
@@ -65,6 +85,60 @@ pub enum Found {
     /// because the laptop is at home is the ordinary case, and the only honest
     /// response is a quiet line rather than a dialog.
     Unavailable { detail: String },
+}
+
+/// Where updates come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// A share folder holding `latest.toml` and the installer.
+    Folder(PathBuf),
+    /// The releases of a GitHub repository.
+    GitHub(github::Repo),
+}
+
+impl Source {
+    /// Where these settings say to look, if anywhere.
+    ///
+    /// A share wins when there is one, because somebody configured it on
+    /// purpose. Otherwise GitHub, from `Cargo.toml`'s `repository` - or from
+    /// `FILES_UPDATE_GITHUB`, which exists so a release can be tried against
+    /// a scratch repository before it is published to the real one.
+    pub fn of(settings: &Settings) -> Option<Self> {
+        if let Some(folder) = &settings.update_from {
+            return Some(Self::Folder(folder.clone()));
+        }
+        if !settings.check_for_updates {
+            return None;
+        }
+        let repo = crate::config::env_str("FILES_UPDATE_GITHUB")
+            .and_then(|r| github::Repo::parse(&r))
+            .or_else(github::Repo::ours)?;
+        Some(Self::GitHub(repo))
+    }
+
+    /// Where, in words, for the About page and `--doctor`.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Folder(folder) => folder.display().to_string(),
+            Self::GitHub(repo) => format!("GitHub \u{b7} {repo}"),
+        }
+    }
+
+    /// Whether this is the internet rather than a share.
+    pub const fn is_remote(&self) -> bool {
+        matches!(self, Self::GitHub(_))
+    }
+}
+
+/// Looks wherever `source` says, and says what it means for this build.
+///
+/// `cache_dir` is where a GitHub installer is downloaded to; a share's is
+/// read where it stands.
+pub fn look_at(source: &Source, running: Version, cache_dir: Option<&Path>) -> Found {
+    match source {
+        Source::Folder(folder) => look(folder, running),
+        Source::GitHub(repo) => github::look(repo, running, &http::WinHttp, cache_dir),
+    }
 }
 
 /// Reads the manifest in `folder` and says what it means for this build.
@@ -111,6 +185,34 @@ pub fn look(folder: &Path, running: Version) -> Found {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A share somebody configured outranks the internet.
+    #[test]
+    fn a_configured_share_is_looked_in_rather_than_github() {
+        let settings = Settings {
+            update_from: Some(PathBuf::from(r"\\server\software\files")),
+            ..Settings::default()
+        };
+        assert!(matches!(Source::of(&settings), Some(Source::Folder(_))));
+    }
+
+    /// Out of the box, the repository this build came from.
+    #[test]
+    fn with_no_share_github_is_looked_at_by_default() {
+        let source = Source::of(&Settings::default());
+        assert!(matches!(source, Some(Source::GitHub(_))), "{source:?}");
+        assert!(source.unwrap().describe().starts_with("GitHub"));
+    }
+
+    /// And turning it off means nothing is looked at at all.
+    #[test]
+    fn turning_the_check_off_looks_nowhere() {
+        let settings = Settings {
+            check_for_updates: false,
+            ..Settings::default()
+        };
+        assert_eq!(Source::of(&settings), None);
+    }
 
     fn folder(manifest: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

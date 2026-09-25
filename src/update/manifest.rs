@@ -130,6 +130,14 @@ fn is_digest(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Windows PowerShell 5.1 writes UTF-8 with a byte-order mark, and a
+    /// manifest published from it must still be read.
+    #[test]
+    fn a_manifest_with_a_byte_order_mark_is_still_read() {
+        let text = "\u{feff}version = \"0.3.0\"\nmsi = \"files-0.3.0-x64.msi\"\n";
+        assert_eq!(parse(text).map(|m| m.version), Ok(Version::new(0, 3, 0)));
+    }
+
     const FULL: &str = r#"
 version = "0.3.0"
 msi     = "files-0.3.0-x64.msi"

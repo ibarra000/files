@@ -98,7 +98,8 @@ fn harness_of(start: Window) -> Harness<'static, Window> {
                         exists: &mut exists,
                         now: std::time::Instant::now(),
                     };
-                    let pages = files::view::settings::pages(None, &w.settings, None, true);
+                    let pages =
+                        files::view::settings::pages(None, &w.settings, None, true, Some(false));
                     let out = settings::show(
                         ui,
                         &theme,
