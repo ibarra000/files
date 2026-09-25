@@ -16,7 +16,7 @@
 //! that lands on it and the air wins the rest. Nothing computes where the air
 //! is.
 
-use eframe::egui::{Align2, Color32, Id, Rect, Sense, Ui, pos2, vec2};
+use eframe::egui::{Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, pos2, vec2};
 
 use crate::app::state::AppState;
 use crate::app::state::pointer::Intent;
@@ -239,7 +239,12 @@ fn x_of(galley: &eframe::egui::Galley, byte: usize) -> f32 {
 /// Clicking in the box puts the caret where the pointer is, which is what
 /// every other text box on this machine does.
 fn click_to_caret(ui: &mut Ui, rect: Rect, text_left: f32, text: &str) -> Vec<Intent> {
-    let response = ui.interact(rect, Id::new("files-field"), Sense::click_and_drag());
+    // An I-beam over the box, as over every other text box on this machine.
+    // With Alt held the panel-wide drag handle is on top and takes the hover,
+    // so the pointer stops promising text exactly when a drag would begin.
+    let response = ui
+        .interact(rect, Id::new("files-field"), Sense::click_and_drag())
+        .on_hover_cursor(CursorIcon::Text);
     let Some(pos) = response.interact_pointer_pos() else {
         return Vec::new();
     };

@@ -583,6 +583,38 @@ fn walking_down_a_long_list_carries_the_view_with_it() {
     );
 }
 
+/// The box is a text box, so the pointer over it says so the way every other
+/// one on this machine does - and over the list it goes back to an arrow,
+/// because a row is something to click rather than to type into.
+#[test]
+fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
+    let (mut s, now) = state();
+    with_results(&mut s, "11-D-0704", many(10), 10, now);
+    let mut h = harness(s);
+
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H / 2.0,
+    ));
+    h.run_steps(2);
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::Text,
+        "no I-beam over the box"
+    );
+
+    h.hover_at(egui::pos2(
+        HARNESS_MARGIN + theme::PANEL_W / 2.0,
+        HARNESS_MARGIN + theme::HEADER_H + theme::CONTENT_H / 2.0,
+    ));
+    h.run_steps(2);
+    assert_ne!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::Text,
+        "the I-beam followed the pointer onto the list"
+    );
+}
+
 /// And the wheel moves the view without moving the selection, which is the
 /// reason it was unbound in the first place: it used to walk the cursor
 /// through somebody's results whenever a hand rested on the mouse.
