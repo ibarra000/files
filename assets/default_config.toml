@@ -1,487 +1,143 @@
-# files - the shares to search
+# files - settings guide
 #
-# Written automatically on first run. Edit freely, then check it with
+# Default template with placeholder values. Replace the example paths with
+# your own, set `enabled = true` on the shares you want, then run:
 #
 #     files --check-config
 #
-# which validates everything below without touching the network.
-#
-# Use literal strings ('...') for paths. TOML *basic* strings ("...") process
-# backslash escapes, so "R:\Documents" is a parse error.
+# Use literal strings ('...') for paths. Basic strings ("...") process
+# backslash escapes, so "X:\Example" is a parse error.
 
 version = 2
 
 
 # ---------------------------------------------------------------------------
-# CustomPro. One large directory holding every job's files directly, so a
-# listing of it is the whole share.
+# Mappings - the shares to search. Add as many as needed; every enabled one
+# is indexed, searched, and merged into one ranked list.
 #
-# kind = "flat" reads that single directory and keeps it in memory. It also
-# gets the cheap freshness check: the directory's timestamp is probed about
-# once a minute - three round trips - and a full re-read only happens when it
-# has actually moved.
+# Rules enforced by the checker:
+#   * no two mappings may point at the same directory;
+#   * a tree mapping may not sit inside another enabled mapping
+#     (a tree inside a live mapping is allowed).
+#
+# kind    = "flat" | "tree" | "live"
+# refresh = "auto" | "manual"   (flat defaults to auto, tree to manual;
+#                                not allowed on live)
 # ---------------------------------------------------------------------------
+
+# Flat: a single directory kept in memory, with a cheap freshness check.
 [[mapping]]
-name    = "custompro"
-path    = 'V:\Documents\custpro'
+name    = "example-flat"
+path    = 'X:\example\flat'
 kind    = "flat"
-enabled = true
-refresh = "auto"          # see the note under `jobs`
+enabled = false
+refresh = "auto"
 
-
-# ---------------------------------------------------------------------------
-# The job share. Walked whole, every folder, and kept in memory.
-#
-# This used to be a set of regular expressions that turned a code into the one
-# folder it was expected to live in. That worked for codes whose folders
-# followed the naming rule and failed silently for every other: the file was
-# not reported as missing, it was invisible, because nothing ever looked in
-# the folder it was actually in.
-#
-# kind = "tree" removes the guess. Every folder under the path is read, so a
-# code is *searched for* rather than deduced, and a file in a folder no rule
-# would have predicted is found like any other. A match on a folder name
-# brings that folder's files with it, which is how a job code usually behaves.
-#
-# The cost is a background walk - one to three minutes for a share of a few
-# hundred thousand folders - which streams results as it goes, so the share is
-# searchable about a second in rather than when it finishes. The result is
-# cached, so only the first run after an upgrade pays for it in full.
-#
-# After that the share is kept current by the server reporting changes as they
-# happen: only the folders that actually changed are re-read, which is a
-# handful of round trips against the nine hundred thousand a full pass costs.
-# A new job folder appears within seconds, and the result is written back to
-# the cache, so the index keeps its place between sessions.
-#
-#
-# refresh = "auto" | "manual"
-#
-# Whether a *timer* may re-read the whole share. Live updates apply either way,
-# and F5 works either way; what this decides is whether the share re-reads
-# itself when nobody asked.
-#
-# A tree defaults to "manual" and a flat share to "auto", and the asymmetry is
-# the point. A flat share is one directory behind a three-round-trip freshness
-# probe. A tree is three hundred thousand directories with no such probe, so a
-# timed pass is nine hundred thousand round trips - and with a few hundred
-# people running this, all of them starting that pass on the same schedule is
-# not a background hum, it is an outage. The half-hourly re-walk this used to
-# do was exactly that.
-#
-# What you give up: a share whose change notifications silently stop will go
-# stale without a timer to catch it. The status line says which share and why,
-# and F5 offers to update it - so the failure is visible rather than silent,
-# which is the trade being made. `files --doctor` says whether notifications
-# are working at all.
-# ---------------------------------------------------------------------------
+# Tree: a full directory tree, kept current by change notifications.
+# F5 refreshes on demand.
 [[mapping]]
-name    = "jobs"
-path    = 'R:\'
+name    = "example-tree"
+path    = 'Y:\example\projects'
 kind    = "tree"
-enabled = true
+enabled = false
 refresh = "manual"
 
-
-# ---------------------------------------------------------------------------
-# More shares. Add as many as you have; there is no limit, and every enabled
-# one is indexed, searched, and merged into a single ranked list.
-#
-# That was not true before: the index had one flat slot and one tree slot, so a
-# second flat mapping was refused outright and a second tree mapping was
-# accepted, listed by `--doctor`, and then silently never walked. If you have
-# been carrying extra mappings that never seemed to do anything, this is why.
-#
-# Two rules the checker enforces, both for the same reason - indexing one
-# directory twice returns every file twice:
-#
-#   * no two mappings may point at the same directory;
-#   * a tree mapping may not sit inside another enabled mapping.
-#
-# Check any change with `files --check-config`, which validates everything
-# here without touching the network.
-# ---------------------------------------------------------------------------
-# [[mapping]]
-# name    = "archive"
-# path    = 'S:\archive'
-# kind    = "tree"
-# enabled = true
+# Live: nothing indexed in the background; each search queries the server.
+# Results cover only the folders that were searched.
+# depth = 1 to 4 (default 1). Deeper searches cost more round trips.
+[[mapping]]
+name    = "example-live"
+path    = '\\example-server\archive'
+kind    = "live"
+depth   = 1
+enabled = false
 
 
 # ---------------------------------------------------------------------------
-# A share too large to index at all.
-#
-# kind = "live" is the honest answer to a share where a walk costs minutes and
-# a few hundred megabytes. Nothing is read in the background: every settled
-# search becomes one wildcard query against the share, which the file server
-# evaluates itself and answers with the matches alone - a few kilobytes,
-# whether the folder holds a thousand files or ten million.
-#
-# What you give up is completeness, and it is not a small thing. The server
-# matches within one folder at a time, so a live share can only answer for the
-# folders one query had time to reach. The panel says which ones those were:
-# an empty result on a live share never reads as "there is no such file", it
-# reads as "nothing in the folders that were searched". Believing the first
-# when the second is true is the mistake this program is built to prevent.
-#
-# depth is how far below the path a search reaches. One - the default - is the
-# share's own folder, plus any folder whose *name* matches what you typed,
-# which is how a job code usually behaves and costs a single round trip.
-# Deeper means listing every folder on the way down, because a filtered query
-# cannot reveal a folder whose name does not match: depth 2 against a root
-# holding two hundred folders is two hundred round trips for one search. The
-# maximum is 4.
-#
-# There is no `refresh` key here: a live share is read when you search it and
-# at no other time, so `refresh` is refused rather than accepted and ignored.
-#
-# What a search finds *is* kept, and that is the whole of this share's index.
-# Ask for a code once and it is answered from memory afterwards, including
-# after a restart - which matters more than it sounds, because a share may
-# only be asked once a second, so a repeated search without this would not be
-# slow, it would be skipped. What is kept is only ever what somebody looked
-# for, so a name missing from it says nothing at all about the share, and the
-# panel never reports an empty result here as "no matches".
-#
-# A walked tree may sit *inside* a live share, and that is the useful
-# arrangement: index the folder people work in, and ask the server about the
-# rest. The live pass skips any folder another mapping already covers, so
-# nothing is returned twice.
-# ---------------------------------------------------------------------------
-# [[mapping]]
-# name    = "old-jobs"
-# path    = '\fileserver\archive'
-# kind    = "live"
-# depth   = 1
-# enabled = true
-
-
-# ---------------------------------------------------------------------------
-# Global options. The command line overrides the environment, which overrides
-# what is set here.
+# Global options. Command line > environment > this file.
+# Commented lines show the default value.
 # ---------------------------------------------------------------------------
 [settings]
-# How many shares are walked at once. Each walk already keeps eight directory
-# reads in flight, so 2 is sixteen outstanding requests against a file server
-# that belongs to somebody else. Raising it shortens a cold start over several
-# shares and lengthens everyone else's afternoon; a share waiting its turn says
-# so on the status line rather than looking idle.
+# Shares walked at the same time.
 # max_concurrent_scans = 2
 
-# Whether the status line says a share needs refreshing, and which one.
-#
-# On by default: a list that has stopped tracking the drive is exactly the
-# thing this program refuses to hide. Turn it off for somebody who was handed
-# the tool, does not need current data, and should not be nagged - the ages are
-# still there on F5, which they only see by asking.
+# Show a status-line notice when a share needs refreshing.
 # stale_notices = true
 
-# When the panel puts itself away.
-#
-# Three settings, all on, which is what a launcher does and what Ueli does.
-# Each is about a different moment, so they are three rather than one.
+# Panel behaviour.
+# hide_on_blur       = true    # hide when another window is clicked
+# hide_after_opening = true    # hide once a file opens (copies keep it open)
+# hide_on_escape     = true    # false = Escape clears the search box instead
 
-# Put the panel away when you click on something else.
-#
-# This is the one that makes it a launcher rather than a window: it is
-# summoned over whatever you were doing and is in the way until it is not
-# wanted. Turn it off and it stays until Escape or the shortcut.
-# hide_on_blur = true
-
-# Put the panel away once a file is on its way.
-#
-# On by default, and that is a reversal of a reversal, so the history is
-# worth having. It used to be on, then it was turned off, because an open is
-# answered on another thread: "Opened 11 of 13 pages", the list of pages
-# skipped and "Could not open ..." all arrived at a window that had already
-# gone, and nobody ever read one. A document quietly missing page seven is
-# the worst outcome this program can produce.
-#
-# It is on again because that is now answered rather than lived with.
-# Anything the open has to say that you must see arrives in a message box
-# instead, which follows you to whatever the viewer put in front of you.
-#
-# Only the opens. Copying leaves the panel up, whatever this says, because
-# the whole of what a copy reports is a line on the panel.
-# hide_after_opening = true
-
-# Escape puts the panel away rather than clearing the box.
-#
-# Turn it off and Escape clears the code instead - first the selection, then
-# the text - and the shortcut becomes the only way out. That suits somebody
-# who keeps the panel up and searches from it all day, and is not what to
-# default to: a window over somebody else's work has to be dismissable
-# without them working out which layer they are on.
-# hide_on_escape = true
-
-# Whether an assembled document opens read-only.
-#
-# On by default, and the reason is this program's own cache rather than the
-# share. The "pdf" mode merges the pages of a set into one document and
-# names the result after a hash of its contents, so a viewer that saves a
-# change back into it leaves a file whose name no longer describes it - and
-# every later open of that code then gets the edited copy instead of the
-# drawing.
-#
-# Turn it off to annotate what comes out and save it. This reaches only files
-# this program wrote: a single PDF opened straight off the share is exactly as
-# writable as it is on the drive, because nothing here writes to a share.
+# Open assembled PDFs read-only (protects the local cache).
 # pdf_read_only = true
 
-# Where the index, the assembled documents and a staged update are kept.
-#
-# Defaults to the local application data folder, which is the right place: it
-# is per-machine rather than roaming, so a file list of several hundred
-# thousand entries is not copied across the network every time somebody signs
-# in. Set it only to move that cache off a small system drive.
-#
-# Nothing here is precious. Deleting the folder costs one cold start.
-# cache_dir = 'D:\files-cache'
+# Local cache for the index, assembled documents and staged updates.
+# Defaults to the local application data folder.
+# cache_dir = 'D:\example-cache'
 
-# Where to record why each drive is read again, if anywhere.
-#
-# Off, and it should stay off. It exists because the bug that produced it -
-# a drive being read again every minute instead of every hour - is invisible
-# from the outside: the status line shows that the index is rebuilding, and
-# by the time anybody looks it has finished. One line per decision turns "it
-# reloads at random" into a sequence with timings and reasons, on the machine
-# that has the problem, without a debugger and without a new build.
-#
-# The file is appended to and never rotated, so set it when somebody asks you
-# to and clear it out afterwards.
-# index_log = 'C:\Users\Public\files-index.log'
+# Diagnostic log of index re-reads. Leave off unless troubleshooting;
+# the file is never rotated.
+# index_log = 'C:\example\files-index.log'
 
+# Advanced.
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
-# server_filter = false              # turn on only after `files --bench` passes
+# server_filter = false              # enable only after `files --bench` passes
 # persist       = true               # keep the on-disk index between runs
 # live_updates  = true               # re-read changed folders as they change
 # history       = true               # remember codes between sessions
 
-# The global hotkey that summons this window from wherever you are working,
-# into a compact quick-search view: type, press Enter to open, or Escape to
-# put it back. The window returns to the size and place it had, and the
-# program you were in gets the keyboard back.
-#
-# ctrl, alt, shift and win, plus a letter, a digit, f1-f24 or space. Use "off"
-# to claim no key at all. If another program already owns the combination this
-# one says so at startup and carries on without it - `files --doctor` reports
-# which window it would move, which is the thing worth checking if the key
-# seems to do nothing.
-#
-# The Copilot key on newer keyboards sends shift+win+f23, so that value binds
-# the key itself.
+# Global hotkey: ctrl/alt/shift/win + a letter, digit, f1-f24 or space.
+# "off" disables it. The Copilot key is "shift+win+f23".
 # hotkey        = "ctrl+shift+space"
 
-# What the compositor puts behind the panel.
-#
-# "acrylic" is the material Windows uses for a flyout: it blurs whatever
-# window the panel is over, which on a drawing office machine is usually the
-# drawing. That is the default and is almost always the one you want.
-#
-# "mica" samples the desktop wallpaper instead of the window behind, so a
-# panel over a full-screen drawing shows the wallpaper through it - and
-# because Mica does not follow a window that moves, dragging the panel drags
-# a stale patch of it around. "tabbed" is Mica's variant for a document
-# window and behaves the same way.
-#
-# "none" asks for nothing and lets the panel paint its own translucent fill.
-# That is also what a Windows older than 11 22H2 gets whatever is set here,
-# which it works out by asking rather than by checking a version.
+# Appearance.
 # backdrop      = "acrylic"          # acrylic | mica | tabbed | none
-
-# How much of itself a result row shows.
-#
-# "compact" is one line - an icon, the name, and the drive it came off - and
-# six of them fit on the panel. "detailed" puts the folder under the name and
-# fits four.
-#
-# Compact is the default, which is worth knowing about: two drawings called
-# GA.pdf in different job folders look identical in it, and the folder is
-# what tells them apart. The path is on the tooltip either way.
 # result_layout = "compact"          # compact | detailed
-
-# Where the panel sits.
-#
-# "free" is a window that floats twelve per cent down the screen, or wherever
-# you last dragged it. "top" and "bottom" pin it against that edge instead,
-# as wide as the screen and a fixed height, so it never moves or changes size.
-# A bottom bar sits on the taskbar rather than under it.
 # dock          = "free"             # free | top | bottom
-
-# How many results sit side by side, from 1 to 3.
-#
-# More columns show more results at once, each with less room for its name.
-# Up and Down move within a column; Tab and Shift+Tab move to the same place
-# in the next or previous one. Docked along an edge, the panel is as wide as
-# the screen, which is where three columns have the most room.
 # columns       = 1                  # 1 | 2 | 3
-
-# Whether to look on GitHub for a newer version, every four hours.
-#
-# Only when update_from names no folder: a folder somebody configured is
-# always what is looked in. Nothing is installed without being asked - a new
-# version is announced from the tray, and installed from there or from the
-# About page of the settings window.
-# check_for_updates = true
-
-# How the panel is coloured.
-#
-# "light" is a warm, bright panel and is what you get if this is not set.
-# "dark" is the same scheme on a low ground, for a dark room. "system" follows
-# the Windows setting, which is what this program used to do unconditionally -
-# and which meant a machine in dark mode got a near-black panel whether or not
-# that was wanted.
 # theme         = "light"            # light | dark | system
 
-# Which viewer Enter uses. Left uncommented because F2 switches it while
-# running and saves the choice here, and the writer replaces this line rather
-# than appending a second one.
+# Check GitHub for updates every four hours (only when update_from is unset).
+# check_for_updates = true
+
+# Default viewer for Enter. F2 switches it and saves the choice here.
+#   auto  - open with the program Windows has registered for the file type
+#   pdf   - assemble a drawing set into one PDF (.dwg still opens in avwin)
+#   avwin - always open the selected file in avwin
 viewer = "auto"                      # auto | pdf | avwin
-#
-# auto  hands the file to Windows, which opens it in whatever is registered
-#       for that kind of file - the same program you would get by
-#       double-clicking it in Explorer. It is the default for a fresh install.
-#
-#       This used to assemble a .pdf and send everything else to avwin, which
-#       made avwin the answer for every file type this program had not heard
-#       of, on machines that may not have it installed at all. If a file type
-#       has no program registered, the panel says so and F2 is the way to
-#       avwin.
-# pdf   assembles a document out of anything it can: the pages of a drawing
-#       set are separate files on the share, so this is what opens all of them
-#       as one. A drawing is the one thing it cannot assemble - DWG is
-#       AutoCAD's own closed format and there is no way to read it here - so a
-#       .dwg still opens in avwin.
-# avwin always hands the one selected file to avwin, whatever it is - which is
-#       how to see a .pdf there rather than in the PDF viewer.
 
-# Which program opens an assembled document.
-#
-# Unset, and it should usually stay unset: an assembled document is a PDF,
-# and whatever this machine already opens PDFs with is almost always the
-# right answer. Set it to send them somewhere else - a viewer with better
-# printing, say - without changing what a double-click in Explorer does.
-#
-# Reaches assembled documents only. A single file opened straight off the
-# drive still goes wherever Windows sends it.
-#
-# Not checked when it is read, unlike every other path here. A mistyped drive
-# is silent and so `files` refuses to start on one; a missing program is
-# loud the first time it is used, and this same file follows people onto
-# laptops where that program legitimately is not installed. `files --doctor`
-# reports it either way.
-# pdf_viewer = 'C:\Program Files\Tracker Software\PDF Viewer\PDFXCview.exe'
+# Program used for assembled PDFs. Unset = the system PDF viewer.
+# pdf_viewer = 'C:\Program Files\Example\PDFViewer.exe'
 
-# Files that are never offered, however well they match.
-#
-# A drawing share is not only drawings: alongside them sit the files Windows
-# and its programs leave behind, and a search for a job code used to return
-# Thumbs.db and a handful of shortcuts as readily as it returned the drawing.
-#
-# Write extensions, not patterns and not filenames - 'db', not '*.db' and not
-# 'Thumbs.db'. The leading dot is optional and the case does not matter. A
-# single one may be written on its own: hide_extensions = 'db'.
-#
-# Left uncommented because this is what a fresh install is expected to want.
-# Set it to [] to hide nothing, which is the quickest way to find out whether
-# this is why a file you expected is not in the list. The change takes effect
-# at the next start; it needs no re-scan of the drives, because the filter is
-# applied as the results are chosen rather than as the index is built.
+# Extensions never shown in results (no dot or wildcard needed).
+# Set to [] to hide nothing. Takes effect on next start.
 hide_extensions = ['db', 'js', 'lnk', 'ini', 'tmp', 'bak', 'url', 'exe', 'dll', 'bat', 'cmd', 'ps1', 'vbs']
 
-# Also hide whatever Windows itself marks hidden or system.
-#
-# That is the ~$ files Office leaves behind while a document is open, and the
-# bookkeeping a file server keeps in the folder it belongs to.
-#
-# Unlike the list above, this one *does* need a re-scan to take effect: the
-# attribute is not part of the name, so it is read while the folder is being
-# listed and is not stored anywhere afterwards. Press F5 and choose the drive.
-# Folders are never hidden by this, whatever they are marked - some servers
-# mark a whole share system, and honouring that would hide the share.
+# Also hide files Windows marks hidden or system. Requires F5 re-scan.
 hide_system_files = true
 
-
-# Show the technical detail behind a message.
-#
-# Off. A drive that cannot be reached reads as "jobs cannot be reached" rather
-# than "V:\Documents\custpro unreachable (os error 53)". The second is the more
-# useful of the two to exactly one person, and this is how they ask for it -
-# the settings window has the same switch under Troubleshooting.
-#
-# `files --doctor` is not affected either way. It is the report to send when
-# you are asking for help, and a report you have to switch on first is one
-# nobody has when they need it.
+# Show technical detail in error messages.
 # dev_mode = false
 
-# Where to look for a newer version of this program.
-#
-# A folder on a share that everybody can read, holding one small file called
-# latest.toml and the installer it names:
-#
-#   \\fileserver\software\files\
-#       latest.toml
-#       files-0.3.0-x64.msi
-#
-# and latest.toml itself:
-#
-#   version = "0.3.0"
-#   msi     = "files-0.3.0-x64.msi"
-#   sha256  = "9f2c..."                  # optional
-#   notes   = "What changed."            # optional
-#
-# `tools/make_msi.ps1 -Publish <folder>` writes both, from the version it
-# just built, so the manifest and the installer beside it cannot disagree.
-#
-# A share rather than a web address, because this program already reads
-# nothing but shares, and because it means no server to run, no certificate to
-# renew and no second password: whoever may read the folder may take the
-# update. `files --doctor` says what it can see there.
-#
-# Left unset, none of this happens at all - no checking, nothing on screen.
-# update_from = '\\fileserver\software\files'
+# Shared folder containing latest.toml and the installer it names.
+# Unset = no update checks from a share.
+# update_from = '\\example-server\software\files'
 
 
 # ---------------------------------------------------------------------------
-# Aliases. Short names for the codes you type every day.
+# Aliases - short names for codes you search often.
 #
-# A job code is something to read off a drawing, which is fine for the one in
-# front of you and poor for the six you open every morning. An alias gives one
-# of those a name you chose:
-#
-#   [[alias]]
-#   name = "pw"
-#   code = "11-D-0704"
-#   note = "Powerwall bracket"      # optional, and only for you to read
-#
-# Type `pw` and you get the results for `11-D-0704`, on the second keystroke.
-# The panel shows you which alias fired and what it stood for, every time - an
-# alias is a shortcut you wrote down, so watching it work is the confirmation,
-# and watching it fire when you did not mean it is how you find out.
-#
-# The whole line has to be the alias, case aside. `pw` resolves; `pwx` and
-# `pw 11` are searched for as they are. That way an alias can never hide the
-# results for a longer code that happens to contain it.
-#
-# `code` is a search *line*, not just a code, so the syntax you can type works
-# here too:
-#
-#   [[alias]]
-#   name = "inv"
-#   code = "ext:pdf inverter"
-#
-# What the checker enforces, all so that an alias which loads is one that
-# works:
-#
-#   * `name` is ASCII, has no spaces, and is not shared with another alias;
-#   * `code` is something this could actually search for - which means at
-#     least 3 characters, the same minimum the search line has.
-#
-# A two-letter *name* is the whole point and is perfectly fine. It is the
-# *search* that has a minimum, and the code above it is what has to meet it.
+#   * name: ASCII, no spaces, unique; the whole search line must match it.
+#   * code: any valid search line, at least 3 characters.
+#   * note: optional, for your reference only.
 # ---------------------------------------------------------------------------
 # [[alias]]
-# name = "pw"
-# code = "11-D-0704"
-# note = "Powerwall bracket"
+# name = "ex"
+# code = "00-X-0000"
+# note = "Example alias"
+#
+# [[alias]]
+# name = "pdfs"
+# code = "ext:pdf example"
