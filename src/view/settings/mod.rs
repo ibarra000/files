@@ -155,6 +155,21 @@ pub(super) const LAYOUTS: &[Choice] = &[
     },
 ];
 
+pub(super) const DOCKS: &[Choice] = &[
+    Choice {
+        value: "free",
+        label: "Floating",
+    },
+    Choice {
+        value: "top",
+        label: "Along the top",
+    },
+    Choice {
+        value: "bottom",
+        label: "Along the bottom",
+    },
+];
+
 pub(super) const THEMES: &[Choice] = &[
     Choice {
         value: "light",

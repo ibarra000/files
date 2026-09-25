@@ -681,6 +681,48 @@ impl ResultLayout {
     }
 }
 
+/// Where the panel sits when it is summoned.
+///
+/// [`Self::Free`] is what it has always done: a 600 by 400 window, placed
+/// twelve per cent down the screen or wherever it was last dragged to. The
+/// other two pin it against an edge of the work area, as wide as the screen
+/// and as tall as it always is - a bar rather than a window, and one that
+/// never moves or changes size, so nothing about it has to be animated or
+/// remembered. Against the work area and not the monitor, so a bottom bar
+/// sits on the taskbar rather than under it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dock {
+    #[default]
+    Free,
+    Top,
+    Bottom,
+}
+
+impl Dock {
+    pub const ALL: [Self; 3] = [Self::Free, Self::Top, Self::Bottom];
+
+    /// The spelling written back to the config file, so it must be one
+    /// [`Self::parse`] accepts.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|d| d.name().eq_ignore_ascii_case(text.trim()))
+    }
+
+    /// Whether the panel is against an edge rather than floating.
+    pub const fn is_docked(self) -> bool {
+        !matches!(self, Self::Free)
+    }
+}
+
 /// Which palette the panel is drawn in.
 ///
 /// A setting rather than a follow of the Windows theme, which is what it used
@@ -1016,6 +1058,8 @@ pub struct Settings {
     pub backdrop: crate::gui::window::Material,
     /// How much of itself a result row shows.
     pub result_layout: ResultLayout,
+    /// Whether the panel floats or is pinned to an edge of the screen.
+    pub dock: Dock,
     /// Overrides the system's `.pdf` association when set.
     ///
     /// Not validated at load, unlike every other path in the configuration. A
@@ -1146,6 +1190,7 @@ impl Settings {
             theme: ThemeChoice::default(),
             backdrop: crate::gui::window::Material::default(),
             result_layout: ResultLayout::default(),
+            dock: Dock::default(),
             pdf_viewer: None,
             migrated: None,
             update_from: None,
@@ -1361,6 +1406,11 @@ impl Settings {
         {
             self.result_layout = v;
         }
+        if env_str("FILES_DOCK").is_none()
+            && let Some(v) = f.dock.as_deref().and_then(Dock::parse)
+        {
+            self.dock = v;
+        }
         self.set_hidden(
             // `env_str` rather than `var` everywhere else, but not here: it
             // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
@@ -1456,6 +1506,9 @@ impl Settings {
         }
         if let Some(v) = env_str("FILES_RESULT_LAYOUT").and_then(|v| ResultLayout::parse(&v)) {
             s.result_layout = v;
+        }
+        if let Some(v) = env_str("FILES_DOCK").and_then(|v| Dock::parse(&v)) {
+            s.dock = v;
         }
         if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
             s.viewer = v;

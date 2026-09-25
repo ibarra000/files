@@ -301,6 +301,14 @@ refresh = "manual"
 # what tells them apart. The path is on the tooltip either way.
 # result_layout = "compact"          # compact | detailed
 
+# Where the panel sits.
+#
+# "free" is a window that floats twelve per cent down the screen, or wherever
+# you last dragged it. "top" and "bottom" pin it against that edge instead,
+# as wide as the screen and a fixed height, so it never moves or changes size.
+# A bottom bar sits on the taskbar rather than under it.
+# dock          = "free"             # free | top | bottom
+
 # How the panel is coloured.
 #
 # "light" is a warm, bright panel and is what you get if this is not set.

@@ -105,10 +105,11 @@ pub enum SettingKey {
     HideOnBlur,
     HideAfterOpening,
     HideOnEscape,
+    Dock,
 }
 
 impl SettingKey {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Viewer,
         Self::Theme,
         Self::Hotkey,
@@ -127,6 +128,7 @@ impl SettingKey {
         Self::HideOnBlur,
         Self::HideAfterOpening,
         Self::HideOnEscape,
+        Self::Dock,
     ];
 
     /// The spelling in the file.
@@ -147,6 +149,7 @@ impl SettingKey {
             Self::IndexLog => "index_log",
             Self::Backdrop => "backdrop",
             Self::ResultLayout => "result_layout",
+            Self::Dock => "dock",
             Self::HideOnBlur => "hide_on_blur",
             Self::HideAfterOpening => "hide_after_opening",
             Self::HideOnEscape => "hide_on_escape",
@@ -175,6 +178,7 @@ impl SettingKey {
             Self::IndexLog => "FILES_INDEX_LOG",
             Self::Backdrop => "FILES_BACKDROP",
             Self::ResultLayout => "FILES_RESULT_LAYOUT",
+            Self::Dock => "FILES_DOCK",
             Self::HideOnBlur => "FILES_HIDE_ON_BLUR",
             Self::HideAfterOpening => "FILES_HIDE_AFTER_OPENING",
             Self::HideOnEscape => "FILES_HIDE_ON_ESCAPE",
@@ -219,6 +223,7 @@ impl SettingKey {
             self,
             Self::Theme
                 | Self::ResultLayout
+                | Self::Dock
                 | Self::Viewer
                 | Self::History
                 | Self::StaleNotices
@@ -626,6 +631,7 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
             .map(|p| Scalar::Path(p.to_string_lossy().into_owned())),
         SettingKey::Backdrop => s.backdrop.clone().map(Scalar::Str),
         SettingKey::ResultLayout => s.result_layout.clone().map(Scalar::Str),
+        SettingKey::Dock => s.dock.clone().map(Scalar::Str),
     }
 }
 
@@ -768,6 +774,7 @@ mod tests {
             SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
             SettingKey::Backdrop => Typed::Text("mica".into()),
             SettingKey::ResultLayout => Typed::Text("detailed".into()),
+            SettingKey::Dock => Typed::Text("bottom".into()),
             SettingKey::HideExtensions => Typed::Text("zzz".into()),
             SettingKey::DevMode => Typed::Flag(true),
             SettingKey::History

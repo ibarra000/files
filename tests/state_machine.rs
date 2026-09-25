@@ -2986,6 +2986,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
             SettingKey::IndexLog => s.index_log = Some(r"C:\index.log".into()),
             SettingKey::Backdrop => s.backdrop = files::gui::window::Material::Mica,
             SettingKey::ResultLayout => s.result_layout = files::config::ResultLayout::Detailed,
+            SettingKey::Dock => s.dock = files::config::Dock::Bottom,
             SettingKey::HideExtensions => {
                 s.hidden = std::sync::Arc::new(files::config::hidden::Hidden::new(
                     &["zzz"],

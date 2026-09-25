@@ -216,6 +216,7 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "theme",
     "backdrop",
     "result_layout",
+    "dock",
     "hide_extensions",
     "hide_system_files",
 ];
@@ -247,6 +248,7 @@ pub struct FileSettings {
     pub theme: Option<String>,
     pub backdrop: Option<String>,
     pub result_layout: Option<String>,
+    pub dock: Option<String>,
     pub hide_extensions: Option<Vec<String>>,
     pub hide_system_files: Option<bool>,
 }
@@ -850,6 +852,21 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     );
                 }
                 out.result_layout = raw.map(str::to_string);
+            }
+            "dock" => {
+                let raw = value.and_then(Value::as_str);
+                if let Some(v) = raw
+                    && crate::config::Dock::parse(v).is_none()
+                {
+                    ctx.err(
+                        item.span(),
+                        None,
+                        None,
+                        format!("unknown dock {v:?} (expected \"free\", \"top\" or \"bottom\")"),
+                        None,
+                    );
+                }
+                out.dock = raw.map(str::to_string);
             }
             _ => {}
         }

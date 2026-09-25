@@ -5,9 +5,9 @@
 //! remembered.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
-use super::{BACKDROPS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
-use crate::config::Settings;
+use super::{BACKDROPS, DOCKS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
 use crate::config::write::SettingKey;
+use crate::config::{Dock, Settings};
 use crate::view::status::Tone;
 
 /// The whole form.
@@ -179,13 +179,33 @@ fn config_file() -> Vec<Block> {
 }
 
 fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
-    let mut where_it_appears = vec![Block::Facts(vec![match placement {
-        Some((left, top)) => Fact::new("Position", format!("Where you left it, {left},{top}")),
-        None => Fact::new(
+    let mut where_it_appears = vec![Block::Rows(vec![row(
+        settings,
+        SettingKey::Dock,
+        "Docked",
+        "Floating is a window you can drag anywhere. Along the top or the bottom \
+         pins it to that edge as a bar the width of the screen, which stays put \
+         and never changes size.",
+        Field::Choice {
+            options: DOCKS,
+            current: index_of(DOCKS, settings.dock.name()),
+        },
+    )])];
+    // A docked panel is not where anybody left it, and cannot be dragged, so
+    // the line says where it is instead of repeating an invitation that would
+    // do nothing. The remembered position is kept either way - it is where
+    // the panel goes back to when it floats again.
+    where_it_appears.push(Block::Facts(vec![match (settings.dock, placement) {
+        (Dock::Top, _) => Fact::new("Position", "Against the top edge of the screen"),
+        (Dock::Bottom, _) => Fact::new("Position", "Against the bottom edge of the screen"),
+        (Dock::Free, Some((left, top))) => {
+            Fact::new("Position", format!("Where you left it, {left},{top}"))
+        }
+        (Dock::Free, None) => Fact::new(
             "Position",
             "Chosen by the program \u{b7} drag the panel to move it",
         ),
-    }])];
+    }]));
     // Only when there is something to forget. A button that does nothing is
     // a button that should not have been there.
     if placement.is_some() {

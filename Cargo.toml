@@ -138,6 +138,9 @@ features = [
     # `MonitorFromWindow`, so the panel lands on the screen it was summoned on
     # rather than on the primary one.
     "Win32_Graphics_Gdi",
+    # `GetDpiForWindow`, so a docked panel's height - and a floating one's
+    # size after it has been docked - is worked out in the monitor's pixels.
+    "Win32_UI_HiDpi",
 ]
 
 # The notification-area icon and its menu. Windows-only, because the tray is:

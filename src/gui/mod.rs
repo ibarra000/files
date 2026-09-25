@@ -255,7 +255,7 @@ impl Shell {
         let hwnd = hwnd_of(cc);
         let backdrop = hwnd.map(|hwnd| {
             window::hide_from_taskbar(hwnd);
-            window::apply(hwnd, dark, settings.backdrop)
+            window::apply(hwnd, dark, settings.backdrop, !settings.dock.is_docked())
         });
         let system_fonts = fonts::install(&cc.egui_ctx);
         // After the fonts, because the style names families by the names
@@ -289,6 +289,8 @@ impl Shell {
             app.actors.panel.remember(placement::load(&path));
             placement::spawn_writer(path).ok()
         });
+        // And the dock, for the same reason: the first summon reads it.
+        app.actors.panel.set_dock(app.state.settings.dock);
 
         // Built on the event loop's own thread, which is where the tray icon's
         // hidden window has to live for its messages to be pumped at all.
@@ -352,7 +354,13 @@ impl Shell {
         // several hundred bytes and the theme moves about twice a day.
         theme::apply_style(ctx, &self.theme);
         if let Some(hwnd) = self.hwnd {
-            self.backdrop = Some(window::apply(hwnd, dark, self.app.state.settings.backdrop));
+            let settings = &self.app.state.settings;
+            self.backdrop = Some(window::apply(
+                hwnd,
+                dark,
+                settings.backdrop,
+                !settings.dock.is_docked(),
+            ));
         }
     }
 
@@ -572,6 +580,10 @@ impl eframe::App for Shell {
         let wall = SystemTime::now();
 
         self.follow_theme(ctx);
+        // Every frame, because it is one atomic store and the setting can be
+        // changed from the settings window at any moment. The hotkey thread
+        // acts on it at the next summon.
+        self.app.actors.panel.set_dock(self.app.state.settings.dock);
 
         // Keystrokes first, so a character typed this frame is searched for on
         // this frame rather than on the next one.
@@ -717,10 +729,16 @@ impl eframe::App for Shell {
         // instead - registered *after*, so it beats even the rows - because
         // the air is a thin target and the panel is frameless: there is no
         // caption bar to reach for.
+        //
+        // None of it while docked. A bar pinned to an edge is put there by the
+        // setting, and a drag that moved it would be undone by the next
+        // summon - so there is nothing to grab, and the header and footer are
+        // left to the controls in them.
+        let docked = self.app.state.settings.dock.is_docked();
         let alt = ui.input(|i| i.modifiers.alt);
         let sense = egui::Sense::click_and_drag();
         let (header, footer) = panel::handles(ui.max_rect());
-        let chrome = (!alt).then(|| {
+        let chrome = (!alt && !docked).then(|| {
             let top = ui.interact(header, egui::Id::new("files-chrome-header"), sense);
             let bottom = ui.interact(footer, egui::Id::new("files-chrome-footer"), sense);
             top.union(bottom)
@@ -735,11 +753,13 @@ impl eframe::App for Shell {
             wall,
         );
 
-        let chrome = match chrome {
-            Some(chrome) => chrome,
-            None => ui.interact(ui.max_rect(), egui::Id::new("files-chrome-all"), sense),
-        };
-        self.follow_drag(&ui.ctx().clone(), &chrome);
+        if !docked {
+            let chrome = match chrome {
+                Some(chrome) => chrome,
+                None => ui.interact(ui.max_rect(), egui::Id::new("files-chrome-all"), sense),
+            };
+            self.follow_drag(&ui.ctx().clone(), &chrome);
+        }
 
         // Fed rather than sent: these were produced on the drawing thread, and
         // a send would go round the channel to arrive one frame later - which

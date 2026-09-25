@@ -104,6 +104,7 @@ impl AppState {
             // to read them anyway.
             SettingKey::Theme
             | SettingKey::ResultLayout
+            | SettingKey::Dock
             | SettingKey::Backdrop
             | SettingKey::HideOnBlur
             | SettingKey::HideAfterOpening

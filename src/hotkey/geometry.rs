@@ -75,11 +75,8 @@ pub const TOP_FRACTION: f32 = 0.12;
 /// badly wrong produces at worst a full-screen window, and never one positioned
 /// outside the desktop where it cannot be reached.
 ///
-/// The height is the panel's height *at the moment it is summoned*, and the top
-/// edge is fixed from it. The panel then grows downward as results arrive,
-/// which is both the stable choice and the legible one: a list that grows by
-/// pushing its own search box up the screen is a list nobody can read while it
-/// is arriving.
+/// The height is the panel's height, which no longer changes once it is up:
+/// the list scrolls inside a fixed window rather than growing it.
 pub fn place(work: RectPx, want: (i32, i32)) -> RectPx {
     let w = want
         .0
@@ -126,6 +123,29 @@ pub fn place_at(work: RectPx, want: (i32, i32), at: (i32, i32)) -> RectPx {
     let top = at.1.clamp(work.top, (work.bottom - h).max(work.top));
 
     RectPx::new(left, top, left + w, top + h)
+}
+
+/// Which edge of the work area a docked panel is pinned to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edge {
+    Top,
+    Bottom,
+}
+
+/// Where a docked panel goes: the full width of the work area, `height` tall,
+/// flush against `edge`.
+///
+/// The work area rather than the monitor, for the reason [`place`] gives -
+/// and here it is the whole feature, because the bottom of the monitor is
+/// where the taskbar is. Same clamp as the floating placements, so a height
+/// that went wrong fills the screen at worst.
+pub fn place_docked(work: RectPx, height: i32, edge: Edge) -> RectPx {
+    let h = height.clamp(MIN_PX.1.min(work.height()), work.height().max(1));
+    let top = match edge {
+        Edge::Top => work.top,
+        Edge::Bottom => work.bottom - h,
+    };
+    RectPx::new(work.left, top, work.right, top + h)
 }
 
 #[cfg(test)]
@@ -274,5 +294,47 @@ mod tests {
         let placed = place(WORK, (720, 300));
         let again = place_at(WORK, (720, 300), (placed.left, placed.top));
         assert_eq!(placed, again);
+    }
+
+    // --- docked against an edge ---------------------------------------------
+
+    /// A bar the width of the screen, and the height it was asked for.
+    #[test]
+    fn a_panel_docked_to_the_top_spans_the_work_area_along_its_top_edge() {
+        let r = place_docked(WORK, 400, Edge::Top);
+        assert_eq!(r, RectPx::new(0, 0, 1920, 400));
+    }
+
+    /// The work area's bottom, which is the top of the taskbar - so a bottom
+    /// bar sits on the taskbar rather than behind it.
+    #[test]
+    fn a_panel_docked_to_the_bottom_sits_on_the_taskbar_not_under_it() {
+        let r = place_docked(WORK, 400, Edge::Bottom);
+        assert_eq!(r, RectPx::new(0, 640, 1920, 1040));
+    }
+
+    /// A taskbar down the left side moves the work area's left edge, and the
+    /// bar has to start there rather than at the monitor's.
+    #[test]
+    fn a_taskbar_on_the_left_narrows_the_bar_rather_than_covering_it() {
+        let work = RectPx::new(62, 0, 1920, 1080);
+        let r = place_docked(work, 400, Edge::Top);
+        assert_eq!((r.left, r.right), (62, 1920));
+    }
+
+    /// And a second monitor is its own work area, negative coordinates and all.
+    #[test]
+    fn a_docked_panel_follows_the_monitor_it_was_given() {
+        let work = RectPx::new(-1920, 0, 0, 1040);
+        let r = place_docked(work, 400, Edge::Bottom);
+        assert_eq!(r, RectPx::new(-1920, 640, 0, 1040));
+    }
+
+    /// The same clamp as the floating placement: never taller than the screen,
+    /// and never so short it cannot be seen.
+    #[test]
+    fn a_docked_height_is_kept_between_nothing_and_the_whole_screen() {
+        assert_eq!(place_docked(WORK, 99_999, Edge::Bottom), WORK);
+        assert_eq!(place_docked(WORK, 0, Edge::Top).height(), MIN_PX.1);
     }
 }
