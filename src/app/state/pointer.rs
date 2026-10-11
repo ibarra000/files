@@ -161,7 +161,7 @@ impl AppState {
         let mut response = match action {
             ActionId::Open => self.on_key(KeyEvent::new(Key::Enter, Mods::NONE), now),
             ActionId::OpenAsDocument => self.open_with(ViewerKind::Pdf, now),
-            ActionId::OpenInAvwin => self.open_with(ViewerKind::Avwin, now),
+            ActionId::OpenWith(i) => self.open_with(ViewerKind::App(i), now),
             ActionId::OpenWithWindows => self.open_with(ViewerKind::Auto, now),
             ActionId::Reveal => self.reveal_selection(now),
             ActionId::CopyPath => self.copy_path(now),

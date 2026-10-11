@@ -138,15 +138,14 @@ pub struct AppState {
     /// Reported so the status line can say the results shifted underneath a
     /// pinned selection.
     pub selection_lost: bool,
-    /// Whether `avwin.exe` could not be found on PATH when the program
-    /// started.
+    /// Which configured viewers could not be found, indexed like
+    /// `settings.viewers`.
     ///
     /// Carried here rather than left on [`crate::app::App`] because the only
     /// thing anybody can usefully do with it is say so, and saying things is
-    /// what `view::status` is for. It was probed and discarded for the whole
-    /// of the rewrite, so choosing the viewer that is not installed failed
-    /// silently at the moment a drawing was wanted.
-    pub avwin_missing: bool,
+    /// what `view::status` is for. A viewer that was probed and discarded
+    /// would fail silently at the moment a drawing was wanted.
+    pub viewers_missing: Box<[bool]>,
     /// Which viewer Enter uses, right now.
     ///
     /// Separate from `settings.viewer`, which is the value resolved at
@@ -294,7 +293,7 @@ impl AppState {
             selection_pinned: false,
             selected_path: None,
             selection_lost: false,
-            avwin_missing: false,
+            viewers_missing: Box::default(),
             viewer,
             query_epoch: 0,
             search_due_at: None,
@@ -359,12 +358,21 @@ impl AppState {
         self.history = History::from_entries(entries);
     }
 
-    /// Records the startup probe for `avwin.exe`.
+    /// Records which configured viewers a probe could not find.
     ///
     /// Separate from [`AppState::new`] for the same reason as the history: the
-    /// state machine does no I/O, and searching PATH is I/O.
-    pub fn set_avwin_missing(&mut self, missing: bool) {
-        self.avwin_missing = missing;
+    /// state machine does no I/O, and searching PATH is I/O. See
+    /// [`crate::open::probe_viewers`].
+    pub fn set_viewers_missing(&mut self, missing: Box<[bool]>) {
+        self.viewers_missing = missing;
+    }
+
+    /// Whether the viewer `viewer` names is one a probe could not find.
+    pub fn viewer_missing(&self, viewer: ViewerKind) -> bool {
+        match viewer.within(&self.settings.viewers) {
+            ViewerKind::App(i) => self.viewers_missing.get(i).copied().unwrap_or(false),
+            _ => false,
+        }
     }
 
     /// When the authoritative server-side check is due, if one is pending.
@@ -943,7 +951,8 @@ impl AppState {
         let code = self.query.term().to_string();
         // Decided before the path is moved into the request, and kept, because
         // the answer is wanted again below.
-        let route = crate::open::route_of(viewer, &path);
+        let viewers = Arc::clone(&self.settings.viewers);
+        let route = crate::open::route_of(viewer, &path, &viewers);
         let request = crate::open::OpenRequest {
             path,
             // The typed code, not the selected row: the page set is rebuilt
@@ -952,6 +961,7 @@ impl AppState {
             // out of order.
             query: code.clone(),
             viewer,
+            viewers,
         };
         let mut response = Response::none().with(Cmd::Open(request));
 
@@ -963,7 +973,7 @@ impl AppState {
         //
         // Asked of the *route* rather than the mode: assembling a document is
         // the only one of the three that goes to the share at all. Handing one
-        // file to avwin or to the shell is a single call that returns at once,
+        // file to a viewer or to the shell is a single call that returns at once,
         // and a notice for it would be on screen and gone inside a frame.
         if route == crate::open::Route::Document {
             self.set_toast("Opening\u{2026}".into(), Severity::Info, now);
@@ -1664,10 +1674,13 @@ impl AppState {
                 self.set_toast_detailed(title.clone(), detail.clone(), Severity::Error, now);
                 self.also_say(&title, detail)
             }
-            OpenMsg::ViewerSaved { viewer } => {
-                // `display`, not `name`: the latter is the config spelling
-                // and is round-tripped through the file.
-                self.set_toast(format!("Viewer: {}", viewer.display()), Severity::Info, now);
+            OpenMsg::ViewerSaved { name } => {
+                // `display`, not the name that was written: that is the
+                // config spelling and is round-tripped through the file.
+                let viewers = &self.settings.viewers;
+                let said =
+                    ViewerKind::parse(&name, viewers).map_or(name.as_ref(), |v| v.display(viewers));
+                self.set_toast(format!("Viewer: {said}"), Severity::Info, now);
                 Response::redraw()
             }
             // The change is already in force for this session - the state

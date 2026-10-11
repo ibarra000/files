@@ -110,7 +110,7 @@ fn table() -> Vec<Binding> {
             Key::Char('e'),
             CTRL,
             Searching,
-            "open the selection in avwin",
+            "open the selection with the first configured viewer",
         ),
         b(
             Key::Char('o'),
@@ -192,6 +192,17 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
     );
 }
 
+/// The settings every test here starts from: the defaults, plus the viewer
+/// that used to be built in, configured the way somebody would write it.
+fn with_avwin() -> Settings {
+    Settings {
+        viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
+            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ])),
+        ..Settings::default()
+    }
+}
+
 /// A state already at `at`, reached the way the program reaches it rather than
 /// by assigning a field - so the fixture cannot describe a state the program
 /// cannot get into.
@@ -205,7 +216,7 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
 /// `tests/overlay.rs` is where that lives.
 fn fixture(at: Where) -> (AppState, Instant) {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let mut s = AppState::new(with_avwin(), now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
     for c in "11-D-0704".chars() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), NONE)), now);

@@ -30,9 +30,20 @@ use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use files::search::verify::{AuditVerdict, VerifyOutcome};
 
+/// The settings every test here starts from: the defaults, plus the viewer
+/// that used to be built in, configured the way somebody would write it.
+fn with_avwin() -> Settings {
+    Settings {
+        viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
+            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ])),
+        ..Settings::default()
+    }
+}
+
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    (AppState::new(Settings::default(), now), now)
+    (AppState::new(with_avwin(), now), now)
 }
 
 /// A state with no share configured at all.
@@ -1274,7 +1285,7 @@ fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
     assert!(
         r.cmds
             .iter()
-            .any(|c| matches!(c, Cmd::SaveViewer(ViewerKind::Pdf))),
+            .any(|c| matches!(c, Cmd::SaveViewer(name) if name.as_ref() == "pdf")),
         "{:?}",
         r.cmds
     );
@@ -1282,9 +1293,50 @@ fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
     // All the way round, so a mode that F2 cannot reach is a failure here
     // rather than something nobody notices.
     s.update(press(Key::F(2)), now);
-    assert_eq!(s.viewer, ViewerKind::Avwin);
-    s.update(press(Key::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::App(0));
+    assert!(
+        s.update(press(Key::F(2)), now)
+            .cmds
+            .iter()
+            .any(|c| matches!(c, Cmd::SaveViewer(name) if name.as_ref() == "auto"))
+    );
     assert_eq!(s.viewer, ViewerKind::Auto, "it cycles back");
+}
+
+/// With no viewer configured F2 has only the built-in two to visit.
+#[test]
+fn f2_without_viewers_toggles_between_the_built_in_two() {
+    let now = Instant::now();
+    let mut s = AppState::new(Settings::default(), now);
+    s.update(press(Key::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Pdf);
+    s.update(press(Key::F(2)), now);
+    assert_eq!(s.viewer, ViewerKind::Auto);
+}
+
+/// `Ctrl+E` opens with the first configured viewer, and with none it does
+/// nothing at all rather than open with something nobody chose.
+#[test]
+fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
+    let (mut s, now) = state();
+    type_in(&mut s, "11-D-0704", now);
+    s.update(search_result(&view(&s), vec![hit("a.dwg")], 1, 9), now);
+    let r = s.update(ctrl(Key::Char('e')), now);
+    let opened = r.cmds.iter().find_map(|c| match c {
+        Cmd::Open(req) => Some(req.viewer),
+        _ => None,
+    });
+    assert_eq!(opened, Some(ViewerKind::App(0)), "{:?}", r.cmds);
+
+    let mut none = AppState::new(Settings::default(), now);
+    type_in(&mut none, "11-D-0704", now);
+    none.update(search_result(&view(&none), vec![hit("a.dwg")], 1, 9), now);
+    let r = none.update(ctrl(Key::Char('e')), now);
+    assert!(
+        !r.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
+        "{:?}",
+        r.cmds
+    );
 }
 
 /// A doubled character is visible; a doubled toggle is a silent no-op that
@@ -1433,7 +1485,7 @@ fn a_saved_viewer_is_confirmed_on_screen() {
     let (mut s, now) = state();
     s.update(
         AppEvent::Open(OpenMsg::ViewerSaved {
-            viewer: ViewerKind::Avwin,
+            name: "avwin".into(),
         }),
         now,
     );
@@ -2268,15 +2320,16 @@ fn every_toast() -> Vec<String> {
     }
 
     // Every viewer, saved and unsaveable.
-    for viewer in [ViewerKind::Auto, ViewerKind::Pdf, ViewerKind::Avwin] {
+    for viewer in [ViewerKind::Auto, ViewerKind::Pdf, ViewerKind::App(0)] {
         let (mut s, now) = state();
-        s.update(AppEvent::Open(OpenMsg::ViewerSaved { viewer }), now);
+        let name = viewer.name(&s.settings.viewers).into();
+        s.update(AppEvent::Open(OpenMsg::ViewerSaved { name }), now);
         raised(&s);
 
         let mut unsaveable = AppState::new(
             Settings {
                 have_file: false,
-                ..Settings::default()
+                ..with_avwin()
             },
             now,
         );
@@ -3108,7 +3161,10 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
         };
         match key {
             SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
-            SettingKey::Viewer => s.viewer = files::config::ViewerKind::Avwin,
+            SettingKey::Viewer => {
+                s.viewers = with_avwin().viewers;
+                s.viewer = files::config::ViewerKind::App(0);
+            }
             SettingKey::Hotkey => s.hotkey = files::hotkey::spec::HotkeySpec::Off,
             SettingKey::PdfViewer => s.pdf_viewer = Some(r"C:\viewer.exe".into()),
             SettingKey::UpdateFrom => s.update_from = Some(r"\\server\share".into()),

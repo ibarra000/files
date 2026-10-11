@@ -151,7 +151,22 @@ impl AppState {
             // written, so each of these is one open with a different one -
             // not a mode change, an open, and a mode change back.
             Key::Char('d') if ctrl && !alt => self.act_on_selection(ViewerKind::Pdf, now),
-            Key::Char('e') if ctrl && !alt => self.act_on_selection(ViewerKind::Avwin, now),
+            // The first configured viewer, where there is one. With none
+            // there is nothing for the key to mean.
+            Key::Char('e') if ctrl && !alt => {
+                if self.settings.viewers.is_empty() {
+                    // Said rather than ignored, so the key does not look broken.
+                    self.set_toast(
+                        "No viewer is configured \u{b7} add a [[viewer]] to the settings file"
+                            .into(),
+                        Severity::Info,
+                        now,
+                    );
+                    Response::redraw()
+                } else {
+                    self.act_on_selection(ViewerKind::App(0), now)
+                }
+            }
             Key::Char('o') if ctrl && !alt => self.reveal_selection(now),
             // Everything there is to do with the row, in one press. Ueli's
             // key, and the reason the footer can be two buttons rather than
@@ -292,10 +307,11 @@ impl AppState {
     /// a different program to open a file with is not a reason to search
     /// again.
     fn toggle_viewer(&mut self, now: Instant) -> Response {
-        self.viewer = self.viewer.next();
+        let viewers = std::sync::Arc::clone(&self.settings.viewers);
+        self.viewer = self.viewer.next(&viewers);
         // `display`, not `name`: the latter is the spelling the config file
         // round-trips, and `Pdf` reads as a typo on screen.
-        let name = self.viewer.display();
+        let name = self.viewer.display(&viewers);
 
         if self
             .settings
@@ -303,7 +319,7 @@ impl AppState {
         {
             // The toast is raised by the save reporting back, so that what the
             // user reads is what actually reached the disk.
-            Response::redraw().with(Cmd::SaveViewer(self.viewer))
+            Response::redraw().with(Cmd::SaveViewer(self.viewer.name(&viewers).into()))
         } else {
             // The environment or the command line outranks the file, so
             // writing it would report a save the next start ignores. Saying so

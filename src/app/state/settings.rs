@@ -73,6 +73,13 @@ impl AppState {
         // file - so it is not covered by the loop above.
         self.resize_statuses();
 
+        // The viewers are their own array too. What a probe found about the
+        // old list says nothing about the new one, so it is dropped here and
+        // the caller, which may do I/O, probes again.
+        if self.settings.viewers != was.viewers {
+            self.viewers_missing = Box::default();
+        }
+
         let mut response = Response::redraw();
 
         // The line already on the panel may have just become an alias, or
@@ -124,7 +131,7 @@ impl AppState {
             // The viewer is two fields, and they are not the same thing:
             // `settings.viewer` is what the form reads back and `self.viewer`
             // is what Enter uses. F2 moves only the second.
-            SettingKey::Viewer => self.viewer = self.settings.viewer,
+            SettingKey::Viewer => self.viewer = self.settings.viewer.within(&self.settings.viewers),
             // Turning the history off throws away what is in memory as
             // well as stopping new entries, or the up arrow would still
             // recall codes from a list the user has just asked not to be

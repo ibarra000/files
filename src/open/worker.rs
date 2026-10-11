@@ -159,11 +159,11 @@ fn run(backend: &Backend, rx: &Receiver<OpenRequest>, events: &Events) {
 fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
     // Only the PDF route needs a listing, and a failure to get one is not a
     // failure to open: it degrades to the single selected file.
-    let snapshot = match super::route_of(request.viewer, &request.path) {
+    let snapshot = match super::route_of(request.viewer, &request.path, &request.viewers) {
         super::Route::Document => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
         // Both of these are handed one file, so neither has a use for a
         // listing.
-        super::Route::Avwin | super::Route::Shell => None,
+        super::Route::App(_) | super::Route::Shell => None,
     };
 
     let cx = OpenContext {
@@ -214,7 +214,10 @@ mod tests {
         OpenRequest {
             path: Arc::from(path),
             query: "11-D-0704".into(),
-            viewer: ViewerKind::Avwin,
+            viewer: ViewerKind::App(0),
+            viewers: Arc::new(crate::config::Viewers::new(vec![
+                crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            ])),
         }
     }
 

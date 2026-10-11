@@ -90,7 +90,8 @@ pub struct Overrides {
     pub server_filter: Option<bool>,
     pub persist: Option<bool>,
     pub index_log: Option<PathBuf>,
-    pub viewer: Option<ViewerKind>,
+    /// As written. Whether it names a viewer depends on the configuration.
+    pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
 }
@@ -122,6 +123,17 @@ fn pinned<T>(
     }
 }
 
+/// What to say about a `--viewer` that names nothing.
+fn unknown_viewer(name: &str, viewers: &crate::config::Viewers) -> String {
+    let mut expected = String::from("\"auto\", \"pdf\"");
+    for n in viewers.names() {
+        expected.push_str(&format!(", {n:?}"));
+    }
+    format!(
+        "unknown --viewer value {name:?} (expected {expected}, or a [[viewer]] added to the configuration)"
+    )
+}
+
 impl Args {
     /// Resolves settings: shipped defaults, then the config file, then the
     /// environment, then these flags.
@@ -148,9 +160,20 @@ impl Args {
         // nothing, so the settings window offered to save a path that
         // `--pdf-viewer` was overruling, reported success, and changed
         // nothing at all - the precise failure `Pin` exists to prevent.
-        pinned(&mut s, SettingKey::Viewer, self.overrides.viewer, |s, v| {
-            s.viewer = v
-        });
+        let viewer = match self.overrides.viewer.as_deref() {
+            Some(name) => Some(ViewerKind::parse(name, &s.viewers).ok_or_else(|| {
+                vec![ConfigError {
+                    path: PathBuf::from("--viewer"),
+                    loc: None,
+                    entry: None,
+                    rule: None,
+                    message: unknown_viewer(name, &s.viewers),
+                    snippet: None,
+                }]
+            })?),
+            None => None,
+        };
+        pinned(&mut s, SettingKey::Viewer, viewer, |s, v| s.viewer = v);
         pinned(
             &mut s,
             SettingKey::PdfViewer,
@@ -232,13 +255,13 @@ OPTIONS:
     --server-filter <on|off>
                         push the search pattern to the file server
                         (default: off until --bench confirms it is safe)
-    --viewer <KIND>     auto | pdf | avwin               (default: auto)
-                        auto picks per file: documents assembled, everything
-                        else - a drawing included - handed to avwin. pdf
-                        gathers every page of the code into one document and
-                        opens it with the system's PDF handler; a drawing
-                        cannot be one, so it still goes to avwin. avwin opens
-                        the single selected file whatever it is. F2 switches
+    --viewer <KIND>     auto | pdf | <a [[viewer]] name> (default: auto)
+                        auto hands each file to the program Windows has for
+                        it. pdf gathers every page of the code into one
+                        document and opens it with the system's PDF handler;
+                        a type a [[viewer]] claims, such as a drawing, goes to
+                        that viewer instead. A [[viewer]] name opens the
+                        single selected file with that program. F2 switches
                         while running, but this flag pins it for the run
     --pdf-viewer <PATH> open merged PDFs with this program instead of
                         whatever is registered for .pdf
@@ -399,11 +422,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
             "--demo" => demo = true,
             "--no-persist" => overrides.persist = Some(false),
             "--viewer" => {
-                let v = value("--viewer")?;
-                overrides.viewer = Some(
-                    ViewerKind::parse(&v)
-                        .ok_or_else(|| ArgError(format!("unknown --viewer value: {v}")))?,
-                );
+                // Kept as written: whether it names a viewer depends on the
+                // configuration, which is not read until `settings`.
+                overrides.viewer = Some(value("--viewer")?);
             }
             "--pdf-viewer" => {
                 overrides.pdf_viewer = Some(PathBuf::from(value("--pdf-viewer")?));
@@ -797,20 +818,32 @@ mod tests {
     #[test]
     fn selects_a_viewer() {
         assert_eq!(
-            args(&["--viewer", "avwin"]).unwrap().overrides.viewer,
-            Some(ViewerKind::Avwin)
+            args(&["--viewer", "avwin"])
+                .unwrap()
+                .overrides
+                .viewer
+                .as_deref(),
+            Some("avwin")
         );
-        assert_eq!(
-            args(&["--viewer", "pdf"]).unwrap().overrides.viewer,
-            Some(ViewerKind::Pdf)
-        );
+        let s = args(&["--no-config", "--viewer", "PDF"])
+            .unwrap()
+            .settings()
+            .unwrap();
+        assert_eq!(s.viewer, ViewerKind::Pdf);
         assert_eq!(args(&[]).unwrap().overrides.viewer, None);
     }
 
+    /// Checked once the configuration is read, against the viewers it adds:
+    /// with none, only the built-in two are names.
     #[test]
     fn an_unknown_viewer_is_rejected_with_its_name() {
-        let err = args(&["--viewer", "notepad"]).unwrap_err();
-        assert!(err.0.contains("notepad"), "{}", err.0);
+        let errs = args(&["--no-config", "--viewer", "notepad"])
+            .unwrap()
+            .settings()
+            .unwrap_err();
+        let msg = crate::config::file::report(&errs);
+        assert!(msg.contains("notepad"), "{msg}");
+        assert!(msg.contains("[[viewer]]"), "{msg}");
         assert!(args(&["--viewer"]).unwrap_err().0.contains("--viewer"));
     }
 

@@ -92,7 +92,7 @@ fn an_intent() -> impl Strategy<Value = Step> {
         1 => prop_oneof![
             Just(files::view::actions::ActionId::Open),
             Just(files::view::actions::ActionId::OpenAsDocument),
-            Just(files::view::actions::ActionId::OpenInAvwin),
+            Just(files::view::actions::ActionId::OpenWith(0)),
             Just(files::view::actions::ActionId::OpenWithWindows),
             Just(files::view::actions::ActionId::Reveal),
             Just(files::view::actions::ActionId::CopyPath),
@@ -256,6 +256,9 @@ fn fresh_in(columns: usize) -> (AppState, Instant) {
     let now = Instant::now();
     let settings = Settings {
         columns,
+        viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
+            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ])),
         ..Settings::default()
     };
     let mut s = AppState::new(settings, now);

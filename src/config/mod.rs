@@ -13,6 +13,7 @@
 pub mod file;
 pub mod hidden;
 pub mod migrate;
+pub mod viewers;
 pub mod write;
 
 use std::path::PathBuf;
@@ -20,6 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::paths::{MappingKind, Routes};
+
+pub use viewers::{ViewerApp, Viewers};
 
 // --- Roots -----------------------------------------------------------------
 
@@ -591,30 +594,32 @@ impl MatcherKind {
 
 /// Which application a chosen result is handed to.
 ///
-/// They differ in more than which executable is spawned. `Avwin` opens the one
-/// file the cursor is on, which is all it can do: the pages of a drawing set
-/// are separate files on the share, and a viewer given one of them shows one
-/// page. `Pdf` treats the code as naming a *document*, gathers every page of it
-/// and hands over a single assembled PDF - which is what someone asking for
-/// `11-D-0704` almost always meant.
+/// They differ in more than which executable is spawned. A configured viewer
+/// ([`Self::App`]) opens the one file the cursor is on, which is all it can
+/// do: the pages of a drawing set are separate files on the share, and a
+/// viewer given one of them shows one page. `Pdf` treats the code as naming a
+/// *document*, gathers every page of it and hands over a single assembled PDF
+/// - which is what someone asking for `11-D-0704` almost always meant.
 ///
-/// `Auto` is neither, and picks between them per file. See
+/// `Auto` is neither, and hands the file to Windows. See
 /// [`crate::open::route_of`], which is where a mode and a file name become a
 /// destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerKind {
-    /// Whatever suits the file: documents assembled, everything else - a
-    /// drawing included - handed to `avwin.exe`.
+    /// Whatever Windows has registered for the file.
     #[default]
     Auto,
     /// Every page of the code, merged into one PDF, opened with the system's
-    /// `.pdf` handler. A drawing is the one thing this cannot assemble - there
-    /// is no Rust that reads DWG - so a drawing still goes to `avwin.exe`.
+    /// `.pdf` handler. A file a configured viewer claims - a drawing, which
+    /// there is no Rust to read - goes to that viewer instead.
     Pdf,
-    /// The single selected file, handed to `avwin.exe`. The behaviour this
-    /// program had before there was a choice, and still the way to see a `.pdf`
-    /// or a `.dwg` in avwin rather than anywhere else.
-    Avwin,
+    /// The single selected file, handed to the configured viewer at this
+    /// position in [`Viewers`].
+    ///
+    /// An index rather than a name so the mode stays `Copy`. It is only ever
+    /// read against the list it was made from; one that is out of range -
+    /// the list shrank under it - behaves as [`Self::Auto`].
+    App(usize),
 }
 
 /// How much of itself a result row shows.
@@ -774,41 +779,58 @@ impl ThemeChoice {
 }
 
 impl ViewerKind {
-    /// Every mode, for the tests that must cover all of them.
-    ///
-    /// A constant rather than a literal at each site: four test arrays used to
-    /// spell `[Pdf, Avwin]` out, which means a new mode makes them quietly stop
-    /// covering it instead of failing.
-    pub const ALL: [Self; 3] = [Self::Auto, Self::Pdf, Self::Avwin];
+    /// Every mode the configured viewers allow, in F2 order.
+    pub fn all(viewers: &Viewers) -> Vec<Self> {
+        [Self::Auto, Self::Pdf]
+            .into_iter()
+            .chain((0..viewers.len()).map(Self::App))
+            .collect()
+    }
 
-    pub fn parse(s: &str) -> Option<Self> {
+    /// Reads a mode from its configuration spelling: one of the built-in two,
+    /// or the name of a configured viewer.
+    pub fn parse(s: &str, viewers: &Viewers) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" | "by-extension" => Some(Self::Auto),
             "pdf" | "merge" | "merged" => Some(Self::Pdf),
-            "avwin" | "av" | "avwin.exe" => Some(Self::Avwin),
+            other => viewers.find(other).map(Self::App),
+        }
+    }
+
+    /// Whether `name` is one of the spellings the built-in modes own, so no
+    /// configured viewer may take it.
+    pub fn is_reserved(name: &str) -> bool {
+        matches!(
+            name.trim().to_ascii_lowercase().as_str(),
+            "auto" | "by-extension" | "pdf" | "merge" | "merged"
+        )
+    }
+
+    /// The configured viewer this mode names, if it names one that exists.
+    pub fn app(self, viewers: &Viewers) -> Option<&ViewerApp> {
+        match self {
+            Self::App(i) => viewers.get(i),
             _ => None,
         }
     }
 
-    /// Whether `avwin.exe` can be reached from this mode.
-    ///
-    /// `Auto` used to be on this list, back when it sent everything that was
-    /// not a document to avwin. It hands those to the system now, so a machine
-    /// with no avwin installed is no longer warned at startup about a viewer
-    /// nothing was going to ask for. F2 is still the way to reach it, and the
-    /// warning is still right for anyone who does.
-    pub fn may_use_avwin(self) -> bool {
-        matches!(self, Self::Avwin)
+    /// This mode, with an index that no longer names anything put back to
+    /// `Auto`.
+    pub fn within(self, viewers: &Viewers) -> Self {
+        match self {
+            Self::App(i) if i >= viewers.len() => Self::Auto,
+            other => other,
+        }
     }
 
     /// The spelling written to the config file, so it must be one `parse`
-    /// accepts. `every_key_the_writer_can_emit_is_an_accepted_setting` pins
-    /// that, because an unknown value is a hard startup error.
-    pub fn name(self) -> &'static str {
-        match self {
+    /// accepts against the same list - `every_name_the_writer_emits_parses_back`
+    /// pins that, because an unknown value is a hard startup error.
+    pub fn name(self, viewers: &Viewers) -> &str {
+        match self.within(viewers) {
             Self::Auto => "auto",
             Self::Pdf => "pdf",
-            Self::Avwin => "avwin",
+            Self::App(i) => &viewers.all()[i].name,
         }
     }
 
@@ -817,22 +839,25 @@ impl ViewerKind {
     /// Separate from [`Self::name`], which is the configuration file's spelling
     /// and is round-tripped through [`Self::parse`]. Using a serialisation
     /// identifier as a label is how the footer came to say `viewer: pdf` in a
-    /// panel where every other word is capitalised.
-    pub fn display(self) -> &'static str {
-        match self {
+    /// panel where every other word is capitalised. A configured viewer is
+    /// shown as its owner wrote it.
+    pub fn display(self, viewers: &Viewers) -> &str {
+        match self.within(viewers) {
             Self::Auto => "Auto",
             Self::Pdf => "PDF",
-            Self::Avwin => "avwin",
+            Self::App(i) => &viewers.all()[i].name,
         }
     }
 
-    /// What F2 does. A cycle rather than a boolean so a third viewer is one
-    /// match arm rather than a rethink.
-    pub fn next(self) -> Self {
-        match self {
-            Self::Pdf => Self::Avwin,
-            Self::Avwin => Self::Auto,
+    /// What F2 does: the built-in two, then every configured viewer in the
+    /// order the file lists them, then round again.
+    pub fn next(self, viewers: &Viewers) -> Self {
+        match self.within(viewers) {
             Self::Auto => Self::Pdf,
+            Self::Pdf if viewers.is_empty() => Self::Auto,
+            Self::Pdf => Self::App(0),
+            Self::App(i) if i + 1 < viewers.len() => Self::App(i + 1),
+            Self::App(_) => Self::Auto,
         }
     }
 }
@@ -921,6 +946,12 @@ pub struct Settings {
     /// into the backend and every worker, and an alias table is read on a
     /// keystroke rather than copied on one.
     pub aliases: Arc<crate::alias::Aliases>,
+    /// The programs `[[viewer]]` names, in the order the file lists them.
+    ///
+    /// An `Arc` for the reason `aliases` is one, and carried on every open
+    /// request rather than read off the backend's copy: a [`ViewerKind::App`]
+    /// is an index, and only means something against the list it came from.
+    pub viewers: Arc<Viewers>,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
     /// Server-side wildcard filtering. Ships **off** so it can be enabled only
@@ -1174,6 +1205,7 @@ impl Settings {
         tweak(Self {
             routes,
             aliases: Arc::new(crate::alias::Aliases::default()),
+            viewers: Arc::new(Viewers::default()),
             enum_strategy: EnumStrategy::default(),
             matcher: MatcherKind::default(),
             server_filter: false,
@@ -1289,6 +1321,7 @@ impl Settings {
 
         let mut s = Self::from_env_with(parsed.routes);
         s.aliases = Arc::new(parsed.aliases);
+        s.viewers = Arc::new(parsed.viewers);
         s.migrated = migrated;
         s.apply_file_settings(&parsed.settings);
         // Everything else about what may be written is asked of the
@@ -1376,8 +1409,23 @@ impl Settings {
         {
             self.hotkey = v;
         }
-        if env_str("FILES_VIEWER").is_none()
-            && let Some(v) = f.viewer.as_deref().and_then(ViewerKind::parse)
+        // Here rather than with the other environment variables, because a
+        // viewer is only a name until the file has said which viewers exist.
+        // The environment still wins.
+        // A `FILES_VIEWER` that is set still outranks the file when it names
+        // nothing, as it always has: the environment is pinning the setting,
+        // and quietly applying the file's value under that pin would be a
+        // viewer nobody chose.
+        let viewers = Arc::clone(&self.viewers);
+        if let Some(env) = env_str("FILES_VIEWER") {
+            match ViewerKind::parse(&env, &viewers) {
+                Some(v) => self.viewer = v,
+                None => log::warn!("FILES_VIEWER={env:?} names no viewer; ignored"),
+            }
+        } else if let Some(v) = f
+            .viewer
+            .as_deref()
+            .and_then(|v| ViewerKind::parse(v, &viewers))
         {
             self.viewer = v;
         }
@@ -1536,7 +1584,12 @@ impl Settings {
         if let Some(v) = env_bool("FILES_CHECK_FOR_UPDATES") {
             s.check_for_updates = v;
         }
-        if let Some(v) = env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v)) {
+        // `FILES_VIEWER` is read in `apply_file_settings`, once the file has
+        // said which viewers exist. Of the built-in two it can name either
+        // here, which is all a run with no file can have.
+        if let Some(v) =
+            env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v, &Viewers::default()))
+        {
             s.viewer = v;
         }
         if let Some(v) = env_str("FILES_PDF_VIEWER") {
@@ -1806,40 +1859,61 @@ mod tests {
         assert_eq!(MatcherKind::parse(""), None);
     }
 
+    fn two_viewers() -> Viewers {
+        Viewers::new(vec![
+            ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            ViewerApp::new("Notes", "notepad.exe", &[]),
+        ])
+    }
+
     #[test]
     fn parses_every_viewer_spelling() {
-        assert_eq!(ViewerKind::parse("auto"), Some(ViewerKind::Auto));
-        assert_eq!(ViewerKind::parse(" AUTO "), Some(ViewerKind::Auto));
-        assert_eq!(ViewerKind::parse("by-extension"), Some(ViewerKind::Auto));
-        assert_eq!(ViewerKind::parse("pdf"), Some(ViewerKind::Pdf));
-        assert_eq!(ViewerKind::parse("  MERGE "), Some(ViewerKind::Pdf));
-        assert_eq!(ViewerKind::parse("avwin"), Some(ViewerKind::Avwin));
-        assert_eq!(ViewerKind::parse("AVWIN.EXE"), Some(ViewerKind::Avwin));
-        assert_eq!(ViewerKind::parse("notepad"), None);
+        let none = Viewers::default();
+        assert_eq!(ViewerKind::parse("auto", &none), Some(ViewerKind::Auto));
+        assert_eq!(ViewerKind::parse(" AUTO ", &none), Some(ViewerKind::Auto));
+        assert_eq!(
+            ViewerKind::parse("by-extension", &none),
+            Some(ViewerKind::Auto)
+        );
+        assert_eq!(ViewerKind::parse("pdf", &none), Some(ViewerKind::Pdf));
+        assert_eq!(ViewerKind::parse("  MERGE ", &none), Some(ViewerKind::Pdf));
+        // Nothing is built in beyond those two.
+        assert_eq!(ViewerKind::parse("avwin", &none), None);
+
+        let two = two_viewers();
+        assert_eq!(ViewerKind::parse("AVWIN", &two), Some(ViewerKind::App(0)));
+        assert_eq!(ViewerKind::parse("notes", &two), Some(ViewerKind::App(1)));
+        assert_eq!(ViewerKind::parse("notepad", &two), None);
     }
 
     /// Assembling the whole document is what someone typing a code almost
     /// always meant; opening one page of it is the special case.
     #[test]
     fn opening_by_file_type_is_the_default() {
-        // Only for a fresh install. Every config.toml this program has ever
-        // written names a viewer explicitly, so nobody's behaviour changes
-        // without them editing the file.
         assert_eq!(Settings::default().viewer, ViewerKind::Auto);
+        assert!(Settings::default().viewers.is_empty());
     }
 
     #[test]
     fn the_viewer_cycles_through_every_mode_and_closes() {
-        for start in ViewerKind::ALL {
-            let mut seen = vec![start];
-            let mut v = start;
-            for _ in 1..ViewerKind::ALL.len() {
-                v = v.next();
-                assert!(!seen.contains(&v), "{v:?} came round twice");
-                seen.push(v);
+        for viewers in [Viewers::default(), two_viewers()] {
+            let all = ViewerKind::all(&viewers);
+            assert_eq!(all.len(), 2 + viewers.len());
+            for &start in &all {
+                let mut seen = vec![start];
+                let mut v = start;
+                for _ in 1..all.len() {
+                    v = v.next(&viewers);
+                    assert!(!seen.contains(&v), "{v:?} came round twice");
+                    seen.push(v);
+                }
+                assert_eq!(v.next(&viewers), start, "the cycle does not close");
+                assert_ne!(
+                    start.next(&viewers),
+                    start,
+                    "F2 must always change something"
+                );
             }
-            assert_eq!(v.next(), start, "the cycle does not close");
-            assert_ne!(start.next(), start, "F2 must always change something");
         }
     }
 
@@ -1847,9 +1921,28 @@ mod tests {
     /// or F2 would write a value that stops the program at the next start.
     #[test]
     fn every_name_the_writer_emits_parses_back() {
-        for v in ViewerKind::ALL {
-            assert_eq!(ViewerKind::parse(v.name()), Some(v));
+        let viewers = two_viewers();
+        for v in ViewerKind::all(&viewers) {
+            assert_eq!(ViewerKind::parse(v.name(&viewers), &viewers), Some(v));
         }
+    }
+
+    /// A viewer index the list no longer has is `Auto`, not a panic.
+    #[test]
+    fn a_viewer_that_is_gone_behaves_as_auto() {
+        let none = Viewers::default();
+        assert_eq!(ViewerKind::App(3).within(&none), ViewerKind::Auto);
+        assert_eq!(ViewerKind::App(3).name(&none), "auto");
+        assert_eq!(ViewerKind::App(3).next(&none), ViewerKind::Pdf);
+        assert!(ViewerKind::App(0).app(&none).is_none());
+    }
+
+    #[test]
+    fn the_built_in_spellings_are_reserved() {
+        for name in ["auto", "PDF", " merge ", "by-extension", "merged"] {
+            assert!(ViewerKind::is_reserved(name), "{name}");
+        }
+        assert!(!ViewerKind::is_reserved("avwin"));
     }
 
     /// Nothing to save to, so F2 must say "this session only" rather than

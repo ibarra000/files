@@ -182,7 +182,7 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &FormRow, form: &mut Form<'_>)
         // is a fixed width, because three options of unequal length make
         // three rows that line up with nothing.
         Field::Choice { options, current } => {
-            let labels: Vec<&str> = options.iter().map(|o| o.label).collect();
+            let labels: Vec<&str> = options.iter().map(|o| o.label.as_ref()).collect();
             let salt = format!("files-setting-{}", row.key.name());
             if let Some(i) = widgets::dropdown(ui, &salt, *current, &labels, control_w) {
                 push(Typed::Text(options[i].value.to_string()));

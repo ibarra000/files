@@ -73,7 +73,7 @@
       <Component Id="StartMenuShortcut" Guid="c1e147a0-08ef-4cd1-a0ef-6b1eb096439f">
         <Shortcut Id="FilesShortcut"
                   Name="files"
-                  Description="Search job codes across the drawing shares"
+                  Description="files - indexer"
                   Target="[INSTALLFOLDER]files.exe"
                   WorkingDirectory="INSTALLFOLDER"
                   Icon="ProductICO" />

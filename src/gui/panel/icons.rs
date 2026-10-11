@@ -25,7 +25,7 @@ pub fn of(path: &str) -> Icon {
     match extension(path).as_str() {
         "pdf" => Icon::FilePdf,
 
-        // What avwin opens, and what a job code is usually about. The
+        // Drawings, which are what a job code is usually about. The
         // exchange formats are here too: somebody who has been sent a STEP
         // file is looking at the same kind of thing.
         "dwg" | "dxf" | "dgn" | "plt" | "step" | "stp" | "iges" | "igs" | "sldprt" | "sldasm"

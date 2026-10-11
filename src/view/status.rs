@@ -91,10 +91,16 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
     //
     // `F2` is named rather than described: it is one press, it is reversible,
     // and it is the whole fix.
-    if state.avwin_missing && state.viewer.may_use_avwin() {
+    if state.viewer_missing(state.viewer)
+        && let Some(app) = state.viewer.app(&state.settings.viewers)
+    {
+        // The program as the configuration spells it, which keeps its own
+        // spelling under the house style like any name read out of the file.
         return StatusLine {
-            text: "Enter cannot open anything \u{b7} avwin.exe is not on PATH \u{b7} F2 uses the built-in viewer"
-                .into(),
+            text: format!(
+                "Enter cannot open anything \u{b7} {} is not on PATH \u{b7} F2 switches viewer",
+                app.program
+            ),
             tone: Tone::Warn,
         };
     }
@@ -1067,8 +1073,11 @@ mod tests {
 
         // The viewer that cannot be launched.
         let mut no_viewer = state_at(now);
-        no_viewer.avwin_missing = true;
-        no_viewer.viewer = crate::config::ViewerKind::Avwin;
+        no_viewer.settings.viewers = std::sync::Arc::new(crate::config::Viewers::new(vec![
+            crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ]));
+        no_viewer.set_viewers_missing(Box::new([true]));
+        no_viewer.viewer = crate::config::ViewerKind::App(0);
         say(&no_viewer, EPOCH);
 
         // Every activity, on one drive and on several.

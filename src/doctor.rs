@@ -188,7 +188,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     let _ = writeln!(
         out,
         "VIEWER  {}{}",
-        settings.viewer.name(),
+        settings.viewer.name(&settings.viewers),
         if settings.can_save(crate::config::write::SettingKey::Viewer) {
             ""
         } else {
@@ -809,28 +809,47 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(
         out,
         "  viewer              {} ({})",
-        settings.viewer.name(),
-        match settings.viewer {
-            crate::config::ViewerKind::Auto => "each file opens in whatever Windows registered",
+        settings.viewer.name(&settings.viewers),
+        match settings.viewer.within(&settings.viewers) {
+            crate::config::ViewerKind::Auto => "each file opens in Windows OS registered default",
             crate::config::ViewerKind::Pdf => "the pages of a code, merged into one document",
-            crate::config::ViewerKind::Avwin => "the one selected file, handed to avwin",
+            crate::config::ViewerKind::App(_) => "the one selected file, handed to that program",
         }
     );
 
-    let _ = writeln!(
-        out,
-        "  avwin.exe           {}",
-        if crate::open::avwin_available() {
-            "found on PATH"
-        } else if settings.viewer.may_use_avwin() {
-            "NOT FOUND on PATH - Enter will fail"
+    // One line per configured viewer. None is built in, so a machine with no
+    // `[[viewer]]` has nothing to look for and says so.
+    if settings.viewers.is_empty() {
+        let _ = writeln!(out, "  viewers             (none configured)");
+    }
+    let missing = crate::open::probe_viewers(&settings.viewers);
+    for (i, (app, &gone)) in settings
+        .viewers
+        .all()
+        .iter()
+        .zip(missing.iter())
+        .enumerate()
+    {
+        let in_use = settings.viewer.within(&settings.viewers) == crate::config::ViewerKind::App(i);
+        let found = if !gone {
+            "found"
+        } else if in_use {
+            "NOT FOUND - Enter will fail"
         } else {
-            // Not a complaint under `auto` or `pdf`: neither reaches avwin
-            // unless F2 is pressed, and most machines running this do not have
-            // it installed at all.
-            "not found on PATH (not in use - F2 would need it)"
+            // Not a complaint while another mode is in force: nothing reaches
+            // it unless F2 is pressed.
+            "NOT FOUND (not in use - F2 would need it)"
+        };
+        let _ = writeln!(out, "  {:<19} {} \u{b7} {found}", app.name, app.program);
+        if !app.extensions.is_empty() {
+            let _ = writeln!(
+                out,
+                "  {:<19} takes {} in pdf mode",
+                "",
+                app.extensions.join(", ")
+            );
         }
-    );
+    }
 
     let _ = writeln!(
         out,
@@ -1032,7 +1051,11 @@ fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
         "  FILES_LIVE_UPDATES={}",
         if settings.live_updates { "on" } else { "off" }
     );
-    let _ = writeln!(out, "  FILES_VIEWER={}", settings.viewer.name());
+    let _ = writeln!(
+        out,
+        "  FILES_VIEWER={}",
+        settings.viewer.name(&settings.viewers)
+    );
     let _ = writeln!(out);
     let _ = writeln!(
         out,

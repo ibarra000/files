@@ -353,14 +353,14 @@ impl Actors {
                     }
                     self.opener.request(request, &self.events);
                 }
-                Cmd::SaveViewer(viewer) => crate::config::write::save_viewer_async(
+                Cmd::SaveViewer(name) => crate::config::write::save_viewer_async(
                     self.backend
                         .settings
                         .routes
                         .source()
                         .path()
                         .map(Path::to_path_buf),
-                    viewer,
+                    name,
                     self.events.clone(),
                 ),
                 // On the spot rather than on a worker. Explorer either

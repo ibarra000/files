@@ -14,7 +14,6 @@ use std::time::Duration;
 use crate::app::key::KeyEvent;
 use smallvec::SmallVec;
 
-use crate::config::ViewerKind;
 use crate::index::errors::EnumError;
 use crate::index::store::IndexStatus;
 use crate::open::OpenRequest;
@@ -178,7 +177,7 @@ pub enum OpenMsg {
         /// What the viewer was actually handed, which for a merged document
         /// is not any of the files the user can see.
         path: Arc<str>,
-        /// Pages handed over. One for avwin, so that path needs no special
+        /// Pages handed over. One for a viewer, so that path needs no special
         /// case downstream.
         pages: usize,
         /// Pages that could not be used, already described. Non-empty means
@@ -199,7 +198,8 @@ pub enum OpenMsg {
     /// would leave "the document opened but the setting did not stick"
     /// impossible to report.
     ViewerSaved {
-        viewer: ViewerKind,
+        /// The configuration spelling that was written.
+        name: Arc<str>,
     },
     ViewerSaveFailed {
         detail: String,
@@ -283,7 +283,11 @@ pub enum Cmd {
     /// Write the chosen viewer back to the configuration file, preserving
     /// every comment in it. Emitted only when the state machine already knows
     /// the value can stick - see `Settings::can_save`.
-    SaveViewer(ViewerKind),
+    ///
+    /// The configuration spelling, resolved by the state machine against the
+    /// viewers it holds. The backend's copy of the settings is the one taken
+    /// at startup and may list different ones.
+    SaveViewer(Arc<str>),
     /// Put text on the system clipboard.
     Copy(String),
     /// Say something the user has to see, with no panel to say it on.
