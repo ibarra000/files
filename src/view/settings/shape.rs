@@ -275,7 +275,12 @@ impl Page {
                             out.extend(row.caveat().map(Cow::Owned));
                             match &row.field {
                                 Field::Choice { options, .. } => {
-                                    out.extend(options.iter().map(|o| Cow::Borrowed(o.label)));
+                                    // Only the labels this program wrote. An owned one is a
+                                    // name out of the configuration, as with a fact's value.
+                                    out.extend(options.iter().filter_map(|o| match o.label {
+                                        Cow::Borrowed(text) => Some(Cow::Borrowed(text)),
+                                        Cow::Owned(_) => None,
+                                    }));
                                 }
                                 Field::Text { placeholder, .. } => {
                                     out.push(Cow::Borrowed(*placeholder));

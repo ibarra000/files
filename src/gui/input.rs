@@ -189,7 +189,7 @@ fn chord(key: egui::Key) -> Option<Key> {
         E::Q => Key::Char('q'),
         E::U => Key::Char('u'),
         E::W => Key::Char('w'),
-        // The actions: open as a document, open in avwin, show in Explorer,
+        // The actions: open as a document, open with the first viewer, show in Explorer,
         // and the menu that lists all of them.
         E::D => Key::Char('d'),
         E::E => Key::Char('e'),

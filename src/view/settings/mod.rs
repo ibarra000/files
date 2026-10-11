@@ -46,7 +46,9 @@
 //! checked the eighteen it named, and would not have checked a nineteenth.
 
 use crate::config::write::SettingKey;
-use crate::config::{Pin, Settings};
+use std::borrow::Cow;
+
+use crate::config::{Pin, Settings, ViewerKind};
 
 mod lists;
 mod pages;
@@ -59,12 +61,25 @@ pub use pages::pages;
 pub use shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch, check_prose, prose};
 
 /// One option in a [`Field::Choice`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Cow` for the reason [`Fact::value`] uses one: a borrowed label is one this
+/// program wrote and is held to the house style, and an owned one - a viewer
+/// somebody named in the configuration - keeps the spelling it was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     /// What is written to the file.
-    pub value: &'static str,
+    pub value: Cow<'static, str>,
     /// What the window shows.
-    pub label: &'static str,
+    pub label: Cow<'static, str>,
+}
+
+impl Choice {
+    const fn fixed(value: &'static str, label: &'static str) -> Self {
+        Self {
+            value: Cow::Borrowed(value),
+            label: Cow::Borrowed(label),
+        }
+    }
 }
 
 /// What kind of control a setting needs.
@@ -72,7 +87,9 @@ pub struct Choice {
 pub enum Field {
     /// One of a fixed set, where the set is short enough to show at once.
     Choice {
-        options: &'static [Choice],
+        /// Borrowed for a fixed set; owned where the set comes from the
+        /// configuration, as the viewers do.
+        options: Cow<'static, [Choice]>,
         /// Index into `options`. Always valid: it is derived from the live
         /// setting, which is already one of them.
         current: usize,
@@ -126,94 +143,58 @@ pub struct Section {
 }
 
 pub(super) const BACKDROPS: &[Choice] = &[
-    Choice {
-        value: "acrylic",
-        label: "Acrylic",
-    },
-    Choice {
-        value: "mica",
-        label: "Mica",
-    },
-    Choice {
-        value: "tabbed",
-        label: "Tabbed",
-    },
-    Choice {
-        value: "none",
-        label: "None",
-    },
+    Choice::fixed("acrylic", "Acrylic"),
+    Choice::fixed("mica", "Mica"),
+    Choice::fixed("tabbed", "Tabbed"),
+    Choice::fixed("none", "None"),
 ];
 
 pub(super) const LAYOUTS: &[Choice] = &[
-    Choice {
-        value: "compact",
-        label: "Compact",
-    },
-    Choice {
-        value: "detailed",
-        label: "Detailed",
-    },
+    Choice::fixed("compact", "Compact"),
+    Choice::fixed("detailed", "Detailed"),
 ];
 
 pub(super) const DOCKS: &[Choice] = &[
-    Choice {
-        value: "free",
-        label: "Floating",
-    },
-    Choice {
-        value: "top",
-        label: "Along the top",
-    },
-    Choice {
-        value: "bottom",
-        label: "Along the bottom",
-    },
+    Choice::fixed("free", "Floating"),
+    Choice::fixed("top", "Along the top"),
+    Choice::fixed("bottom", "Along the bottom"),
 ];
 
 pub(super) const COLUMNS: &[Choice] = &[
-    Choice {
-        value: "1",
-        label: "One",
-    },
-    Choice {
-        value: "2",
-        label: "Two",
-    },
-    Choice {
-        value: "3",
-        label: "Three",
-    },
+    Choice::fixed("1", "One"),
+    Choice::fixed("2", "Two"),
+    Choice::fixed("3", "Three"),
 ];
 
 pub(super) const THEMES: &[Choice] = &[
-    Choice {
-        value: "light",
-        label: "Light",
-    },
-    Choice {
-        value: "dark",
-        label: "Dark",
-    },
-    Choice {
-        value: "system",
-        label: "Follow Windows",
-    },
+    Choice::fixed("light", "Light"),
+    Choice::fixed("dark", "Dark"),
+    Choice::fixed("system", "Follow Windows"),
 ];
 
-pub(super) const VIEWERS: &[Choice] = &[
-    Choice {
-        value: "auto",
-        label: "Automatic",
-    },
-    Choice {
-        value: "pdf",
-        label: "PDF",
-    },
-    Choice {
-        value: "avwin",
-        label: "avwin",
-    },
-];
+/// The modes `Enter` can be in: the built-in two, then every viewer the
+/// configuration adds, in its order. Not a constant, because the last part is
+/// the user's.
+pub(super) fn viewer_choices(settings: &Settings) -> Cow<'static, [Choice]> {
+    let fixed = [
+        Choice::fixed("auto", "Automatic"),
+        Choice::fixed("pdf", "PDF"),
+    ];
+    let configured = settings.viewers.all().iter().map(|v| Choice {
+        value: Cow::Owned(v.name.to_string()),
+        label: Cow::Owned(v.name.to_string()),
+    });
+    Cow::Owned(fixed.into_iter().chain(configured).collect())
+}
+
+/// Which of [`viewer_choices`] is in force.
+pub(super) fn viewer_index(settings: &Settings) -> usize {
+    match settings.viewer.within(&settings.viewers) {
+        ViewerKind::Auto => 0,
+        ViewerKind::Pdf => 1,
+        ViewerKind::App(i) => 2 + i,
+    }
+}
 
 /// Where `options` holds `value`, or zero.
 ///

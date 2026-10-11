@@ -38,8 +38,8 @@ use std::path::{Path, PathBuf};
 
 use toml_edit::{DocumentMut, Item, Table, value};
 
-use super::ViewerKind;
 use crate::app::event::{AppEvent, Events, OpenMsg};
+use std::sync::Arc;
 
 /// Why the configuration could not be updated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -657,20 +657,25 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
     }
 }
 
-/// Writes `viewer` into `[settings]`, preserving everything else.
-pub fn save_viewer(path: &Path, viewer: ViewerKind) -> Result<(), WriteError> {
-    save(path, &[viewer_edit(viewer)])
+/// Writes the viewer called `name` into `[settings]`, preserving everything
+/// else.
+///
+/// The configuration spelling rather than a [`crate::config::ViewerKind`]: a
+/// configured viewer is an index, and only the caller holds the list it is an
+/// index into. See [`crate::config::ViewerKind::name`].
+pub fn save_viewer(path: &Path, name: &str) -> Result<(), WriteError> {
+    save(path, &[viewer_edit(name)])
 }
 
 /// Returns `text` with the viewer set, as a pure string transformation.
-pub fn with_viewer(text: &str, viewer: ViewerKind) -> Result<String, WriteError> {
-    apply(text, &[viewer_edit(viewer)])
+pub fn with_viewer(text: &str, name: &str) -> Result<String, WriteError> {
+    apply(text, &[viewer_edit(name)])
 }
 
-fn viewer_edit(viewer: ViewerKind) -> Edit {
+fn viewer_edit(name: &str) -> Edit {
     Edit::Set {
         key: SettingKey::Viewer,
-        value: Scalar::Str(viewer.name().to_string()),
+        value: Scalar::Str(name.to_string()),
     }
 }
 
@@ -725,10 +730,10 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
 /// `Actors::shutdown`, so F2 immediately followed by closing the window can
 /// kill it mid-write. Temp-then-rename bounds that to a stray `.tmp` beside
 /// the configuration rather than a damaged one.
-pub fn save_viewer_async(path: Option<PathBuf>, viewer: ViewerKind, events: Events) {
-    save_async(path, vec![viewer_edit(viewer)], events, move |outcome| {
+pub fn save_viewer_async(path: Option<PathBuf>, name: Arc<str>, events: Events) {
+    save_async(path, vec![viewer_edit(&name)], events, move |outcome| {
         AppEvent::Open(match outcome {
-            Ok(()) => OpenMsg::ViewerSaved { viewer },
+            Ok(()) => OpenMsg::ViewerSaved { name },
             Err(detail) => OpenMsg::ViewerSaveFailed { detail },
         })
     });
@@ -785,7 +790,7 @@ mod tests {
     /// rather than a key the round trip below silently skips.
     fn different(key: SettingKey) -> Typed {
         match key {
-            SettingKey::Viewer => Typed::Text("avwin".into()),
+            SettingKey::Viewer => Typed::Text("pdf".into()),
             SettingKey::Theme => Typed::Text("dark".into()),
             SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
             SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
@@ -953,18 +958,18 @@ mod tests {
     #[test]
     fn rewriting_the_viewer_leaves_every_comment_intact() {
         let before = DEFAULT_CONFIG_TOML;
-        let after = with_viewer(before, ViewerKind::Avwin).unwrap();
+        let after = with_viewer(before, "pdf").unwrap();
 
         for line in before.lines().filter(|l| l.trim_start().starts_with('#')) {
             assert!(after.contains(line), "lost a comment: {line}");
         }
-        assert_eq!(reload(&after).settings.viewer.as_deref(), Some("avwin"));
+        assert_eq!(reload(&after).settings.viewer.as_deref(), Some("pdf"));
     }
 
     #[test]
     fn rewriting_the_viewer_replaces_rather_than_duplicates_it() {
-        let once = with_viewer(DEFAULT_CONFIG_TOML, ViewerKind::Avwin).unwrap();
-        let twice = with_viewer(&once, ViewerKind::Pdf).unwrap();
+        let once = with_viewer(DEFAULT_CONFIG_TOML, "auto").unwrap();
+        let twice = with_viewer(&once, "pdf").unwrap();
 
         // Whole lines that are actually the key, rather than every
         // occurrence of the text. A substring count also matched the `#
@@ -982,24 +987,24 @@ mod tests {
     /// What an older config looks like: the table is there, the key is not.
     #[test]
     fn rewriting_the_viewer_when_the_key_is_absent_adds_it_to_the_existing_table() {
-        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
                     kind = \"flat\"\n\n\
                     [settings]\n# matcher = \"simd\"\npersist = true\n";
-        let after = with_viewer(text, ViewerKind::Avwin).unwrap();
+        let after = with_viewer(text, "pdf").unwrap();
 
         assert!(after.contains("persist = true"), "{after}");
         assert!(after.contains("# matcher"), "{after}");
-        assert_eq!(reload(&after).settings.viewer.as_deref(), Some("avwin"));
+        assert_eq!(reload(&after).settings.viewer.as_deref(), Some("pdf"));
     }
 
     /// A new table appended to a file that ends in comments will swallow them
     /// into its own decor unless it is given a prefix of its own.
     #[test]
     fn rewriting_the_viewer_with_no_settings_table_does_not_swallow_the_trailing_comments() {
-        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
                     kind = \"flat\"\n\n\
                     # a parting note the user wrote\n# and a second line of it\n";
-        let after = with_viewer(text, ViewerKind::Pdf).unwrap();
+        let after = with_viewer(text, "pdf").unwrap();
 
         assert!(
             after.contains("# a parting note the user wrote"),
@@ -1014,12 +1019,19 @@ mod tests {
     /// leave the program unable to start.
     #[test]
     fn every_viewer_the_writer_emits_still_reloads() {
-        for viewer in ViewerKind::ALL {
-            let after = with_viewer(DEFAULT_CONFIG_TOML, viewer).unwrap();
-            assert_eq!(
-                reload(&after).settings.viewer.as_deref(),
-                Some(viewer.name())
-            );
+        // With a viewer configured, so every kind of mode is covered.
+        let text = format!(
+            "{DEFAULT_CONFIG_TOML}
+[[viewer]]
+name = \"avwin\"
+program = 'avwin.exe'
+"
+        );
+        let viewers = reload(&text).viewers;
+        for viewer in crate::config::ViewerKind::all(&viewers) {
+            let name = viewer.name(&viewers);
+            let after = with_viewer(&text, name).unwrap();
+            assert_eq!(reload(&after).settings.viewer.as_deref(), Some(name));
         }
     }
 
@@ -1029,10 +1041,10 @@ mod tests {
         let path = dir.path().join("config.toml");
         std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
 
-        save_viewer(&path, ViewerKind::Avwin).unwrap();
+        save_viewer(&path, "pdf").unwrap();
         let after = std::fs::read_to_string(&path).unwrap();
 
-        assert!(after.contains("viewer = \"avwin\""), "{after}");
+        assert!(after.contains("viewer = \"pdf\""), "{after}");
         assert!(after.contains("CustomPro"), "the body must be untouched");
         assert!(
             std::fs::read_dir(dir.path())
@@ -1045,11 +1057,8 @@ mod tests {
 
     #[test]
     fn a_missing_file_is_reported_rather_than_created() {
-        let err = save_viewer(
-            Path::new(r"C:\definitely-not-here-4a91\config.toml"),
-            ViewerKind::Pdf,
-        )
-        .unwrap_err();
+        let err =
+            save_viewer(Path::new(r"C:\definitely-not-here-4a91\config.toml"), "pdf").unwrap_err();
         assert!(matches!(err, WriteError::Io(_)));
         assert!(!err.detail().is_empty());
     }
@@ -1063,7 +1072,7 @@ mod tests {
         // Valid TOML, but not a valid configuration - no mappings at all.
         std::fs::write(&path, "version = 1\n").unwrap();
 
-        let err = save_viewer(&path, ViewerKind::Pdf).unwrap_err();
+        let err = save_viewer(&path, "pdf").unwrap_err();
         assert!(matches!(err, WriteError::WouldNotReload(_)), "{err:?}");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -1089,7 +1098,7 @@ settings = []
 ",
         ] {
             assert_eq!(
-                with_viewer(text, ViewerKind::Avwin),
+                with_viewer(text, "pdf"),
                 Err(WriteError::NotATable),
                 "{text:?}"
             );
@@ -1115,7 +1124,7 @@ settings = {{ persist = true }}
         .unwrap();
 
         let before = std::fs::read_to_string(&path).unwrap();
-        assert!(save_viewer(&path, ViewerKind::Avwin).is_err());
+        assert!(save_viewer(&path, "pdf").is_err());
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             before,

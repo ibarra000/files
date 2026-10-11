@@ -14,7 +14,8 @@
 //! was what would happen if you pressed Enter right now. It said `Enter open`,
 //! which is true of every launcher ever written.
 //!
-//! This says "Open as one document", or "Open with avwin", depending on the
+//! This says "Open as one document", or "Open with avwin" for a viewer the
+//! configuration calls avwin, depending on the
 //! mode `F2` has left the program in - which is the fact the viewer chip
 //! existed to carry and could not, because at the shipped width it did not
 //! fit.
@@ -27,8 +28,10 @@
 //! `Ctrl+,` stay discoverable now that nothing advertises them along the
 //! bottom.
 
+use std::borrow::Cow;
+
 use crate::app::state::AppState;
-use crate::config::ViewerKind;
+use crate::config::{ViewerKind, Viewers};
 
 /// One thing that can be done.
 ///
@@ -42,9 +45,9 @@ pub enum ActionId {
     Open,
     /// Every page of the code, merged, whatever the mode is.
     OpenAsDocument,
-    /// This one file, handed to `avwin.exe`.
-    OpenInAvwin,
-    /// This one file, handed to whatever Windows has registered for it.
+    /// This one file, handed to the configured viewer at this position.
+    OpenWith(usize),
+    /// This one file, handed to windows default app.
     OpenWithWindows,
     /// Explorer, with the file already picked out.
     Reveal,
@@ -56,7 +59,7 @@ pub enum ActionId {
 }
 
 /// One entry, as the footer and the menu will draw it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
     pub id: ActionId,
     /// What the button says, and what the menu row says.
@@ -64,7 +67,9 @@ pub struct Action {
     /// A verb phrase rather than a noun: this is read as the completion of
     /// "Enter will…", and a button labelled `Viewer: PDF` answers a question
     /// nobody asked at the moment they are about to press it.
-    pub description: &'static str,
+    ///
+    /// Owned where it names a configured viewer, whose name is the user's.
+    pub description: Cow<'static, str>,
     /// The key that does the same thing, where there is one.
     ///
     /// Written the way somebody would say it. The renderer splits it on `+`
@@ -81,15 +86,15 @@ pub struct Action {
     pub hides: bool,
 }
 
-const fn act(
+fn act(
     id: ActionId,
-    description: &'static str,
+    description: impl Into<Cow<'static, str>>,
     shortcut: Option<&'static str>,
     hides: bool,
 ) -> Action {
     Action {
         id,
-        description,
+        description: description.into(),
         shortcut,
         hides,
     }
@@ -98,19 +103,25 @@ const fn act(
 /// What `Enter` will do, said in words.
 ///
 /// The one thing the hint bar could not say. `F2` decides whether Enter
-/// assembles a document, launches avwin or hands the file to Windows, and the
+/// assembles a document, launches a viewer or hands the file to Windows, and the
 /// chip that named the mode was `Priority::Normal` - so at six hundred points
 /// it was the first thing dropped, and the key whose whole job is to change a
 /// mode gave no sign of which mode it was in.
-pub const fn open_label(viewer: ViewerKind) -> &'static str {
-    match viewer {
-        // Not "Open with whatever Windows uses", which is what this mode
+pub fn open_label(viewer: ViewerKind, viewers: &Viewers) -> Cow<'static, str> {
+    match viewer.within(viewers) {
+        // Not "Open with Default Apps", which is what this mode
         // technically means: on the default setting the button is read dozens
         // of times an hour and "Open" is what it does.
-        ViewerKind::Auto => "Open",
-        ViewerKind::Pdf => "Open as one document",
-        ViewerKind::Avwin => "Open with avwin",
+        ViewerKind::Auto => Cow::Borrowed("Open"),
+        ViewerKind::Pdf => Cow::Borrowed("Open as one document"),
+        ViewerKind::App(i) => Cow::Owned(open_with_label(viewers, i)),
     }
+}
+
+/// "Open with" and the name the configuration gave the viewer.
+fn open_with_label(viewers: &Viewers, index: usize) -> String {
+    let name = viewers.get(index).map_or("", |v| v.name.as_ref());
+    format!("Open with {name}")
 }
 
 /// Everything on offer right now, the default first.
@@ -125,15 +136,13 @@ pub fn actions(state: &AppState) -> Vec<Action> {
     if has_something_to_open(state) {
         out.push(act(
             ActionId::Open,
-            open_label(state.viewer),
+            open_label(state.viewer, &state.settings.viewers),
             Some("Enter"),
             true,
         ));
-        // The two modes that are *not* the current one, so the menu never
+        // The modes that are *not* the current one, so the menu never
         // offers the same thing twice under two names.
-        for alternative in alternatives(state.viewer) {
-            out.push(alternative);
-        }
+        out.extend(alternatives(state.viewer, &state.settings.viewers));
         out.push(act(
             ActionId::Reveal,
             "Show it in Explorer",
@@ -181,35 +190,51 @@ fn has_something_to_open(state: &AppState) -> bool {
     !state.hits.is_empty() && !state.history.is_browsing() && !state.picking_share
 }
 
-/// The two viewers the current mode is not.
-fn alternatives(viewer: ViewerKind) -> Vec<Action> {
-    const DOCUMENT: Action = act(
+/// Every way of opening the file that the current mode is not.
+///
+/// The built-in two and each configured viewer, in that order, less whichever
+/// one `Enter` already is.
+fn alternatives(viewer: ViewerKind, viewers: &Viewers) -> Vec<Action> {
+    let document = act(
         ActionId::OpenAsDocument,
         "Open as one document",
         Some("Ctrl+D"),
-        true,
-    );
-    const AVWIN: Action = act(
-        ActionId::OpenInAvwin,
-        "Open with avwin",
-        Some("Ctrl+E"),
         true,
     );
     // No key, and that is not an oversight: this is what `Enter` already does
     // on the default setting, so it is here for somebody who has switched
     // away from it and wants one file back the ordinary way. A third chord
     // for that would be a key nobody presses twice.
-    const WINDOWS: Action = act(
+    let windows = act(
         ActionId::OpenWithWindows,
-        "Open with whatever Windows uses",
+        "Open with Default Apps",
         None,
         true,
     );
+    // The first viewer has `Ctrl+E`, and only the first: one chord for "my
+    // viewer" is a key somebody learns, and a chord per viewer would be a
+    // row of keys nobody could keep straight.
+    let app = |i: usize| {
+        act(
+            ActionId::OpenWith(i),
+            open_with_label(viewers, i),
+            (i == 0).then_some("Ctrl+E"),
+            true,
+        )
+    };
 
-    match viewer {
-        ViewerKind::Auto => vec![DOCUMENT, AVWIN],
-        ViewerKind::Pdf => vec![AVWIN, WINDOWS],
-        ViewerKind::Avwin => vec![DOCUMENT, WINDOWS],
+    let current = viewer.within(viewers);
+    let apps = (0..viewers.len())
+        .filter(|&i| current != ViewerKind::App(i))
+        .map(app);
+    match current {
+        // `Enter` is the system's choice, so the system is not offered again.
+        ViewerKind::Auto => std::iter::once(document).chain(apps).collect(),
+        ViewerKind::Pdf => apps.chain(std::iter::once(windows)).collect(),
+        ViewerKind::App(_) => std::iter::once(document)
+            .chain(apps)
+            .chain(std::iter::once(windows))
+            .collect(),
     }
 }
 
@@ -224,8 +249,16 @@ mod tests {
     use std::time::Instant;
 
     fn state() -> AppState {
-        AppState::new(Settings::default(), Instant::now())
+        let settings = Settings {
+            viewers: Arc::new(crate::config::Viewers::new(vec![
+                crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            ])),
+            ..Settings::default()
+        };
+        AppState::new(settings, Instant::now())
     }
+
+    const AVWIN: ViewerKind = ViewerKind::App(0);
 
     fn with_hits(n: usize) -> AppState {
         let mut s = state();
@@ -248,7 +281,7 @@ mod tests {
         let all = actions(&s);
         assert_eq!(all[0].id, ActionId::Open);
         assert_eq!(all[0].shortcut, Some("Enter"));
-        assert_eq!(default_action(&s), Some(all[0]));
+        assert_eq!(default_action(&s).as_ref(), Some(&all[0]));
     }
 
     /// With nothing to open there is no default action, so the footer button
@@ -275,7 +308,7 @@ mod tests {
         for (viewer, said) in [
             (ViewerKind::Auto, "Open"),
             (ViewerKind::Pdf, "Open as one document"),
-            (ViewerKind::Avwin, "Open with avwin"),
+            (AVWIN, "Open with avwin"),
         ] {
             let mut s = with_hits(3);
             s.viewer = viewer;
@@ -286,12 +319,12 @@ mod tests {
     /// And the menu offers the two it will not, never the same one twice.
     #[test]
     fn the_menu_offers_the_other_two_viewers_and_not_the_current_one() {
-        for viewer in [ViewerKind::Auto, ViewerKind::Pdf, ViewerKind::Avwin] {
+        for viewer in [ViewerKind::Auto, ViewerKind::Pdf, AVWIN] {
             let mut s = with_hits(3);
             s.viewer = viewer;
             let all = actions(&s);
 
-            let mut said: Vec<&str> = all.iter().map(|a| a.description).collect();
+            let mut said: Vec<&str> = all.iter().map(|a| a.description.as_ref()).collect();
             let before = said.len();
             said.sort_unstable();
             said.dedup();
@@ -304,7 +337,7 @@ mod tests {
                         a.id,
                         ActionId::Open
                             | ActionId::OpenAsDocument
-                            | ActionId::OpenInAvwin
+                            | ActionId::OpenWith(_)
                             | ActionId::OpenWithWindows
                     )
                 })
@@ -346,7 +379,7 @@ mod tests {
                 action.id,
                 ActionId::Open
                     | ActionId::OpenAsDocument
-                    | ActionId::OpenInAvwin
+                    | ActionId::OpenWith(_)
                     | ActionId::OpenWithWindows
                     | ActionId::Reveal
             );
@@ -371,6 +404,47 @@ mod tests {
         );
         assert!(s.history.is_browsing(), "the fixture is not browsing");
         assert_eq!(default_action(&s), None);
+    }
+
+    /// With no viewers configured nothing offers one, and nothing claims
+    /// `Ctrl+E`: there is no viewer for the key to mean.
+    #[test]
+    fn with_no_viewers_none_is_offered() {
+        let mut s = with_hits(3);
+        s.settings.viewers = Arc::new(crate::config::Viewers::default());
+        for viewer in [ViewerKind::Auto, ViewerKind::Pdf] {
+            s.viewer = viewer;
+            let all = actions(&s);
+            assert!(
+                all.iter().all(|a| !matches!(a.id, ActionId::OpenWith(_))),
+                "{viewer:?}: {all:?}"
+            );
+            assert!(all.iter().all(|a| a.shortcut != Some("Ctrl+E")));
+        }
+    }
+
+    /// Two viewers are both offered, and only the first carries the chord.
+    #[test]
+    fn every_configured_viewer_is_offered_and_the_first_has_the_key() {
+        let mut s = with_hits(3);
+        s.settings.viewers = Arc::new(crate::config::Viewers::new(vec![
+            crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            crate::config::ViewerApp::new("Notes", "notepad.exe", &[]),
+        ]));
+        let all = actions(&s);
+        let first = all.iter().find(|a| a.id == ActionId::OpenWith(0)).unwrap();
+        let second = all.iter().find(|a| a.id == ActionId::OpenWith(1)).unwrap();
+        assert_eq!(first.description, "Open with avwin");
+        assert_eq!(first.shortcut, Some("Ctrl+E"));
+        assert_eq!(second.description, "Open with Notes");
+        assert_eq!(second.shortcut, None);
+
+        // With the second in force, the menu offers the first and not it.
+        s.viewer = ViewerKind::App(1);
+        let all = actions(&s);
+        assert_eq!(default_action(&s).unwrap().description, "Open with Notes");
+        assert!(all.iter().any(|a| a.id == ActionId::OpenWith(0)));
+        assert!(!all.iter().any(|a| a.id == ActionId::OpenWith(1)));
     }
 
     /// Every description is written for somebody who does not use a terminal

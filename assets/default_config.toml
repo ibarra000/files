@@ -8,7 +8,7 @@
 # Use literal strings ('...') for paths. Basic strings ("...") process
 # backslash escapes, so "X:\Example" is a parse error.
 
-version = 2
+version = 3
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +103,11 @@ enabled = false
 # check_for_updates = true
 
 # Default viewer for Enter. F2 switches it and saves the choice here.
-#   auto  - open with the program Windows has registered for the file type
-#   pdf   - assemble a drawing set into one PDF (.dwg still opens in avwin)
-#   avwin - always open the selected file in avwin
-viewer = "auto"                      # auto | pdf | avwin
+#   auto   - open with the program Windows has registered for the file type
+#   pdf    - assemble a drawing set into one PDF (types a [[viewer]] claims
+#            in `extensions` go to that viewer instead)
+#   <name> - always open the selected file with that [[viewer]] (see below)
+viewer = "auto"                      # auto | pdf | a [[viewer]] name
 
 # Program used for assembled PDFs. Unset = the system PDF viewer.
 # pdf_viewer = 'C:\Program Files\Example\PDFViewer.exe'
@@ -124,6 +125,23 @@ hide_system_files = true
 # Shared folder containing latest.toml and the installer it names.
 # Unset = no update checks from a share.
 # update_from = '\\example-server\software\files'
+
+
+# ---------------------------------------------------------------------------
+# Viewers - programs to open files with. None is built in; add one table per
+# program and it appears on F2, in the actions menu and in Settings. The
+# first one is also on Ctrl+E.
+#
+#   * name:       what F2, the menu and `viewer =` call it; unique, and not
+#                 "auto" or "pdf".
+#   * program:    a name on PATH, or a full path (literal string).
+#   * extensions: optional; file types PDF mode sends here instead of
+#                 assembling them. Not "pdf" - use pdf_viewer for that.
+# ---------------------------------------------------------------------------
+# [[viewer]]
+# name       = "avwin"
+# program    = 'avwin.exe'
+# extensions = ["dwg"]
 
 
 # ---------------------------------------------------------------------------

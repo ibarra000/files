@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{ImDocument, Item, Value};
 
 use crate::alias::{Alias, Aliases};
+use crate::config::{ViewerApp, ViewerKind, Viewers};
 use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
 use crate::util::winpath;
 
@@ -45,7 +46,7 @@ const V1_MIGRATION: &str = concat!(
     "patterns to work out which folder to look in. Both shares are indexed now, so there ",
     "is nothing left to match: delete every `[[mapping.rules]]` block and any `case` or ",
     "`stop` key, give each mapping `kind = \"flat\"` or `kind = \"tree\"`, and set ",
-    "`version = 2`. Deleting the file also works - a fresh one is written on the next run.",
+    "`version = 3`. Deleting the file also works - a fresh one is written on the next run.",
 );
 
 /// The only format version this build understands.
@@ -54,7 +55,12 @@ const V1_MIGRATION: &str = concat!(
 /// missing a key or two - every `[[mapping.rules]]` in it describes work the
 /// program no longer does - so it gets one clear instruction rather than a
 /// wall of "unknown key".
-pub const CONFIG_VERSION: i64 = 2;
+///
+/// Bumped to 3 when avwin stopped being built in. A version 2 file that chose
+/// it is brought forward with a `[[viewer]]` table saying so - see
+/// [`super::migrate`] - rather than refused for naming a viewer that no
+/// longer exists.
+pub const CONFIG_VERSION: i64 = 3;
 
 /// What went wrong, and exactly where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +229,8 @@ pub(super) const SETTINGS_KEYS: &[&str] = &[
     "hide_system_files",
 ];
 const ALIAS_KEYS: &[&str] = &["name", "code", "note"];
-pub(super) const ROOT_KEYS: &[&str] = &["version", "mapping", "settings", "alias"];
+const VIEWER_KEYS: &[&str] = &["name", "program", "extensions"];
+pub(super) const ROOT_KEYS: &[&str] = &["version", "mapping", "settings", "alias", "viewer"];
 
 /// Global options a config file may carry. Applied under the environment.
 #[derive(Debug, Clone, Default)]
@@ -263,6 +270,7 @@ pub struct ParsedConfig {
     pub routes: Routes,
     pub settings: FileSettings,
     pub aliases: Aliases,
+    pub viewers: Viewers,
 }
 
 /// Parses configuration text.
@@ -356,6 +364,8 @@ pub fn parse(
     let mappings = parse_mappings(&doc, &mut ctx);
     let settings = parse_settings(&doc, &mut ctx);
     let aliases = parse_aliases(&doc, &mut ctx);
+    let viewers = Viewers::new(parse_viewers(&doc, &mut ctx));
+    check_viewer_setting(&doc, &settings, &viewers, &mut ctx);
 
     // The rules about mappings *as a set*, from the same function the
     // settings window uses. A configuration the file refuses has to be one
@@ -370,6 +380,7 @@ pub fn parse(
             routes: Routes::new(mappings, source),
             settings,
             aliases: Aliases::new(aliases),
+            viewers,
         })
     } else {
         Err(ctx.errors)
@@ -643,6 +654,235 @@ fn parse_aliases(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<Alias> {
     aliases
 }
 
+/// One string, or an array of them.
+///
+/// One may be written bare rather than as an array of one: naming a single
+/// type is a common enough edit that the brackets would only be ceremony.
+fn string_or_list(value: &Value) -> Option<Vec<String>> {
+    if let Some(s) = value.as_str() {
+        return Some(vec![s.to_string()]);
+    }
+    value.as_array().map(|a| {
+        a.iter()
+            .filter_map(|e| e.as_str().map(str::to_string))
+            .collect()
+    })
+}
+
+/// Why `entry` is not an extension, if it is not one.
+///
+/// An extension, not a pattern and not a filename. Someone reaching for `*.db`
+/// or `Thumbs.db` has written something that would match nothing at all, and
+/// a list entry that matches nothing is worse than none: they would go on
+/// believing it was doing something. Shared by `hide_extensions` and a
+/// viewer's `extensions`, which are the same kind of thing.
+fn extension_problem(entry: &str) -> Option<&'static str> {
+    let bare = entry.trim().trim_start_matches('.');
+    // Wildcards are checked before the dot, because `*.db` is the likeliest
+    // mistake and trips both - and being told to drop the star is more use
+    // than being told to drop the dot.
+    if bare.is_empty() {
+        Some("an extension cannot be blank")
+    } else if bare.contains(['*', '?']) {
+        Some("this is not a pattern; write the extension only")
+    } else if bare.contains('.') {
+        Some("write the extension only, as \"db\" or \".db\"")
+    } else if bare.contains(['/', '\\']) {
+        Some("an extension cannot contain a path")
+    } else if !bare.is_ascii() {
+        // `Hidden` drops these, because it cannot judge one consistently -
+        // see its `hides_folded`. Reported rather than dropped silently: a
+        // filter entry that is quietly ignored is a filter somebody believes
+        // is running.
+        Some("an extension must be ASCII")
+    } else {
+        None
+    }
+}
+
+/// Reads `[[viewer]]`, of which a file may have none.
+///
+/// Optional, like `[[alias]]`: no viewers is the shipped configuration, and
+/// it means Enter has the built-in two modes and nothing else.
+fn parse_viewers(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> Vec<ViewerApp> {
+    let Some(tables) = doc.get("viewer").and_then(Item::as_array_of_tables) else {
+        if let Some(item) = doc.get("viewer") {
+            ctx.err(
+                item.span(),
+                None,
+                None,
+                "`viewer` must be written as [[viewer]] tables",
+                None,
+            );
+        }
+        return Vec::new();
+    };
+
+    let mut viewers: Vec<ViewerApp> = Vec::with_capacity(tables.len());
+
+    for (index, table) in tables.iter().enumerate() {
+        let span = table.span();
+        let name = table
+            .get("name")
+            .and_then(Item::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let label = if name.is_empty() {
+            format!("#{index}")
+        } else {
+            name.clone()
+        };
+
+        for (key, item) in table.iter() {
+            if !VIEWER_KEYS.contains(&key) {
+                ctx.err(
+                    item.span(),
+                    Some(("viewer", &label)),
+                    None,
+                    format!("unknown key {key:?}"),
+                    None,
+                );
+            }
+        }
+
+        let name_problem = if name.is_empty() {
+            Some("a viewer needs a name".to_string())
+        } else if ViewerKind::is_reserved(&name) {
+            Some(format!(
+                "{name:?} is one of the built-in modes; give the viewer another name"
+            ))
+        } else if viewers.iter().any(|v| v.name.eq_ignore_ascii_case(&name)) {
+            Some("another viewer already has this name".to_string())
+        } else {
+            None
+        };
+        if let Some(problem) = name_problem {
+            let at = table.get("name").and_then(Item::span).or(span.clone());
+            ctx.err(at, Some(("viewer", &label)), None, problem, None);
+        }
+
+        let program = table
+            .get("program")
+            .and_then(Item::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        // Not checked for existence. The file roams with the profile, and a
+        // program missing on one machine is reported where it matters - by
+        // the panel and by `--doctor` - rather than stopping the program from
+        // starting there at all.
+        if program.is_empty() {
+            ctx.err(
+                table.get("program").and_then(Item::span).or(span.clone()),
+                Some(("viewer", &label)),
+                None,
+                "a viewer needs a program: a name on PATH, or a full path",
+                None,
+            );
+        }
+
+        let extensions = viewer_extensions(table, &label, ctx);
+        let refs: Vec<&str> = extensions.iter().map(String::as_str).collect();
+        viewers.push(ViewerApp::new(&name, &program, &refs));
+    }
+
+    viewers
+}
+
+/// A viewer's `extensions`, with every entry that is not one reported.
+fn viewer_extensions(table: &toml_edit::Table, label: &str, ctx: &mut Ctx<'_>) -> Vec<String> {
+    let Some(item) = table.get("extensions") else {
+        return Vec::new();
+    };
+    let Some(list) = item.as_value().and_then(string_or_list) else {
+        ctx.err(
+            item.span(),
+            Some(("viewer", label)),
+            None,
+            "extensions must be a list of file types, as [\"dwg\"]",
+            None,
+        );
+        return Vec::new();
+    };
+    // `string_or_list` keeps only the strings, so anything else in the array
+    // would otherwise vanish without a word.
+    if let Some(array) = item.as_value().and_then(Value::as_array)
+        && array.iter().any(|e| !e.is_str())
+    {
+        ctx.err(
+            item.span(),
+            Some(("viewer", label)),
+            None,
+            "every extensions entry must be a quoted file type, as \"dwg\"",
+            None,
+        );
+    }
+
+    let mut out = Vec::with_capacity(list.len());
+    for entry in list {
+        let bare = entry.trim().trim_start_matches('.');
+        let why = extension_problem(&entry).or_else(|| {
+            // Claiming PDFs would quietly switch off the one thing PDF mode
+            // is for. `pdf_viewer` is how a PDF is given to a program of
+            // somebody's choosing.
+            bare.eq_ignore_ascii_case("pdf").then_some(
+                "PDF mode assembles PDFs itself; use pdf_viewer to choose the program that shows them",
+            )
+        });
+        match why {
+            Some(why) => ctx.err(
+                item.span(),
+                Some(("viewer", label)),
+                None,
+                format!("extensions entry {entry:?}: {why}"),
+                None,
+            ),
+            None => out.push(entry),
+        }
+    }
+    out
+}
+
+/// Checks `[settings] viewer` against the modes this file makes available.
+///
+/// Rejected here rather than ignored later. A misspelt viewer that silently
+/// fell back would leave someone pressing Enter and getting the wrong program
+/// with nothing to explain it.
+fn check_viewer_setting(
+    doc: &ImDocument<String>,
+    settings: &FileSettings,
+    viewers: &Viewers,
+    ctx: &mut Ctx<'_>,
+) {
+    let Some(v) = settings.viewer.as_deref() else {
+        return;
+    };
+    if ViewerKind::parse(v, viewers).is_some() {
+        return;
+    }
+    let expected = if viewers.is_empty() {
+        "expected \"auto\" or \"pdf\", or the name of a [[viewer]] added to this file".to_string()
+    } else {
+        let names: Vec<String> = viewers.names().iter().map(|n| format!("{n:?}")).collect();
+        format!(
+            "expected \"auto\", \"pdf\" or one of the [[viewer]] names: {}",
+            names.join(", ")
+        )
+    };
+    let span = doc
+        .get("settings")
+        .and_then(|s| s.get("viewer"))
+        .and_then(Item::span);
+    ctx.err(
+        span,
+        None,
+        None,
+        format!("unknown viewer {v:?} ({expected})"),
+        None,
+    );
+}
+
 fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
     let mut out = FileSettings::default();
     let Some(item) = doc.get("settings") else {
@@ -721,24 +961,9 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                     }
                 }
             }
-            "viewer" => {
-                let raw = value.and_then(Value::as_str);
-                // Rejected here rather than ignored later. A misspelt viewer
-                // that silently fell back would leave someone pressing Enter
-                // and getting the wrong program with nothing to explain it.
-                if let Some(v) = raw
-                    && crate::config::ViewerKind::parse(v).is_none()
-                {
-                    ctx.err(
-                        item.span(),
-                        None,
-                        None,
-                        format!("unknown viewer {v:?} (expected \"auto\", \"pdf\" or \"avwin\")"),
-                        None,
-                    );
-                }
-                out.viewer = raw.map(str::to_string);
-            }
+            // Checked in `check_viewer_setting`, once `[[viewer]]` has been
+            // read: what names a viewer depends on which ones the file adds.
+            "viewer" => out.viewer = value.and_then(Value::as_str).map(str::to_string),
             "pdf_viewer" => out.pdf_viewer = value.and_then(Value::as_str).map(PathBuf::from),
             "update_from" => out.update_from = value.and_then(Value::as_str).map(PathBuf::from),
             "hide_system_files" => out.hide_system_files = bool_at(ctx, key, item),
@@ -746,15 +971,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 // One extension may be written bare rather than as an array
                 // of one: hiding a single type is a common enough edit that
                 // the brackets would only be ceremony.
-                let list = match value {
-                    Some(v) if v.is_str() => v.as_str().map(|s| vec![s.to_string()]),
-                    Some(v) => v.as_array().map(|a| {
-                        a.iter()
-                            .filter_map(|e| e.as_str().map(str::to_string))
-                            .collect()
-                    }),
-                    None => None,
-                };
+                let list = value.and_then(string_or_list);
                 // An extension, not a pattern and not a filename. Someone
                 // reaching for `*.db` or `Thumbs.db` has written something
                 // that would match nothing at all, and a filter that hides
@@ -762,30 +979,7 @@ fn parse_settings(doc: &ImDocument<String>, ctx: &mut Ctx<'_>) -> FileSettings {
                 // the file was meant to be there.
                 if let Some(v) = &list {
                     for entry in v {
-                        let bare = entry.trim().trim_start_matches('.');
-                        // Wildcards are checked before the dot, because
-                        // `*.db` is the likeliest mistake and trips both -
-                        // and being told to drop the star is more use than
-                        // being told to drop the dot.
-                        let bad = if bare.is_empty() {
-                            Some("an extension cannot be blank")
-                        } else if bare.contains(['*', '?']) {
-                            Some("this is not a pattern; write the extension only")
-                        } else if bare.contains('.') {
-                            Some("write the extension only, as \"db\" or \".db\"")
-                        } else if bare.contains(['/', '\\']) {
-                            Some("an extension cannot contain a path")
-                        } else if !bare.is_ascii() {
-                            // `Hidden` drops these, because it cannot judge
-                            // one consistently - see its `hides_folded`.
-                            // Reported rather than dropped silently: a filter
-                            // entry that is quietly ignored is a filter
-                            // somebody believes is running.
-                            Some("an extension must be ASCII")
-                        } else {
-                            None
-                        };
-                        if let Some(why) = bad {
+                        if let Some(why) = extension_problem(entry) {
                             ctx.err(
                                 item.span(),
                                 None,
@@ -1123,7 +1317,7 @@ mod tests {
     }
 
     const MINIMAL: &str = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "jobs"
@@ -1134,7 +1328,7 @@ kind = "tree"
     // --- live mappings ------------------------------------------------------
 
     const LIVE: &str = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "archive"
@@ -1205,7 +1399,7 @@ kind = "live"
     fn two_live_mappings_on_one_directory_are_refused_like_two_indexed_ones() {
         let errs = parse_err(
             r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "a"
@@ -1226,7 +1420,7 @@ kind = "live"
     fn a_live_mapping_inside_a_walked_tree_is_refused() {
         let errs = parse_err(
             r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "jobs"
@@ -1252,7 +1446,7 @@ kind = "live"
     fn a_walked_tree_inside_a_live_share_is_accepted() {
         let c = parse_ok(
             r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "archive"
@@ -1272,7 +1466,7 @@ kind = "tree"
     fn an_unknown_kind_names_all_three_it_could_have_been() {
         let errs = parse_err(
             r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "jobs"
@@ -1527,7 +1721,7 @@ hide_system_files = false
 
     #[test]
     fn a_syntax_error_reports_a_line_and_column() {
-        let errs = parse_err("version = 2\n[[mapping]\nname = 'x'\n");
+        let errs = parse_err("version = 3\n[[mapping]\nname = 'x'\n");
         let msg = messages(&errs);
         assert!(msg.contains(r"C:\cfg.toml:"), "{msg}");
     }
@@ -1535,7 +1729,7 @@ hide_system_files = false
     fn a_duplicate_name_is_rejected() {
         let text = format!(
             "{MINIMAL}\n{}",
-            MINIMAL.trim_start_matches("\nversion = 2\n")
+            MINIMAL.trim_start_matches("\nversion = 3\n")
         );
         let errs = parse_err(&text);
         assert!(messages(&errs).contains("duplicate mapping name"));
@@ -1553,7 +1747,7 @@ hide_system_files = false
     fn an_indexed_mapping_is_searched_for_every_query() {
         for kind in ["flat", "tree"] {
             let text = format!(
-                "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
+                "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
             );
             let parsed = parse(&text, p(), ConfigSource::BuiltIn)
                 .unwrap_or_else(|e| panic!("{kind} was rejected: {:?}", messages(&e)));
@@ -1569,7 +1763,7 @@ hide_system_files = false
     /// effect.
     #[test]
     fn a_leftover_rules_block_is_rejected() {
-        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
                     kind = \"tree\"\n\n  [[mapping.rules]]\n  pattern = '^x$'\n";
         let errs = parse_err(text);
         assert!(messages(&errs).contains("unknown key \"rules\""));
@@ -1585,7 +1779,7 @@ hide_system_files = false
         let errs = parse_err(text);
         let msg = messages(&errs);
         assert!(msg.contains("version 1 configuration"), "{msg}");
-        assert!(msg.contains("version = 2"), "{msg}");
+        assert!(msg.contains("version = 3"), "{msg}");
         assert!(msg.contains("kind"), "{msg}");
         // And nothing else. Every `rules` block and every `job-folder` in the
         // file would otherwise report its own "unknown key" beneath the one
@@ -1606,7 +1800,7 @@ hide_system_files = false
     #[test]
     fn reads_the_viewer_and_its_override_from_the_settings_table() {
         let text = format!(
-            "{MINIMAL}\n[settings]\nviewer = \"avwin\"\npdf_viewer = 'C:\\tools\\sumatra.exe'\n"
+            "{MINIMAL}\n[settings]\nviewer = \"avwin\"\npdf_viewer = 'C:\\tools\\sumatra.exe'\n\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n"
         );
         let c = parse_ok(&text);
         assert_eq!(c.settings.viewer.as_deref(), Some("avwin"));
@@ -1625,9 +1819,113 @@ hide_system_files = false
         let msg = messages(&errs);
         assert!(msg.contains("notepad"), "{msg}");
         assert!(
-            msg.contains("avwin"),
+            msg.contains("\"auto\"") && msg.contains("[[viewer]]"),
             "the message must say what is allowed: {msg}"
         );
+    }
+
+    /// avwin is not built in any more. Naming it without a `[[viewer]]` that
+    /// says what it is is the same mistake as naming notepad.
+    #[test]
+    fn avwin_is_not_a_viewer_until_the_file_adds_it() {
+        let errs = parse_err(&format!("{MINIMAL}\n[settings]\nviewer = \"avwin\"\n"));
+        assert!(messages(&errs).contains("unknown viewer \"avwin\""));
+    }
+
+    /// The names the file does offer are listed, so the fix is on screen.
+    #[test]
+    fn an_unknown_viewer_lists_the_ones_that_are_configured() {
+        let text = format!(
+            "{MINIMAL}\n[settings]\nviewer = \"avwn\"\n\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n"
+        );
+        let msg = messages(&parse_err(&text));
+        assert!(msg.contains("\"avwin\""), "{msg}");
+    }
+
+    #[test]
+    fn a_viewer_table_is_read_in_order() {
+        let text = format!(
+            "{MINIMAL}\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n\n[[viewer]]\nname = \"Notes\"\nprogram = 'C:\\Windows\\notepad.exe'\nextensions = '.TXT'\n"
+        );
+        let c = parse_ok(&text);
+        let all = c.viewers.all();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name.as_ref(), "avwin");
+        assert_eq!(all[0].program.as_ref(), "avwin.exe");
+        assert_eq!(all[0].extensions.as_ref(), [Box::from("dwg")]);
+        assert_eq!(all[1].name.as_ref(), "Notes");
+        assert_eq!(all[1].program.as_ref(), r"C:\Windows\notepad.exe");
+        // A bare string is a list of one, and the dot and case come off.
+        assert_eq!(all[1].extensions.as_ref(), [Box::from("txt")]);
+    }
+
+    #[test]
+    fn a_viewer_needs_a_name_and_a_program() {
+        let msg = messages(&parse_err(&format!(
+            "{MINIMAL}\n[[viewer]]\nextensions = [\"dwg\"]\n"
+        )));
+        assert!(msg.contains("needs a name"), "{msg}");
+        assert!(msg.contains("needs a program"), "{msg}");
+    }
+
+    /// Two viewers called the same thing would make `viewer = ` ambiguous,
+    /// and a viewer called `pdf` would make it lie.
+    #[test]
+    fn a_viewer_name_must_be_unique_and_not_a_built_in_mode() {
+        let twice = format!(
+            "{MINIMAL}\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n\n[[viewer]]\nname = \"AVWIN\"\nprogram = 'x.exe'\n"
+        );
+        assert!(messages(&parse_err(&twice)).contains("already has this name"));
+
+        for reserved in ["auto", "PDF", "merge"] {
+            let text = format!("{MINIMAL}\n[[viewer]]\nname = \"{reserved}\"\nprogram = 'x.exe'\n");
+            let msg = messages(&parse_err(&text));
+            assert!(msg.contains("built-in modes"), "{reserved}: {msg}");
+        }
+    }
+
+    #[test]
+    fn a_viewer_extension_is_held_to_the_same_rules_as_a_hidden_one() {
+        for (bad, why) in [
+            ("*.dwg", "not a pattern"),
+            ("a.dwg", "extension only"),
+            ("", "blank"),
+            ("pdf", "pdf_viewer"),
+            (".PDF", "pdf_viewer"),
+        ] {
+            let text = format!(
+                "{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = [\"{bad}\"]\n"
+            );
+            let msg = messages(&parse_err(&text));
+            assert!(msg.contains(why), "{bad:?}: {msg}");
+        }
+        let not_a_list =
+            format!("{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = 3\n");
+        assert!(messages(&parse_err(&not_a_list)).contains("list of file types"));
+        let mixed = format!(
+            "{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = [\"dwg\", 3]\n"
+        );
+        assert!(messages(&parse_err(&mixed)).contains("quoted file type"));
+    }
+
+    #[test]
+    fn an_unknown_key_in_a_viewer_is_rejected() {
+        let text =
+            format!("{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nargs = \"-q\"\n");
+        let msg = messages(&parse_err(&text));
+        assert!(msg.contains("unknown key \"args\""), "{msg}");
+    }
+
+    #[test]
+    fn a_viewer_written_as_a_single_table_is_rejected() {
+        let text = format!("{MINIMAL}\n[viewer]\nname = \"x\"\nprogram = 'x.exe'\n");
+        assert!(messages(&parse_err(&text)).contains("[[viewer]]"));
+    }
+
+    /// Nothing is built in, and the template only shows how to add one.
+    #[test]
+    fn the_shipped_default_configures_no_viewers() {
+        assert!(builtin().viewers.is_empty());
     }
 
     /// The viewer key ships uncommented because F2 rewrites it in place, and
@@ -1642,7 +1940,7 @@ hide_system_files = false
         let c = builtin();
         assert_eq!(
             c.settings.viewer.as_deref(),
-            Some(crate::config::ViewerKind::default().name()),
+            Some(crate::config::ViewerKind::default().name(&Viewers::default())),
             "a fresh install would not get the default viewer"
         );
     }
@@ -1655,9 +1953,9 @@ hide_system_files = false
             // Root keys must precede the first table header, so this goes
             // beside `version` rather than after the mapping.
             let errs = parse_err(&MINIMAL.replace(
-                "version = 2",
+                "version = 3",
                 &format!(
-                    "version = 2
+                    "version = 3
 {bad}"
                 ),
             ));
@@ -1707,7 +2005,7 @@ hide_system_files = false
     /// permission rather than as a mistake.
     #[test]
     fn a_mapping_enabled_by_a_non_boolean_is_rejected_rather_than_enabled() {
-        let text = "version = 2\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
              kind = \"tree\"\nenabled = \"no\"\n";
         let errs = parse_err(text);
         assert!(
@@ -1734,7 +2032,7 @@ hide_system_files = false
     #[test]
     fn two_enabled_flat_mappings_are_both_accepted() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "one"
@@ -1760,7 +2058,7 @@ kind = "tree"
     /// Ten mappings, which is the configuration that prompted all of this.
     #[test]
     fn ten_mappings_are_all_accepted_and_all_searched() {
-        let mut text = String::from("version = 2\n");
+        let mut text = String::from("version = 3\n");
         for i in 0..10 {
             let kind = if i % 3 == 0 { "flat" } else { "tree" };
             text.push_str(&format!(
@@ -1783,7 +2081,7 @@ kind = "tree"
     #[test]
     fn two_mappings_on_the_same_directory_are_refused() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "one"
@@ -1807,7 +2105,7 @@ kind = "tree"
     #[test]
     fn a_mapping_nested_inside_a_walked_tree_is_refused() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "jobs"
@@ -1831,7 +2129,7 @@ kind = "tree"
     #[test]
     fn a_mapping_below_a_flat_share_is_allowed() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "top"
@@ -1862,7 +2160,7 @@ kind = "tree"
     #[test]
     fn a_disabled_second_flat_mapping_is_fine() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "custompro"
@@ -1884,7 +2182,7 @@ enabled = false
     #[test]
     fn several_tree_mappings_are_accepted() {
         let text = r#"
-version = 2
+version = 3
 
 [[mapping]]
 name = "jobs"
@@ -1914,16 +2212,16 @@ kind = "tree"
 
     #[test]
     fn a_missing_or_wrong_version_is_rejected() {
-        let errs = parse_err(&MINIMAL.replace("version = 2", "version = 9"));
+        let errs = parse_err(&MINIMAL.replace("version = 3", "version = 9"));
         assert!(messages(&errs).contains("unsupported version 9"));
 
-        let errs = parse_err(&MINIMAL.replace("version = 2\n", ""));
+        let errs = parse_err(&MINIMAL.replace("version = 3\n", ""));
         assert!(messages(&errs).contains("missing `version`"));
     }
 
     #[test]
     fn a_file_with_no_mappings_is_rejected() {
-        let errs = parse_err("version = 2\n");
+        let errs = parse_err("version = 3\n");
         assert!(messages(&errs).contains("no `[[mapping]]`"));
     }
 
@@ -1934,7 +2232,7 @@ kind = "tree"
     #[test]
     fn every_error_is_reported_at_once() {
         let text = "
-version = 2
+version = 3
 
 [[mapping]]
 name = \"a\"

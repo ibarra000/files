@@ -5,7 +5,11 @@
 //! remembered.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
-use super::{BACKDROPS, COLUMNS, DOCKS, Field, LAYOUTS, THEMES, VIEWERS, index_of, row};
+use std::borrow::Cow;
+
+use super::{
+    BACKDROPS, COLUMNS, DOCKS, Field, LAYOUTS, THEMES, index_of, row, viewer_choices, viewer_index,
+};
 use crate::config::write::SettingKey;
 use crate::config::{Dock, Settings};
 use crate::view::status::Tone;
@@ -187,7 +191,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
          pins it to that edge as a bar the width of the screen, which stays put \
          and never changes size.",
         Field::Choice {
-            options: DOCKS,
+            options: Cow::Borrowed(DOCKS),
             current: index_of(DOCKS, settings.dock.name()),
         },
     )])];
@@ -226,7 +230,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                     "Colours",
                     "Follow Windows to change with the system, or pick one and keep it.",
                     Field::Choice {
-                        options: THEMES,
+                        options: Cow::Borrowed(THEMES),
                         current: index_of(THEMES, settings.theme.name()),
                     },
                 )])],
@@ -243,7 +247,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                      the panel paint its own, which is what an older Windows gives \
                      you whatever you pick here.",
                     Field::Choice {
-                        options: BACKDROPS,
+                        options: Cow::Borrowed(BACKDROPS),
                         current: index_of(BACKDROPS, settings.backdrop.name()),
                     },
                 )])],
@@ -259,7 +263,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                          drive. Detailed fits four and puts the folder under each name, \
                          which is how you tell two drawings with the same name apart.",
                         Field::Choice {
-                            options: LAYOUTS,
+                            options: Cow::Borrowed(LAYOUTS),
                             current: index_of(LAYOUTS, settings.result_layout.name()),
                         },
                     ),
@@ -271,7 +275,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                          each name. Up and down stay in a column, and Tab or Shift+Tab \
                          moves to the same place in the next one.",
                         Field::Choice {
-                            options: COLUMNS,
+                            options: Cow::Borrowed(COLUMNS),
                             current: index_of(COLUMNS, &settings.columns.to_string()),
                         },
                     ),
@@ -385,11 +389,12 @@ fn opening(settings: &Settings) -> Page {
                     settings,
                     SettingKey::Viewer,
                     "Enter opens",
-                    "Automatic assembles a document from its pages and hands anything else \
-                     to avwin. F2 switches this while you work.",
+                    "Automatic opens each file with the program Windows has for it. PDF \
+                     assembles a document from its pages. Viewers added as [[viewer]] in the \
+                     configuration file are listed here too. F2 switches this while you work.",
                     Field::Choice {
-                        options: VIEWERS,
-                        current: index_of(VIEWERS, settings.viewer.name()),
+                        options: viewer_choices(settings),
+                        current: viewer_index(settings),
                     },
                 ),
                 row(
@@ -400,7 +405,7 @@ fn opening(settings: &Settings) -> Page {
                      Windows has registered for PDFs.",
                     Field::Text {
                         value: path_of(settings.pdf_viewer.as_deref()),
-                        placeholder: "Whatever Windows uses",
+                        placeholder: "Default App",
                     },
                 ),
                 row(

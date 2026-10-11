@@ -2,7 +2,8 @@
 //!
 //! Three routes, and the choice between them is not arbitrary:
 //!
-//! * **`avwin.exe`** by name on `PATH`, as this program has always done.
+//! * **A configured viewer**, a `[[viewer]]` program, by name on `PATH` or
+//!   by full path. None is built in.
 //! * **A configured `pdf_viewer`**, spawned directly. Only ever given a
 //!   `.pdf`, because the file the user picked is not always one - see
 //!   [`open_associated`].
@@ -24,9 +25,6 @@ use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-/// The legacy viewer, looked up on `PATH`.
-pub const AVWIN: &str = "avwin.exe";
-
 /// Why a launch failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchError {
@@ -38,8 +36,8 @@ pub enum LaunchError {
     /// sends the reader looking in the wrong place.
     ///
     /// Ordinary rather than rare since `Auto` started handing every file to
-    /// the shell: a file type nobody on this machine has a program for used to
-    /// go to avwin and open. So the message says how to get that back.
+    /// the shell. So the message says what else there is: a configured
+    /// viewer, which F2 reaches.
     NoHandler(String),
     Io(String),
 }
@@ -49,19 +47,19 @@ impl LaunchError {
         match self {
             Self::ViewerNotFound(name) => format!("{name} not found on PATH"),
             Self::NoHandler(kind) if kind.is_empty() => {
-                "nothing is registered to open this kind of file \u{b7} F2 for avwin".into()
+                "nothing is registered to open this kind of file \u{b7} F2 switches viewer".into()
             }
             Self::NoHandler(kind) => {
-                format!("nothing is registered to open {kind} files \u{b7} F2 for avwin")
+                format!("nothing is registered to open {kind} files \u{b7} F2 switches viewer")
             }
             Self::Io(e) => e.clone(),
         }
     }
 }
 
-/// Opens `path` with `avwin.exe`.
-pub fn open_avwin(path: &str) -> Result<(), LaunchError> {
-    spawn(AVWIN, path)
+/// Opens `path` with a configured viewer's `program`.
+pub fn open_with(program: &str, path: &str) -> Result<(), LaunchError> {
+    spawn(program, path)
 }
 
 /// Opens `path` the way the desktop would.
@@ -308,16 +306,11 @@ fn shell_open(path: &str) -> Result<(), LaunchError> {
     spawn("xdg-open", path)
 }
 
-/// Whether `avwin.exe` can be found, for the startup warning.
+/// Whether a program resolves, for the startup warning and `--doctor`.
 ///
 /// Looked up rather than run: the point is to warn someone before they need
-/// it, not to open a window they did not ask for.
-pub fn avwin_available() -> bool {
-    program_on_path(AVWIN)
-}
-
-/// Whether a bare program name resolves, for the startup warning and
-/// `--doctor`.
+/// it, not to open a window they did not ask for. A bare name is looked for
+/// on `PATH`; a name with a separator in it is a path and is checked as one.
 ///
 /// # Why this is a directory walk and not `where`
 ///
@@ -347,7 +340,7 @@ pub fn program_on_path(program: &str) -> bool {
 /// Where a bare name is looked for, in order.
 ///
 /// The current directory first, which is what `CreateProcess` does and what
-/// `where` does. It is a legitimate place for `avwin.exe` to be - somebody
+/// `where` does. It is a legitimate place for a viewer to be - somebody
 /// running this from the folder the viewer lives in - and leaving it out
 /// would make this answer "no" where the launch would succeed.
 fn path_dirs() -> Vec<std::path::PathBuf> {
@@ -488,7 +481,7 @@ mod tests {
     #[test]
     fn every_error_carries_a_usable_detail() {
         assert!(
-            LaunchError::ViewerNotFound(AVWIN.into())
+            LaunchError::ViewerNotFound("avwin.exe".into())
                 .detail()
                 .contains("avwin.exe")
         );
@@ -550,7 +543,7 @@ o-extension"
     /// The answer depends on the machine; only the absence of a panic and of a
     /// spawned viewer window is being asserted.
     #[test]
-    fn probing_for_avwin_does_not_panic() {
-        let _ = avwin_available();
+    fn probing_for_a_viewer_does_not_panic() {
+        let _ = program_on_path("avwin.exe");
     }
 }

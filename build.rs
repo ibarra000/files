@@ -49,7 +49,7 @@ fn embed() {
     res.set("ProductName", "files");
     res.set(
         "FileDescription",
-        "Search job codes across the drawing shares",
+        "files - indexer",
     );
     res.set("CompanyName", "files");
     res.set("LegalCopyright", "");

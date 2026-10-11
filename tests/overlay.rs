@@ -23,9 +23,20 @@ use files::search::verify::{SkipReason, VerifyOutcome};
 
 const CODE: &str = "11-D-0704";
 
+/// The settings every test here starts from: the defaults, plus the viewer
+/// that used to be built in, configured the way somebody would write it.
+fn with_avwin() -> Settings {
+    Settings {
+        viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
+            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ])),
+        ..Settings::default()
+    }
+}
+
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    let s = AppState::new(Settings::default(), now);
+    let s = AppState::new(with_avwin(), now);
     // Big enough that the results pane has room, so nothing here is an
     // accidental test of a one-row terminal.
     (s, now)
@@ -427,7 +438,7 @@ fn every_hiding_action_hides() {
     for action in [
         ActionId::Open,
         ActionId::OpenAsDocument,
-        ActionId::OpenInAvwin,
+        ActionId::OpenWith(0),
         ActionId::OpenWithWindows,
         ActionId::Reveal,
         ActionId::CopyPath,

@@ -128,7 +128,7 @@ fn default_button(
     let painter = ui.painter().clone();
     let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let label_w = painter
-        .layout_no_wrap(action.description.to_owned(), font.clone(), theme.text)
+        .layout_no_wrap(action.description.to_string(), font.clone(), theme.text)
         .rect
         .width();
     let key_w = action
@@ -147,7 +147,7 @@ fn default_button(
     // say "circumflex".
     let spoken = match action.shortcut {
         Some(key) => format!("{} \u{b7} {}", action.description, chip::spoken(key)),
-        None => action.description.to_owned(),
+        None => action.description.to_string(),
     };
     let response = ui.interact(rect, Id::new("files-default-action"), Sense::click());
     let name = spoken.clone();

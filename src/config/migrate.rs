@@ -32,6 +32,16 @@
 //! A tree is walked whole and searched, which answers the same question by
 //! looking rather than by guessing. See [`crate::paths`].
 //!
+//! # Version 2 to 3: avwin stops being built in
+//!
+//! Version 2 knew one external viewer by name, `avwin.exe`, and offered it to
+//! everybody. Version 3 knows none: a viewer is a `[[viewer]]` table somebody
+//! wrote. A version 2 file that *chose* avwin - `viewer = "avwin"` - would
+//! otherwise name a viewer that no longer exists, which is a hard startup
+//! error, so it is given the table that makes the name mean what it did.
+//! Nobody else is given anything: a viewer they never chose is not something
+//! to start writing into their file.
+//!
 //! # Format-preserving, like every other write to this file
 //!
 //! `toml_edit` again, and for the reason [`super::write`] gives: the file is
@@ -39,7 +49,7 @@
 //! hand it back with every remaining comment gone. What is removed here is
 //! removed deliberately; nothing else is touched.
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 use super::file::{CONFIG_VERSION, MAPPING_KEYS, ROOT_KEYS, SETTINGS_KEYS};
 
@@ -66,13 +76,16 @@ impl Problem {
     }
 }
 
-/// The highest version this can upgrade from.
+/// The oldest version this can upgrade from.
 ///
-/// One, because one is all there has ever been. Named so that the next bump
-/// has somewhere obvious to go, and so the test below can say what it means.
+/// Named so the test below can say what it means. Everything from here up to
+/// [`CONFIG_VERSION`] is brought forward one step at a time.
 const OLDEST_UPGRADABLE: i64 = 1;
 
-/// Rewrites a version 1 configuration as a version 2 one.
+/// Rewrites an older configuration as a current one.
+///
+/// One step per version, applied in order, so a version 1 file passes
+/// through version 2 on its way to 3 rather than needing a step of its own.
 ///
 /// Pure, like [`super::write::apply`], so every shape a real file can be in is
 /// testable without one. Proving the result loads is the caller's job - see
@@ -85,11 +98,23 @@ pub fn to_current(text: &str) -> Result<String, Problem> {
         .map_err(|e: toml_edit::TomlError| Problem::NotToml(e.to_string()))?;
 
     let was = doc.get("version").and_then(Item::as_integer);
-    if was != Some(OLDEST_UPGRADABLE) {
+    let Some(from) = was.filter(|v| (OLDEST_UPGRADABLE..CONFIG_VERSION).contains(v)) else {
         return Err(Problem::CannotUpgradeFrom(was));
+    };
+
+    if from < 2 {
+        v1_to_v2(&mut doc);
+    }
+    if from < 3 {
+        v2_to_v3(&mut doc);
     }
     doc["version"] = value(CONFIG_VERSION);
 
+    Ok(doc.to_string())
+}
+
+/// Routing was deleted: the rules go, and a job folder becomes a tree.
+fn v1_to_v2(doc: &mut DocumentMut) {
     if let Some(mappings) = doc
         .get_mut("mapping")
         .and_then(Item::as_array_of_tables_mut)
@@ -123,8 +148,69 @@ pub fn to_current(text: &str) -> Result<String, Problem> {
     for key in strays {
         doc.remove(&key);
     }
+}
 
-    Ok(doc.to_string())
+/// The spellings version 2 accepted for its built-in avwin.
+const AVWIN_SPELLINGS: &[&str] = &["avwin", "av", "avwin.exe"];
+
+/// avwin stopped being built in: a file that chose it is given a
+/// `[[viewer]]` table that makes the choice mean what it did.
+///
+/// Exactly what version 2 did with it: the program looked up on `PATH`, and
+/// drawings sent to it from PDF mode.
+fn v2_to_v3(doc: &mut DocumentMut) {
+    let chose_avwin = doc
+        .get("settings")
+        .and_then(|s| s.get("viewer"))
+        .and_then(Item::as_str)
+        .is_some_and(|v| {
+            AVWIN_SPELLINGS
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(v.trim()))
+        });
+    if !chose_avwin {
+        return;
+    }
+    // The one spelling the table below answers to. Only rewritten when it is
+    // spelled otherwise, because replacing the value drops the comment beside it.
+    let spelled = doc["settings"]["viewer"].as_str().map(str::trim);
+    if spelled != Some("avwin") {
+        doc["settings"]["viewer"] = value("avwin");
+    }
+
+    let already = doc
+        .get("viewer")
+        .and_then(Item::as_array_of_tables)
+        .is_some_and(|viewers| {
+            viewers.iter().any(|v| {
+                v.get("name")
+                    .and_then(Item::as_str)
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case("avwin"))
+            })
+        });
+    if already {
+        return;
+    }
+
+    let mut table = Table::new();
+    table["name"] = value("avwin");
+    table["program"] = value("avwin.exe");
+    let mut extensions = Array::new();
+    extensions.push("dwg");
+    table["extensions"] = value(extensions);
+    // A blank line above it, and a note saying where it came from.
+    table.decor_mut().set_prefix(
+        "\n# Added when this file was brought up to date: avwin is no longer built in.\n",
+    );
+
+    match doc.get_mut("viewer").and_then(Item::as_array_of_tables_mut) {
+        Some(viewers) => viewers.push(table),
+        None => {
+            let mut viewers = ArrayOfTables::new();
+            viewers.push(table);
+            doc["viewer"] = Item::ArrayOfTables(viewers);
+        }
+    }
 }
 
 /// Drops every key the current format does not accept.
@@ -287,6 +373,89 @@ case    = "lower"
             migrated.contains("# The drawings, on the old server."),
             "{migrated}"
         );
+    }
+
+    /// A version 2 file in the shape the shipped one had, choosing `viewer`.
+    fn v2(viewer: &str) -> String {
+        format!(
+            "version = 2\n\n[[mapping]]\nname = \"jobs\"\npath = 'R:\\'\nkind = \"tree\"\nenabled = true\n\n[settings]\n# Default viewer for Enter.\nviewer = \"{viewer}\"   # auto | pdf | avwin\n"
+        )
+    }
+
+    fn viewers_of(text: &str) -> Vec<(String, String, Vec<String>)> {
+        reload(text)
+            .viewers
+            .all()
+            .iter()
+            .map(|v| {
+                (
+                    v.name.to_string(),
+                    v.program.to_string(),
+                    v.extensions.iter().map(|e| e.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// Somebody who chose avwin keeps it: the same program, and drawings
+    /// still sent to it from PDF mode.
+    #[test]
+    fn a_version_two_file_that_chose_avwin_keeps_it() {
+        for spelling in ["avwin", "AV", "AvWin.exe"] {
+            let migrated = to_current(&v2(spelling)).unwrap();
+            assert_eq!(
+                viewers_of(&migrated),
+                vec![("avwin".into(), "avwin.exe".into(), vec!["dwg".into()])],
+                "{spelling}:\n{migrated}"
+            );
+            let parsed = reload(&migrated);
+            assert_eq!(parsed.settings.viewer.as_deref(), Some("avwin"));
+            // The comment above it is the user's and survives.
+            assert!(
+                migrated.contains("# Default viewer for Enter."),
+                "{migrated}"
+            );
+            // And the one beside it, where the value did not need rewriting.
+            if spelling == "avwin" {
+                assert!(migrated.contains("# auto | pdf | avwin"), "{migrated}");
+            }
+        }
+    }
+
+    /// Nobody is given a viewer they never chose.
+    #[test]
+    fn a_version_two_file_that_did_not_choose_avwin_gains_nothing() {
+        for viewer in ["auto", "pdf"] {
+            let migrated = to_current(&v2(viewer)).unwrap();
+            assert!(viewers_of(&migrated).is_empty(), "{viewer}:\n{migrated}");
+            assert!(!migrated.contains("[[viewer]]"), "{migrated}");
+        }
+        let no_settings =
+            "version = 2\n\n[[mapping]]\nname = \"jobs\"\npath = 'R:\\'\nkind = \"tree\"\n";
+        assert!(viewers_of(&to_current(no_settings).unwrap()).is_empty());
+    }
+
+    /// Run twice, or over a file somebody already fixed by hand, it does not
+    /// add a second avwin - which would be a duplicate name and refused.
+    #[test]
+    fn an_avwin_viewer_that_is_already_there_is_not_added_again() {
+        let text = format!(
+            "{}\n[[viewer]]\nname = \"AVWIN\"\nprogram = 'C:\\tools\\avwin.exe'\n",
+            v2("avwin")
+        );
+        let migrated = to_current(&text).unwrap();
+        let viewers = viewers_of(&migrated);
+        assert_eq!(viewers.len(), 1, "{migrated}");
+        assert_eq!(viewers[0].1, r"C:\tools\avwin.exe");
+    }
+
+    /// A version 1 file goes through every step and comes out current.
+    #[test]
+    fn a_version_one_file_reaches_the_current_version() {
+        let text = format!("{V1}\n[settings]\nviewer = \"avwin\"\n");
+        let migrated = to_current(&text).unwrap();
+        assert!(migrated.contains(&format!("version = {CONFIG_VERSION}")));
+        assert_eq!(viewers_of(&migrated).len(), 1, "{migrated}");
     }
 
     #[test]

@@ -4,7 +4,7 @@ version = "0.2.0"
 edition = "2024"
 # Read by the installer, by Apps & Features, and by the version block `build.rs`
 # embeds. Absent until there was something to install.
-description = "Search job codes across the drawing shares"
+description = "files - indexer"
 # Where the update check looks for new releases, unless `update_from` names a
 # share instead. Read at compile time by `update::github::Repo::ours`.
 repository = "https://github.com/ibarra000/files"

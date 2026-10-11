@@ -92,7 +92,7 @@ impl App {
         source: Arc<dyn DirSource>,
         wake: event::Wake,
     ) -> io::Result<Self> {
-        let avwin_missing = !crate::open::avwin_available();
+        let viewers_missing = crate::open::probe_viewers(&settings.viewers);
         let (actors, rx) = Actors::start(settings.clone(), source, wake)?;
 
         // Loaded before the first frame so the Up arrow works immediately, and
@@ -105,9 +105,9 @@ impl App {
         let mut state = AppState::new(settings, Instant::now());
         state.seed_history(remembered);
         // Probed here rather than in the state machine, which does no I/O, and
-        // once rather than per frame: it is a search of PATH, and the answer
-        // cannot change without the program being restarted.
-        state.set_avwin_missing(avwin_missing);
+        // once rather than per frame: it is a search of PATH. Again only when
+        // the configured viewers change - see `gui::adopt_config`.
+        state.set_viewers_missing(viewers_missing);
 
         Ok(Self {
             state,

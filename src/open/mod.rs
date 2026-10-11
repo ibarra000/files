@@ -4,20 +4,18 @@
 //! `let _ = Command::new("avwin.exe").arg(path).spawn();`, so a missing viewer
 //! or a deleted file produced exactly nothing: the user pressed Enter and the
 //! program appeared to ignore them. Every launch is reported either way now,
-//! and `avwin.exe` is probed once at startup so its absence is learned before
-//! it is needed rather than after.
+//! and every configured viewer is probed once at startup so its absence is
+//! learned before it is needed rather than after.
 //!
 //! # Three destinations, one keypress
 //!
-//! [`ViewerKind::Avwin`] is that original behaviour: the one file under the
-//! cursor, handed to one program.
+//! [`ViewerKind::App`] is that original behaviour, generalised: the one file
+//! under the cursor, handed to a program somebody named in a `[[viewer]]`
+//! table. None is built in - see [`crate::config::viewers`].
 //!
 //! [`ViewerKind::Auto`] hands the file to the desktop instead, and names no
 //! program at all: whatever is registered for that extension opens it, which
-//! is the program the user would have got from Explorer. It used to route by
-//! extension and send everything it had no opinion about to avwin, which made
-//! a viewer most machines do not have the answer for file types this program
-//! has never heard of.
+//! is the program the user would have got from Explorer.
 //!
 //! [`ViewerKind::Pdf`] treats the typed code as naming a *document*. The pages
 //! of a drawing set are separate files on the share, so it re-collects them
@@ -41,12 +39,12 @@ pub mod worker;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::ViewerKind;
+use crate::config::{ViewerApp, ViewerKind, Viewers};
 use crate::search::pages::{self, PageGroup};
 
 #[cfg(windows)]
 pub use launch::shell_open;
-pub use launch::{AVWIN, LaunchError, avwin_available};
+pub use launch::{LaunchError, program_on_path};
 
 /// Everything an open needs, gathered where it is still testable.
 ///
@@ -60,6 +58,12 @@ pub struct OpenRequest {
     /// The typed code, which the page group is rebuilt from.
     pub query: String,
     pub viewer: ViewerKind,
+    /// The list `viewer` is an index into, as it was when the key was pressed.
+    ///
+    /// Carried rather than read off the worker's copy of the settings, which
+    /// is the one taken at startup: after the file is edited the two lists can
+    /// differ, and an index read against the wrong one opens the wrong program.
+    pub viewers: Arc<Viewers>,
 }
 
 /// Why an open failed outright.
@@ -86,7 +90,7 @@ impl OpenError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub path: Arc<str>,
-    /// How many pages were handed over. One for `Avwin`, so that path is not a
+    /// How many pages were handed over. One for a viewer, so that path is not a
     /// special case anywhere downstream.
     pub pages: usize,
     /// Pages that were left out, if any.
@@ -118,13 +122,13 @@ pub struct OpenContext<'a> {
 /// [`ViewerKind`] is what the user chose; this is what that means for the file
 /// under the cursor. They are separate types because `Auto` is not reducible to
 /// either of the others - it hands the file over without naming a program at
-/// all, which is somewhere neither `Pdf` nor `Avwin` has ever gone.
+/// all, which is somewhere neither `Pdf` nor a viewer has ever gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// Every page of the code, merged.
     Document,
-    /// One file, handed to `avwin.exe`.
-    Avwin,
+    /// One file, handed to the configured viewer at this position.
+    App(usize),
     /// One file, handed to whatever the system has registered for it.
     Shell,
 }
@@ -135,39 +139,50 @@ pub enum Route {
 /// is testable with no share, no viewer and no disk, and it is asked twice - by
 /// [`open`] below and by the worker deciding whether it needs a listing - so
 /// the two can no longer drift apart.
-pub fn route_of(viewer: ViewerKind, path: &str) -> Route {
-    let ext = Path::new(path)
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase());
-
-    match viewer {
-        // Forced: everything, including documents and drawings, goes to avwin.
-        ViewerKind::Avwin => Route::Avwin,
+pub fn route_of(viewer: ViewerKind, path: &str, viewers: &Viewers) -> Route {
+    match viewer.within(viewers) {
+        // Forced: everything, including documents and drawings, goes to the
+        // viewer that was asked for.
+        ViewerKind::App(i) => Route::App(i),
         // Forced the other way: `pdf` means "always give me a PDF". A drawing
         // is the one thing that cannot be made into one - there is no Rust that
-        // reads DWG, and every route to a PDF is somebody else's program - so
-        // it goes to avwin, which reads it natively. That is the only thing
-        // this program can honestly do with a drawing.
-        ViewerKind::Pdf => match ext.as_deref() {
-            Some("dwg") => Route::Avwin,
-            _ => Route::Document,
-        },
+        // reads DWG, and every route to a PDF is somebody else's program - so a
+        // type a configured viewer claims goes to that viewer, which reads it
+        // natively. Without one it takes the document route, which opens a
+        // file that is not part of a document with whatever Windows has.
+        ViewerKind::Pdf => {
+            let claimed = Path::new(path)
+                .extension()
+                .and_then(|e| viewers.claiming(&e.to_string_lossy()));
+            claimed.map_or(Route::Document, Route::App)
+        }
         // Not by type at all: the file is handed to the system, which already
         // knows what opens a `.xlsx` and never needed this program to have an
         // opinion about it.
-        //
-        // This used to send a `.pdf` to the document route and everything else
-        // to avwin, which made a program most machines do not have the answer
-        // for every file type this one had not heard of. `pdf` and `avwin` are
-        // still there for anyone who wants either of them by name.
         ViewerKind::Auto => Route::Shell,
     }
 }
 
+/// Which configured viewers cannot be found, indexed like `viewers`.
+///
+/// For the startup warning: looked up rather than run, because the point is to
+/// warn somebody before they need a viewer, not to open one.
+pub fn probe_viewers(viewers: &Viewers) -> Box<[bool]> {
+    viewers
+        .all()
+        .iter()
+        .map(|v| !launch::program_on_path(&v.program))
+        .collect()
+}
+
 /// Opens what `request` asked for.
 pub fn open(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
-    match route_of(request.viewer, &request.path) {
-        Route::Avwin => open_one_with_avwin(&request.path),
+    match route_of(request.viewer, &request.path, &request.viewers) {
+        // `route_of` only names a viewer the list has.
+        Route::App(i) => match request.viewers.get(i) {
+            Some(app) => open_one_with(app, &request.path),
+            None => open_one_with_shell(&request.path, cx),
+        },
         Route::Document => open_as_document(request, cx),
         Route::Shell => open_one_with_shell(&request.path, cx),
     }
@@ -175,7 +190,7 @@ pub fn open(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenE
 
 /// Opens one file the way the desktop would, which is what `Auto` means.
 ///
-/// The existence check is the same one the avwin path makes, for the same
+/// The existence check is the same one the viewer path makes, for the same
 /// reason: a stale index should say the file is gone, rather than leave the
 /// shell to report it in a dialog this program did not write.
 fn open_one_with_shell(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
@@ -225,13 +240,13 @@ fn guard_cached(path: &str, cx: &OpenContext<'_>) {
     }
 }
 
-fn open_one_with_avwin(path: &Arc<str>) -> Result<Opened, OpenError> {
+fn open_one_with(app: &ViewerApp, path: &Arc<str>) -> Result<Opened, OpenError> {
     // Checked first so a stale index produces a clear message rather than a
     // confusing viewer error.
     if !Path::new(path.as_ref()).exists() {
         return Err(OpenError::FileMissing);
     }
-    launch::open_avwin(path).map_err(OpenError::Launch)?;
+    launch::open_with(&app.program, path).map_err(OpenError::Launch)?;
     Ok(Opened {
         path: Arc::clone(path),
         pages: 1,
@@ -341,7 +356,13 @@ mod tests {
             path: Arc::from(path),
             query: query.to_string(),
             viewer,
+            viewers: Arc::new(avwin()),
         }
+    }
+
+    /// The viewer every machine used to get, now as somebody would write it.
+    fn avwin() -> Viewers {
+        Viewers::new(vec![ViewerApp::new("avwin", "avwin.exe", &["dwg"])])
     }
 
     /// The invariant that keeps read-only off somebody else's disk.
@@ -402,7 +423,7 @@ mod tests {
             &request(
                 r"C:\definitely-not-here-4a91\nope.pdf",
                 "nope",
-                ViewerKind::Avwin,
+                ViewerKind::App(0),
             ),
             &cx,
         )
@@ -426,7 +447,7 @@ mod tests {
         // avwin.exe is not present on a development machine, so this
         // exercises the real path.
         match open(
-            &request(file.to_str().unwrap(), "real", ViewerKind::Avwin),
+            &request(file.to_str().unwrap(), "real", ViewerKind::App(0)),
             &cx,
         ) {
             Err(OpenError::Launch(LaunchError::ViewerNotFound(name))) => {
@@ -446,9 +467,9 @@ mod tests {
             "a.pdf (not a PDF)"
         );
         assert!(
-            OpenError::Launch(LaunchError::ViewerNotFound(AVWIN.into()))
+            OpenError::Launch(LaunchError::ViewerNotFound("avwin.exe".into()))
                 .detail()
-                .contains(AVWIN)
+                .contains("avwin.exe")
         );
     }
 
@@ -661,7 +682,9 @@ mod tests {
     /// share, no viewer and no disk.
     #[test]
     fn route_of_sends_each_kind_of_file_to_the_right_place() {
-        use ViewerKind::{Auto, Avwin, Pdf};
+        use ViewerKind::{App, Auto, Pdf};
+        let viewers = avwin();
+        let avwin = App(0);
 
         for (viewer, path, want) in [
             // Auto does not pick at all: every kind of file, the one this
@@ -672,18 +695,45 @@ mod tests {
             (Auto, r"R:\11d\scan.tif", Route::Shell),
             (Auto, r"R:\11d\README", Route::Shell),
             // Forced: pdf assembles a document out of anything it can. A
-            // drawing is the one thing it cannot, so that still goes to avwin.
+            // drawing is the one thing it cannot, so it goes to the viewer
+            // that claims it.
             (Pdf, r"R:\11d\11-D-0704.pdf", Route::Document),
-            (Pdf, r"R:\11d\11-D-0704.dwg", Route::Avwin),
+            (Pdf, r"R:\11d\11-D-0704.dwg", Route::App(0)),
             (Pdf, r"R:\11d\notes.docx", Route::Document),
-            // Forced the other way: everything goes to avwin, including the
-            // one kind this program has an opinion about.
-            (Avwin, r"R:\11d\11-D-0704.pdf", Route::Avwin),
-            (Avwin, r"R:\11d\11-D-0704.dwg", Route::Avwin),
-            (Avwin, r"R:\11d\notes.docx", Route::Avwin),
+            // Forced the other way: everything goes to the viewer, including
+            // the one kind this program has an opinion about.
+            (avwin, r"R:\11d\11-D-0704.pdf", Route::App(0)),
+            (avwin, r"R:\11d\11-D-0704.dwg", Route::App(0)),
+            (avwin, r"R:\11d\notes.docx", Route::App(0)),
         ] {
-            assert_eq!(route_of(viewer, path), want, "{viewer:?} {path}");
+            assert_eq!(route_of(viewer, path, &viewers), want, "{viewer:?} {path}");
         }
+    }
+
+    /// With no viewer claiming drawings, PDF mode has nowhere special to send
+    /// one, so it takes the document route - which opens a file that is not
+    /// part of a document with whatever Windows has registered for it.
+    #[test]
+    fn with_no_viewers_a_drawing_takes_the_document_route() {
+        let none = Viewers::default();
+        assert_eq!(
+            route_of(ViewerKind::Pdf, r"R:\11d\11-D-0704.dwg", &none),
+            Route::Document
+        );
+    }
+
+    /// A viewer the list no longer has is `Auto`, never an index past the end.
+    #[test]
+    fn a_viewer_that_is_gone_goes_to_the_shell() {
+        let none = Viewers::default();
+        assert_eq!(
+            route_of(ViewerKind::App(2), r"R:\11d\a.pdf", &none),
+            Route::Shell
+        );
+        assert_eq!(
+            route_of(ViewerKind::App(1), r"R:\11d\a.pdf", &avwin()),
+            Route::Shell
+        );
     }
 
     /// Case comes off a share and is nobody's to rely on.
@@ -698,7 +748,7 @@ mod tests {
         // share where somebody typed `.DWG` is still a share full of drawings.
         for spelling in ["dwg", "DWG", "Dwg", "dWg"] {
             let path = format!(r"R:\11d\11-D-0704.{spelling}");
-            assert_eq!(route_of(ViewerKind::Pdf, &path), Route::Avwin);
+            assert_eq!(route_of(ViewerKind::Pdf, &path, &avwin()), Route::App(0));
         }
     }
 }

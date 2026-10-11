@@ -177,9 +177,20 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
     harness
 }
 
+/// The settings every test here starts from: the defaults, plus the viewer
+/// that used to be built in, configured the way somebody would write it.
+fn with_avwin() -> Settings {
+    Settings {
+        viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
+            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+        ])),
+        ..Settings::default()
+    }
+}
+
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    (AppState::new(Settings::default(), now), now)
+    (AppState::new(with_avwin(), now), now)
 }
 
 /// A state with nothing at all to say: nothing typed, and an index that has
@@ -328,7 +339,7 @@ fn the_footer_says_what_enter_will_do() {
     for (viewer, label) in [
         (ViewerKind::Auto, "Open"),
         (ViewerKind::Pdf, "Open as one document"),
-        (ViewerKind::Avwin, "Open with avwin"),
+        (ViewerKind::App(0), "Open with avwin"),
     ] {
         let (mut s, now) = state();
         with_results(&mut s, "11-D-0704", many(3), 3, now);
@@ -340,6 +351,22 @@ fn the_footer_says_what_enter_will_do() {
             "{viewer:?} is not named on the footer:\n{screen}"
         );
     }
+}
+
+/// A machine with no viewer configured is offered none, and `Ctrl+E` is
+/// advertised nowhere: there is nothing for it to open with.
+#[test]
+fn with_no_viewers_the_menu_offers_none() {
+    let now = Instant::now();
+    let mut s = AppState::new(Settings::default(), now);
+    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    s.actions_open = true;
+
+    let h = harness(s);
+    let screen = on_screen(&h);
+    assert!(!screen.contains("Open with"), "{screen}");
+    assert!(!screen.contains("Ctrl E"), "{screen}");
+    assert!(screen.contains("Open as one document"), "{screen}");
 }
 
 /// And Ctrl+K opens the rest of them, which is the whole reason the footer
@@ -387,11 +414,11 @@ fn the_actions_menu_with_nothing_selected_offers_no_file() {
 /// moment somebody wanted a drawing. The probe was taken at startup and
 /// discarded.
 #[test]
-fn a_missing_avwin_is_reported_before_it_is_needed() {
+fn a_missing_viewer_is_reported_before_it_is_needed() {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(3), 3, now);
-    s.viewer = ViewerKind::Avwin;
-    s.set_avwin_missing(true);
+    s.viewer = ViewerKind::App(0);
+    s.set_viewers_missing(Box::new([true]));
 
     let h = harness(s);
     let screen = on_screen(&h);

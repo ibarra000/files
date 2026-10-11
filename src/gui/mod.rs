@@ -581,7 +581,14 @@ impl Shell {
         };
         // Command-line pins belong to this process, not to the file.
         fresh.cli_pinned = self.app.state.settings.cli_pinned;
+        // Probed here, because the state machine does no I/O, and only when
+        // the list changed: otherwise what was found at startup still holds.
+        let probe = (fresh.viewers != self.app.state.settings.viewers)
+            .then(|| crate::open::probe_viewers(&fresh.viewers));
         self.app.feed(AppEvent::Adopt(Box::new(fresh)), now);
+        if let Some(missing) = probe {
+            self.app.state.set_viewers_missing(missing);
+        }
     }
 
     fn forget_placement(&mut self) {

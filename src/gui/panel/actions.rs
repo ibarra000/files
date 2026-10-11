@@ -122,7 +122,7 @@ fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
     for action in entries {
         let label = painter
             .layout_no_wrap(
-                action.description.to_owned(),
+                action.description.to_string(),
                 label_font.clone(),
                 theme.text,
             )
@@ -172,7 +172,7 @@ fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &m
         let response = ui.interact(row, Id::new(("files-action", i)), Sense::click());
         let spoken = match action.shortcut {
             Some(key) => format!("{} \u{b7} {}", action.description, chip::spoken(key)),
-            None => action.description.to_owned(),
+            None => action.description.to_string(),
         };
         response.widget_info(|| {
             eframe::egui::WidgetInfo::labeled(eframe::egui::WidgetType::Button, true, &spoken)
@@ -198,7 +198,7 @@ fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &m
         painter.text(
             pos2(row.left() + ROW_PAD_X + gutter, row.center().y),
             Align2::LEFT_CENTER,
-            action.description,
+            action.description.as_ref(),
             label_font.clone(),
             theme.text,
         );
@@ -224,7 +224,7 @@ const fn icon_of(id: ActionId) -> Option<Icon> {
     match id {
         ActionId::Open
         | ActionId::OpenAsDocument
-        | ActionId::OpenInAvwin
+        | ActionId::OpenWith(_)
         | ActionId::OpenWithWindows => Some(Icon::Open),
         ActionId::Reveal => Some(Icon::Browse),
         ActionId::CopyPath | ActionId::CopyName => Some(Icon::Copy),
@@ -244,7 +244,7 @@ mod tests {
         for id in [
             ActionId::Open,
             ActionId::OpenAsDocument,
-            ActionId::OpenInAvwin,
+            ActionId::OpenWith(0),
             ActionId::OpenWithWindows,
             ActionId::Reveal,
             ActionId::CopyPath,
