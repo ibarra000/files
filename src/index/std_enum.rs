@@ -126,8 +126,8 @@ impl DirSource for StdDirSource {
     }
 }
 
-#[cfg(test)]
 // Tests only: SetFileAttributesW, to make a hidden file.
+#[cfg(test)]
 #[allow(unsafe_code)]
 mod tests {
     use super::*;

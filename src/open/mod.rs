@@ -75,7 +75,7 @@ pub struct Opened {
     pub pages: usize,
     /// Pages that were left out.
     pub skipped: Vec<pdf::Skipped>,
-    /// The document has more than `MAX_PAGES` pages and the document stops short.
+    /// The document has more than `MAX_PAGES` pages and is cut short.
     /// Surfaced so the user is told the document is incomplete.
     pub truncated: bool,
 }

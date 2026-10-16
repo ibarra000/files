@@ -85,7 +85,8 @@ impl Drop for Owned {
 // pointer into this process's memory, and each one below is used by exactly
 // one thread for exactly one direction.
 unsafe impl Send for Owned {}
-// SAFETY: as for `Send`, above.
+// SAFETY: the handle is a kernel token, not memory, and the Win32 calls
+// made through a shared `&Owned` are themselves thread-safe.
 unsafe impl Sync for Owned {}
 
 /// Writes one newline-terminated message; returns `false` once the other end

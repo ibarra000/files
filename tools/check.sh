@@ -55,8 +55,14 @@ fi
 # opting out. Every opt-out must be listed, with a reason, in the allowlist.
 step "unsafe allowlist"
 allowlist=tools/unsafe-allowlist.txt
+# Any spelling of an opt-out counts: allow or expect, alone or in a list,
+# or inside cfg_attr.
+OPT_OUT='(allow|expect)[[:space:]]*\([^)]*unsafe_code'
+if ! grep -qE '^unsafe_code[[:space:]]*=[[:space:]]*"deny"' Cargo.toml; then
+    fail "Cargo.toml no longer denies unsafe_code. Restore unsafe_code = \"deny\" under [lints.rust]"
+fi
 listed=$(sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$allowlist" | sort -u)
-present=$(grep -rlE '#!?\[allow\(unsafe_code\)\]' $SOURCES | tr '\\' '/' | sort -u)
+present=$(grep -rlE "$OPT_OUT" $SOURCES | tr '\\' '/' | sort -u)
 
 unlisted=$(printf '%s\n' "$present" | while read -r f; do
     [ -n "$f" ] || continue
@@ -69,7 +75,7 @@ fi
 
 stale=$(printf '%s\n' "$listed" | while read -r f; do
     [ -n "$f" ] || continue
-    if [ ! -f "$f" ] || ! grep -qE '#!?\[allow\(unsafe_code\)\]' "$f"; then
+    if [ ! -f "$f" ] || ! grep -qE "$OPT_OUT" "$f"; then
         printf '%s\n' "$f"
     fi
 done)
@@ -101,8 +107,11 @@ fi
 # input", "folder", "flat share", "viewer". The only exceptions are legacy
 # values that the config migration must still read from old files.
 step "vocabulary"
-VOCAB='custpro|custompro|avwin|(^|[^a-z_])jobs?([^a-z_]|$)'
+# `_` counts as a word boundary, so identifiers are caught too. egui's
+# `layout_job` is a toolkit method, not this vocabulary.
+VOCAB='custpro|custompro|avwin|(^|[^a-z])jobs?([^a-z]|$)'
 words=$(grep -rniE "$VOCAB" $SOURCES assets docs README.md CONTRIBUTING.md 2>/dev/null \
+    | grep -v 'layout_job' \
     | grep -vE '^src/config/(migrate|file)\.rs:[0-9]+:.*(job-folder|avwin)')
 if [ -n "$words" ]; then
     printf '%s\n' "$words"

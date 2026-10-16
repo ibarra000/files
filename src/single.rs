@@ -44,7 +44,8 @@ impl Drop for Owned {
 // this process's memory, and every use below passes it by value. The wait
 // thread needs to own one.
 unsafe impl Send for Owned {}
-// SAFETY: as for `Send`, above.
+// SAFETY: the handle is a kernel token, not memory, and the Win32 calls
+// made through a shared `&Owned` are themselves thread-safe.
 unsafe impl Sync for Owned {}
 
 /// This process's claim to being the only copy.
