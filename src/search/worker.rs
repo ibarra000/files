@@ -526,7 +526,7 @@ mod tests {
     use std::time::Duration;
 
     fn backend(src: FakeDirSource) -> Arc<Backend> {
-        backend_with(Settings::default(), src)
+        backend_with(Settings::fixture(), src)
     }
 
     // --- remembering what a search found ------------------------------------
@@ -547,7 +547,7 @@ mod tests {
                 // Nothing here should touch the disk; the format round trip is
                 // covered where the format is.
                 persist: false,
-                ..Settings::default()
+                ..Settings::fixture()
             },
             store: Arc::new(IndexStore::single(
                 "archive",
@@ -664,7 +664,7 @@ mod tests {
     fn backend_with(settings: Settings, src: FakeDirSource) -> Arc<Backend> {
         Arc::new(Backend {
             settings,
-            store: Arc::new(IndexStore::default()),
+            store: Arc::new(IndexStore::fixture()),
             source: Arc::new(src),
             live: Vec::new(),
         })

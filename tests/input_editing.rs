@@ -23,7 +23,7 @@ use files::search::verify::VerifyOutcome;
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    let s = AppState::new(Settings::default(), now);
+    let s = AppState::new(Settings::fixture(), now);
     (s, now)
 }
 

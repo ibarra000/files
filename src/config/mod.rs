@@ -877,6 +877,53 @@ pub fn default_routes() -> Routes {
     file::builtin().routes
 }
 
+/// Two enabled drives for tests to search: the flat `custompro` at
+/// [`CUSTPRO_PATH`] and the tree `jobs` at `R:\`.
+const FIXTURE_MAPPINGS: &str = r#"
+[[mapping]]
+name    = "custompro"
+path    = 'V:\Documents\custpro'
+kind    = "flat"
+enabled = true
+refresh = "auto"
+
+[[mapping]]
+name    = "jobs"
+path    = 'R:\'
+kind    = "tree"
+enabled = true
+refresh = "manual"
+"#;
+
+/// The shipped template with [`FIXTURE_MAPPINGS`] ahead of its examples.
+///
+/// Test fixture only. The shipped template enables no drives, so tests that
+/// search, index or report on drives start from this instead.
+#[doc(hidden)]
+pub fn fixture_toml() -> &'static str {
+    static TOML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let template = file::DEFAULT_CONFIG_TOML;
+        let version = template
+            .find("\nversion = ")
+            .expect("the template declares a version");
+        let end = version + 1 + template[version + 1..].find('\n').unwrap_or(0);
+        format!("{}{FIXTURE_MAPPINGS}{}", &template[..end], &template[end..])
+    });
+    &TOML
+}
+
+/// The routing table of [`fixture_toml`]. Test fixture only.
+#[doc(hidden)]
+pub fn fixture_routes() -> Routes {
+    file::parse(
+        fixture_toml(),
+        std::path::Path::new("<fixture>"),
+        crate::paths::ConfigSource::BuiltIn,
+    )
+    .expect("the test fixture configuration must parse")
+    .routes
+}
+
 /// Which configuration file to read, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConfigChoice {
@@ -1147,6 +1194,14 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self::with_routes(Arc::new(default_routes()), |s| s)
+    }
+}
+
+impl Settings {
+    /// Defaults over [`fixture_routes`]. Test fixture only.
+    #[doc(hidden)]
+    pub fn fixture() -> Self {
+        Self::with_routes(Arc::new(fixture_routes()), |s| s)
     }
 }
 
@@ -1975,23 +2030,6 @@ mod tests {
         // It is enabled only after --bench proves the server's pattern
         // matching returns a superset of a full enumeration.
         assert!(!Settings::default().server_filter);
-    }
-
-    /// The shipped configuration names two shares, and both are indexed.
-    ///
-    /// Replaces a test for `is_flat_root`, which asked whether a path was
-    /// *the* flat root - a question with no answer once a configuration can
-    /// name several.
-    #[test]
-    fn the_shipped_configuration_indexes_every_share_it_names() {
-        let s = Settings::default();
-        let indexed: Vec<_> = s
-            .routes
-            .enabled()
-            .filter(|m| m.kind.is_indexed())
-            .map(|m| m.name.as_ref())
-            .collect();
-        assert_eq!(indexed, vec!["custompro", "jobs"]);
     }
 
     /// Checked at compile time: a shorter needle would make `memmem` weak

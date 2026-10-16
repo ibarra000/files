@@ -248,7 +248,7 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::new(Settings::default(), Instant::now())
+        AppState::new(Settings::fixture(), Instant::now())
     }
 
     #[test]
@@ -390,7 +390,7 @@ mod tests {
             Arc::new(crate::index::fake_source::FakeDirSource::new().with_dir("V:\\", &["a.pdf"]));
         let settings = Settings {
             persist: false,
-            ..Default::default()
+            ..Settings::fixture()
         };
         Actors::start(settings, source, Arc::new(|| {}))
             .expect("the workers start")

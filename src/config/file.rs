@@ -1590,47 +1590,18 @@ hide_system_files = false
         assert_eq!(c.settings.hide_system_files, Some(true));
     }
 
+    /// The template ships one example of each kind, all disabled, so a first
+    /// run loads cleanly and searches nothing until a drive is set up.
     #[test]
-    fn the_shipped_default_parses() {
+    fn the_shipped_default_parses_with_no_drives_enabled() {
         let c = builtin();
-        assert_eq!(c.routes.enabled().count(), 2);
-        assert_eq!(c.routes.flat().count(), 1);
-    }
-
-    #[test]
-    fn the_shipped_default_points_at_the_corrected_directory() {
-        let c = builtin();
-        let flat = c.routes.flat().next().unwrap();
-        assert_eq!(flat.path, Path::new(r"V:\Documents\custpro"));
-    }
-
-    /// The precedence that keeps a dashed CustomPro code out of the job share.
-    #[test]
-    /// Every configured share is searched, and the results merge into one
-    /// ranked list.
-    ///
-    /// This used to assert the opposite: a CustomPro code `stop`ped there, so
-    /// the job share was never consulted. That existed because routing had to
-    /// *choose* a folder, and choosing wrongly meant probing a path that did
-    /// not exist on every keystroke. Both shares are indexed now, so there is
-    /// nothing to choose between - a code that matches in both legitimately
-    /// appears from both.
-    fn the_shipped_default_searches_every_share() {
-        let c = builtin();
-        assert_eq!(c.routes.targets().len(), 2);
-    }
-
-    /// And every share is indexed, which is what makes the patterns
-    /// unnecessary rather than merely absent.
-    #[test]
-    fn every_shipped_mapping_is_indexed() {
-        for mapping in builtin().routes.all() {
-            assert!(
-                mapping.kind.is_indexed(),
-                "{:?} is not indexed",
-                mapping.name
-            );
-        }
+        assert_eq!(c.routes.enabled().count(), 0);
+        assert!(c.routes.targets().is_empty());
+        let kinds: Vec<_> = c.routes.all().iter().map(|m| m.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![MappingKind::Flat, MappingKind::Tree, MappingKind::Live]
+        );
     }
 
     /// Every setting the loader accepts is one the shipped file mentions.
@@ -1691,14 +1662,13 @@ hide_system_files = false
         assert!(c.routes.all()[0].enabled);
 
         let text = MINIMAL.replace("kind = \"tree\"", "kind = \"tree\"\nenabled = false");
-        match parse(&text, p(), ConfigSource::BuiltIn) {
-            Ok(_) => panic!("a config with nothing enabled should be rejected"),
-            Err(e) => assert!(
-                messages(&e).contains("no enabled drives"),
-                "{}",
-                messages(&e)
-            ),
-        }
+        let c = parse_ok(&text);
+        assert!(!c.routes.all()[0].enabled);
+        assert_eq!(
+            c.routes.enabled().count(),
+            0,
+            "no enabled drives is a valid configuration"
+        );
     }
 
     #[test]

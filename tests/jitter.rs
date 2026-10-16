@@ -124,7 +124,7 @@ impl Rig {
     fn new(corpus: Vec<&'static str>) -> Self {
         let now = Instant::now();
         Self {
-            state: AppState::new(Settings::default(), now),
+            state: AppState::new(Settings::fixture(), now),
             frame: Frame::new(),
             now,
             inflight: Vec::new(),

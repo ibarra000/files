@@ -191,7 +191,7 @@ mod tests {
     fn a_configured_share_is_looked_in_rather_than_github() {
         let settings = Settings {
             update_from: Some(PathBuf::from(r"\\server\software\files")),
-            ..Settings::default()
+            ..Settings::fixture()
         };
         assert!(matches!(Source::of(&settings), Some(Source::Folder(_))));
     }
@@ -199,7 +199,7 @@ mod tests {
     /// Out of the box, the repository this build came from.
     #[test]
     fn with_no_share_github_is_looked_at_by_default() {
-        let source = Source::of(&Settings::default());
+        let source = Source::of(&Settings::fixture());
         assert!(matches!(source, Some(Source::GitHub(_))), "{source:?}");
         assert!(source.unwrap().describe().starts_with("GitHub"));
     }
@@ -209,7 +209,7 @@ mod tests {
     fn turning_the_check_off_looks_nowhere() {
         let settings = Settings {
             check_for_updates: false,
-            ..Settings::default()
+            ..Settings::fixture()
         };
         assert_eq!(Source::of(&settings), None);
     }

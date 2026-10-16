@@ -46,7 +46,7 @@ struct Window {
 fn window(page: PageId, dark: bool, have_file: bool) -> Window {
     let settings = Settings {
         have_file,
-        ..Settings::default()
+        ..Settings::fixture()
     };
     Window {
         theme: Theme::of(dark),

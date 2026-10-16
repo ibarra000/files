@@ -61,8 +61,6 @@ pub fn ensure_app_dirs(settings: &crate::config::Settings) -> Vec<PathBuf> {
 /// reported against the line that holds them, which only the parser can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Conflict {
-    /// Nothing enabled, so nothing could ever be searched.
-    NothingEnabled,
     /// Two mappings on one directory.
     ///
     /// Refused rather than merged: the persisted index is keyed by a hash of
@@ -87,7 +85,6 @@ pub enum Conflict {
 impl Conflict {
     pub fn detail(&self) -> String {
         match self {
-            Self::NothingEnabled => "no enabled drives; nothing could ever be searched".into(),
             Self::SameDirectory { a, b, at } => format!(
                 "drives `{a}` and `{b}` both point at {}; \
                  indexing one directory twice returns every file twice",
@@ -115,10 +112,6 @@ impl Conflict {
 /// attempts is gratuitous when all four are already known.
 pub fn conflicts(mappings: &[Mapping]) -> Vec<Conflict> {
     let mut out = Vec::new();
-    if !mappings.iter().any(|m| m.enabled) {
-        out.push(Conflict::NothingEnabled);
-    }
-
     for (i, a) in mappings.iter().enumerate() {
         if !a.enabled || !a.kind.is_searched() {
             continue;

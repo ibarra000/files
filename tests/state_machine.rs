@@ -37,7 +37,7 @@ fn with_avwin() -> Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -1307,7 +1307,7 @@ fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
 #[test]
 fn f2_without_viewers_toggles_between_the_built_in_two() {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let mut s = AppState::new(Settings::fixture(), now);
     s.update(press(Key::F(2)), now);
     assert_eq!(s.viewer, ViewerKind::Pdf);
     s.update(press(Key::F(2)), now);
@@ -1328,7 +1328,7 @@ fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     });
     assert_eq!(opened, Some(ViewerKind::App(0)), "{:?}", r.cmds);
 
-    let mut none = AppState::new(Settings::default(), now);
+    let mut none = AppState::new(Settings::fixture(), now);
     type_in(&mut none, "11-D-0704", now);
     none.update(search_result(&view(&none), vec![hit("a.dwg")], 1, 9), now);
     let r = none.update(ctrl(Key::Char('e')), now);
@@ -1725,7 +1725,7 @@ fn with_aliases() -> Settings {
                 note: None,
             },
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -1973,7 +1973,7 @@ fn in_columns(columns: usize) -> (AppState, Instant) {
     let now = Instant::now();
     let settings = Settings {
         columns,
-        ..Settings::default()
+        ..Settings::fixture()
     };
     (AppState::new(settings, now), now)
 }
@@ -2804,7 +2804,7 @@ fn aliased_state() -> (AppState, Instant) {
     }]);
     let settings = Settings {
         aliases: Arc::new(aliases),
-        ..Default::default()
+        ..Settings::fixture()
     };
     let now = Instant::now();
     (AppState::new(settings, now), now)
@@ -2943,7 +2943,7 @@ fn alias(name: &str, code: &str) -> files::alias::Alias {
 fn saveable() -> (AppState, Instant) {
     let settings = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     let now = Instant::now();
     (AppState::new(settings, now), now)
@@ -2982,7 +2982,7 @@ fn a_file_rewritten_elsewhere_is_taken_whole() {
         have_file: true,
         history: false,
         result_layout: files::config::ResultLayout::Detailed,
-        ..Default::default()
+        ..Settings::fixture()
     };
     adopt(&mut s, fresh, now);
 
@@ -3012,7 +3012,7 @@ fn turning_the_history_off_elsewhere_forgets_what_it_held() {
         Settings {
             have_file: true,
             history: false,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -3033,7 +3033,7 @@ fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
 
     let mut fresh = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
     adopt(&mut s, fresh, now);
@@ -3048,7 +3048,7 @@ fn an_alias_removed_elsewhere_stops_expanding_the_line() {
     let (mut s, now) = saveable();
     let mut with = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
     adopt(&mut s, with, now);
@@ -3059,7 +3059,7 @@ fn an_alias_removed_elsewhere_stops_expanding_the_line() {
         &mut s,
         Settings {
             have_file: true,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -3093,7 +3093,7 @@ fn the_status_slots_follow_the_drive_list() {
     ];
     let mut fresh = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fresh.routes = std::sync::Arc::new(Routes::new(three, ConfigSource::BuiltIn));
     adopt(&mut s, fresh, now);
@@ -3101,7 +3101,7 @@ fn the_status_slots_follow_the_drive_list() {
 
     let mut fewer = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fewer.routes = std::sync::Arc::new(Routes::new(
         vec![drive(0, "only", r"Z:\")],
@@ -3157,7 +3157,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
     fn differing(key: SettingKey) -> Settings {
         let mut s = Settings {
             have_file: true,
-            ..Default::default()
+            ..Settings::fixture()
         };
         match key {
             SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
@@ -3396,7 +3396,7 @@ fn developer_mode_changes_the_next_message_drawn() {
         Settings {
             have_file: true,
             dev_mode: true,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );

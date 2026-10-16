@@ -71,6 +71,7 @@ pub fn run(settings: Settings, choice: ConfigChoice, page: Option<PageId>) -> ef
         viewport: egui::ViewportBuilder::default()
             .with_title("files - settings")
             .with_app_id("files-settings")
+            .with_icon(crate::gui::icon::window_icon(false))
             // Everything the panel is not. A caption bar, because this is a
             // document window somebody keeps open and moves about; a
             // taskbar button, because it is a place you come back to; and
@@ -107,6 +108,8 @@ struct App {
     /// one. `--config` is a flag on *this* process as well as on the panel.
     choice: ConfigChoice,
     theme: Theme,
+    /// Whether the title-bar icon is tinted for a dark caption, once set.
+    caption_dark: Option<bool>,
     page: PageId,
     /// The facts only a running panel knows. Default until one says.
     live: Live,
@@ -168,6 +171,7 @@ impl App {
             update: look_for_update(&settings, wake),
             page: page.unwrap_or(PageId::General),
             theme,
+            caption_dark: None,
             settings,
             choice,
             live: Live::default(),
@@ -231,6 +235,15 @@ impl App {
     /// answer changes, because a `Style` is several hundred bytes cloned
     /// and the theme moves about twice a day.
     fn follow_theme(&mut self, ctx: &egui::Context) {
+        // The caption follows the Windows app theme, not this setting.
+        let caption_dark = ctx.theme() == egui::Theme::Dark;
+        if self.caption_dark != Some(caption_dark) {
+            self.caption_dark = Some(caption_dark);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(
+                crate::gui::icon::window_icon(caption_dark),
+            )));
+        }
+
         let dark = self
             .settings
             .theme

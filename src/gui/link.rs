@@ -263,7 +263,7 @@ mod tests {
     /// read.
     #[test]
     fn the_default_configuration_file_is_not_named_on_the_command_line() {
-        let settings = Settings::default();
+        let settings = Settings::fixture();
         assert_eq!(config_arg(&settings), None);
     }
 }

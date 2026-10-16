@@ -950,6 +950,12 @@ impl Default for IndexStore {
 }
 
 impl IndexStore {
+    /// A store over [`crate::config::fixture_routes`]. Test fixture only.
+    #[doc(hidden)]
+    pub fn fixture() -> Self {
+        Self::for_routes(&crate::config::fixture_routes(), JOB_CACHE_CAPACITY)
+    }
+
     /// Builds a slot for every configured mapping, enabled or not.
     ///
     /// Disabled mappings get a slot and no actor. Keeping them means
@@ -1127,7 +1133,7 @@ mod tests {
 
     #[test]
     fn starts_with_no_snapshot_and_a_clean_status() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(s.first_flat_slot().as_flat().is_none());
         let st = s.first_flat_slot().status();
         assert!(st.health.is_ok());
@@ -1137,7 +1143,7 @@ mod tests {
 
     #[test]
     fn publishing_makes_the_snapshot_and_its_metadata_visible() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
         assert_eq!(s.first_flat_slot().as_flat().unwrap().len(), 2);
@@ -1150,7 +1156,7 @@ mod tests {
     /// The modelling fix: an error must never cost us the data we already had.
     #[test]
     fn a_failed_refresh_keeps_the_last_known_good_snapshot() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot().publish_flat(
             snap(&["a", "b", "c"], SystemTime::UNIX_EPOCH),
             Origin::Network,
@@ -1172,7 +1178,7 @@ mod tests {
 
     #[test]
     fn repeated_failures_keep_the_original_onset_time() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .record_failure(EnumError::Transient(53), 1, Instant::now());
         let status = s.first_flat_slot().status();
@@ -1195,7 +1201,7 @@ mod tests {
 
     #[test]
     fn a_successful_publish_clears_the_error() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .record_failure(EnumError::Transient(53), 3, Instant::now());
         s.first_flat_slot()
@@ -1207,7 +1213,7 @@ mod tests {
 
     #[test]
     fn a_truncated_snapshot_is_reported_as_degraded() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let mut b = SnapshotBuilder::new("V:\\");
         b.push_str("a");
         let mut snapshot = b.finish(SystemTime::UNIX_EPOCH, 0, None);
@@ -1238,7 +1244,7 @@ mod tests {
 
     #[test]
     fn confirming_freshness_recovers_from_unreachable() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         s.first_flat_slot()
@@ -1254,7 +1260,7 @@ mod tests {
     fn age_is_clamped_rather_than_going_negative() {
         // A clock correction can put built_at in the future.
         let future = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], future), Origin::Network);
         let age = s
@@ -1267,7 +1273,7 @@ mod tests {
 
     #[test]
     fn job_lookups_honour_the_ttl() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job(dir.clone(), snap(&["f.txt"], SystemTime::UNIX_EPOCH));
 
@@ -1280,7 +1286,7 @@ mod tests {
 
     #[test]
     fn an_unknown_job_folder_is_absent() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(matches!(
             s.job(Path::new("R:\\nope"), Duration::from_secs(60)),
             Cached::Absent
@@ -1289,7 +1295,7 @@ mod tests {
 
     #[test]
     fn definite_misses_are_cached_so_typing_does_not_reprobe() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\nope");
         s.publish_job_miss(dir.clone(), EnumError::PathNotFound(3));
         assert!(matches!(
@@ -1302,7 +1308,7 @@ mod tests {
     /// be remembered, or one network blip pins an empty answer for the TTL.
     #[test]
     fn transient_failures_are_never_cached() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job_miss(dir.clone(), EnumError::Transient(53));
         assert!(
@@ -1316,7 +1322,7 @@ mod tests {
     /// the keystroke that replaced it.
     #[test]
     fn only_definite_answers_about_the_folder_are_cached() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
 
         for definite in [
             EnumError::PathNotFound(3),
@@ -1371,7 +1377,7 @@ mod tests {
 
     #[test]
     fn invalidating_a_job_forces_a_refetch() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job(dir.clone(), snap(&["f"], SystemTime::UNIX_EPOCH));
         s.invalidate_job(&dir);
@@ -1386,7 +1392,7 @@ mod tests {
     /// "0s" - honest about the check, dishonest about the data.
     #[test]
     fn confirming_freshness_does_not_pretend_the_data_is_new() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let built = SystemTime::UNIX_EPOCH;
         s.first_flat_slot()
             .publish_flat(snap(&["a"], built), Origin::Network);
@@ -1404,7 +1410,7 @@ mod tests {
 
     #[test]
     fn a_fresh_listing_is_its_own_confirmation() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         let st = s.first_flat_slot().status();
@@ -1413,7 +1419,7 @@ mod tests {
 
     #[test]
     fn the_scan_reason_is_visible_to_the_ui() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(s.first_flat_slot().status().last_scan_reason.is_none());
         s.first_flat_slot()
             .note_scan_started(ScanReason::StampMoved);
@@ -1433,7 +1439,7 @@ mod tests {
 
     #[test]
     fn the_session_totals_reach_the_ui() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot().note_schedule(
             Counters {
                 full_scans: 3,
@@ -1451,7 +1457,7 @@ mod tests {
     /// somewhere else" looked identical to "first run".
     #[test]
     fn a_rejected_cache_is_recorded_rather_than_discarded() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .note_cache_rejected("cached index belongs to volume 00000000".into());
         assert!(
@@ -1468,7 +1474,7 @@ mod tests {
     fn readers_never_block_the_writer() {
         // Holding a snapshot must not prevent a publish - that is the whole
         // reason for the arc-swap.
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         let held = s.first_flat_slot().as_flat().unwrap();

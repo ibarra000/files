@@ -47,10 +47,7 @@ fn embed() {
     // comes from Cargo by default; the rest is what turns "files.exe" into
     // something a person can identify.
     res.set("ProductName", "files");
-    res.set(
-        "FileDescription",
-        "files - indexer",
-    );
+    res.set("FileDescription", env!("CARGO_PKG_DESCRIPTION"));
     res.set("CompanyName", "files");
     res.set("LegalCopyright", "");
     res.set("OriginalFilename", "files.exe");

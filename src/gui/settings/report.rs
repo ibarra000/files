@@ -262,7 +262,7 @@ mod tests {
         let mut reporter = ready("all fine", now);
         let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&woken);
-        reporter.wanted(true, &Settings::default(), None, now + TTL / 2, move || {
+        reporter.wanted(true, &Settings::fixture(), None, now + TTL / 2, move || {
             flag.store(true, std::sync::atomic::Ordering::Relaxed)
         });
         assert!(reporter.job.is_none(), "a second run was started");
@@ -275,7 +275,7 @@ mod tests {
     fn an_answer_older_than_the_minute_is_taken_again() {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
-        reporter.wanted(true, &Settings::default(), None, now + TTL * 2, || {});
+        reporter.wanted(true, &Settings::fixture(), None, now + TTL * 2, || {});
         assert!(reporter.job.is_some(), "no second run was started");
         assert_eq!(reporter.view(), View::Waiting);
     }
@@ -285,7 +285,7 @@ mod tests {
     fn a_page_that_wants_nothing_starts_nothing() {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
-        reporter.wanted(false, &Settings::default(), None, now + TTL * 2, || {});
+        reporter.wanted(false, &Settings::fixture(), None, now + TTL * 2, || {});
         assert!(reporter.job.is_none());
         assert_eq!(reporter.view(), View::Ready("all fine"));
     }
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn refreshing_keeps_the_old_report_on_screen() {
         let mut reporter = ready("all fine", Instant::now());
-        reporter.refresh(&Settings::default(), None, || {});
+        reporter.refresh(&Settings::fixture(), None, || {});
         assert_eq!(reporter.view(), View::Stale("all fine"));
         assert_eq!(reporter.text(), "all fine");
     }
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn refreshing_from_nothing_is_a_plain_wait() {
         let mut reporter = Reporter::default();
-        reporter.refresh(&Settings::default(), None, || {});
+        reporter.refresh(&Settings::fixture(), None, || {});
         assert_eq!(reporter.view(), View::Waiting);
     }
 
@@ -339,7 +339,7 @@ mod tests {
         reporter.poll(Instant::now());
         assert!(reporter.job.is_none());
         // And asking again starts a new one.
-        reporter.wanted(true, &Settings::default(), None, Instant::now(), || {});
+        reporter.wanted(true, &Settings::fixture(), None, Instant::now(), || {});
         assert!(reporter.job.is_some());
     }
 }

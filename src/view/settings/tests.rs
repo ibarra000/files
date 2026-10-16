@@ -42,7 +42,7 @@ fn rows(settings: &Settings) -> Vec<Row> {
 /// one checks whatever is there.
 #[test]
 fn every_word_on_every_page_keeps_the_house_style() {
-    check_prose(&form(&Settings::default()));
+    check_prose(&form(&Settings::fixture()));
 }
 
 /// And with a configuration file, which changes what the caveats say.
@@ -50,7 +50,7 @@ fn every_word_on_every_page_keeps_the_house_style() {
 fn the_words_keep_the_house_style_with_a_file_to_save_to() {
     let settings = Settings {
         have_file: true,
-        ..Settings::default()
+        ..Settings::fixture()
     };
     check_prose(&form(&settings));
 }
@@ -59,7 +59,7 @@ fn the_words_keep_the_house_style_with_a_file_to_save_to() {
 /// help, which may legitimately begin with a program name or a switch.
 #[test]
 fn every_title_and_heading_starts_the_way_a_line_should() {
-    for page in form(&Settings::default()) {
+    for page in form(&Settings::fixture()) {
         assert!(
             style::starts_capitalised(page.id.title()),
             "the {} page title does not",
@@ -76,7 +76,7 @@ fn every_title_and_heading_starts_the_way_a_line_should() {
 /// being true.
 #[test]
 fn every_writable_setting_appears_on_the_pages_exactly_once() {
-    let rows = rows(&Settings::default());
+    let rows = rows(&Settings::fixture());
     for key in SettingKey::ALL {
         let found = rows.iter().filter(|r| r.key == key).count();
         assert_eq!(found, 1, "{} appears {found} times", key.name());
@@ -88,7 +88,7 @@ fn every_writable_setting_appears_on_the_pages_exactly_once() {
 /// with nothing in it is a heading over nothing.
 #[test]
 fn every_page_has_a_group_and_every_group_has_a_block() {
-    for page in form(&Settings::default()) {
+    for page in form(&Settings::fixture()) {
         assert!(
             !page.groups.is_empty(),
             "the {} page is empty",
@@ -117,7 +117,7 @@ fn every_page_has_a_group_and_every_group_has_a_block() {
 /// or a page exists that nothing can reach.
 #[test]
 fn the_registry_and_the_list_of_pages_agree() {
-    let ids: Vec<PageId> = form(&Settings::default()).iter().map(|p| p.id).collect();
+    let ids: Vec<PageId> = form(&Settings::fixture()).iter().map(|p| p.id).collect();
     assert_eq!(ids, PageId::ALL.to_vec());
 }
 
@@ -137,7 +137,7 @@ fn every_page_is_distinguishable_from_the_others() {
 #[test]
 fn every_kind_of_block_contributes_something_to_the_corpus() {
     let blocks = [
-        Block::Rows(rows(&Settings::default())),
+        Block::Rows(rows(&Settings::fixture())),
         Block::Facts(vec![Fact::new("Label", "value")]),
         Block::Actions(vec![Action::new(ActionId::CopyReport, "Copy")]),
         Block::Switches(vec![Switch::new(
@@ -201,7 +201,7 @@ fn a_choice_starts_on_the_setting_that_is_in_force() {
     for theme in [ThemeChoice::Light, ThemeChoice::Dark, ThemeChoice::System] {
         let settings = Settings {
             theme,
-            ..Settings::default()
+            ..Settings::fixture()
         };
         let row = rows(&settings)
             .into_iter()
@@ -221,7 +221,7 @@ fn a_toggle_starts_on_the_setting_that_is_in_force() {
     for on in [true, false] {
         let settings = Settings {
             history: on,
-            ..Settings::default()
+            ..Settings::fixture()
         };
         let row = rows(&settings)
             .into_iter()
@@ -234,7 +234,7 @@ fn a_toggle_starts_on_the_setting_that_is_in_force() {
 /// With no file there is nowhere to save anything, and every row says so.
 #[test]
 fn a_session_without_a_configuration_file_says_so_on_every_row() {
-    for row in rows(&Settings::default()) {
+    for row in rows(&Settings::fixture()) {
         assert_eq!(row.pin, Some(Pin::NoFile), "{}", row.label);
         assert_eq!(row.caveat().as_deref(), Some(Pin::NoFile.detail().as_str()));
     }
@@ -259,7 +259,7 @@ fn a_pin_outranks_a_restart_notice() {
 fn a_setting_that_applies_at_once_says_nothing_at_all() {
     let settings = Settings {
         have_file: true,
-        ..Settings::default()
+        ..Settings::fixture()
     };
     let row = rows(&settings)
         .into_iter()
@@ -297,7 +297,7 @@ fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
         (SettingKey::IndexLog, PageId::Diagnostics),
     ];
 
-    let pages = form(&Settings::default());
+    let pages = form(&Settings::fixture());
     for (key, want) in HOME {
         let found = pages
             .iter()
@@ -321,7 +321,7 @@ fn every_setting_is_on_the_page_it_is_meant_to_be_on() {
 /// drawn twice and nothing is unreachable.
 #[test]
 fn the_lists_and_the_report_appear_exactly_once_each() {
-    let pages = form(&Settings::default());
+    let pages = form(&Settings::fixture());
     let blocks: Vec<&Block> = pages
         .iter()
         .flat_map(|p| &p.groups)
@@ -359,7 +359,7 @@ fn every_action_on_the_form_is_one_the_shell_can_act_on() {
     let settings = Settings {
         have_file: true,
         update_from: Some(std::path::PathBuf::from(r"\\server\share")),
-        ..Settings::default()
+        ..Settings::fixture()
     };
     let pages = form(&settings);
     let actions: Vec<ActionId> = pages
@@ -386,7 +386,7 @@ fn every_action_on_the_form_is_one_the_shell_can_act_on() {
 fn a_remembered_position_brings_a_way_to_forget_it() {
     let pages = pages(
         None,
-        &Settings::default(),
+        &Settings::fixture(),
         Some((100, 200)),
         true,
         Some(false),
@@ -409,7 +409,7 @@ fn a_remembered_position_brings_a_way_to_forget_it() {
 #[test]
 fn starting_with_windows_is_a_switch_that_reads_the_registry() {
     for on in [false, true] {
-        let pages = pages(None, &Settings::default(), None, true, Some(on));
+        let pages = pages(None, &Settings::fixture(), None, true, Some(on));
         let found = switches(&pages);
         assert_eq!(found.len(), 1, "one switch, not {found:?}");
         let switch = &found[0];
@@ -423,7 +423,7 @@ fn starting_with_windows_is_a_switch_that_reads_the_registry() {
 /// it looks like or where it searches.
 #[test]
 fn starting_with_windows_is_on_the_general_page() {
-    let pages = form(&Settings::default());
+    let pages = form(&Settings::fixture());
     let general = pages.iter().find(|p| p.id == PageId::General).unwrap();
     assert_eq!(switches(std::slice::from_ref(general)).len(), 1);
 }
@@ -433,7 +433,7 @@ fn starting_with_windows_is_on_the_general_page() {
 /// on over an entry that may already be there.
 #[test]
 fn an_unreadable_registry_is_reported_rather_than_guessed_at() {
-    let pages = pages(None, &Settings::default(), None, true, None);
+    let pages = pages(None, &Settings::fixture(), None, true, None);
     assert!(switches(&pages).is_empty());
     let said = pages
         .iter()

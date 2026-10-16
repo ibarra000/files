@@ -184,7 +184,7 @@ fn with_avwin() -> Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -358,7 +358,7 @@ fn the_footer_says_what_enter_will_do() {
 #[test]
 fn with_no_viewers_the_menu_offers_none() {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let mut s = AppState::new(Settings::fixture(), now);
     with_results(&mut s, "11-D-0704", many(3), 3, now);
     s.actions_open = true;
 

@@ -292,7 +292,7 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::new(Settings::default(), Instant::now())
+        AppState::new(Settings::fixture(), Instant::now())
     }
 
     /// Reports a healthy index, which is what stops a fresh state having the

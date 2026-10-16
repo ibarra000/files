@@ -26,10 +26,13 @@ pub mod anim;
 pub mod drag;
 pub mod fonts;
 pub mod frame;
+pub mod icon;
 pub mod input;
 pub mod link;
 pub mod panel;
 pub mod settings;
+#[cfg(windows)]
+pub mod taskbar;
 pub mod text;
 pub mod theme;
 #[cfg(windows)]
@@ -76,6 +79,8 @@ pub enum Request {
     Diagnostics,
     InstallUpdate,
     Quit,
+    /// The taskbar may have switched between light and dark.
+    TaskbarTheme,
 }
 
 /// Runs the application until the user quits.
@@ -100,6 +105,7 @@ pub fn run(
         viewport: egui::ViewportBuilder::default()
             .with_title("files")
             .with_app_id("files")
+            .with_icon(icon::window_icon(false))
             // Frameless: the panel paints its own edge. A caption bar on a
             // thing summoned by a hotkey is a thing nobody asked to manage.
             .with_decorations(false)
@@ -300,16 +306,25 @@ impl Shell {
         // still works, and a search tool that will not start because the
         // notification area is full is a worse tool than one without an icon.
         #[cfg(windows)]
-        let tray = tray::Tray::new(move |action| {
-            post(match action {
-                tray::TrayAction::Show => Request::Show,
-                tray::TrayAction::Settings => Request::Settings,
-                tray::TrayAction::Diagnostics => Request::Diagnostics,
-                tray::TrayAction::InstallUpdate => Request::InstallUpdate,
-                tray::TrayAction::Quit => Request::Quit,
-            });
+        let tray = tray::Tray::new({
+            let post = post.clone();
+            move |action| {
+                post(match action {
+                    tray::TrayAction::Show => Request::Show,
+                    tray::TrayAction::Settings => Request::Settings,
+                    tray::TrayAction::Diagnostics => Request::Diagnostics,
+                    tray::TrayAction::InstallUpdate => Request::InstallUpdate,
+                    tray::TrayAction::Quit => Request::Quit,
+                });
+            }
         })
         .ok();
+        #[cfg(windows)]
+        if tray.is_some()
+            && let Err(err) = taskbar::watch(move || post(Request::TaskbarTheme))
+        {
+            log::warn!("the tray icon will not follow the taskbar theme: {err}");
+        }
 
         Ok(Self {
             app,
@@ -387,6 +402,13 @@ impl Shell {
                     .open_at(PageId::Diagnostics, &self.app.state.settings),
                 Request::InstallUpdate => self.install_update(now),
                 Request::Quit => self.app.state.should_quit = true,
+                Request::TaskbarTheme =>
+                {
+                    #[cfg(windows)]
+                    if let Some(tray) = self.tray.as_mut() {
+                        tray.follow_taskbar();
+                    }
+                }
             }
         }
     }

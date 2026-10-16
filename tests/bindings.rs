@@ -199,7 +199,7 @@ fn with_avwin() -> Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -676,7 +676,7 @@ fn a_control_combination_this_program_does_not_have_types_nothing() {
 #[test]
 fn a_key_release_is_not_a_second_keystroke() {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let mut s = AppState::new(Settings::fixture(), now);
     for c in "11-D".chars() {
         let key = KeyEvent::new(Key::Char(c), NONE);
         s.update(AppEvent::Key(key), now);

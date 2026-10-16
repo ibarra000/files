@@ -536,7 +536,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             persist: false,
-            ..Default::default()
+            ..Settings::fixture()
         }
     }
 

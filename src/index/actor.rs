@@ -1599,7 +1599,7 @@ mod tests {
     fn ctx(src: FakeDirSource, store: Arc<IndexStore>) -> IndexContext {
         let settings = Settings {
             persist: false,
-            ..Default::default()
+            ..Settings::fixture()
         };
         IndexContext::new(settings, MappingId(0), store, Arc::new(src))
     }
@@ -1651,7 +1651,7 @@ mod tests {
     #[test]
     fn the_actor_publishes_an_initial_snapshot() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1668,7 +1668,7 @@ mod tests {
     #[test]
     fn the_session_is_warmed_before_anything_needs_it() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1690,7 +1690,7 @@ mod tests {
     fn an_unchanged_stamp_avoids_re_enumeration() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1720,7 +1720,7 @@ mod tests {
     fn a_changed_stamp_triggers_a_rescan() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1750,7 +1750,7 @@ mod tests {
     fn a_forced_refresh_bypasses_the_stamp_check() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1779,7 +1779,7 @@ mod tests {
     #[test]
     fn a_failing_refresh_keeps_serving_the_previous_snapshot() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn a_refresh_report_reaches_the_ui() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1837,7 +1837,7 @@ mod tests {
     #[test]
     fn shutdown_is_prompt() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1868,7 +1868,7 @@ mod tests {
         // can interrupt and prove nothing about this one.
         src.set_stamp_error(Some(EnumError::Unsupported(50)));
         src.set_hang(true);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1904,7 +1904,7 @@ mod tests {
     fn a_share_that_will_not_report_a_stamp_is_rescanned_on_the_floor_not_the_probe_interval() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp_supported(false);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -1934,7 +1934,7 @@ mod tests {
     fn a_transient_stamp_failure_never_triggers_an_enumeration() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -1964,7 +1964,7 @@ mod tests {
     fn a_failed_first_scan_is_retried_no_faster_than_the_minimum_spacing() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_error(Some(EnumError::Transient(53)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let cadence = Cadence::fast();
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
@@ -1987,7 +1987,7 @@ mod tests {
     fn an_unchanged_stamp_is_never_re_enumerated_however_long_the_app_runs() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(7, 7)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2015,7 +2015,7 @@ mod tests {
     fn sixteen_f5_presses_produce_one_enumeration() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2050,7 +2050,7 @@ mod tests {
     fn an_empty_listing_does_not_immediately_replace_a_populated_index() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2076,7 +2076,7 @@ mod tests {
     fn a_genuinely_emptied_directory_is_accepted_on_the_second_answer() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2103,7 +2103,7 @@ mod tests {
     fn the_scan_reason_reaches_the_ui() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2131,7 +2131,7 @@ mod tests {
         let path = dir.path().join("index.log");
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context =
             fast_ctx(src.clone(), Arc::clone(&store)).with_log(Arc::new(IndexLog::to_path(&path)));
         let mut actor = spawn(context, draining_events()).unwrap();
@@ -2183,11 +2183,11 @@ mod tests {
 
         // First run: populate the cache.
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let settings = Settings {
                 persist: true,
                 cache_dir: Some(cache.path().to_path_buf()),
-                ..Default::default()
+                ..Settings::fixture()
             };
             let context = IndexContext::new(
                 settings,
@@ -2209,11 +2209,11 @@ mod tests {
 
         // Second run: the stamp still matches, so no enumeration is needed.
         src.clear_calls();
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let settings = Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
         let context = IndexContext::new(
             settings,
@@ -2251,11 +2251,11 @@ mod tests {
         let settings = || Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
 
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let context = IndexContext::new(
                 settings(),
                 MappingId(0),
@@ -2279,7 +2279,7 @@ mod tests {
         src.bump_stamp();
         src.clear_calls();
 
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context = IndexContext::new(
             settings(),
             MappingId(0),
@@ -2313,7 +2313,7 @@ mod tests {
     fn a_source_with_no_stamp_support_is_marked_degraded() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp_supported(false);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor = spawn(fast_ctx(src, Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(
@@ -2345,12 +2345,12 @@ mod tests {
         let settings = Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
 
         // Write a cache under one volume identity...
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let context = IndexContext::new(
                 settings.clone(),
                 MappingId(0),
@@ -2371,7 +2371,7 @@ mod tests {
         }
 
         // ...then read it back as a different one.
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context = IndexContext::new(
             settings,
             MappingId(0),

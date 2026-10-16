@@ -30,7 +30,7 @@ fn with_avwin() -> Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -379,7 +379,7 @@ fn the_overlay_can_be_told_to_stay_up_after_an_open() {
     let mut s = AppState::new(
         Settings {
             hide_after_opening: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -537,7 +537,7 @@ fn losing_focus_does_nothing_when_it_should_not() {
     let mut off = AppState::new(
         Settings {
             hide_on_blur: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -566,7 +566,7 @@ fn escape_can_be_told_to_clear_rather_than_close() {
     let mut s = AppState::new(
         Settings {
             hide_on_escape: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );

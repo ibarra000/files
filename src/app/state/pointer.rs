@@ -206,7 +206,7 @@ mod tests {
     use std::sync::Arc;
 
     fn state_with_hits(n: usize) -> AppState {
-        let mut state = AppState::new(Settings::default(), Instant::now());
+        let mut state = AppState::new(Settings::fixture(), Instant::now());
         state.hits = (0..n)
             .map(|i| Hit {
                 path: Arc::from(format!(r"R:\jobs\11-D-070{i}.pdf").as_str()),
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn clicking_a_remembered_code_takes_that_one() {
         let now = Instant::now();
-        let mut state = AppState::new(Settings::default(), now);
+        let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into(), "b".into(), "c".into()]);
         state.on_key(crate::app::key::KeyEvent::new(Key::Up, Mods::NONE), now);
         assert_eq!(state.input.text(), "a", "the fixture is not browsing");
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn clicking_a_remembered_code_that_is_gone_does_nothing() {
         let now = Instant::now();
-        let mut state = AppState::new(Settings::default(), now);
+        let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into()]);
         assert!(state.on_intent(Intent::Recall(9), now).cmds.is_empty());
         assert_eq!(state.input.text(), "");

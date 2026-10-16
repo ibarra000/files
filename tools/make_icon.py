@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
-"""Draws the application icon.
+"""Builds the application icons from `assets/open.ico`.
 
-Committed and re-runnable rather than a binary that appeared in the tree: an
-icon nobody can regenerate is one nobody can change, and "why is the blue
-slightly different from the panel's" is a question that should have an answer
-in the repository rather than in somebody's image editor.
+Writes:
 
-Writes two things, because two things need it and neither should be derived
-from the other at run time:
+  assets/files.ico      the sizes Windows asks for, for the executable, the
+                        Start menu, the taskbar and the installer
+  assets/files-32.rgba  raw 32x32 RGBA, for the tray and window icons
 
-  assets/files.ico      every size Windows asks for, for the executable, the
-                        Start menu, the taskbar and Alt-Tab
-  assets/files-32.rgba  raw RGBA at 32x32, which is what `tray-icon` takes
-
-Pure standard library: `struct` and `zlib` are enough to write a PNG, and an
-.ico is a header plus a list of PNGs. Adding Pillow to build an icon would mean
-a Python environment is part of building a Rust program.
+Standard library only, so building the icon needs no Python packages.
 
 Run from the repository root:
 
@@ -26,95 +18,128 @@ import os
 import struct
 import zlib
 
-# The panel's accent blue, and its lightest text. Taken from
-# `src/gui/theme.rs` so the icon and the thing it launches are the same colour;
-# if that palette moves, this is the one other place to change.
-ACCENT = (0x6F, 0xB3, 0xFF)
-ACCENT_DEEP = (0x1E, 0x5F, 0xB8)
-INK = (0xF2, 0xF5, 0xFA)
-
-# How much bigger the icon is drawn before being scaled down. Antialiasing by
-# supersampling, which is 15 lines rather than a dependency.
-SS = 8
-
-SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+SIZES = [16, 20, 24, 32, 40, 48, 64]
+RGBA_SIZE = 32
 
 
-def rounded_square(x, y, size, radius):
-    """Signed coverage test for a rounded square at the origin."""
-    # Distance from the rounded-rectangle boundary, negative inside.
-    inner = size / 2 - radius
-    dx = max(abs(x - size / 2) - inner, 0.0)
-    dy = max(abs(y - size / 2) - inner, 0.0)
-    return (dx * dx + dy * dy) ** 0.5 - radius
+def read_ico(path):
+    """The largest image in an .ico, as (size, rows of RGBA bytes).
 
-
-def draw(size):
-    """One icon, as a list of RGBA rows.
-
-    A rounded square in the panel's accent blue, with three bars in it - a
-    list, which is what the program shows you, in the shape Windows 11 gives
-    every other app icon. Deliberately not a magnifying glass: at sixteen
-    pixels a magnifier is four grey dots and a smudge, and this has to be
-    recognisable in a notification area.
+    Handles both PNG entries and 32-bit BMP entries with an alpha channel.
     """
-    big = size * SS
-    radius = big * 0.22
-
-    # The three bars, as fractions of the icon: top, left, width, height.
-    # Decreasing width, which reads as a list rather than as a flag.
-    bars = [(0.30, 0.24, 0.52, 0.09), (0.455, 0.24, 0.40, 0.09), (0.61, 0.24, 0.28, 0.09)]
-    bars_px = [
-        (t * big, l * big, w * big, h * big)
-        for (t, l, w, h) in bars
-    ]
-
+    data = open(path, "rb").read()
+    _, kind, count = struct.unpack("<HHH", data[:6])
+    if kind != 1 or count == 0:
+        raise ValueError(f"{path} is not an icon")
+    entries = []
+    for i in range(count):
+        w, h, _, _, _, bpp, size, offset = struct.unpack(
+            "<BBBBHHII", data[6 + 16 * i : 22 + 16 * i]
+        )
+        entries.append((w or 256, h or 256, bpp, data[offset : offset + size]))
+    w, h, bpp, image = max(entries, key=lambda e: e[0] * e[1])
+    if w != h:
+        raise ValueError(f"{path}: the largest image is not square ({w}x{h})")
+    if image[:4] == b"\x89PNG":
+        return w, read_png(image)
+    if bpp != 32:
+        raise ValueError(f"{path}: BMP entries must be 32-bit, found {bpp}-bit")
+    header = struct.unpack("<I", image[:4])[0]
+    pixels = image[header : header + w * h * 4]
+    # Bottom-up BGRA. The AND mask that follows is redundant with alpha.
     rows = []
-    for py in range(size):
+    for y in range(h):
+        src = pixels[(h - 1 - y) * w * 4 : (h - y) * w * 4]
         row = bytearray()
-        for px in range(size):
-            r = g = b = a = 0.0
-            for sy in range(SS):
-                for sx in range(SS):
-                    x = px * SS + sx + 0.5
-                    y = py * SS + sy + 0.5
-                    if rounded_square(x, y, big, radius) > 0:
-                        continue
-                    # A vertical gradient, so the tile has some depth rather
-                    # than reading as a flat swatch.
-                    t = y / big
-                    cr = ACCENT[0] + (ACCENT_DEEP[0] - ACCENT[0]) * t
-                    cg = ACCENT[1] + (ACCENT_DEEP[1] - ACCENT[1]) * t
-                    cb = ACCENT[2] + (ACCENT_DEEP[2] - ACCENT[2]) * t
-                    for (bt, bl, bw, bh) in bars_px:
-                        if bl <= x <= bl + bw and bt <= y <= bt + bh:
-                            cr, cg, cb = INK
-                            break
-                    r += cr
-                    g += cg
-                    b += cb
-                    a += 255.0
-            n = SS * SS
-            if a == 0:
-                row += bytes((0, 0, 0, 0))
-                continue
-            # Averaged over the covered samples only, so an edge pixel keeps
-            # the colour of the shape rather than fading towards black.
-            covered = a / 255.0
-            row += bytes(
-                (
-                    int(round(r / covered)),
-                    int(round(g / covered)),
-                    int(round(b / covered)),
-                    int(round(a / n)),
-                )
-            )
+        for x in range(w):
+            b, g, r, a = src[4 * x : 4 * x + 4]
+            row += bytes((r, g, b, a))
         rows.append(bytes(row))
+    return w, rows
+
+
+def read_png(data):
+    """Rows of RGBA bytes from an 8-bit RGBA, non-interlaced PNG."""
+    pos, idat, w = 8, b"", 0
+    while pos < len(data):
+        length, tag = struct.unpack(">I4s", data[pos : pos + 8])
+        body = data[pos + 8 : pos + 8 + length]
+        if tag == b"IHDR":
+            w, h, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if (depth, colour, interlace) != (8, 6, 0):
+                raise ValueError("only 8-bit RGBA non-interlaced PNGs are supported")
+        elif tag == b"IDAT":
+            idat += body
+        pos += 12 + length
+    raw, stride, rows, prev = zlib.decompress(idat), w * 4, [], bytes(w * 4)
+    for y in range(len(raw) // (stride + 1)):
+        kind = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b = prev[i]
+            c = prev[i - 4] if i >= 4 else 0
+            if kind == 1:
+                line[i] = (line[i] + a) & 0xFF
+            elif kind == 2:
+                line[i] = (line[i] + b) & 0xFF
+            elif kind == 3:
+                line[i] = (line[i] + (a + b) // 2) & 0xFF
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pred = a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+                line[i] = (line[i] + pred) & 0xFF
+        rows.append(bytes(line))
+        prev = line
     return rows
 
 
+def resize(rows, src, dst):
+    """Area-weighted resample on premultiplied alpha, so edges keep their colour."""
+    scale = src / dst
+    out = []
+    for oy in range(dst):
+        y0, y1 = oy * scale, (oy + 1) * scale
+        row = bytearray()
+        for ox in range(dst):
+            x0, x1 = ox * scale, (ox + 1) * scale
+            r = g = b = a = area = 0.0
+            for sy in range(int(y0), min(src, int(y1 + 0.999999))):
+                wy = min(y1, sy + 1) - max(y0, sy)
+                if wy <= 0:
+                    continue
+                line = rows[sy]
+                for sx in range(int(x0), min(src, int(x1 + 0.999999))):
+                    wx = min(x1, sx + 1) - max(x0, sx)
+                    if wx <= 0:
+                        continue
+                    weight = wx * wy
+                    pr, pg, pb, pa = line[4 * sx : 4 * sx + 4]
+                    alpha = pa / 255.0
+                    r += pr * alpha * weight
+                    g += pg * alpha * weight
+                    b += pb * alpha * weight
+                    a += pa * weight
+                    area += weight
+            if a == 0:
+                row += bytes(4)
+                continue
+            coverage = a / 255.0
+            row += bytes(
+                (
+                    min(255, round(r / coverage)),
+                    min(255, round(g / coverage)),
+                    min(255, round(b / coverage)),
+                    min(255, round(a / area)),
+                )
+            )
+        out.append(bytes(row))
+    return out
+
+
 def png(rows, size):
-    """A PNG, written by hand."""
+    """An 8-bit RGBA PNG."""
 
     def chunk(tag, data):
         out = struct.pack(">I", len(data)) + tag + data
@@ -132,13 +157,13 @@ def png(rows, size):
 def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     assets = os.path.join(root, "assets")
-    os.makedirs(assets, exist_ok=True)
+    size, master = read_ico(os.path.join(assets, "open.ico"))
 
     images = []
-    for size in SIZES:
-        rows = draw(size)
-        images.append((size, png(rows, size)))
-        if size == 32:
+    for target in SIZES:
+        rows = master if target == size else resize(master, size, target)
+        images.append((target, png(rows, target)))
+        if target == RGBA_SIZE:
             with open(os.path.join(assets, "files-32.rgba"), "wb") as f:
                 f.write(b"".join(rows))
 
@@ -146,17 +171,15 @@ def main():
     offset = 6 + 16 * len(images)
     header = struct.pack("<HHH", 0, 1, len(images))
     entries = b""
-    for size, data in images:
-        # 0 means 256 in a byte-sized field, which is the whole reason .ico
-        # tops out where it does.
-        dim = 0 if size >= 256 else size
+    for target, data in images:
+        dim = 0 if target >= 256 else target  # 0 encodes 256
         entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset)
         offset += len(data)
 
     with open(os.path.join(assets, "files.ico"), "wb") as f:
         f.write(header + entries + b"".join(data for _, data in images))
 
-    print("wrote assets/files.ico and assets/files-32.rgba")
+    print(f"wrote assets/files.ico and assets/files-32.rgba from a {size}x{size} source")
 
 
 if __name__ == "__main__":

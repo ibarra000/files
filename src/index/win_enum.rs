@@ -447,7 +447,7 @@ fn probe_stamp_win(dir: &Path) -> Result<DirStamp, EnumError> {
 
 fn probe_stamp_by_handle(dir: &Path) -> Result<DirStamp, EnumError> {
     #[cfg(test)]
-    if FORCE_STAMP_FALLBACK.load(std::sync::atomic::Ordering::Relaxed) {
+    if FORCE_STAMP_FALLBACK.get() {
         return Err(EnumError::AccessDenied(code::ACCESS_DENIED));
     }
     let handle = open_dir_handle(dir)?;
@@ -501,11 +501,13 @@ fn filetime_to_i64(ft: FILETIME) -> i64 {
     ((u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)) as i64
 }
 
-/// Forces the attribute fallback, so the path a hostile share would take can
-/// be exercised on a machine where the handle query works fine.
 #[cfg(test)]
-static FORCE_STAMP_FALLBACK: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// Forces the attribute fallback, so the path a hostile share would take
+    /// can be exercised on a machine where the handle query works. Per thread,
+    /// so it cannot leak into tests running in parallel.
+    static FORCE_STAMP_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 // --- the source ------------------------------------------------------------
 
@@ -865,14 +867,14 @@ mod tests {
 
     impl ForcedFallback {
         fn on() -> Self {
-            FORCE_STAMP_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
+            FORCE_STAMP_FALLBACK.set(true);
             Self
         }
     }
 
     impl Drop for ForcedFallback {
         fn drop(&mut self) {
-            FORCE_STAMP_FALLBACK.store(false, std::sync::atomic::Ordering::Relaxed);
+            FORCE_STAMP_FALLBACK.set(false);
         }
     }
 

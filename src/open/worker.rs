@@ -202,9 +202,9 @@ mod tests {
         Arc::new(Backend {
             settings: Settings {
                 persist: false,
-                ..Default::default()
+                ..Settings::fixture()
             },
-            store: Arc::new(IndexStore::default()),
+            store: Arc::new(IndexStore::fixture()),
             source: Arc::new(FakeDirSource::new()),
             live: Vec::new(),
         })

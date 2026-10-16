@@ -1045,7 +1045,7 @@ program = 'avwin.exe'
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(after.contains("viewer = \"pdf\""), "{after}");
-        assert!(after.contains("CustomPro"), "the body must be untouched");
+        assert!(after.contains("example-flat"), "the body must be untouched");
         assert!(
             std::fs::read_dir(dir.path())
                 .unwrap()

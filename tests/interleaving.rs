@@ -259,7 +259,7 @@ fn fresh_in(columns: usize) -> (AppState, Instant) {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     };
     let mut s = AppState::new(settings, now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);

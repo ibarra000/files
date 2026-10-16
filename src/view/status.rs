@@ -391,7 +391,7 @@ mod tests {
 
     /// Two shares, for the rendering that only exists when there are several.
     fn state_with_two_shares(now: Instant) -> AppState {
-        AppState::new(Settings::default(), now)
+        AppState::new(Settings::fixture(), now)
     }
 
     fn publish(s: &mut AppState, id: MappingId, now: Instant, f: impl FnOnce(&mut IndexStatus)) {

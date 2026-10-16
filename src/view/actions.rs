@@ -253,7 +253,7 @@ mod tests {
             viewers: Arc::new(crate::config::Viewers::new(vec![
                 crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
             ])),
-            ..Settings::default()
+            ..Settings::fixture()
         };
         AppState::new(settings, Instant::now())
     }
