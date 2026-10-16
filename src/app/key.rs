@@ -1,25 +1,17 @@
-//! Keys, as this program understands them.
+//! Toolkit-independent key events consumed by the state machine.
 //!
-//! Deliberately smaller than any toolkit's key enum. What is here is exactly
-//! what [`super::state::keys`] matches on, so the binding table in
-//! `tests/bindings.rs` can be exhaustive over it and the catch-all arm has
-//! almost nothing left to catch.
-//!
-//! It exists because the state machine should not know which toolkit is
-//! feeding it. That was true in principle while the only source was a
-//! terminal, and it stops being a principle the moment there are two: a type
-//! owned by whichever library happens to be drawing is a type the state
-//! machine cannot be tested against without that library.
+//! The set is exactly what `app::state::keys` matches on, so the binding
+//! table in `tests/bindings.rs` can be exhaustive over it. Keeping the type
+//! independent of any UI library lets the state machine be tested without one.
 //!
 //! # Characters are not keys
 //!
 //! [`Key::Char`] carries a character the layout has already composed, not a
-//! physical key. Shift, AltGr and any dead key are spent by the time one of
-//! these exists, which is why the modifiers on a `Char` mean "a combination"
-//! and never "how this letter was typed". Getting that backwards is how `@` on
-//! a German keyboard stops working.
+//! physical key. Shift, AltGr and dead keys are already applied, so modifiers
+//! on a `Char` describe a combination, never how the letter was typed.
+//! Treating them otherwise breaks `@` on a German layout.
 
-/// A key, named by what it means rather than by a scancode.
+/// A key, named by meaning rather than by scancode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A character the layout has already composed. See the module note.
@@ -40,11 +32,7 @@ pub enum Key {
     F(u8),
 }
 
-/// Which modifiers were held.
-///
-/// Three bools rather than bitflags: every read in `keys.rs` is a single
-/// field, the type stays `const`-constructible with no dependency, and a
-/// struct literal in a test says what it means without a bitwise or.
+/// The modifiers held during a keystroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Mods {
     pub ctrl: bool,
@@ -75,10 +63,8 @@ impl Mods {
     };
     /// AltGr, which Windows reports as Ctrl+Alt.
     ///
-    /// Named, because it is not a combination anybody chose: it is how a
-    /// German, Polish or French layout types `@`, `{`, `[` and every accented
-    /// letter, and the arm in `keys.rs` that lets those through exists for
-    /// exactly this value.
+    /// Layouts such as German, Polish and French use it to type `@`, `{`, `[`
+    /// and accented letters; `keys.rs` lets characters with it through.
     pub const ALTGR: Self = Self {
         ctrl: true,
         alt: true,
@@ -92,11 +78,8 @@ impl Mods {
 
 /// Press or release.
 ///
-/// Two variants, not three. Windows reports both halves of every keystroke,
-/// and without a guard each one is handled twice - but an auto-repeat is a
-/// *press*, and a third `Repeat` variant is an invitation to drop it. Held
-/// Backspace has to keep deleting, so that decision is made once, at the edge,
-/// and the state machine never sees the question.
+/// Auto-repeat is reported as a press, so held Backspace keeps deleting. The
+/// state machine acts on presses only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum KeyPhase {
     #[default]
@@ -113,10 +96,7 @@ pub struct KeyEvent {
 }
 
 impl KeyEvent {
-    /// A press.
-    ///
-    /// Named and shaped like the constructor it replaces, so the tests that
-    /// build thousands of these change by a rename rather than a rewrite.
+    /// Returns a press of `key` with `mods`.
     pub const fn new(key: Key, mods: Mods) -> Self {
         Self {
             key,
@@ -149,7 +129,6 @@ mod tests {
         assert!(!Mods::SHIFT.is_none());
     }
 
-    /// The guard the whole press/release story rests on.
     #[test]
     fn a_release_is_not_a_press() {
         assert!(KeyEvent::new(Key::Enter, Mods::NONE).is_press());

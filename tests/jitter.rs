@@ -1,26 +1,8 @@
-//! What the panel does while somebody types, frame by frame.
+//! Frame-by-frame panel behaviour while typing: state, animator and a stub
+//! search worker driven together on a simulated clock.
 //!
-//! The loop nothing else in this repository closes. `tests/shell.rs` checks
-//! [`files::gui::anim::Motion`] against targets handed to it by hand, and
-//! `tests/state_machine.rs` checks the state those targets are derived from -
-//! but the bugs this file exists for live in between, where the two meet:
-//! state changes on a keystroke, the view measures the change, the animator is
-//! told, and the window system is asked to do something about it.
-//!
-//! Every assertion here is a *budget*. Jitter is not a behaviour that is
-//! either present or absent, it is a count - of body changes, of searches
-//! dispatched - and a count is something a test can hold a number against and
-//! a future change can be measured by. `--nocapture` prints them.
-//!
-//! Window resizes used to be the headline count here, because the panel was
-//! the window and every row-count change was a `SetWindowPos` and a swapchain
-//! reconfigure. The window is a fixed six hundred by four hundred now and
-//! resizes exactly never, so that budget is gone along with the thing it was
-//! counting - and the body-change and search budgets, which were always the
-//! ones about what somebody actually sees, are what is left.
-//!
-//! Nothing here opens a window, touches a GPU or reads a clock. The clock is a
-//! variable and the search worker is a dozen lines in the rig.
+//! Each assertion is a budget on a count (body changes, searches dispatched);
+//! `--nocapture` prints the counts. No window, GPU or real clock is used.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -34,27 +16,20 @@ use files::gui::frame::Frame;
 use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 
-/// Sixty frames a second, which is what the compositor gives us.
+/// One frame at 60 Hz.
 const FRAME: Duration = Duration::from_nanos(16_666_667);
 
-/// A brisk but ordinary typing speed: about eight characters a second, which
-/// is what somebody reading a code off a drawing manages.
+/// Typing speed of about eight characters a second.
+///
+/// Must stay below `SEARCH_DEBOUNCE` (180ms) so a burst dispatches nothing
+/// until it stops.
 const KEYSTROKE_GAP: Duration = Duration::from_millis(120);
 
-/// The code every test here types. Nine characters, the shape the office uses.
+/// The code every test types.
 const CODE: &str = "11-D-0704";
 
-/// Long enough for a typed code to be searched for and answered.
-///
-/// `SEARCH_DEBOUNCE` plus slack. Typing at `KEYSTROKE_GAP` never reaches it -
-/// 120ms between characters against a 180ms pause - which is the whole point:
-/// a burst dispatches nothing until it stops.
-///
-/// The margin is 60ms where it used to be 180ms, which is exactly what the
-/// shorter debounce bought and exactly what it costs. The budget below still
-/// holds at a hundred and twenty; it would not at two hundred, and a reader
-/// who pauses that long between the groups of a code will now spend one
-/// extra sweep over an index this process owns.
+/// Long enough for a typed code to be searched for and answered:
+/// `SEARCH_DEBOUNCE` plus slack.
 const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 
 // --- the rig ---------------------------------------------------------------
@@ -63,22 +38,17 @@ const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 #[derive(Default)]
 struct Log {
     bodies: Vec<Content>,
-    /// Which row was selected on each of those frames.
-    ///
-    /// Read off the state rather than off the frame. It used to come back
-    /// with the body, because the animator slid the highlight and therefore
-    /// had to be told where it was going; a row paints its own now, so the
-    /// only place the answer lives is the state machine.
+    /// The selected row on each frame, read from the state.
     selected: Vec<Option<usize>>,
 }
 
 impl Log {
-    /// How many times the body changed to something else.
+    /// Counts frames whose body differs from the previous one.
     fn body_changes(&self) -> usize {
         self.bodies.windows(2).filter(|w| w[0] != w[1]).count()
     }
 
-    /// Every body the panel showed, in order, with repeats collapsed.
+    /// Returns every body shown, in order, with repeats collapsed.
     fn bodies(&self) -> Vec<Content> {
         let mut out: Vec<Content> = Vec::new();
         for body in &self.bodies {
@@ -104,18 +74,12 @@ struct Rig {
     state: AppState,
     frame: Frame,
     now: Instant,
-    /// Dispatched but not yet answered. The matcher is sub-millisecond but it
-    /// runs on another thread, so the earliest it can land is the next frame -
-    /// which is the whole reason the panel ever sees a list it is about to
-    /// replace.
+    /// Searches dispatched but not yet answered. The real matcher runs on
+    /// another thread, so answers land on the next frame at the earliest.
     inflight: Vec<(u64, Query)>,
-    /// What the index holds.
+    /// The file names the index holds.
     corpus: Vec<&'static str>,
-    /// How many searches have actually been dispatched.
-    ///
-    /// The headline budget. Jitter is a count, and this is the count the
-    /// debounce exists to bring down: nine characters used to be nine sweeps
-    /// over the index for eight answers nobody read.
+    /// Number of searches dispatched; the debounce keeps this low.
     searches: usize,
     log: Log,
 }
@@ -124,7 +88,7 @@ impl Rig {
     fn new(corpus: Vec<&'static str>) -> Self {
         let now = Instant::now();
         Self {
-            state: AppState::new(Settings::default(), now),
+            state: AppState::new(Settings::fixture(), now),
             frame: Frame::new(),
             now,
             inflight: Vec::new(),
@@ -134,8 +98,7 @@ impl Rig {
         }
     }
 
-    /// A panel already up and settled, so a test about typing is not also a
-    /// test about the entrance.
+    /// Returns a rig whose panel is already shown and settled.
     fn summoned(corpus: Vec<&'static str>) -> Self {
         let mut rig = Self::new(corpus);
         rig.feed(AppEvent::Hotkey(HotkeyMsg::Summoned));
@@ -151,10 +114,8 @@ impl Rig {
         rig
     }
 
-    /// Forgets everything recorded so far, so a budget measures the burst
-    /// rather than the priming that set it up. Clears the search count with
-    /// the log, because the two are read together and forgetting one silently
-    /// inflates a budget.
+    /// Clears the log and the search count so a budget measures only what
+    /// follows. Both are cleared together because they are read together.
     fn forget(&mut self) {
         self.log = Log::default();
         self.searches = 0;
@@ -170,8 +131,7 @@ impl Rig {
         }
     }
 
-    /// Answers whatever the matcher was asked, the way the real one would:
-    /// on a later frame than the one that asked.
+    /// Answers a dispatched search with a substring match over the corpus.
     fn answer(&mut self, epoch: u64, query: Query) {
         let needle = query.term().to_ascii_lowercase();
         let hits: Vec<Hit> = self
@@ -201,9 +161,8 @@ impl Rig {
         }));
     }
 
-    /// One turn of the loop, in the order `Shell::logic` then `Shell::ui` take
-    /// it: pending work lands, the clock's deadlines fire, the frame is
-    /// composed, and the window system is told if it needs to be.
+    /// Runs one frame in the order `Shell::logic` then `Shell::ui` use:
+    /// pending results land, due deadlines fire, then the frame is composed.
     fn tick(&mut self) {
         self.now += FRAME;
 
@@ -233,12 +192,8 @@ impl Rig {
         }
     }
 
-    /// Types `text` at a human cadence, running the frames in between.
-    ///
-    /// The cadence is the point. Every existing helper in this repository
-    /// passes the *same* `Instant` for every character, which means no
-    /// debounce can fire in the middle of a word - and a debounce firing in
-    /// the middle of a word is precisely the class of bug this file is for.
+    /// Types `text` with `gap` between characters, running the frames in
+    /// between so a debounce can fire mid-word.
     fn type_code(&mut self, text: &str, gap: Duration) {
         for c in text.chars() {
             self.feed(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)));
@@ -268,10 +223,7 @@ fn corpus() -> Vec<&'static str> {
 
 // --- the budgets -----------------------------------------------------------
 
-/// The one that mattered. Every character typed used to empty the result list
-/// for exactly one frame - the frame between the matcher being asked and
-/// answering - and an empty list is not a shorter list, it is a different
-/// body three hundred points shorter.
+/// The list does not show its empty state while a refined search is in flight.
 #[test]
 fn typing_a_code_never_empties_the_result_list() {
     let mut rig = Rig::summoned(corpus());
@@ -293,8 +245,7 @@ fn typing_a_code_never_empties_the_result_list() {
     );
 }
 
-/// The body is allowed to change when it has something else to show. It is not
-/// allowed to change on the way to showing the same thing again.
+/// The body does not change on the way to showing the same content again.
 #[test]
 fn typing_a_code_does_not_change_the_body_at_all() {
     let mut rig = Rig::summoned(corpus());
@@ -311,14 +262,7 @@ fn typing_a_code_does_not_change_the_body_at_all() {
     );
 }
 
-/// Six keystrokes are one sweep over the index.
-///
-/// This used to count window resizes as well, and that was the headline: the
-/// panel was the window, so every row-count change was a `SetWindowPos` and a
-/// swapchain reconfigure. It went thirty-one, then six, then one. The window
-/// is fixed now and the count is zero by construction, so what is left to
-/// budget is the thing that still costs something - a sweep over an index on
-/// a file server.
+/// Six keystrokes cost one sweep over the index.
 #[test]
 fn typing_a_code_costs_the_index_exactly_one_sweep() {
     let mut rig = Rig::summoned(corpus());
@@ -330,14 +274,13 @@ fn typing_a_code_costs_the_index_exactly_one_sweep() {
     rig.run(Duration::from_millis(600));
     rig.log.report("index_cost");
 
-    // The six characters are typed 120ms apart, inside the debounce, so the
-    // matcher is asked once - after the typing stops.
+    // Keystrokes 120ms apart fall inside the debounce, so the matcher is asked
+    // once, after typing stops.
     assert_eq!(rig.searches, 1, "six keystrokes, one sweep over the index");
     assert_eq!(rig.log.body_changes(), 0, "and the body never changed");
 }
 
-/// A selection that blinks out and back is the same defect as a list that
-/// does, one row tall.
+/// The selection never drops to `None` while typing.
 #[test]
 fn the_selection_stays_on_screen_while_typing() {
     let mut rig = Rig::summoned(corpus());
@@ -353,9 +296,8 @@ fn the_selection_stays_on_screen_while_typing() {
     );
 }
 
-/// A result set that arrives saying exactly what the last one said should move
-/// nothing at all. This is the guard on a snapshot republishing under a live
-/// panel, which re-runs the search with the same epoch.
+/// A result set identical to the last one changes neither body nor selection,
+/// as when a republished snapshot re-runs the search with the same epoch.
 #[test]
 fn an_unchanged_result_set_moves_nothing() {
     let mut rig = Rig::summoned(corpus());
@@ -366,7 +308,7 @@ fn an_unchanged_result_set_moves_nothing() {
     let selected = rig.state.selected_row();
     rig.forget();
 
-    // The same answer, again, as a republished snapshot would deliver it.
+    // Re-deliver the same answer.
     let epoch = rig.state.query_epoch();
     rig.inflight.push((epoch, Query::contains(CODE)));
     rig.run(Duration::from_millis(400));
@@ -380,8 +322,7 @@ fn an_unchanged_result_set_moves_nothing() {
     }
 }
 
-/// A code that really does match nothing still says so - the hold is a delay,
-/// not a refusal.
+/// A code with no matches still reaches the empty state; the hold only delays it.
 #[test]
 fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
     let mut rig = Rig::summoned(corpus());
@@ -397,8 +338,7 @@ fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
     );
 }
 
-/// The budget this whole change exists for: a nine-character code is one
-/// sweep over the index, not nine.
+/// A nine-character code costs one sweep over the index.
 #[test]
 fn a_burst_of_typing_dispatches_exactly_one_search() {
     let mut rig = Rig::summoned(corpus());
@@ -413,7 +353,7 @@ fn a_burst_of_typing_dispatches_exactly_one_search() {
     );
 }
 
-/// And nothing reaches the window system at all until the typing stops.
+/// No search is dispatched and the body does not change until typing stops.
 #[test]
 fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
     let mut rig = Rig::summoned(corpus());
@@ -421,8 +361,7 @@ fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
     rig.run(SEARCH_SETTLE);
     rig.forget();
 
-    // Six characters, 720ms of typing, and deliberately no settle: this is
-    // what the panel does *while* somebody is still going.
+    // No settle afterwards: this measures the panel during the burst.
     rig.type_code("D-0704", KEYSTROKE_GAP);
     rig.log.report("during_burst");
 

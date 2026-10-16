@@ -1,14 +1,8 @@
-//! Filesystem error classification.
+//! Classification of Win32 filesystem errors.
 //!
-//! Deliberately kept out of the FFI modules: this is pure, table-driven
-//! logic, and it is one of the few parts of the Windows integration that can
-//! be tested on a machine without the network drives. The FFI modules stay
-//! mechanically thin so excluding them from coverage stays honest.
-//!
-//! The distinction that matters most is that **`ERROR_FILE_NOT_FOUND` is a
-//! success case**. On a volume root it means the directory is empty; on a
-//! wildcard query it means nothing matched. The previous implementation
-//! collapsed it, along with access denials, into "Path not found".
+//! Kept out of the FFI modules so it can be unit-tested without network
+//! drives. Note that `ERROR_FILE_NOT_FOUND` from an enumeration is a success
+//! case: an empty volume root or a wildcard query that matched nothing.
 
 use std::fmt;
 
@@ -49,7 +43,7 @@ pub enum EnumError {
     AccessDenied(u32),
     /// Worth one retry; a mapped drive often reconnects lazily.
     Transient(u32),
-    /// This strategy cannot run here. The only condition that advances the
+    /// This strategy cannot run here. The only error that advances the
     /// fallback chain.
     Unsupported(u32),
     /// The kernel or server returned a malformed record buffer.
@@ -84,13 +78,10 @@ impl EnumError {
         }
     }
 
-    /// Maps a raw Win32 error code from a *directory open*.
+    /// Maps a raw Win32 error code from a directory open.
     ///
-    /// The classification is context-dependent, and getting it wrong is easy.
-    /// `ERROR_FILE_NOT_FOUND` from an enumeration means "no more entries" or
-    /// "the pattern matched nothing" - an answer. From `CreateFileW` it means
-    /// the directory itself does not exist, which is a genuine failure the
-    /// user needs told about.
+    /// `ERROR_FILE_NOT_FOUND` from an enumeration means no entries matched;
+    /// from `CreateFileW` it means the directory itself does not exist.
     pub fn from_win_open(raw: u32) -> Self {
         match raw {
             code::FILE_NOT_FOUND => Self::PathNotFound(raw),
@@ -111,26 +102,26 @@ impl EnumError {
         }
     }
 
-    /// Whether the fallback chain should advance past the current strategy.
+    /// Returns whether the fallback chain should advance past the current
+    /// strategy.
     ///
-    /// Only genuine "this API cannot work here" answers qualify. Retrying an
-    /// access denial or a missing path through a different API just multiplies
-    /// latency on an operation that has already given its answer.
+    /// Only "this API cannot work here" qualifies. Retrying an access denial or
+    /// a missing path through another API only adds latency.
     pub fn should_try_next_strategy(self) -> bool {
         matches!(self, Self::Unsupported(_) | Self::Corrupt(_))
     }
 
-    /// Whether one retry after a short delay is worthwhile.
+    /// Returns whether one retry after a short delay is worthwhile.
     pub fn is_retryable(self) -> bool {
         matches!(self, Self::Transient(_) | Self::TimedOut)
     }
 
-    /// Whether this means "no data, but nothing went wrong".
+    /// Returns whether this means "no data, but nothing went wrong".
     pub fn is_empty_result(self) -> bool {
         matches!(self, Self::Empty)
     }
 
-    /// The raw OS code, when there was one.
+    /// Returns the raw OS code, if any.
     pub fn raw(self) -> Option<u32> {
         match self {
             Self::Empty | Self::Cancelled | Self::TimedOut => None,
@@ -144,22 +135,16 @@ impl EnumError {
         }
     }
 
-    /// A message naming the drive involved, with the raw code on the end.
+    /// Returns a message naming the target, with the raw code appended.
     ///
-    /// The full form, for `--doctor` and for anything else whose job is to be
-    /// complete. The panel asks for [`Self::describe_for`] instead and decides
-    /// by `dev_mode` - an error nobody can diagnose is worse than an ugly one,
-    /// but an ugly one in front of somebody who cannot act on it is not much
-    /// better, and the two audiences are different people.
+    /// Used by `--doctor`. The panel uses [`Self::describe_for`] and includes
+    /// the code only in `dev_mode`.
     pub fn describe(self, target: &str) -> String {
         self.describe_for(target, true)
     }
 
-    /// The same, with the code included only when somebody asked for it.
-    ///
-    /// The sentence is identical either way. What `dev` adds is `(os error
-    /// 53)` on the end, which is the part that means nothing to the person
-    /// searching and everything to the person they telephone.
+    /// Returns the same message, with the `(os error N)` suffix only when
+    /// `dev` is true.
     pub fn describe_for(self, target: &str, dev: bool) -> String {
         let detail = |s: String| match self.raw().filter(|_| dev) {
             Some(c) => format!("{s} (os error {c})"),
@@ -200,7 +185,7 @@ mod tests {
     #[test]
     fn file_not_found_is_an_empty_result_not_a_failure() {
         // On a volume root this means "empty directory"; on a wildcard query
-        // it means "nothing matched". Both are answers.
+        // it means "nothing matched".
         assert_eq!(EnumError::from_win(code::FILE_NOT_FOUND), EnumError::Empty);
         assert_eq!(EnumError::from_win(code::NO_MORE_FILES), EnumError::Empty);
         assert!(EnumError::from_win(2).is_empty_result());
@@ -208,8 +193,8 @@ mod tests {
 
     #[test]
     fn distinguishes_a_missing_path_from_a_denied_one() {
-        // The previous implementation reported both as "Path not found",
-        // because Path::exists() returns false on ERROR_ACCESS_DENIED.
+        // `Path::exists()` returns false on ERROR_ACCESS_DENIED, so the two
+        // must be classified from the raw code.
         assert!(matches!(EnumError::from_win(3), EnumError::PathNotFound(_)));
         assert!(matches!(EnumError::from_win(5), EnumError::AccessDenied(_)));
     }
@@ -291,9 +276,8 @@ mod tests {
         assert!(!EnumError::TimedOut.describe("V:\\").contains("os error"));
     }
 
-    /// The same code means different things depending on which call produced
-    /// it, and conflating them is how "the folder is empty" and "the folder
-    /// does not exist" become indistinguishable.
+    /// The same code means "empty" from an enumeration and "missing" from an
+    /// open.
     #[test]
     fn file_not_found_means_missing_when_it_comes_from_an_open() {
         assert_eq!(EnumError::from_win(code::FILE_NOT_FOUND), EnumError::Empty);

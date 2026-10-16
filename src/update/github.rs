@@ -1,30 +1,16 @@
-//! Looking for a newer version among a GitHub repository's releases.
+//! Checking a GitHub repository's latest release for a newer version.
 //!
-//! The release carries the same two files a share folder does: the installer,
-//! and the `latest.toml` that `tools/make_msi.ps1 -Release` writes beside it.
-//! So this reads the same manifest with the same parser, and the one thing it
-//! adds is getting them off the internet. No JSON, and no API: GitHub serves
-//! the newest release's assets at a fixed address,
-//! `releases/latest/download/<name>`, which is the whole of what is needed.
+//! A release carries the same `latest.toml` and installer as a share folder
+//! (written by `tools/make_msi.ps1 -Release`), fetched from the fixed
+//! `releases/latest/download/<name>` address; no API or JSON is involved.
 //!
-//! # Why the installer is downloaded when it is found
+//! The installer is downloaded during the check, so the result is the same
+//! [`Found::Available`] a share yields, pointing at a local file, and
+//! downstream code (including [`super::apply::stage`]) is unchanged.
 //!
-//! Everything downstream of a look - the About page's button, the tray's menu
-//! item, [`super::apply::stage`] - was written for a share, where the
-//! installer is a file that is simply there. Fetching it here, on the
-//! checker's thread, keeps that true: what comes back is the same
-//! [`Found::Available`] a share produces, pointing at a file on this machine,
-//! and nothing after it needs to know the network was involved. It also means
-//! "Install and restart" is instant rather than a download with no progress.
-//!
-//! # Why it must name a digest
-//!
-//! A share is one an administrator controls. A download is bytes from the
-//! internet, and the `sha256` in the manifest is the only thing that ties the
-//! installer to the release that named it. So a release without one is not
-//! offered, and a download that does not match it is deleted. `stage` checks
-//! the digest again before anything runs, which is deliberate: this check is
-//! about not keeping a bad download, that one is about not installing one.
+//! A release must name a `sha256`; otherwise it is not offered. A mismatched
+//! download is deleted here, and `stage` checks the digest again before
+//! installing.
 
 use std::fmt;
 use std::path::Path;
@@ -34,20 +20,17 @@ use std::time::{Duration, SystemTime};
 use super::http::{Fetch, HttpError};
 use super::{Found, MANIFEST_NAME, Version, manifest};
 
-/// The most a manifest may be. It is four lines.
+/// Maximum manifest size in bytes.
 const MANIFEST_LIMIT: u64 = 64 * 1024;
 
-/// The most an installer may be. It is a few megabytes; this is a ceiling
-/// against something that is not an installer at all.
+/// Maximum installer size in bytes; a sanity ceiling well above the real size.
 const MSI_LIMIT: u64 = 200 * 1024 * 1024;
 
-/// Where downloads go, under the cache folder's `update`.
+/// Download subdirectory under the cache's `update` folder.
 const DOWNLOAD_DIR: &str = "download";
 
-/// How old a scratch file must be before it is taken for a dead download's.
-///
-/// A day: an installer over the slowest VPN arrives in minutes, so nothing
-/// that old is still being written.
+/// Age after which a `.part` file is assumed abandoned; real downloads finish
+/// in minutes.
 const STALE_SCRATCH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// `owner/name` on GitHub.
@@ -58,11 +41,10 @@ pub struct Repo {
 }
 
 impl Repo {
-    /// `owner/name`, or a `https://github.com/owner/name` address.
+    /// Parses `owner/name` or a `https://github.com/owner/name` address.
     ///
-    /// Strict about the characters, because both halves go into a URL this
-    /// program builds, and GitHub's own rules - letters, digits, `-`, `_`,
-    /// `.` - are narrower than anything that would need escaping.
+    /// Accepts only GitHub's allowed characters (letters, digits, `-`, `_`,
+    /// `.`), so both parts are safe to put into a URL unescaped.
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
         let text = text
@@ -85,15 +67,13 @@ impl Repo {
         })
     }
 
-    /// The repository this build came from, off `Cargo.toml`'s `repository`.
+    /// Returns the repository from `Cargo.toml`'s `repository` field.
     pub fn ours() -> Option<Self> {
         Self::parse(env!("CARGO_PKG_REPOSITORY"))
     }
 
-    /// The newest release's manifest.
-    ///
-    /// "Latest" is GitHub's: the newest release that is neither a draft nor
-    /// a pre-release, so publishing either of those offers nobody anything.
+    /// URL of the latest release's manifest. GitHub's "latest" excludes drafts
+    /// and pre-releases.
     fn manifest_url(&self) -> String {
         format!(
             "https://github.com/{}/{}/releases/latest/download/{MANIFEST_NAME}",
@@ -101,11 +81,10 @@ impl Repo {
         )
     }
 
-    /// An asset of the release tagged for `version`.
+    /// URL of an asset of the release tagged `v{version}`.
     ///
-    /// By tag rather than through "latest" again, so the installer is the one
-    /// the manifest just read belongs to even if a release is published in
-    /// the moment between the two requests.
+    /// Uses the tag rather than "latest" so the installer matches the manifest
+    /// even if a release is published between the two requests.
     fn asset_url(&self, version: Version, file: &str) -> String {
         format!(
             "https://github.com/{}/{}/releases/download/v{version}/{file}",
@@ -120,8 +99,8 @@ impl fmt::Display for Repo {
     }
 }
 
-/// Reads the newest release of `repo` and says what it means for this build,
-/// downloading its installer into `cache_dir` when it is newer.
+/// Checks the latest release of `repo` against `running`, downloading its
+/// installer into `cache_dir` when it is newer.
 pub fn look(repo: &Repo, running: Version, fetch: &dyn Fetch, cache_dir: Option<&Path>) -> Found {
     let unavailable = |detail: String| Found::Unavailable { detail };
 
@@ -130,13 +109,9 @@ pub fn look(repo: &Repo, running: Version, fetch: &dyn Fetch, cache_dir: Option<
             Ok(text) => text,
             Err(_) => return unavailable(format!("The {MANIFEST_NAME} on GitHub is not text")),
         },
-        // No release yet, or a release published without a manifest. Both
-        // are ordinary for a repository that has only just started
-        // publishing, and neither is anything this machine can fix.
+        // No release yet, or a release without a manifest.
         Err(HttpError::Status(404)) => {
-            return unavailable(format!(
-                "No release on GitHub has a {MANIFEST_NAME} yet, so there is nothing to offer"
-            ));
+            return unavailable(format!("No GitHub release includes {MANIFEST_NAME} yet"));
         }
         Err(e) => return unavailable(format!("GitHub could not be reached: {e}")),
     };
@@ -157,7 +132,7 @@ pub fn look(repo: &Repo, running: Version, fetch: &dyn Fetch, cache_dir: Option<
         ));
     };
     let Some(cache_dir) = cache_dir else {
-        return unavailable("There is no cache folder to download the installer into".into());
+        return unavailable("No cache folder is available for the installer download".into());
     };
 
     let dir = cache_dir.join(super::apply::STAGE_DIR).join(DOWNLOAD_DIR);
@@ -170,12 +145,11 @@ pub fn look(repo: &Repo, running: Version, fetch: &dyn Fetch, cache_dir: Option<
     }
 }
 
-/// Makes sure the installer is at `msi` and matches `sha256`. Whether it is.
+/// Ensures the installer at `msi` matches `sha256`, downloading it if needed.
+/// Returns whether it does.
 ///
-/// Already there and right is kept, so every look after the first costs one
-/// small request. Anything else is fetched to a scratch name and renamed into
-/// place only once it has been checked, so a half-finished download is never
-/// at the name the installer is looked for under.
+/// A matching file is kept. Otherwise the download goes to a scratch name and
+/// is renamed into place only after verification.
 fn fetch_installer(
     repo: &Repo,
     manifest: &manifest::Manifest,
@@ -199,18 +173,15 @@ fn fetch_installer(
     if !placed {
         let _ = std::fs::remove_file(&part);
     }
-    // Another attempt may have renamed its copy into place first, which is as
-    // good as this one having done it.
+    // A concurrent attempt may have placed a valid copy first.
     placed || matches(msi)
 }
 
-/// A scratch file no other download is using.
+/// Returns a scratch path unique to this download.
 ///
-/// The process id, because the panel and the settings window both look. And
-/// a count, because one process can look twice at once: "Check now" pressed
-/// again before the first check answers is a second thread in the settings
-/// window, and two downloads into one scratch file truncate - or delete -
-/// each other halfway through.
+/// Includes the process id (two processes may check) and a counter (one
+/// process may run two checks at once), so concurrent downloads never share a
+/// file.
 fn scratch_for(manifest: &manifest::Manifest, dir: &Path) -> std::path::PathBuf {
     static ATTEMPT: AtomicU64 = AtomicU64::new(0);
     let attempt = ATTEMPT.fetch_add(1, Ordering::Relaxed);
@@ -221,13 +192,8 @@ fn scratch_for(manifest: &manifest::Manifest, dir: &Path) -> std::path::PathBuf 
     ))
 }
 
-/// Deletes scratch files a crash left behind.
-///
-/// Every finished download is renamed or removed, so a `.part` file that
-/// outlives its download is one whose process died mid-way - and without
-/// this, each one would sit in the cache for good, up to [`MSI_LIMIT`] apiece.
-/// Only old ones, so a download still under way in the other process is
-/// never pulled out from under it.
+/// Deletes `.part` files older than [`STALE_SCRATCH`], left by interrupted
+/// downloads. Newer ones may belong to a download still in progress.
 fn sweep_stale(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -254,8 +220,7 @@ mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    /// A network made of a table: each URL answers with its bytes, or a
-    /// status, and every request is written down.
+    /// A fake network: canned responses per URL, with every request recorded.
     #[derive(Default)]
     struct Fake {
         answers: HashMap<String, Result<Vec<u8>, HttpError>>,
@@ -340,7 +305,6 @@ mod tests {
         );
     }
 
-    /// Both halves go into an address this program builds.
     #[test]
     fn a_repository_name_that_would_need_escaping_is_refused() {
         for bad in [
@@ -356,7 +320,6 @@ mod tests {
         }
     }
 
-    /// The build knows where it came from.
     #[test]
     fn this_build_names_its_own_repository() {
         assert!(
@@ -365,7 +328,6 @@ mod tests {
         );
     }
 
-    /// The whole feature: newer, fetched, checked, and on disk.
     #[test]
     fn a_newer_release_is_offered_with_its_installer_already_downloaded() {
         let cache = tempfile::tempdir().unwrap();
@@ -389,7 +351,6 @@ mod tests {
         );
     }
 
-    /// Four hours later nothing is downloaded again.
     #[test]
     fn an_installer_already_downloaded_is_not_fetched_twice() {
         let cache = tempfile::tempdir().unwrap();
@@ -401,9 +362,6 @@ mod tests {
         assert_eq!(downloads, 1, "asked for {:?}", fake.asked());
     }
 
-    /// "Check now" pressed twice in the settings window is two looks in one
-    /// process, at once. Each needs a scratch file of its own, or one
-    /// truncates - or deletes - the other's download halfway through.
     #[test]
     fn two_looks_at_once_in_one_process_do_not_share_a_scratch_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -413,8 +371,6 @@ mod tests {
         assert_ne!(first, second, "two attempts were given one scratch file");
     }
 
-    /// A download a crash cut short is swept up by the next look, rather than
-    /// left in the cache for good.
     #[test]
     fn a_scratch_file_left_by_a_dead_download_is_swept_up() {
         let cache = tempfile::tempdir().unwrap();
@@ -435,7 +391,6 @@ mod tests {
         assert!(!orphan.exists(), "the dead download is still there");
     }
 
-    /// And one that is still being written - by the other process - is not.
     #[test]
     fn a_scratch_file_still_being_written_is_left_alone() {
         let cache = tempfile::tempdir().unwrap();
@@ -449,8 +404,6 @@ mod tests {
         assert!(live.exists(), "a download in progress was swept away");
     }
 
-    /// The installer is fetched by the tag the manifest names, not through
-    /// "latest" a second time.
     #[test]
     fn the_installer_comes_from_the_release_the_manifest_belongs_to() {
         let cache = tempfile::tempdir().unwrap();
@@ -465,7 +418,6 @@ mod tests {
         );
     }
 
-    /// Bytes that are not what the manifest promised are not kept.
     #[test]
     fn a_download_that_does_not_match_its_digest_is_not_kept() {
         let cache = tempfile::tempdir().unwrap();
@@ -488,7 +440,6 @@ mod tests {
         assert!(left.is_empty(), "scratch files were left behind: {left:?}");
     }
 
-    /// Without a digest there is nothing to check a download against.
     #[test]
     fn a_release_without_a_digest_is_not_offered() {
         let cache = tempfile::tempdir().unwrap();
@@ -513,12 +464,13 @@ mod tests {
         assert_eq!(fake.asked().len(), 1);
     }
 
-    /// Where the repository is today: public, with no release yet.
     #[test]
     fn no_release_yet_is_said_quietly() {
         let fake = Fake::default();
         match look(&repo(), Version::new(0, 2, 0), &fake, None) {
-            Found::Unavailable { detail } => assert!(detail.contains("No release"), "{detail}"),
+            Found::Unavailable { detail } => {
+                assert!(detail.contains("No GitHub release"), "{detail}")
+            }
             other => panic!("expected unavailable, got {other:?}"),
         }
     }

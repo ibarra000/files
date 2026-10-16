@@ -1,21 +1,16 @@
-//! The main loop.
+//! One turn of the application loop: apply events, dispatch commands.
 //!
-//! One receiver, one state machine, one place that draws. The loop blocks on
-//! the event channel with a deadline computed from the state, so:
+//! The UI toolkit owns the loop and calls [`App::pump`] each frame. Deadlines
+//! come from the state, so:
 //!
-//! * **idle costs almost nothing** - a blocking receive with no deadline at
-//!   all when nothing on screen goes stale on its own, rather than the
-//!   previous fifty-frames-a-second poll. A displayed index age costs exactly
-//!   one wakeup per change of the digit: once a second while it reads in
-//!   seconds, once a minute while it reads in minutes, once a day while it
-//!   reads in days. It used to cost none, and the age simply froze until a
-//!   keystroke arrived and then jumped;
-//! * **latency is zero** - a keystroke wakes the thread immediately;
-//! * **timers cannot be lost or leaked** - `Tick` is synthesised locally when
-//!   a deadline expires, never sent by anyone.
+//! * **idle costs almost nothing**: with nothing time-dependent on screen
+//!   there is no deadline at all, and a displayed index age wakes only when
+//!   its digit changes;
+//! * **timers cannot be lost or leaked**: `Tick` is synthesised locally when
+//!   a deadline expires, never sent over the channel.
 //!
-//! A burst of events is drained before drawing, so pasting twenty characters
-//! produces one frame rather than twenty.
+//! A burst of events is drained before drawing, so a twenty-character paste
+//! produces one frame.
 
 pub mod actors;
 pub mod event;
@@ -37,23 +32,17 @@ use crate::index::enumerate::DirSource;
 
 /// Windows a keystroke asked the shell to show or hide.
 ///
-/// A struct rather than an enum, even at one field: a burst of keystrokes is
-/// fed before anything reads this, so a second request must not be able to
-/// replace the first. It held two until the shortcuts window was removed.
+/// A struct of flags rather than an enum so that, across a burst of
+/// keystrokes, a second request cannot replace the first.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WindowRequests {
     pub settings: bool,
 }
 
-/// Everything a driver needs, with no opinion about who is drawing.
+/// The application core, independent of the UI toolkit.
 ///
-/// `run` used to own the loop. A window toolkit owns its own, so what is left
-/// here is the body of one turn - and both drivers take it: the terminal once
-/// per blocking receive, a window once per frame.
-///
-/// The redraw and the commands are accumulated rather than returned one event
-/// at a time, which is what lets a burst of twenty keystrokes become one frame
-/// and one dispatch however the driver chose to feed them in.
+/// Redraw and commands accumulate across events, so a burst becomes one frame
+/// and one dispatch however the driver feeds it.
 pub struct App {
     pub state: AppState,
     pub actors: Actors,
@@ -62,31 +51,23 @@ pub struct App {
     pending: CmdList,
     /// Windows a keystroke asked for that the shell has not acted on yet.
     ///
-    /// A latch rather than an entry in `pending`, and that is the whole of the
-    /// fix for a keystroke that did nothing for as long as it existed. `pump`
-    /// drains `pending` into `Actors::dispatch`, which names `Cmd::ToggleHelp`
-    /// only to ignore it - so by the time the shell asked, the request had
-    /// already been thrown away. `logic` feeds and pumps; `ui` asks. Nothing
-    /// that survives only between those two can be read from there.
+    /// A latch rather than an entry in `pending`: `logic` feeds and pumps, which
+    /// drains `pending`, before `ui` asks.
     requested: WindowRequests,
     /// Whether this process has written the configuration file since the
     /// shell last asked.
     ///
-    /// The settings window is reading the same file, so it has to be told.
-    /// Latched on the way past rather than scanned for, exactly as
-    /// `requested` is and for the same reason: by the time `ui` asks, the
-    /// event that carried the news has been applied and dropped.
+    /// The settings window reads the same file and must be told. Latched for
+    /// the same reason as `requested`.
     saved: bool,
-    /// ...and whether they changed anything on screen.
+    /// Whether the applied events changed anything on screen.
     redraw: Redraw,
 }
 
 impl App {
     /// Starts the workers and loads what the first frame needs.
     ///
-    /// `wake` is what the workers call after posting; see [`event::Events`].
-    /// A driver that blocks on the receiver passes a no-op, because a send
-    /// wakes it by construction.
+    /// `wake` is called by workers after posting; see [`event::Events`].
     pub fn start(
         settings: Settings,
         source: Arc<dyn DirSource>,
@@ -95,8 +76,8 @@ impl App {
         let viewers_missing = crate::open::probe_viewers(&settings.viewers);
         let (actors, rx) = Actors::start(settings.clone(), source, wake)?;
 
-        // Loaded before the first frame so the Up arrow works immediately, and
-        // read here rather than inside the state machine, which does no I/O.
+        // Loaded before the first frame so Up works immediately; read here
+        // because the state machine does no I/O.
         let remembered = match (settings.history, settings.history_path.clone()) {
             (true, Some(path)) => crate::history::load(&path),
             _ => Vec::new(),
@@ -104,9 +85,8 @@ impl App {
 
         let mut state = AppState::new(settings, Instant::now());
         state.seed_history(remembered);
-        // Probed here rather than in the state machine, which does no I/O, and
-        // once rather than per frame: it is a search of PATH. Again only when
-        // the configured viewers change - see `gui::adopt_config`.
+        // Probed here, once, because it searches PATH and the state machine does
+        // no I/O. Re-probed when viewers change; see `gui::Shell::adopt_config`.
         state.set_viewers_missing(viewers_missing);
 
         Ok(Self {
@@ -122,17 +102,9 @@ impl App {
 
     /// Which windows were asked for since this was last called.
     ///
-    /// These commands are addressed to whoever is drawing rather than to a
-    /// worker. Read-and-clear, so two readers of one "somebody asked for help"
-    /// cannot toggle the window twice or not at all - which with a toggle is
-    /// the difference between opening it and leaving it exactly as it was.
-    ///
-    /// Reads a latch set in [`Self::feed`] rather than scanning `pending`. It
-    /// used to scan, and could therefore never see a keystroke: `logic` feeds
-    /// the key and then calls [`Self::pump`], which empties `pending` into
-    /// `Actors::dispatch`; `ui` asks afterwards, by which time there is
-    /// nothing left to find. Clicking the F1 chip worked and pressing F1 did
-    /// not, for the sole reason that the click is fed two lines above the ask.
+    /// Read-and-clear, so a toggle request is acted on exactly once. Reads a
+    /// latch set in [`Self::feed`], because [`Self::pump`] empties `pending`
+    /// before the shell asks.
     pub fn take_window_requests(&mut self) -> WindowRequests {
         std::mem::take(&mut self.requested)
     }
@@ -145,21 +117,18 @@ impl App {
 
     /// Applies one event, holding on to what it asked for.
     ///
-    /// Public so a driver can feed events of its own - a keystroke a window
-    /// received directly, rather than one a worker posted - and have them
-    /// coalesce into the same turn as everything else.
+    /// Public so a driver can feed events it received directly, such as
+    /// keystrokes, into the same turn as worker events.
     pub fn feed(&mut self, event: AppEvent, now: Instant) {
-        // Before the update, because `update` consumes the event. One
-        // variant rather than two: F2 is the only thing left in this
-        // process that writes the configuration file, because the settings
-        // window writes its own.
+        // Checked before `update`, which consumes the event. F2 is the only
+        // path in this process that writes the configuration file.
         if matches!(&event, AppEvent::Open(event::OpenMsg::ViewerSaved { .. })) {
             self.saved = true;
         }
         let response = self.state.update(event, now);
         self.redraw = self.redraw.or(response.redraw);
-        // Latched on the way past, because `pending` does not survive the
-        // `pump` that `logic` performs before `ui` ever asks.
+        // Latched because `pending` does not survive the `pump` that `logic`
+        // performs before `ui` asks.
         for cmd in &response.cmds {
             if cmd == &event::Cmd::ToggleSettings {
                 self.requested.settings = true;
@@ -170,14 +139,10 @@ impl App {
 
     /// Applies everything queued and dispatches what it all asked for.
     ///
-    /// Drains rather than taking one, so a burst - twenty characters of a
-    /// paste, or five index reports landing together - draws once.
+    /// Drains the whole queue so a burst draws once.
     ///
-    /// Synthesises [`AppEvent::Tick`] when a deadline has passed, because
-    /// nobody sends it: it exists precisely so that a timer cannot be lost or
-    /// leaked in transit. `on_tick` re-checks every deadline against `now`, so
-    /// feeding it on a frame some keystroke caused is correct and slightly
-    /// more prompt than waiting for the deadline to arrive on its own.
+    /// Synthesises [`AppEvent::Tick`] when a deadline has passed. `on_tick`
+    /// re-checks every deadline against `now`, so an early tick is harmless.
     pub fn pump(&mut self, now: Instant) -> Redraw {
         if self.state.next_deadline().is_some_and(|due| due <= now) {
             self.feed(AppEvent::Tick, now);
@@ -208,11 +173,8 @@ impl App {
         self.actors.shutdown()
     }
 
-    /// Builds one around a channel the caller owns.
-    ///
-    /// Only for the two tests below, which are about what the loop does when
-    /// the channel dies - a thing that cannot be arranged from outside while
-    /// `Actors` is holding the only sender.
+    /// Builds an `App` around a caller-owned channel, so tests can disconnect
+    /// it while `Actors` holds its own sender.
     #[cfg(test)]
     fn around(state: AppState, actors: Actors, rx: Receiver<AppEvent>) -> Self {
         Self {
@@ -235,8 +197,7 @@ mod tests {
     use crossbeam_channel::bounded;
     use std::time::Duration;
 
-    /// Drives the loop's decision logic without the terminal, by replaying the
-    /// same sequencing the loop performs.
+    /// Replays the loop's event sequencing without a window.
     fn step(state: &mut AppState, events: Vec<AppEvent>, now: Instant) -> Response {
         let mut it = events.into_iter();
         let first = it.next().expect("at least one event");
@@ -248,7 +209,7 @@ mod tests {
     }
 
     fn state() -> AppState {
-        AppState::new(Settings::default(), Instant::now())
+        AppState::new(Settings::fixture(), Instant::now())
     }
 
     #[test]
@@ -290,9 +251,8 @@ mod tests {
     fn quitting_is_requested_exactly_once() {
         let mut s = state();
         let now = Instant::now();
-        // Driven by `Shutdown`, because no key quits any more: Ctrl+C copies
-        // and Esc clears. The window's close button ends the program, so the
-        // shutdown and channel-disconnect paths are the only ways in.
+        // No key quits; the shutdown and channel-disconnect paths are the only
+        // ways in.
         let response = s.update(AppEvent::Shutdown, now);
         assert!(s.should_quit);
         assert_eq!(
@@ -305,13 +265,7 @@ mod tests {
         );
     }
 
-    /// A channel with no senders left must not be something `pump` sits in.
-    ///
-    /// The terminal loop blocked on this channel, so a disconnect was the
-    /// thing that ended it. Nothing blocks on it now - the toolkit owns the
-    /// waiting - but a `try_recv` loop that treats "disconnected" as "nothing
-    /// this time" is a frame that never finishes, which is worse than the
-    /// hang it replaced because it burns a core while doing it.
+    /// A channel with no senders left must end the drain, not spin a core.
     #[test]
     fn a_disconnected_channel_does_not_wedge_a_frame() {
         let (tx, rx) = bounded::<AppEvent>(4);
@@ -351,14 +305,8 @@ mod tests {
         app.shutdown();
     }
 
-    /// A window request survives the pump that happens between the key and the
-    /// question.
-    ///
-    /// The seam nothing covered, and the reason F1 did nothing for as long as
-    /// it existed - the same shape of bug Ctrl+, then had one layer further
-    /// out. `tests/bindings.rs` asserts the state machine *emits* the command,
-    /// which it always did; `gui::Shell::logic` then feeds and pumps, and `ui`
-    /// asks afterwards. Anything that lived only in `pending` was gone by then.
+    /// A window request survives the pump between the keystroke and the
+    /// shell's query. `gui::Shell::logic` feeds and pumps; `ui` asks later.
     #[test]
     fn a_window_request_survives_the_pump_that_follows_it() {
         let (_tx, rx) = bounded::<AppEvent>(4);
@@ -369,7 +317,7 @@ mod tests {
             AppEvent::Key(KeyEvent::new(Key::Char(','), Mods::CTRL)),
             now,
         );
-        // Exactly what the shell does between the keystroke and the question.
+        // What the shell does between the keystroke and the query.
         let _ = app.pump(now);
 
         assert!(
@@ -383,14 +331,13 @@ mod tests {
         app.shutdown();
     }
 
-    /// Workers nothing here drives, for the two tests that need an `App` and
-    /// do not care what is behind it.
+    /// Workers for tests that need an `App` but do not drive it.
     fn actors_for_test() -> Actors {
         let source: Arc<dyn crate::index::enumerate::DirSource> =
             Arc::new(crate::index::fake_source::FakeDirSource::new().with_dir("V:\\", &["a.pdf"]));
         let settings = Settings {
             persist: false,
-            ..Default::default()
+            ..Settings::fixture()
         };
         Actors::start(settings, source, Arc::new(|| {}))
             .expect("the workers start")

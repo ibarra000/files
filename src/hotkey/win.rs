@@ -1,37 +1,8 @@
-//! The hotkey thread, the message pump, and the window operations.
+//! The Windows hotkey thread (`files-hotkey`): message pump and window calls.
 //!
-//! Everything here runs on one thread named `files-hotkey`, and that is load
-//! bearing rather than tidy - see the module doc on [`super`]. Note what is
-//! *absent*: there is no `unsafe impl Send` anywhere in this file. `HWND` is a
-//! raw pointer and so is neither `Send` nor `Sync`, which means the compiler
-//! itself guarantees no window handle ever crosses a thread boundary. The panel
-//! publishes its window as an `isize` through [`Panel`] for exactly that
-//! reason, and it is rebuilt into an `HWND` here and nowhere else.
-//!
-//! # What the window being ours changed
-//!
-//! Most of this file used to be about somebody else's window: finding it,
-//! confirming it was really the one on screen, remembering the placement it had
-//! before we shrank it, and putting all of that back afterwards - including the
-//! case where the terminal had been maximised, and the case where the user
-//! closed it while the overlay was up. None of that survives. Our window has no
-//! previous placement to preserve, cannot be closed behind our back, and does
-//! not need finding.
-//!
-//! What does survive is the part that was never about terminals:
-//!
-//! * **Foreground rights belong to the keypress, not to the process.** Windows
-//!   grants the right to change the foreground window to the process handling a
-//!   `WM_HOTKEY`, and only while it is handling it. So `SetForegroundWindow`
-//!   still happens here, on this thread, inside that handler - and the drawing
-//!   thread still asks rather than acts.
-//! * **`PostThreadMessageW` has nothing to post to until a queue exists.** The
-//!   pump forces one into existence *before* publishing its thread id.
-//! * **No `WndProc`.** `RegisterHotKey` with a null window delivers `WM_HOTKEY`
-//!   as a thread message, so a bare pump receives it and this file defines no
-//!   `extern "system"` function at all - which matters because `panic =
-//!   "unwind"` is kept deliberately, and unwinding across the foreign boundary
-//!   is undefined behaviour. The hazard is removed by construction.
+//! See [`super`] for the threading constraints. There is no `unsafe impl Send`
+//! here: `HWND` is `!Send`, so the panel's handle crosses threads as an
+//! `isize` through [`Panel`] and is rebuilt into an `HWND` only in this file.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU8, Ordering};
@@ -55,93 +26,53 @@ use crossbeam_channel::Sender;
 use crate::app::event::{AppEvent, Events, HotkeyMsg};
 use crate::config::Dock;
 
-/// Take the panel down, asked for by the user - Escape, or the hotkey pressed
-/// a second time.
+/// Starts the dismissal (Escape or a second hotkey press).
 ///
-/// Distinct from [`WM_APP_HIDE`], and the distinction is the whole reason the
-/// exit transition is ever seen: this one *reports* that the panel is going
-/// away, and the window is still on screen afterwards. Collapsing the two is
-/// how a transition comes to be written and never watched.
+/// Distinct from [`WM_APP_HIDE`]: this only reports the dismissal, leaving the
+/// window on screen so the drawing thread can play the exit transition.
 const WM_APP_DISMISS: u32 = WM_APP + 3;
 
-/// Put the panel away, asked for by the drawing thread once its exit transition
-/// has finished playing.
+/// Hides the window; sent by the drawing thread after the exit transition.
 const WM_APP_HIDE: u32 = WM_APP + 1;
 
-/// Bring the panel up, asked for by something that is not the hotkey: the tray
-/// icon, or a second copy of the program being launched.
+/// Shows the panel on request from the tray icon or a second instance.
 ///
-/// Routed through this thread rather than done where it was asked for, because
-/// showing the panel means taking the foreground, and this is the thread that
-/// does that - see the module note.
+/// Routed through this thread because showing the panel takes the foreground.
 const WM_APP_SUMMON: u32 = WM_APP + 2;
 
-/// Any non-negative id will do: the space is per-thread, and this thread
-/// registers exactly one.
+/// Hotkey id; ids are per thread and this thread registers only one.
 const HOTKEY_ID: i32 = 1;
 
-/// How long `spawn` waits to hear whether registration worked.
-///
-/// The path to the answer is three system calls, so this is an upper bound on
-/// a thing that takes microseconds, not a guess at how long it might take.
+/// Upper bound on how long `spawn` waits for the registration result.
 const READY_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// The panel's window, shared with whoever is drawing it.
+/// Panel window state shared between the drawing thread and this one.
 ///
-/// An `isize` rather than an `HWND` on purpose. `HWND` is a raw pointer, so it
-/// is neither `Send` nor `Sync`, and a struct holding one could not be shared
-/// with this thread without an `unsafe impl` that would also switch off the
-/// compiler's guarantee that no *other* handle escapes. Passing the bits and
-/// rebuilding the pointer in one place keeps that guarantee intact.
-///
-/// Zero means the window does not exist yet: the thread starts before the
-/// toolkit has created anything, and a hotkey pressed in that window of time
-/// must do nothing rather than act on a null pointer.
+/// The handle is stored as an `isize` because `HWND` is `!Send`. Zero means
+/// the window does not exist yet, and a hotkey press then does nothing.
 #[derive(Debug)]
 pub struct Panel {
     hwnd: AtomicIsize,
-    /// Where the user last dragged the panel to, in device pixels, packed as
-    /// two `i32`s into one atomic.
+    /// The last dragged-to position in device pixels, packed as two `i32`s.
     ///
-    /// Packed rather than held behind a lock because it is written on every
-    /// frame of a drag and read once per summon, and because the two halves are
-    /// meaningless apart: a torn read that took the left from one position and
-    /// the top from another would put the panel somewhere nobody ever left it.
-    /// One atomic makes that unrepresentable rather than unlikely.
-    ///
-    /// [`NOWHERE`] means nobody has moved it, and the panel is placed.
+    /// A single atomic avoids torn reads that mix two positions' halves.
+    /// [`NOWHERE`] means no position is remembered.
     at: AtomicI64,
-    /// Which edge the panel is pinned to, if any: a [`Dock`] as its index in
-    /// [`Dock::ALL`]. Published by the drawing thread every frame, because the
-    /// setting can change under it at any time and this thread reads it only
-    /// on a keypress.
+    /// The [`Dock`] setting as its index in [`Dock::ALL`]. Published by the
+    /// drawing thread every frame; read here on each summon.
     dock: AtomicU8,
 }
 
-/// No remembered position.
+/// Sentinel for "no remembered position" in [`Panel::at`].
 ///
-/// A sentinel rather than an `Option` because the value lives in an atomic, and
-/// the pair has to be read in one go - see [`Panel::at`].
-///
-/// The packing is a bijection, so *some* coordinate maps onto any sentinel that
-/// could be chosen. `i64::MIN` is the image of `(i32::MIN, 0)` exactly, which a
-/// test caught: remembering that position and then asking what was remembered
-/// answered "nothing". [`COORD_LIMIT`] is what makes the sentinel unreachable
-/// rather than merely unlikely.
+/// `i64::MIN` is the packed form of `(i32::MIN, 0)`; [`COORD_LIMIT`] keeps
+/// every real position from packing to it.
 const NOWHERE: i64 = i64::MIN;
 
-/// Furthest from the desktop origin a coordinate is taken seriously.
+/// Coordinates are clamped to `-COORD_LIMIT..=COORD_LIMIT` before packing.
 ///
-/// A million pixels is some five hundred 4K monitors laid end to end, so no
-/// arrangement of real displays reaches it. Clamping to it costs nothing for
-/// every position anybody can produce, and buys the one property [`NOWHERE`]
-/// needs: the high half of a packed value is now always within a million of
-/// zero, and `i32::MIN` - the high half of the sentinel - is not.
-///
-/// Clamping rather than rejecting because the two end in the same place
-/// anyway. [`geometry::place_at`] pulls whatever it is given inside the work
-/// area of the nearest monitor, so an absurd coordinate was always going to
-/// become an edge; doing it here as well only decides *which* edge.
+/// Far beyond any real desktop, and it keeps the packed high half away from
+/// `i32::MIN` so no position equals [`NOWHERE`].
 const COORD_LIMIT: i32 = 1_000_000;
 
 impl Default for Panel {
@@ -159,17 +90,15 @@ impl Panel {
         Arc::new(Self::default())
     }
 
-    /// Published by the drawing thread once the toolkit has a window.
+    /// Records the panel window handle once the toolkit has created it.
     pub fn publish(&self, hwnd: isize) {
         self.hwnd.store(hwnd, Ordering::Release);
     }
 
-    /// Published by the drawing thread when a drag ends, and once at startup
-    /// from whatever [`crate::placement::load`] found.
+    /// Records the panel position after a drag, or at startup from
+    /// [`crate::placement::load`].
     ///
-    /// `None` puts the panel back to being placed by
-    /// [`geometry::place`], which is what the Settings window asks for when
-    /// somebody wants the default back.
+    /// `None` restores the default placement from [`geometry::place`].
     pub fn remember(&self, at: Option<(i32, i32)>) {
         let packed = match at {
             Some((left, top)) => {
@@ -184,20 +113,19 @@ impl Panel {
         self.at.store(packed, Ordering::Release);
     }
 
-    /// Published by the drawing thread whenever it has a frame to spare.
+    /// Records the dock setting; called by the drawing thread each frame.
     pub fn set_dock(&self, dock: Dock) {
         let index = Dock::ALL.iter().position(|&d| d == dock).unwrap_or(0);
         self.dock.store(index as u8, Ordering::Release);
     }
 
-    /// Where the next summon will pin the panel.
+    /// Returns the dock mode the next summon will use.
     pub fn dock(&self) -> Dock {
         let index = usize::from(self.dock.load(Ordering::Acquire));
         Dock::ALL.get(index).copied().unwrap_or_default()
     }
 
-    /// Whether a position is being remembered, for `--doctor` and for the
-    /// Settings window.
+    /// Returns the remembered position, if any, for `--doctor` and Settings.
     pub fn remembered(&self) -> Option<(i32, i32)> {
         self.placed()
     }
@@ -221,43 +149,36 @@ enum Ready {
     Failed(u32),
 }
 
-/// The hotkey thread's handle.
+/// Handle to the hotkey thread.
 ///
-/// Genuinely joinable, unlike the input thread: this one parks in
-/// `GetMessageW`, and a posted `WM_QUIT` is a wakeup that reaches it.
+/// Joinable: a posted `WM_QUIT` wakes its `GetMessageW`.
 pub struct HotkeyThread {
     tid: u32,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HotkeyThread {
-    /// The user asked for the panel to go away.
+    /// Starts dismissing the panel.
     ///
-    /// Starts the exit rather than finishing it: the window is still on screen
-    /// when this returns, and stays there until the transition has played and
-    /// [`Self::hide`] is called. A window that vanished on the keystroke would
-    /// have no exit transition, however carefully one was written.
+    /// The window stays on screen until the exit transition has played and
+    /// [`Self::hide`] is called.
     pub fn dismiss(&self, handing_over: bool) {
         self.post(WM_APP_DISMISS, usize::from(handing_over), 0);
     }
 
-    /// The exit transition has finished; take the window off the screen.
+    /// Hides the window once the exit transition has finished.
     pub fn hide(&self) {
         self.post(WM_APP_HIDE, 0, 0);
     }
 
-    /// Brings the panel up, as the hotkey would have.
-    ///
-    /// Idempotent: asking for a panel that is already up does nothing, which is
-    /// what somebody clicking the tray icon twice means.
+    /// Shows the panel as the hotkey would. Does nothing if it is already up.
     pub fn summon(&self) {
         self.post(WM_APP_SUMMON, 0, 0);
     }
 
     fn post(&self, msg: u32, w: usize, l: isize) {
         // SAFETY: posting to a thread id. A dead thread returns zero, which is
-        // ignored - there is nothing useful to do about a listener that has
-        // already stopped.
+        // ignored because the listener has already stopped.
         unsafe { PostThreadMessageW(self.tid, msg, w, l) };
     }
 
@@ -274,9 +195,8 @@ impl HotkeyThread {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-        // Abandoned rather than waited on, the same answer every other worker
-        // gives. It cannot actually happen: a parked GetMessageW is woken by
-        // the post above.
+        // Abandon the thread, as other workers do. Not expected: the WM_QUIT
+        // post wakes GetMessageW.
         false
     }
 }
@@ -301,7 +221,7 @@ pub fn spawn(
     let handle = std::thread::Builder::new()
         .name("files-hotkey".into())
         .spawn(move || {
-            // A panic here must not take the window state with it silently.
+            // Report a panic instead of letting the thread die silently.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 pump(hk, &tx, &ready_tx, &panel);
             }));
@@ -340,11 +260,8 @@ pub fn spawn(
 fn registration_detail(hk: Hotkey, code: u32) -> String {
     let chord = super::spec::describe(hk);
     if code == ERROR_HOTKEY_ALREADY_REGISTERED {
-        // Deliberately does not guess which program. Windows claims several
-        // chords itself - shift+win+f23, the Copilot key, among them - so
-        // "another copy of this one" is a guess that is wrong about as often
-        // as it is right, and a wrong guess sends somebody hunting for a
-        // process that was never running.
+        // Does not name the owner: Windows itself claims several chords (such
+        // as shift+win+f23 for the Copilot key), so any guess would mislead.
         format!(
             "{chord} is already claimed \u{b7} set hotkey in config.toml to another \
              combination, or to \"off\""
@@ -355,15 +272,12 @@ fn registration_detail(hk: Hotkey, code: u32) -> String {
 }
 
 fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
-    // Force a message queue into existence *before* the thread id is
-    // published. A thread that has never called into user32 has no queue, and
-    // PostThreadMessageW against it fails with ERROR_INVALID_THREAD_ID - a
-    // hide lost that way would leave the panel on screen with no way to shift
-    // it but the hotkey.
+    // Create the message queue before publishing the thread id; until then
+    // PostThreadMessageW fails with ERROR_INVALID_THREAD_ID and a hide would
+    // be lost.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     // SAFETY: a null window filters to this thread's own messages, and
-    // PM_NOREMOVE leaves the queue alone. The only effect wanted is the side
-    // effect of the queue being created.
+    // PM_NOREMOVE leaves the queue alone. Called only to create the queue.
     unsafe {
         PeekMessageW(
             &mut msg,
@@ -374,8 +288,8 @@ fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
         )
     };
 
-    // SAFETY: a null window means the hotkey arrives as a *thread* message,
-    // which is what lets this file own no window and define no WndProc.
+    // SAFETY: a null window means the hotkey arrives as a thread message, so
+    // no window or WndProc is needed.
     if unsafe { RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, hk.mods, hk.vk as u32) } == 0 {
         // SAFETY: no arguments.
         let _ = ready.send(Ready::Failed(unsafe { GetLastError() }));
@@ -387,8 +301,7 @@ fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
 
     let mut summoner = Summoner::default();
 
-    // GetMessageW returns 0 on WM_QUIT and -1 on error; `> 0` covers both,
-    // which is the documented idiom and the reason this cannot spin.
+    // GetMessageW returns 0 on WM_QUIT and -1 on error; `> 0` exits on both.
     // SAFETY: `msg` is a live local; a null window filter means this thread's
     // messages, which includes the thread-targeted WM_HOTKEY.
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -405,58 +318,48 @@ fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
     unsafe { UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID) };
 }
 
-/// Everything the thread knows, on the thread that knows it.
+/// Panel visibility state, owned by the hotkey thread.
 #[derive(Default)]
 struct Summoner {
-    /// Whether the panel is up. The single authority; the interface's own idea
-    /// of it is downstream of this, never a peer.
+    /// Whether the panel is up. Authoritative; the UI's view follows it.
     shown: bool,
-    /// The window the keyboard came from, as bits.
-    ///
-    /// Stored so focus can be handed back to whatever somebody was working in.
-    /// An `isize` rather than an `HWND` only because the field would otherwise
-    /// make this struct un-`Send` for no reason; it never leaves this thread.
+    /// The previously focused window as bits, restored on hide.
     prev: isize,
-    /// The panel is going away so a viewer can come up, rather than because
-    /// somebody pressed Escape.
+    /// The panel is closing so a viewer can take the foreground.
     ///
-    /// Set when the dismissal is asked for and read when the window is
-    /// actually hidden, which are two messages apart. See [`Self::hide`].
+    /// Set on dismiss and read on hide, which arrive as separate messages.
+    /// See [`Self::hide`].
     handing_over: bool,
 }
 
 impl Summoner {
     fn toggle(&mut self, tx: &Events, panel: &Panel) {
         if self.shown {
-            // The hotkey pressed again, which is a dismissal like Escape: no
-            // viewer is coming, so the foreground goes back where it was.
+            // A second press dismisses like Escape and restores the previous
+            // foreground window.
             self.dismiss(tx, false);
         } else {
             self.summon(tx, panel);
         }
     }
 
-    /// Reports that the panel is going away, and does nothing else.
+    /// Reports that the panel is closing, without hiding it.
     ///
-    /// The drawing thread plays the exit transition and asks for
-    /// `WM_APP_HIDE` when it has finished. Idempotent, because Escape followed
-    /// by the hotkey is an ordinary sequence.
+    /// The drawing thread plays the exit transition, then posts `WM_APP_HIDE`.
+    /// Idempotent.
     fn dismiss(&mut self, tx: &Events, handing_over: bool) {
         if !self.shown {
             return;
         }
         self.shown = false;
-        // Remembered here because `hide` is posted later, by the shell, and
-        // has no way of knowing why the panel is going away.
+        // Stored for `hide`, which arrives later without this context.
         self.handing_over = handing_over;
         let _ = tx.send(AppEvent::Hotkey(HotkeyMsg::Dismissed));
     }
 
     fn summon(&mut self, tx: &Events, panel: &Panel) {
         let Some(hwnd) = panel.get() else {
-            // The toolkit has not created the window yet. Nothing to say about
-            // it: a keypress in the first few hundred milliseconds of the
-            // process's life is not something to warn anybody about.
+            // The window does not exist yet (early startup); ignore the press.
             return;
         };
         self.shown = true;
@@ -470,9 +373,7 @@ impl Summoner {
                 return;
             }
 
-            // Where the keyboard is going back to, captured before we take it.
-            // Our own window is excluded: storing it would mean dismissing the
-            // panel restored focus to the panel.
+            // Capture the window to restore focus to, excluding the panel.
             let fg = GetForegroundWindow();
             if !fg.is_null() && fg != hwnd {
                 self.prev = fg as isize;
@@ -480,7 +381,8 @@ impl Summoner {
 
             let dock = panel.dock();
             let rect = place(hwnd, panel.placed(), dock);
-            // Before it is shown, so it never appears with the wrong corners.
+            // Set before showing, so the window never appears with the wrong
+            // corners.
             crate::gui::window::set_rounded(hwnd as isize, !dock.is_docked());
             SetWindowPos(
                 hwnd,
@@ -489,10 +391,8 @@ impl Summoner {
                 rect.top,
                 rect.width(),
                 rect.height(),
-                // Shown without being activated, then given the foreground
-                // deliberately below. `SWP_SHOWWINDOW` alone leaves the
-                // keyboard wherever it was, and a search box that does not
-                // take what you type is worse than no search box.
+                // Show without activating; `force_foreground` below takes the
+                // keyboard, which `SWP_SHOWWINDOW` alone does not.
                 SWP_SHOWWINDOW | SWP_NOACTIVATE,
             );
         }
@@ -501,7 +401,7 @@ impl Summoner {
         let _ = tx.send(AppEvent::Hotkey(HotkeyMsg::Summoned));
     }
 
-    /// Puts the panel away and hands the keyboard back.
+    /// Hides the panel and restores the previous foreground window.
     fn hide(&mut self, panel: &Panel) {
         self.shown = false;
         let Some(hwnd) = panel.get() else {
@@ -512,18 +412,12 @@ impl Summoner {
         unsafe {
             ShowWindow(hwnd, SW_HIDE);
 
-            // Back to whatever was in front before. Hiding a window usually
-            // does this by itself, but "usually" means the case it misses is
-            // the one where somebody typed a code, dismissed the panel, and
-            // found their keystrokes going to the desktop.
+            // Restore the previous foreground explicitly; hiding alone does not
+            // always do it, and keystrokes can then go to the desktop.
             //
-            // Except when a viewer is on its way up. Then the window that was
-            // in front before is precisely the wrong answer: handing it the
-            // foreground is a race against the viewer, and it is a race the
-            // viewer loses, because it is still starting. That is most of why
-            // a drawing used to open *behind* the window somebody opened it
-            // from. Leaving the foreground alone lets the viewer take it with
-            // the right this process granted in `dispatch`.
+            // Skip this when a viewer is starting: it would win the race and
+            // open the viewer behind. The viewer instead takes the foreground
+            // via `AllowSetForegroundWindow` (see `src/open/launch.rs`).
             let prev = self.prev as HWND;
             if !self.handing_over && !prev.is_null() && IsWindow(prev) != 0 {
                 SetForegroundWindow(prev);
@@ -533,12 +427,10 @@ impl Summoner {
         self.handing_over = false;
     }
 
-    /// Takes the foreground, including from a window belonging to somebody
-    /// else's thread.
+    /// Takes the foreground, including from another thread's window.
     ///
-    /// `SetForegroundWindow` is refused across threads unless the input queues
-    /// are attached, and this is the documented way to arrange that. It is
-    /// allowed here at all only because this thread is handling `WM_HOTKEY`.
+    /// Attaches input queues, since `SetForegroundWindow` is otherwise refused
+    /// across threads. Only permitted while handling `WM_HOTKEY`.
     fn force_foreground(&self, hwnd: HWND) {
         // SAFETY: attach and detach are paired unconditionally, and both take
         // thread ids obtained from live windows.
@@ -561,27 +453,16 @@ impl Summoner {
     }
 }
 
-/// Where to put the panel, and how big to make it.
+/// Returns the panel rectangle for this summon.
 ///
-/// The size is the panel's own - [`crate::gui::PANEL_W`] by
-/// [`crate::gui::PANEL_H`] points - in this monitor's pixels. It used to be
-/// read back off the window, which was right while nothing but the drawing
-/// thread ever sized it. Docking does: a panel that was a bar along the bottom
-/// last time is a bar's width now, and asking the window how big it is would
-/// float a bar. So both sizes are worked out from the points every summon.
+/// The size is computed from [`crate::gui::PANEL_W`] by
+/// [`crate::gui::PANEL_H`] points every time, not read from the window, since
+/// a previous docked summon may have resized it.
 ///
-/// Docked, it is the width of the work area and the panel's height, against
-/// whichever edge - on the monitor the window is on, for the reason below, and
-/// with any remembered position left alone for when it floats again.
-///
-/// `at` is the position the user dragged the panel to, if they ever did. Note
-/// which monitor each branch asks about, because it is the difference between
-/// the feature working and appearing to work: the default placement asks about
-/// the monitor the *window* is on, while a remembered position asks about the
-/// monitor that *position* is on. They agree on every summon but the first
-/// after a cold start - at which point the window is still wherever the toolkit
-/// created it, and asking about the window would quietly drag a position saved
-/// on the second screen back onto the first.
+/// A remembered position `at` uses the work area of the monitor containing
+/// `at`, not the window's monitor: on the first summon the window may still
+/// be on another screen. Docked and default placements use the window's
+/// monitor.
 fn place(hwnd: HWND, at: Option<(i32, i32)>, dock: Dock) -> RectPx {
     let want = natural_px(hwnd);
 
@@ -607,12 +488,10 @@ fn place(hwnd: HWND, at: Option<(i32, i32)>, dock: Dock) -> RectPx {
     }
 }
 
-/// The panel's size in points, in the pixels of the monitor the window is on.
+/// Returns the panel size in device pixels for the window's current monitor.
 ///
-/// `GetDpiForWindow` answers for the window's current monitor, which is the
-/// one it is about to be placed on in every case but a remembered position on
-/// another screen - and there Windows sends the window its new DPI as it
-/// arrives, and the toolkit resizes to match.
+/// If the window moves to a monitor with a different DPI, Windows notifies the
+/// toolkit, which resizes to match.
 fn natural_px(hwnd: HWND) -> (i32, i32) {
     // SAFETY: a window this process owns, checked live by the caller. Zero
     // means the call failed, and is replaced by the unscaled 96.
@@ -629,16 +508,13 @@ fn natural_px(hwnd: HWND) -> (i32, i32) {
 
 pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {
     let chord = spec.bound().map(super::spec::describe);
-    // What the caller already knows beats what this can find out, and the
-    // reason is in `super::Probe`: `RegisterHotKey` is per-thread, so asking
-    // again from inside a process whose own hotkey thread holds the chord
-    // reports it as taken - by itself.
+    // Prefer the caller's known result; see `super::Probe` for why a fresh
+    // registration is wrong inside the running program.
     let registered = match known {
         Some(answer) => spec.bound().map(|_| answer),
         None => spec.bound().map(|hk| {
-            // SAFETY: registered and immediately released, on whatever thread
-            // the caller is on. Asking the question must not leave the key
-            // claimed.
+            // SAFETY: registered and immediately released on the caller's
+            // thread, so the key is never left claimed.
             unsafe {
                 if RegisterHotKey(std::ptr::null_mut(), HOTKEY_ID, hk.mods, hk.vk as u32) == 0 {
                     let code = GetLastError();
@@ -650,10 +526,8 @@ pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {
             }
         }),
     };
-    // The window is this program's own, so there is nothing to find and nothing
-    // that can go wrong in finding it. What is still worth reporting is where
-    // the panel would land, which is the answer somebody with two monitors
-    // actually wants from `--doctor`.
+    // Report where the default placement would land; a null window resolves
+    // to the nearest monitor.
     let window = win_hwnd::work_area(std::ptr::null_mut()).map(|work| {
         let rect = geometry::place(work, (720, 300));
         Ok(format!(
@@ -676,10 +550,7 @@ pub fn probe(spec: HotkeySpec, known: Option<Result<(), String>>) -> Probe {
 mod tests {
     use super::*;
 
-    /// The packing is the one piece of arithmetic in this file that a test can
-    /// reach, and getting it wrong would not crash - it would put the panel
-    /// somewhere plausible and wrong. A sign-extended `top` is the likely
-    /// mistake, which is why the negative cases are here.
+    /// Negative cases guard against sign-extending `top` when packing.
     #[test]
     fn a_remembered_position_survives_the_round_trip() {
         let panel = Panel::default();
@@ -699,9 +570,7 @@ mod tests {
         }
     }
 
-    /// The sentinel is the image of `(i32::MIN, 0)` under a bijective packing,
-    /// so without [`COORD_LIMIT`] that exact position reads back as "never
-    /// moved". This is the test that found it.
+    /// Without [`COORD_LIMIT`], `(i32::MIN, 0)` would pack to [`NOWHERE`].
     #[test]
     fn no_position_is_mistaken_for_no_position_at_all() {
         let panel = Panel::default();
@@ -719,8 +588,6 @@ mod tests {
         }
     }
 
-    /// And a coordinate no desktop can produce is brought back to one that can,
-    /// rather than stored as it stands.
     #[test]
     fn a_coordinate_no_desktop_could_produce_is_brought_back_in_range() {
         let panel = Panel::default();
@@ -728,7 +595,6 @@ mod tests {
         assert_eq!(panel.placed(), Some((-COORD_LIMIT, COORD_LIMIT)));
     }
 
-    /// Forgetting has to work from any position.
     #[test]
     fn a_position_can_always_be_forgotten() {
         let panel = Panel::default();
@@ -739,7 +605,6 @@ mod tests {
         assert_eq!(panel.placed(), None);
     }
 
-    /// Every corner of a desktop far larger than any real one survives intact.
     #[test]
     fn an_ordinary_desktop_coordinate_is_never_clamped() {
         let panel = Panel::default();

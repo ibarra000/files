@@ -1,8 +1,6 @@
 //! A tiny seedable PRNG, used only for backoff jitter.
 //!
-//! Hand-rolled rather than pulling in `rand`: jitter is the only randomness in
-//! the program, and a seedable generator makes the backoff schedule
-//! deterministic under test.
+//! Avoids a `rand` dependency; seeding makes backoff deterministic in tests.
 
 /// SplitMix64. Fast, small, and good enough for jitter.
 #[derive(Debug, Clone)]

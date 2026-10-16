@@ -1,31 +1,24 @@
-//! The programs somebody has named to open their files with.
+//! User-configured viewer programs, from `[[viewer]]` tables in `config.toml`.
 //!
-//! Nothing here is built in. This program used to know about exactly one
-//! viewer, `avwin.exe`, and offered it to everybody - on F2, on `Ctrl+E`, in
-//! the menu and as the home for drawings in PDF mode - although most machines
-//! have never had it installed. A viewer is the user's to name now, in
-//! `[[viewer]]` tables in `config.toml`, and the program offers exactly the
-//! ones they wrote down, in the order they wrote them.
+//! No viewer is built in; the program offers exactly the configured ones, in
+//! configuration order.
 //!
-//! # What `extensions` means
+//! # `extensions`
 //!
-//! The types PDF mode hands to this program rather than trying to assemble
-//! them. PDF mode treats a code as naming a document and merges its pages, and
-//! a drawing is the thing it cannot merge - there is no Rust that reads DWG.
-//! A viewer that claims `dwg` is where those go; without one they go to
-//! whatever Windows has registered for them. `Auto` never reads this list: it
-//! hands every file to Windows, which is what it means.
+//! The file types PDF mode sends to the viewer instead of merging them, such as
+//! `dwg`, which PDF mode cannot read. Unclaimed types go to the Windows
+//! association. `Auto` ignores this list and always uses Windows.
 
 use std::sync::Arc;
 
-/// One program, as the configuration names it.
+/// One configured viewer program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewerApp {
-    /// What F2, the menu and `viewer = ` call it.
+    /// The display name used by F2, the menu and `viewer = `.
     pub name: Arc<str>,
     /// A bare name looked up on `PATH`, or a full path.
     pub program: Arc<str>,
-    /// Lower case, no dot.
+    /// Claimed extensions, lowercase without the dot.
     pub extensions: Box<[Box<str>]>,
 }
 
@@ -47,11 +40,10 @@ impl ViewerApp {
     }
 }
 
-/// The configured viewers. Immutable once loaded, shared by every thread.
+/// The configured viewers, immutable once loaded and shared across threads.
 ///
-/// A slice in configuration order, like [`crate::alias::Aliases`]: the order
-/// somebody wrote them is the order F2 visits them, and the first one is the
-/// one `Ctrl+E` opens.
+/// Kept in configuration order: F2 cycles in that order and `Ctrl+E` opens the
+/// first.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Viewers {
     entries: Box<[ViewerApp]>,
@@ -80,7 +72,7 @@ impl Viewers {
         self.entries.is_empty()
     }
 
-    /// The position of the viewer called `name`, case aside.
+    /// Returns the index of the viewer named `name`, ignoring ASCII case.
     pub fn find(&self, name: &str) -> Option<usize> {
         let name = name.trim();
         self.entries
@@ -93,7 +85,7 @@ impl Viewers {
         self.entries.iter().position(|v| v.claims(ext))
     }
 
-    /// The names, for an error message that has to say what was expected.
+    /// Returns the viewer names, for error messages.
     pub fn names(&self) -> Vec<&str> {
         self.entries.iter().map(|v| v.name.as_ref()).collect()
     }

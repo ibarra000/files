@@ -1,45 +1,14 @@
-//! The settings window, as its own program.
+//! The settings window as a standalone process (`files --settings`), with no
+//! index, hotkey, tray icon, or search.
 //!
-//! `files --settings` runs this and nothing else: no index, no hotkey, no
-//! tray icon, no search. It is a form over a configuration file, and that
-//! is all the process is.
+//! It is a separate process rather than a panel viewport because a child of
+//! the always-on-top panel would sit behind it and interfere with
+//! `hide_on_blur`.
 //!
-//! # Why a process and not a viewport
-//!
-//! It used to be an immediate viewport of the panel, and three of the
-//! reported faults were that arrangement rather than anything drawn in it.
-//!
-//! The panel is `always_on_top`, because a thing summoned by a global
-//! hotkey has to arrive in front of whatever you were doing. A child
-//! viewport of an always-on-top window is behind it, so the panel floated
-//! over the settings window. `park()` then refused to dismiss the panel
-//! while a window was open - which is what `any_open()` was for - so it
-//! could not be got out of the way either, and `hide_on_blur` stopped
-//! meaning what the form said it meant: opening the settings window
-//! suppressed exactly the blur that should have dismissed the panel.
-//!
-//! As a process none of that exists. The window is an ordinary top-level
-//! window with a caption bar, a taskbar button, and no relationship to the
-//! panel's z-order at all. This is what Ueli does.
-//!
-//! # With no panel running
-//!
-//! Supported, and not a fallback. Every setting saves, because this process
-//! writes the file itself - see [`Editor::save`]. What needs a panel is
-//! three things, and each is disabled with a reason rather than failing
-//! when pressed.
-//!
-//! # Who writes the file
-//!
-//! This process does, always, and then tells the panel to re-read it.
-//!
-//! The alternative - sending each edit across and having the panel perform
-//! the write - would put the whole configuration schema on the wire and
-//! then on the wire again in the other direction, to avoid a race that
-//! `config::write::save` already handles: it re-reads the file before
-//! applying, precisely because "another instance - or the user, in an
-//! editor - may have changed a mapping since". Two writers is a case that
-//! module was written for.
+//! This process writes the config file itself, then tells the panel to
+//! re-read it; `config::write::save` re-reads before applying, so concurrent
+//! writers are safe. It works without a running panel, with panel-only
+//! actions disabled.
 
 use std::time::Instant;
 
@@ -52,16 +21,10 @@ use crate::gui::theme::{self, Theme};
 use crate::ipc::{Held, Link, Live, ToPanel, ToSettings};
 use crate::view::settings::{ActionId, PageId};
 
-/// Big enough for the nav and a reading column, short enough to open whole
-/// on a 1366 by 768 laptop once the taskbar has taken its share.
-///
-/// Ueli uses 1000 by 800; the 800 is the part not to copy, because this
-/// configuration follows people onto laptops by design.
+/// Initial size; fits a 1366x768 screen after the taskbar.
 const SIZE: [f32; 2] = [940.0, 700.0];
 
-/// The smallest this window may be made. See the note in [`super::measure`]:
-/// nothing breaks at any width now, so this is a readability floor rather
-/// than a damage limit.
+/// Minimum size, a readability floor; the layout itself works at any width.
 const MIN_SIZE: [f32; 2] = [820.0, 560.0];
 
 /// Runs the window until it is closed.
@@ -71,17 +34,15 @@ pub fn run(settings: Settings, choice: ConfigChoice, page: Option<PageId>) -> ef
         viewport: egui::ViewportBuilder::default()
             .with_title("files - settings")
             .with_app_id("files-settings")
-            // Everything the panel is not. A caption bar, because this is a
-            // document window somebody keeps open and moves about; a
-            // taskbar button, because it is a place you come back to; and
-            // no always-on-top, because it is not summoned.
+            .with_icon(crate::gui::icon::window_icon(false))
+            // An ordinary document window: caption bar, taskbar button, and
+            // not always-on-top.
             .with_decorations(true)
             .with_resizable(true)
             .with_inner_size(SIZE)
             .with_min_inner_size(MIN_SIZE),
-        // Remembered between runs, unlike the panel's. The panel is placed
-        // by the program on every summon; this is a window somebody has
-        // put where they want it.
+        // Unlike the panel, which is placed on every summon, this window
+        // keeps its user-chosen position between runs.
         persist_window: true,
         ..Default::default()
     };
@@ -100,23 +61,21 @@ pub fn run(settings: Settings, choice: ConfigChoice, page: Option<PageId>) -> ef
     )
 }
 
-/// The window, and everything it is drawn from.
+/// The settings window's state.
 struct App {
     settings: Settings,
-    /// Which file the settings came from, so a re-read comes from the same
-    /// one. `--config` is a flag on *this* process as well as on the panel.
+    /// The config file source, so a reload reads the same file.
     choice: ConfigChoice,
     theme: Theme,
+    /// Whether the title-bar icon is tinted for a dark caption, once set.
+    caption_dark: Option<bool>,
     page: PageId,
-    /// The facts only a running panel knows. Default until one says.
+    /// State only a running panel knows; default until the panel reports.
     live: Live,
-    /// The panel, if there is one.
+    /// The connection to the panel, if one is running.
     link: Option<Box<dyn Link>>,
-    /// What the About page found, computed here rather than carried across.
-    ///
-    /// The panel has an answer of its own, four hours stale by design, and
-    /// sending it would have meant a fifth field on the wire to be more
-    /// wrong than a fresh look. `update::look` is a directory read.
+    /// The update check for the About page, run locally because the panel's
+    /// result may be hours old.
     update: Update,
     report: report::Reporter,
     exists: exists::DirCache,
@@ -125,17 +84,15 @@ struct App {
     editing: Option<(SettingKey, String)>,
     draft: lists::AliasDraft,
     drive: lists::DriveDraft,
-    /// What the last save did, if it failed.
+    /// The last save error, if any.
     problem: Option<String>,
-    /// Whether Windows starts files at sign-in. `None` when the registry
-    /// would not say. Read when the window opens and again after every flip
-    /// of the switch, rather than every frame: nothing else this window does
-    /// moves it, and a flip reads back what actually landed.
+    /// Whether Windows starts files at sign-in; `None` if the registry read
+    /// failed. Read on open and after each toggle, not every frame.
     autostart: Option<bool>,
 }
 
-/// The update check, off the frame thread for the same reason the
-/// diagnostics are: it reads a network share.
+/// The update check, run off the frame thread because it reads a network
+/// share.
 enum Update {
     Running(std::sync::mpsc::Receiver<crate::update::Found>),
     Done(Option<crate::update::Found>),
@@ -160,14 +117,14 @@ impl App {
                 None
             }
         };
-        // The system's answer is not available before the context exists,
-        // so `System` starts light and `follow_theme` corrects it on the
-        // first frame - exactly as the panel does.
+        // The system theme is unknown before the context exists, so start
+        // light and let `follow_theme` correct it on the first frame.
         let theme = Theme::of(settings.theme.is_dark(false));
         Self {
             update: look_for_update(&settings, wake),
             page: page.unwrap_or(PageId::General),
             theme,
+            caption_dark: None,
             settings,
             choice,
             live: Live::default(),
@@ -183,10 +140,8 @@ impl App {
         }
     }
 
-    /// Writes or deletes the `Run` value, then reads back what landed.
-    ///
-    /// A failure is said on the message bar where a failed save is, because
-    /// it is the same news: the switch moved and Windows did not.
+    /// Writes or deletes the `Run` value, then reads back the result. Errors
+    /// go to the same message bar as save failures.
     fn start_with_windows(&mut self, on: bool) {
         let done = if on {
             crate::autostart::enable()
@@ -199,7 +154,7 @@ impl App {
         self.autostart = crate::autostart::is_on().ok();
     }
 
-    /// Whether there is a panel to act on.
+    /// Returns whether a panel is connected.
     fn panel(&self) -> bool {
         self.link.as_ref().is_some_and(|l| l.alive())
     }
@@ -210,27 +165,29 @@ impl App {
         }
     }
 
-    /// Reads the configuration file again, keeping nothing of what is here.
-    ///
-    /// The file is the truth, and both processes can read it - which is
-    /// most of why the wire carries so little.
+    /// Reloads settings from the config file, which is the source of truth
+    /// for both processes.
     fn reload(&mut self) {
         let pinned = self.settings.cli_pinned;
         if let Ok(mut fresh) = Settings::load(&self.choice) {
-            // Command-line pins are a property of the *processes*, not of
-            // the file, so they do not survive a re-read on their own.
+            // Command-line pins belong to the process, not the file.
             fresh.cli_pinned = pinned;
             self.settings = fresh;
         }
     }
 
-    /// Follows the system theme, where the setting says to.
-    ///
-    /// Every frame, like the panel's: `ctx.theme()` is winit's answer and
-    /// moves when Windows does. The style is re-applied only when the
-    /// answer changes, because a `Style` is several hundred bytes cloned
-    /// and the theme moves about twice a day.
+    /// Tracks the system theme each frame, re-applying the style only when
+    /// the effective theme changes.
     fn follow_theme(&mut self, ctx: &egui::Context) {
+        // The caption follows the Windows app theme, not this setting.
+        let caption_dark = ctx.theme() == egui::Theme::Dark;
+        if self.caption_dark != Some(caption_dark) {
+            self.caption_dark = Some(caption_dark);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Icon(Some(
+                crate::gui::icon::window_icon(caption_dark),
+            )));
+        }
+
         let dark = self
             .settings
             .theme
@@ -242,10 +199,10 @@ impl App {
         theme::apply_style(ctx, &self.theme);
     }
 
-    /// Writes an edit, and tells the panel the file moved.
+    /// Saves edits, reloads, and notifies the panel.
     fn save(&mut self, edits: &[Edit]) {
         let Some(path) = self.choice.path() else {
-            self.problem = Some("There is no configuration file to write to.".into());
+            self.problem = Some("There is no configuration file to save to.".into());
             return;
         };
         match crate::config::write::save(&path, edits) {
@@ -259,7 +216,7 @@ impl App {
     }
 }
 
-/// Starts the update check, or reports that there is nothing to check.
+/// Starts the update check, or returns `Done(None)` if no source is set.
 fn look_for_update(settings: &Settings, wake: impl Fn() + Send + 'static) -> Update {
     let Some(source) = crate::update::Source::of(settings) else {
         return Update::Done(None);
@@ -284,7 +241,7 @@ fn look_for_update(settings: &Settings, wake: impl Fn() + Send + 'static) -> Upd
 }
 
 impl eframe::App for App {
-    /// Opaque. This window is a document rather than an overlay.
+    /// Opaque, unlike the panel.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         let c = self.theme.surface;
         [
@@ -298,8 +255,6 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = Instant::now();
 
-        // Whatever the panel has said. `Close` and `Exiting` are the two
-        // that change what this process does rather than what it draws.
         let inbox: Vec<ToSettings> = self.link.as_mut().map(|l| l.poll()).unwrap_or_default();
         for msg in inbox {
             match msg {
@@ -310,9 +265,8 @@ impl eframe::App for App {
                 ToSettings::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
                 ToSettings::Live(live) => self.live = live,
                 ToSettings::Reload => self.reload(),
-                // Nothing to do but notice. `panel()` goes false on its own
-                // when the pipe breaks, and every caveat on the form reads
-                // from that.
+                // `panel()` turns false when the pipe breaks, which updates
+                // the form's caveats.
                 ToSettings::Exiting => {}
             }
         }
@@ -345,11 +299,8 @@ impl eframe::App for App {
             },
         );
 
-        // Stashed for `ui` below, which is where this frame's drawing
-        // happens. The split is eframe 0.36's: `logic` runs once per frame
-        // whether or not anything is drawn, and `ui` is handed the root
-        // `Ui`. Everything above here is the part that has to run even
-        // while the window is hidden behind something.
+        // Stashed for `ui`. In eframe 0.36, `logic` runs every frame even
+        // when nothing is drawn; `ui` receives the root `Ui`.
         self.pages = pages;
     }
 
@@ -375,11 +326,8 @@ impl eframe::App for App {
                     exists: &mut self.exists,
                     now,
                 };
-                // A save that did not land, said where the setting is
-                // rather than in a toast on a panel that may not be
-                // running. The change is already in force for this
-                // session - the form drew it the moment it moved - so the
-                // wording has to say what did and did not happen.
+                // Save failures are shown here, since the panel may not be
+                // running to show a toast.
                 if let Some(problem) = &self.problem {
                     super::widgets::message_bar(
                         ui,
@@ -405,9 +353,7 @@ impl eframe::App for App {
         };
         self.page = chosen;
 
-        // In the order they were moved, and before the buttons: a setting
-        // is what the window is for and a button is what somebody does
-        // afterwards.
+        // Edits are saved in order, before button actions run.
         let edits: Vec<Edit> = changed
             .into_iter()
             .filter(|c| self.settings.can_save(c.key))
@@ -421,10 +367,8 @@ impl eframe::App for App {
 
         for action in actions {
             match action {
-                // Both of these need the panel, and both are disabled on
-                // the form when there is not one - this is the second
-                // guard, because a form and a link can disagree for one
-                // frame while a panel is exiting.
+                // Disabled on the form without a panel; `tell` is a second
+                // guard for the frame where a panel is exiting.
                 ActionId::ForgetPlacement => self.tell(ToPanel::ForgetPlacement),
                 ActionId::InstallUpdate => self.tell(ToPanel::InstallUpdate),
                 ActionId::CheckForUpdates => {
@@ -444,11 +388,10 @@ impl eframe::App for App {
                     self.report
                         .refresh(&self.settings, claim, move || ctx.request_repaint());
                 }
-                // Handled where it is pressed, because it needs the report
-                // text and nothing else. See `gui::settings::page`.
+                // Handled in `gui::settings::page`, where the text is at hand.
                 ActionId::CopyReport => {}
-                // Here rather than in the panel: the `Run` value is the
-                // signed-in user's, and this process is running as them.
+                // The `Run` value is per-user, and this process runs as the
+                // signed-in user.
                 ActionId::StartWithWindows => self.start_with_windows(true),
                 ActionId::StopStartingWithWindows => self.start_with_windows(false),
             }
@@ -468,12 +411,13 @@ impl App {
         }
     }
 
-    /// What the panel said about the chord, in the shape `doctor` wants.
+    /// Returns the panel's hotkey registration status in the form `doctor`
+    /// expects.
     fn hotkey_claim(&self) -> Option<Result<(), String>> {
         match &self.live.hotkey {
-            // No panel has spoken, so this process may ask Windows itself -
-            // and unlike the panel it holds no chord, so the answer is
-            // honest. See `hotkey::Probe`.
+            // No panel report; `doctor` probes Windows directly, which is
+            // accurate because this process holds no hotkey. See
+            // `hotkey::Probe`.
             Held::Unknown => None,
             Held::Yes => Some(Ok(())),
             Held::No(why) => Some(Err(why.clone())),

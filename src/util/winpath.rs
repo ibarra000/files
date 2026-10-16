@@ -1,20 +1,17 @@
 //! Windows path shapes, as pure string manipulation.
 //!
-//! Several Win32 calls are fussy about being handed a *volume root* rather
-//! than an arbitrary directory, and getting it wrong fails quietly rather
-//! than loudly:
+//! Several Win32 calls require a volume root rather than an arbitrary
+//! directory, and fail quietly otherwise:
 //!
 //! * `GetVolumeInformationW` requires a root path with a trailing separator.
-//!   Given `V:\Documents\custpro` it fails with `ERROR_DIR_NOT_ROOT`, so the
-//!   volume serial - the persisted index's only identity check - silently
-//!   becomes unavailable.
-//! * `GetDriveTypeW` answers `DRIVE_NO_ROOT_DIR` for anything that is not a
-//!   root, so a network share stops being recognised as one.
+//!   Otherwise it fails with `ERROR_DIR_NOT_ROOT`, and the volume serial (the
+//!   persisted index's identity check) becomes unavailable.
+//! * `GetDriveTypeW` returns `DRIVE_NO_ROOT_DIR` for a non-root, so network
+//!   shares are not recognised.
 //! * `WNetGetConnectionW` wants a bare device name (`V:`), not a path.
 //!
-//! Parsing is done by hand rather than through `std::path::Component`, whose
-//! `Prefix` matching is a no-op when the host is not Windows. Hand-parsing
-//! keeps these functions - and their tests - identical on every host.
+//! Parsed by hand because `std::path::Component::Prefix` is never produced on
+//! non-Windows hosts; this keeps behaviour and tests identical everywhere.
 
 use std::path::{Path, PathBuf};
 
@@ -84,10 +81,9 @@ pub fn is_volume_root(path: &Path) -> bool {
 
 /// Canonical spelling of a configured root.
 ///
-/// A volume root keeps its trailing separator; anything deeper loses it. Done
-/// once when configuration is loaded, so `V:\Documents\custpro\` can never
-/// reach `CreateFileW` as a non-root path with a trailing backslash - the one
-/// combination the enumerator's own comments warn against.
+/// A volume root keeps its trailing separator; anything deeper loses it.
+/// Applied when configuration is loaded, so `CreateFileW` never receives a
+/// non-root path with a trailing backslash.
 pub fn normalise_root(path: &Path) -> PathBuf {
     let s = path.to_string_lossy().into_owned();
     if s.is_empty() {
@@ -180,8 +176,7 @@ mod tests {
         assert_eq!(drive_letter_of(Path::new("")), None);
     }
 
-    /// The whole point: the volume APIs need `V:\`, not the configured
-    /// directory.
+    /// The volume APIs need `V:\`, not the configured directory.
     #[test]
     fn finds_the_volume_root_of_a_subdirectory() {
         assert_eq!(
@@ -230,8 +225,6 @@ mod tests {
         assert!(!is_volume_root(Path::new("relative")));
     }
 
-    /// A volume root keeps its separator; anything deeper loses it. That is
-    /// exactly what `CreateFileW` wants in each case.
     #[test]
     fn normalises_roots_for_createfile() {
         assert_eq!(normalise_root(Path::new(r"V:\")), PathBuf::from(r"V:\"));
@@ -269,8 +262,8 @@ mod tests {
             path_key(Path::new(r"V:\Documents\custpro")),
             path_key(Path::new(r"V:\Documents\other"))
         );
-        // The old root and the new subdirectory must not collide - that is
-        // the case that would serve a stale index.
+        // A root and its subdirectory must not collide, or a stale index
+        // would be served.
         assert_ne!(
             path_key(Path::new(r"V:\")),
             path_key(Path::new(r"V:\Documents\custpro"))

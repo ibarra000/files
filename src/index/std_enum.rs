@@ -1,13 +1,9 @@
 //! Portable `std::fs::read_dir` enumeration.
 //!
-//! This is the bottom of the fallback chain and the field escape hatch
-//! (`FILES_FS_STRATEGY=std`). It is also, on a network share, by far the
-//! slowest option: `read_dir` uses a roughly 4 KB fetch buffer, so a
-//! million-entry directory costs on the order of 45,000 serialised SMB round
-//! trips. That is the behaviour the Windows enumerators exist to replace.
-//!
-//! It stays because it always compiles, always works, and gives the
-//! non-Windows build something real to test against.
+//! The last step of the fallback chain and the field override
+//! (`FILES_FS_STRATEGY=std`). It is slow on network shares: `read_dir` fetches
+//! about 4 KB per round trip, so a million-entry directory needs roughly
+//! 45,000 serialised SMB requests. It also serves as the non-Windows backend.
 
 use std::path::Path;
 use std::time::Instant;
@@ -20,18 +16,11 @@ use super::errors::EnumError;
 use crate::config::EnumStrategy;
 use crate::util::cancel::CancelToken;
 
-/// The hidden and system bits, and nothing else.
+/// Returns the entry's hidden and system attribute bits.
 ///
-/// Read separately from the directory bit above because that one is a
-/// restatement of `file_type()` while these are a genuine question about the
-/// entry. `DirEntry::metadata` is free on Windows for the same reason
-/// `file_type` is - the directory scan already returned the whole
-/// `WIN32_FIND_DATA` - so this costs no extra round trip on a share.
-///
-/// Nothing off Windows, where the attributes do not exist. The dotfile
-/// convention is deliberately not treated as a stand-in: this enumerator is
-/// the fallback for a Windows share, and giving it a second meaning here would
-/// make the two paths disagree about which files exist.
+/// `DirEntry::metadata` on Windows reuses the `WIN32_FIND_DATA` from the scan,
+/// so this costs no extra round trip. Off Windows it returns 0; dotfiles are
+/// not treated as hidden so both paths agree on which files exist.
 #[cfg(windows)]
 fn marked(entry: &std::fs::DirEntry) -> u32 {
     use std::os::windows::fs::MetadataExt;
@@ -64,10 +53,8 @@ impl DirSource for StdDirSource {
                 .map(|d| d.as_nanos().min(i64::MAX as u128) as i64)
                 .unwrap_or(0)
         };
-        // std exposes no separate change time, so the stamp carries mtime
-        // alone and says so. Comparisons remain valid; only the resolution is
-        // coarser - and marking the kind is what stops a stamp from here ever
-        // being compared against a two-field one from the Windows path.
+        // std exposes no change time, so the stamp is write-only. Marking the
+        // kind keeps it from comparing equal to a two-field Windows stamp.
         Ok(DirStamp::write_only(secs(meta.modified())))
     }
 
@@ -121,8 +108,7 @@ impl DirSource for StdDirSource {
 
         Ok(ListStats {
             entries,
-            // read_dir hides its buffering, so there is no honest refill count
-            // to report here.
+            // read_dir hides its buffering, so no refill count is available.
             round_trips: 0,
             elapsed: started.elapsed(),
             strategy: Some(EnumStrategy::StdReadDir),
@@ -131,7 +117,7 @@ impl DirSource for StdDirSource {
     }
 
     fn prewarm(&self, root: &Path) {
-        // Cheapest thing that forces an SMB session setup and tree connect.
+        // Cheapest call that forces SMB session setup and tree connect.
         let _ = std::fs::metadata(root);
     }
 
@@ -153,8 +139,7 @@ mod tests {
         dir
     }
 
-    /// Marks a real file hidden, so the filter is tested against Windows
-    /// rather than against a fixture that agrees with it by construction.
+    /// Marks a real file hidden through the Win32 API.
     #[cfg(windows)]
     fn mark_hidden(path: &Path) {
         use std::os::windows::ffi::OsStrExt;
@@ -170,12 +155,8 @@ mod tests {
         assert_ne!(ok, 0, "could not mark {} hidden", path.display());
     }
 
-    /// The end-to-end shape of the attribute half: a file the operating system
-    /// says is hidden, read back through the real enumerator.
-    ///
-    /// Also the test that `marked` reads the attribute at all. Before it, this
-    /// enumerator synthesised its attributes from `file_type()` alone, so it
-    /// could not have seen a hidden file however it was configured.
+    /// A file Windows marks hidden is listed by default and dropped only when
+    /// `hide_system` is set.
     #[test]
     #[cfg(windows)]
     fn a_file_windows_marks_hidden_is_dropped_only_when_asked() {
@@ -321,8 +302,8 @@ mod tests {
 
     #[test]
     fn server_side_filtering_is_reported_as_unsupported() {
-        // std cannot push a filter to the server, so the caller must know to
-        // match locally instead.
+        // std cannot push a filter to the server, so the caller must match
+        // locally.
         let dir = temp_dir_with(&["a"]);
         let mut sink = VecSink::default();
         let err = StdDirSource

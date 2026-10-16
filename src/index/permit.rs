@@ -1,26 +1,17 @@
 //! A cap on how many shares are walked at once.
 //!
-//! One tree walk already runs [`WALK_CONCURRENCY`] directory reads in flight,
-//! a number chosen because a share is someone else's production file server;
-//! see that constant's own comment. Ten configured mappings without a cap is
-//! ten walks at once, eighty outstanding SMB requests, and a first run that
-//! looks to the server like an attack rather than a client.
+//! Each walk already keeps [`crate::config::WALK_CONCURRENCY`] directory reads
+//! in flight, so uncapped walks across many mappings would flood the file
+//! server.
 //!
-//! # Why a channel rather than a mutex and a condition variable
+//! A bounded channel pre-filled with `n` units is used instead of a `Condvar`
+//! so the wait composes with `select!` over the actor's command receiver and
+//! a queued walker still answers shutdown promptly.
 //!
-//! The actor waiting here must still answer a shutdown. A `Condvar` would need
-//! a timed poll loop to notice one; a bounded channel pre-filled with `n`
-//! units composes with `select!` over the actor's existing command receiver,
-//! which is exactly how [`super::actor`] already blocks between wakes. A
-//! walker parked for a permit therefore leaves as promptly as an idle one.
-//!
-//! # Why the count can never drift
-//!
-//! Exactly `n` units exist for the life of the process. [`WalkPermit`] returns
-//! its unit on `Drop`, into a channel with capacity `n` that by construction
-//! cannot be full, so the send cannot fail and cannot block. `panic` is
-//! deliberately left at `unwind` (see `Cargo.toml`), so a walk that panics
-//! still runs `Drop` before the actor's `catch_unwind` sees the payload.
+//! Exactly `n` units exist. [`WalkPermit`] returns its unit on `Drop` into a
+//! channel that cannot be full, so the send never fails or blocks. `panic`
+//! must stay at `unwind` (see `Cargo.toml`) so a panicking walk still runs
+//! `Drop` before the actor's `catch_unwind`.
 
 use crossbeam_channel::{Receiver, Sender, select};
 
@@ -41,8 +32,7 @@ pub struct WalkPermits {
 }
 
 impl WalkPermits {
-    /// `n` is clamped to at least one: a cap of zero would mean no share is
-    /// ever indexed, which is not a configuration anyone means.
+    /// Creates `n` permits, clamped to at least one.
     pub fn new(n: usize) -> Self {
         let n = n.max(1);
         let (tx, rx) = crossbeam_channel::bounded(n);
@@ -52,19 +42,18 @@ impl WalkPermits {
         Self { tx, rx }
     }
 
-    /// Permits not currently held. For tests and `--doctor`.
+    /// Returns the number of permits not currently held.
     pub fn available(&self) -> usize {
         self.rx.len()
     }
 
     /// Takes a permit, or reports that the actor should stop.
     ///
-    /// A `Refresh` arriving while queued is folded into `forced` rather than
-    /// dropped: the scan this permit is for has not started, so the force
-    /// still applies to it. A `Changed` is ignored for the opposite reason -
-    /// the full pass about to run covers whatever the watcher saw.
+    /// A `Refresh` received while queued is folded into `forced`, since the
+    /// scan has not started. A `Changed` is ignored because the upcoming full
+    /// pass covers it.
     pub fn acquire(&self, cmds: &Receiver<IndexCmd>, forced: &mut bool) -> Acquired<'_> {
-        // The fast path, so an uncontended walk pays nothing for the cap.
+        // Uncontended fast path; does not read the command channel.
         if self.rx.try_recv().is_ok() {
             return Acquired::Held(WalkPermit { tx: &self.tx });
         }
@@ -87,17 +76,14 @@ impl WalkPermits {
     }
 }
 
-/// Held for exactly as long as one full pass.
-///
-/// Deliberately not `Clone`: one guard is one unit.
+/// Held for the duration of one full pass. Not `Clone`: one guard is one unit.
 pub struct WalkPermit<'a> {
     tx: &'a Sender<()>,
 }
 
 impl Drop for WalkPermit<'_> {
     fn drop(&mut self) {
-        // Cannot fail: the channel has capacity for every unit that exists,
-        // and this is one of them coming home.
+        // Cannot fail: the channel has capacity for every unit that exists.
         let _ = self.tx.try_send(());
     }
 }
@@ -138,9 +124,7 @@ mod tests {
         assert_eq!(WalkPermits::new(0).available(), 1);
     }
 
-    /// The property the whole design exists for: an actor queued behind a
-    /// walk must still be able to shut down. Without it, quitting during a
-    /// cold start waits out every walk ahead of it.
+    /// An actor queued behind a walk must still be able to shut down.
     #[test]
     fn shutdown_reaches_an_actor_that_is_queueing() {
         let p = WalkPermits::new(1);
@@ -153,13 +137,10 @@ mod tests {
         assert_eq!(p.available(), 0, "a refused acquire must not take a unit");
     }
 
-    /// A forced refresh that lands while actually queued still applies to the
-    /// scan the permit is being taken for - it has not started yet.
+    /// A forced refresh received while queued applies to the pending scan.
     ///
-    /// The permit must genuinely be contended for this to exercise anything:
-    /// with one free, `acquire` takes the fast path and never looks at the
-    /// command channel, which is correct - the actor's own wake loop picks the
-    /// refresh up instead.
+    /// The permit must be contended: with one free, `acquire` takes the fast
+    /// path and the actor's wake loop handles the refresh instead.
     #[test]
     fn a_forced_refresh_while_queueing_is_not_lost() {
         let p = WalkPermits::new(1);
@@ -176,8 +157,7 @@ mod tests {
         assert!(forced, "F5 pressed during a queue must not be swallowed");
     }
 
-    /// The fast path is a fast path: an uncontended walk must not pay for the
-    /// cap, and must not steal commands the actor's own loop needs to see.
+    /// The fast path must not consume commands meant for the actor's loop.
     #[test]
     fn an_uncontended_walk_does_not_touch_the_command_channel() {
         let p = WalkPermits::new(1);

@@ -1,13 +1,8 @@
-//! The status line.
+//! The status line, rendered as a pure function of state and time.
 //!
-//! Rendered as a pure function of state and time, so the exact text can be
-//! asserted in tests. That matters more than usual here: the status line is
-//! the only place the user learns that the index is stale, that the drive is
-//! unreachable, or that server-side filtering has switched itself off, and
-//! none of those conditions can be reproduced on a development machine.
-//!
-//! The previous implementation showed `0 / 0 files matched` for every one of
-//! them.
+//! It is the only place the user learns that an index is stale, a drive is
+//! unreachable or server-side filtering is off. Those conditions are hard to
+//! reproduce on a development machine, so the exact text is pinned by tests.
 
 use std::time::SystemTime;
 
@@ -32,27 +27,14 @@ pub struct StatusLine {
     pub tone: Tone,
 }
 
-/// Builds the status line.
+/// Builds the status line text and tone.
 ///
-/// Words only. The mark that leads the line - a tone glyph, or a spinner while
-/// something is in flight - is added by [`crate::gui::panel::footer`], which is the one
-/// place that knows the whole frame's clock. Putting it here as well is how the
-/// line came to be drawn with two spinners on it.
+/// The leading tone glyph or spinner is added by
+/// [`crate::gui::panel::footer`]; adding it here too would draw it twice.
 pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
-    // Something that just happened outranks everything standing: it is the
-    // answer to a key the user pressed a moment ago, and it goes away on its
-    // own after `TOAST_LIFETIME`.
-    //
-    // This line is where they are drawn because it is the only band on the
-    // panel whose height does not depend on what is in it. A toast row of its
-    // own - which is what the terminal build had - would grow and shrink the
-    // window twice per message.
-    //
-    // They were computed and thrown away for the whole of the rewrite. Every
-    // one of "copied 9 characters", "the clipboard holds no text", "nothing to
-    // open", "updating jobs...", "viewer: avwin (this session only)" and
-    // "avwin.exe not found on PATH" was raised, given an expiry, kept on the
-    // frame clock so the loop would wake to retire it - and never rendered.
+    // A toast outranks everything: it answers a recent key press and expires
+    // after `TOAST_LIFETIME`. It is drawn here because this band has a fixed
+    // height, so toasts never resize the window.
     if let Some(toast) = &state.toast {
         return StatusLine {
             text: toast.text.clone(),
@@ -64,20 +46,9 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
         };
     }
 
-    // A share that cannot be reached outranks everything else: it explains
-    // every other oddity on screen.
-    //
-    // The share that actually failed is named. This used to hand
-    // `EnumError::describe` the derived `custpro_path` whatever had gone
-    // wrong, so a tree failure was reported against the flat share - and with
-    // no flat mapping configured it rendered a leading space and an error code
-    // attached to nothing, which is the reported "random os error 03".
-    //
-    // The countdown to the next automatic retry used to be on this line, and
-    // it is gone with the rest of the panel's prose. It was a second thing
-    // to read on the one line that has to land, it was the reason the panel
-    // asked for a repaint once a second for as long as a drive stayed down,
-    // and "F5" is the answer to the question it was answering anyway.
+    // An unreachable share explains every other oddity, so it comes next.
+    // The failing share is named. No retry countdown is shown, so the panel
+    // does not need a repaint every second while a drive is down.
     if let Some((id, Health::Unreachable { err, .. })) = state.index.unreachable() {
         return StatusLine {
             text: format!("{} \u{b7} F5", state.describe_drive_error(id, *err)),
@@ -85,38 +56,24 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
         };
     }
 
-    // Second, because a drive nobody can reach outranks a viewer nobody can
-    // launch - but ahead of everything else, because it is the explanation for
-    // a keystroke that is about to appear to do nothing.
-    //
-    // `F2` is named rather than described: it is one press, it is reversible,
-    // and it is the whole fix.
+    // A missing viewer explains why `Enter` would appear to do nothing.
+    // `F2` (switch viewer) is the fix.
     if state.viewer_missing(state.viewer)
         && let Some(app) = state.viewer.app(&state.settings.viewers)
     {
-        // The program as the configuration spells it, which keeps its own
-        // spelling under the house style like any name read out of the file.
+        // The program name keeps its configured spelling.
         return StatusLine {
             text: format!(
-                "Enter cannot open anything \u{b7} {} is not on PATH \u{b7} F2 switches viewer",
+                "Cannot open \u{b7} {} is not on PATH \u{b7} F2 switches viewer",
                 app.program
             ),
             tone: Tone::Warn,
         };
     }
 
-    // One line for all five of them.
-    //
-    // There used to be five, and between them they carried a folder count, a
-    // queue depth, a file count, a share name, and a reason in brackets -
-    // rewriting themselves several times a second in the one place on the
-    // panel reserved for things somebody has to act on. Every number in them
-    // is either in the diagnostics - which report each drive's entry count,
-    // its age and its resident size, at leisure and without rewriting
-    // themselves - or is a progress figure for work in flight, which nothing
-    // keeps once the work is done and which nobody was acting on. What is
-    // left is the one fact that changes what to do: the list is not complete
-    // yet, so a code that is missing may not really be missing.
+    // One line for every kind of index work. Counts and progress figures are
+    // on the Diagnostics page; what matters here is that the list is
+    // incomplete, so a missing code may not really be missing.
     if state.index.activity != Activity::Idle {
         return StatusLine {
             text: "Indexing\u{2026}".into(),
@@ -124,36 +81,19 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
         };
     }
 
-    // The file that was selected is not in the list any more, and the cursor
-    // has been moved to whatever is now in its place. Worth interrupting the
-    // ordinary line for: the next Enter opens something other than what the
-    // user was looking at when they reached for it.
-    //
-    // Maintained since the selection was first tracked by path, asserted by
-    // `tests/state_machine.rs` under the name "the user should be told the
-    // list shifted", and until now read by nothing outside that test.
+    // The selected file left the list and the cursor moved, so the next
+    // `Enter` would open a different file.
     if state.selection_lost {
         return StatusLine {
-            text: "The list changed \u{b7} check the highlighted file before opening it".into(),
+            text: "File list changed \u{b7} check the selection before opening".into(),
             tone: Tone::Warn,
         };
     }
 
-    // The phase, where the phase is worth a sentence.
-    //
-    // `Idle`, `Local` and `Verified` are the quiet ones, and they yield to the
-    // index below rather than returning here. Everything else is either
-    // transient or something the user has to do about, and outranks an ambient
-    // note about the index - "Keep typing" while a code is half-entered is
-    // more use than "no file list yet", even when both are true.
-    // Above the phase, because a partial live answer outranks a confirmed
-    // local one: the phase can only say the indexes are current, and the live
-    // share is the part of the answer that may be missing.
+    // A partial live answer outranks the query phase, which can only say the
+    // indexes are current. A live search in flight is shown only by the
+    // spinner beside the count; it usually finishes in under a second.
     if let Some(live) = &state.live {
-        // "Asking jobs..." is gone. A live share answers in well under a
-        // second, and a line that appears and disappears inside one is a
-        // flicker rather than information - the spinner beside the count
-        // already says something is in flight.
         if let Some((id, detail)) = live.failed.first() {
             return StatusLine {
                 text: format!(
@@ -195,19 +135,16 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
             tone: Tone::Warn,
         }),
         QueryPhase::NoShares => Some(StatusLine {
-            text: "No drives are set up \u{b7} run files --check-config".into(),
+            text: "No drives set up \u{b7} Ctrl+, opens Settings".into(),
             tone: Tone::Warn,
         }),
-        // Silent, all three. A local search finishes in a few milliseconds
-        // and a verification in a few hundred, so these were three lines
-        // that appeared and vanished faster than they could be read - and
-        // the last of them, "Up to date", is the line that says nothing is
-        // wrong, which is what an empty status line already says.
+        // Silent: these finish too quickly to read, and success is already
+        // shown by an empty line.
         QueryPhase::LocalPending | QueryPhase::Verifying { .. } | QueryPhase::Verified { .. } => {
             None
         }
         QueryPhase::VerifyFailed { detail } => Some(StatusLine {
-            text: format!("Showing the saved list \u{b7} {detail}"),
+            text: format!("Showing cached results \u{b7} {detail}"),
             tone: Tone::Warn,
         }),
     };
@@ -215,14 +152,8 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
         return line;
     }
 
-    // Nothing is happening, so the only thing left worth saying is that the
-    // index is wrong - and usually it is not, so the line is empty.
-    //
-    // An empty footer is the point of all this. The count sits to the left of
-    // it and the keys to the right; the middle used to hold
-    // `Ready · 1,284,551 files · updated 2m ago`, which was a number nobody was
-    // looking for, in the one place the program has to say things people must
-    // act on, rewriting itself once a second.
+    // Otherwise, only an index problem is worth saying; a healthy index
+    // leaves the line empty.
     match index_warning(state, wall) {
         Some(warning) => StatusLine {
             text: warning,
@@ -235,29 +166,13 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
     }
 }
 
-/// What is wrong with the index, if anything.
+/// Returns a warning about the index, or `None` when it is healthy.
 ///
-/// All that is left of a summary that used to lead every healthy status line
-/// with `Ready · 1,284,551 files · updated 2m ago`. Three things were wrong
-/// with that. It competed for width with the result count on the same line,
-/// and lost, so it was usually an ellipsis. Its age ticked, so the line
-/// rewrote itself once a second and then once a minute for as long as the
-/// panel was open. And it was ambient: a number nobody was looking for, in the
-/// one place the program has to say things people must act on.
-///
-/// The ages moved to `F5` when the drive picker was built - see
-/// [`crate::view::shares`] - which is where somebody goes when they suspect
-/// the list is out of date. What stays here is only what they cannot go and
-/// look for, because they do not yet know to look.
-///
-/// `None` when the index is healthy, which is what makes a healthy footer
-/// quiet.
+/// Index ages are shown in the `F5` drive list ([`crate::view::shares`]),
+/// not here.
 fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
-    // Whether there is anything to say is asked of the state, because the
-    // panel asks the same question before it decides whether to leave room for
-    // this line - and a footer whose height and contents disagree is a message
-    // drawn into a band of no height. This function owns the words; it does
-    // not own the question.
+    // The panel uses the same predicate to reserve room for this line, so
+    // the two must agree.
     if !state.has_standing_notice(wall) {
         return None;
     }
@@ -267,16 +182,9 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
         return Some("No file list yet".into());
     }
 
-    // Named, because a degraded share is one somebody has to go and look at.
-    // A name only when there are several: "jobs: no live updates" is useful
-    // and "custompro: no live updates" when custompro is the only share is a
-    // word nobody needed.
-    //
-    // The name is not capitalised and the fragment after it is not either: a
-    // drive is called whatever the configuration calls it, and a line that
-    // leads with `Jobs` names a drive that does not exist. Where no name
-    // leads, `view::sentence` capitalises the fragment instead - which is the
-    // whole reason those fragments are written lowercase.
+    // The share is named only when several are configured. The configured
+    // name keeps its spelling; with no name, `view::sentence` capitalises the
+    // fragment instead.
     let named = |id| {
         if status.configured > 1 {
             format!("{}: ", state.settings.routes.label(id))
@@ -293,9 +201,8 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
         return Some(lead(id, reason.label()));
     }
 
-    // Which share to refresh, and why - not merely that something is stale.
-    // Somebody told only that "an index is out of date" refreshes everything,
-    // and everything is what a few hundred people must not all read at once.
+    // Name the share and the reason, so users refresh one share rather than
+    // all of them.
     if state.settings.stale_notices
         && let Some((id, reason)) = status.stale_at(wall)
     {
@@ -305,40 +212,11 @@ fn index_warning(state: &AppState, wall: SystemTime) -> Option<String> {
     None
 }
 
-/// The facts the footer reserves room for, so neither can be truncated.
+/// Returns the match count with its noun ("300 items"), reserved its own
+/// space in the footer so it is never truncated.
 ///
-/// Everything else on that line is prose, and prose is what the buttons on
-/// the right eat into: it is laid out in whatever they left and ellipsised
-/// to fit. These are not prose. They are values somebody is *looking* for,
-/// and a value that might not be there is not worth putting on screen.
-///
-/// # Why each of them is here
-///
-/// The count, because the panel had no way at all of saying there was more
-/// than it was showing: two hundred and ninety-two results could sit in `hits`,
-/// unreachable and unmentioned, behind a list of eight.
-///
-/// The viewer, because `F2` changes what `Enter` does and nothing on screen
-/// said which way it had been changed. The chip that names it is real but it is
-/// `Priority::Normal`, and at the shipped width it does not fit - so on its own
-/// it would be an answer that is there until the moment somebody needs it.
-/// How many the code found.
-///
-/// Empty when there is nothing to count, so the footer says nothing rather
-/// than a zero.
-///
-/// This used to be a *range* - "9-16 of 300" - and the argument for it was
-/// sound while it held: the panel drew a twelve-row window over the result
-/// list, the other 288 were unreachable, and somebody holding Down through
-/// three hundred drawings had nothing else to tell them how far they had got.
-///
-/// The content band is a scroller now. Every result is reachable, the
-/// scrollbar says how far down them you are, and a range printed beside it
-/// would be a second, worse answer to a question the bar already answers. So
-/// what is left is the fact the range was wrapped around: how many there are.
-///
-/// With its noun, because a bare "300" at the foot of a list reads as a page
-/// number, a code, or anything but a count.
+/// Empty when there is nothing to count. This is the number the index found,
+/// which may exceed the hits returned.
 pub fn found(state: &AppState) -> String {
     let found = state.matched as usize;
     if found == 0 || state.hits.is_empty() {
@@ -368,8 +246,7 @@ mod tests {
 
     const EPOCH: SystemTime = SystemTime::UNIX_EPOCH;
 
-    /// One share, which is what the assertions below are written against.
-    /// Several-share rendering has its own tests at the end of this module.
+    /// A state with one share. Several-share tests are at the end.
     fn state_at(now: Instant) -> AppState {
         AppState::new(
             Settings::for_mapping("custompro", crate::config::CUSTPRO_PATH, MappingKind::Flat),
@@ -377,21 +254,19 @@ mod tests {
         )
     }
 
-    /// The same, in developer mode - which is what puts the drive's path and
-    /// the operating system's code on the line.
-    ///
-    /// Several tests below are *about* that detail reaching the screen, so
-    /// they have to ask for it. What the ordinary user sees is asserted
-    /// separately, by `a_drive_failure_is_a_sentence_until_somebody_asks`.
+    /// The same in developer mode, which adds the drive path and OS error
+    /// code. The non-developer wording is covered by
+    /// `a_drive_failure_is_a_sentence_until_somebody_asks` in
+    /// `tests/state_machine.rs`.
     fn dev_state_at(now: Instant) -> AppState {
         let mut s = state_at(now);
         s.settings.dev_mode = true;
         s
     }
 
-    /// Two shares, for the rendering that only exists when there are several.
+    /// A state with two shares.
     fn state_with_two_shares(now: Instant) -> AppState {
-        AppState::new(Settings::default(), now)
+        AppState::new(Settings::fixture(), now)
     }
 
     fn publish(s: &mut AppState, id: MappingId, now: Instant, f: impl FnOnce(&mut IndexStatus)) {
@@ -471,13 +346,6 @@ mod tests {
         assert_eq!(line.tone, Tone::Normal);
     }
 
-    /// The counts and the age did not move somewhere shorter - they left.
-    ///
-    /// They were ambient: a number nobody was looking for, sitting in the one
-    /// place the program has to say things people must act on, rewriting
-    /// itself once a second as the age ticked. The ages are in the drive
-    /// picker, which is where somebody goes when they suspect the list is out
-    /// of date; how many matched is in the reserved slot beside this line.
     #[test]
     fn the_file_count_and_the_index_age_are_not_on_this_line() {
         let now = Instant::now();
@@ -492,10 +360,6 @@ mod tests {
         }
     }
 
-    /// One character is a search now, so the line that used to say "keep
-    /// typing" says what it says for any other search in flight. The old
-    /// line, and the phase behind it, are gone: there is no such thing as a
-    /// query that is too short any more, only one with nothing on it.
     #[test]
     fn one_character_is_searched_for_rather_than_refused() {
         let now = Instant::now();
@@ -509,15 +373,6 @@ mod tests {
     }
 
     #[test]
-    /// An unusual query is searched for rather than refused.
-    ///
-    /// This used to assert "not a recognised job code": a pattern had to
-    /// recognise a string before anything would look anywhere, so an
-    /// unfamiliar code was declined rather than searched. With both shares
-    /// indexed there is nothing to recognise - an odd query simply finds
-    /// nothing, which is a different and far more honest answer, because
-    /// "I will not look" and "I looked and it is not there" were previously
-    /// indistinguishable.
     fn an_unusual_query_is_searched_for_rather_than_refused() {
         let now = Instant::now();
         let mut s = state_at(now);
@@ -529,22 +384,10 @@ mod tests {
         assert_eq!(s.phase, QueryPhase::LocalPending);
     }
 
-    /// The refusal still exists for a configuration made only of patterns,
-    /// where declining is the honest answer.
-    /// With no share enabled, the status line says so rather than searching
-    /// nothing and reporting no matches.
-    ///
-    /// This used to read "not a recognised job code": a pattern had to match
-    /// before anything would look anywhere. Both shares are indexed now, so
-    /// the only way a query reaches nothing is a configuration with nothing
-    /// in it.
     #[test]
     fn a_configuration_with_no_enabled_share_says_so() {
         let now = Instant::now();
-        // Built directly rather than parsed: the config layer refuses a file
-        // with no enabled mapping in it, which is why this phase is a
-        // defensive branch rather than something a user can reach by editing
-        // the file.
+        // The shipped template enables no drives, so this is the first-run state.
         let routes = crate::paths::Routes::new(Vec::new(), crate::paths::ConfigSource::BuiltIn);
         let settings = Settings::with_routes(std::sync::Arc::new(routes), |s| s);
 
@@ -553,10 +396,7 @@ mod tests {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
         let line = render(&s, EPOCH);
-        assert_eq!(
-            line.text,
-            "No drives are set up \u{b7} run files --check-config"
-        );
+        assert_eq!(line.text, "No drives set up \u{b7} Ctrl+, opens Settings");
         assert_eq!(line.tone, Tone::Warn);
     }
 
@@ -571,20 +411,15 @@ mod tests {
 
         assert_eq!(found(&s), "300 items");
 
-        // To the foot of the list, the way an arrow key does it. This used to
-        // read "295-300 of 300" by the end, because the panel drew a window
-        // over the list and the range said where the window was. The band
-        // scrolls now and the scrollbar says that, so the number beside it is
-        // a number rather than a second opinion about the same thing.
+        // Walk to the foot of the list; the count must not change.
         for _ in 0..299 {
             s.update(AppEvent::Key(KeyEvent::new(Key::Down, Mods::NONE)), now);
         }
         assert_eq!(found(&s), "300 items");
     }
 
-    /// What the index found, not what came back: the search is capped at
-    /// [`crate::config::MAX_RESULTS`], and the difference is the whole reason
-    /// there is a number in the footer at all.
+    /// The count is what the index found, not the hits returned, which are
+    /// capped at [`crate::config::MAX_RESULTS`].
     #[test]
     fn a_capped_result_list_says_how_many_it_really_found() {
         let now = Instant::now();
@@ -609,9 +444,7 @@ mod tests {
     }
 
     #[test]
-    /// Nothing found is said by the body, at length, with what to try next -
-    /// see [`crate::view::empty`]. Repeating it here as a count of zero would
-    /// be the same news twice.
+    /// No matches is reported by [`crate::view::empty`], not as a zero count.
     fn no_matches_is_left_to_the_body_to_explain() {
         let now = Instant::now();
         let mut s = state_at(now);
@@ -623,7 +456,6 @@ mod tests {
         assert_eq!(found(&s), "");
     }
 
-    /// The condition the previous implementation rendered as `0 / 0 files`.
     #[test]
     fn an_unreachable_drive_says_so_and_what_to_press() {
         let now = Instant::now();
@@ -646,23 +478,10 @@ mod tests {
             "the user needs a way out: {}",
             line.text
         );
-        // The countdown to the next automatic retry is deliberately not
-        // here. It was a second thing to read on the one line that has to
-        // land, and it was the reason the panel woke once a second for as
-        // long as a drive stayed down.
+        // No retry countdown, so the panel need not repaint every second.
         assert!(!line.text.contains("retrying"), "{}", line.text);
     }
 
-    /// Every kind of index work says the same five characters.
-    ///
-    /// There used to be five tests here and five branches behind them, and
-    /// between them they asserted a folder count, a queue depth, a file
-    /// count, a share name and a reason in brackets - all of it rewriting
-    /// itself several times a second in the one place on the panel reserved
-    /// for things somebody has to act on. Every one of those numbers is in
-    /// the diagnostics now. What the panel says is the fact that changes
-    /// what to do: the list is not finished, so a code that is missing may
-    /// not really be missing.
     #[test]
     fn every_kind_of_indexing_reads_the_same() {
         let now = Instant::now();
@@ -686,7 +505,6 @@ mod tests {
         }
     }
 
-    /// And none of them carries a number, which is the point.
     #[test]
     fn indexing_never_puts_a_count_on_the_status_line() {
         let now = Instant::now();
@@ -700,13 +518,6 @@ mod tests {
         assert!(!line.text.contains('('), "{}", line.text);
     }
 
-    /// A healthy index says nothing at all.
-    ///
-    /// This used to assert that the line did not contain "checked", against a
-    /// line that reads "Checked just now" - a case-sensitive negative that
-    /// passed on the capital and tested nothing for as long as it existed.
-    /// What it was reaching for is that the footer is *empty* when all is
-    /// well, which is the whole argument of `index_warning`, so it says that.
     #[test]
     fn a_freshly_built_index_says_nothing_at_all() {
         let now = Instant::now();
@@ -716,19 +527,6 @@ mod tests {
         assert_eq!(line.text, "", "the quiet case is quiet");
     }
 
-    /// A search in flight says nothing, and neither does one that came back
-    /// clean.
-    ///
-    /// Three lines used to live here - "Searching...", "Checking the
-    /// drive...", and "Up to date" or "Checked just now". A local search
-    /// finishes in a few milliseconds and a verification in a few hundred,
-    /// so the first two appeared and vanished faster than they could be
-    /// read; the third is the line that says nothing is wrong, which is
-    /// exactly what an empty status line already says.
-    ///
-    /// What is still on screen while a search is in flight is the spinner
-    /// beside the count, which does not rewrite itself and does not occupy
-    /// the line reserved for things that matter.
     #[test]
     fn a_search_in_flight_and_a_search_confirmed_both_say_nothing() {
         let now = Instant::now();
@@ -740,8 +538,7 @@ mod tests {
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 100);
         s.update(AppEvent::Tick, now + crate::config::VERIFY_DEBOUNCE);
         assert_eq!(render(&s, EPOCH).text, "", "a verification was announced");
-        // The count is beside the line, not in it, so a round trip in
-        // flight never costs the number somebody is reading.
+        // The count is separate from the line, so it survives a verification.
         assert_eq!(found(&s), "1 item");
 
         s.update(
@@ -784,8 +581,7 @@ mod tests {
             line.text
         );
         assert_eq!(line.tone, Tone::Warn);
-        // And the results are still reachable beside it: a warning about the
-        // index must not cost the count of what it found.
+        // The warning must not hide the count.
         assert_eq!(found(&s), "1 item");
     }
 
@@ -796,11 +592,6 @@ mod tests {
         assert!(render(&s, EPOCH).text.contains("No file list yet"));
     }
     // --- naming the share that actually failed --------------------------
-    //
-    // These cover the reported "random os error 03". `EnumError::describe`
-    // was handed the derived `custpro_path` whatever had gone wrong, so a
-    // tree failure named the flat share - and with no flat mapping enabled it
-    // rendered a leading space and an error code attached to nothing.
 
     fn unreachable(err: EnumError) -> impl FnOnce(&mut IndexStatus) {
         move |st: &mut IndexStatus| {
@@ -840,7 +631,7 @@ mod tests {
         assert!(line.text.contains("os error 3"), "{}", line.text);
     }
 
-    /// The literal reported symptom: a message with nothing in front of it.
+    /// An error message must always name its target.
     #[test]
     fn an_error_never_renders_with_an_empty_target() {
         let now = Instant::now();
@@ -861,15 +652,6 @@ mod tests {
         assert!(line.text.contains("os error 3"), "{}", line.text);
     }
 
-    /// The line reads the same however close the next retry is.
-    ///
-    /// It used to carry a countdown, which needed a special case at zero -
-    /// `humanize::elapsed(ZERO)` is "0us", and a drive reported as "retrying
-    /// in 0us" reads as a stopwatch rather than as a retry that is due. Both
-    /// the countdown and its special case are gone: it was a second thing to
-    /// read on the one line that has to land, and it was the reason the
-    /// panel asked for a repaint once a second for as long as a drive stayed
-    /// down.
     #[test]
     fn the_unreachable_line_does_not_change_as_the_retry_approaches() {
         let now = Instant::now();
@@ -916,12 +698,6 @@ mod tests {
         assert!(line.text.contains("jobs: no live updates"), "{}", line.text);
     }
 
-    /// A share waiting behind another share's walk is still indexing, and
-    /// must not look idle.
-    ///
-    /// It used to have a line of its own naming how many shares were
-    /// waiting. Which share is queued behind which is in the diagnostics;
-    /// what the panel has to say is that the list is not finished.
     #[test]
     fn a_share_queued_behind_a_walk_does_not_look_idle() {
         let now = Instant::now();
@@ -934,10 +710,6 @@ mod tests {
         assert_eq!(line.tone, Tone::Busy);
     }
     // --- which share to refresh ------------------------------------------
-    //
-    // The whole point of naming it: somebody told only that "an index is out
-    // of date" refreshes everything, and everything is what a few hundred
-    // people must not all read off one server at once.
 
     fn ready(entries: u32) -> impl FnOnce(&mut IndexStatus) {
         move |st: &mut IndexStatus| {
@@ -969,9 +741,8 @@ mod tests {
         assert!(line.text.contains("F5"), "{}", line.text);
     }
 
-    /// A reported reason outranks mere age: "changes were missed" says the
-    /// list is incomplete, which is worth acting on however recently it was
-    /// built.
+    /// "Changes were missed" outranks age, since it means the list is
+    /// incomplete.
     #[test]
     fn a_reported_reason_outranks_age() {
         let now = Instant::now();
@@ -993,9 +764,8 @@ mod tests {
         );
     }
 
-    /// Age is judged when the line is drawn, not stored: an on-demand share's
-    /// actor may not wake for hours, and a flag it never set would be a
-    /// promise the status line could not keep.
+    /// Age is judged at render time, since an on-demand share's actor may not
+    /// wake for hours to set a flag.
     #[test]
     fn an_index_nobody_has_refreshed_says_so_on_its_own() {
         let now = Instant::now();
@@ -1015,8 +785,6 @@ mod tests {
         assert!(old.text.contains("Not refreshed recently"), "{}", old.text);
     }
 
-    /// Silent mode, for somebody handed the tool who does not need current
-    /// data and should not be nagged about it.
     #[test]
     fn stale_notices_can_be_turned_off() {
         let now = Instant::now();
@@ -1037,24 +805,15 @@ mod tests {
             line.text, "",
             "silent mode must not nag, about events or about age"
         );
-        // The ages are still one keypress away, which is the whole bargain:
-        // not shown, not hidden. See `view::shares`, which F5 opens.
+        // Ages remain available in the `F5` drive list (`view::shares`).
         assert!(s.index.age(wall).is_some());
     }
 
     // --- the house style --------------------------------------------------
 
-    /// Every line this function can produce, held to the house style.
+    /// Returns every line `render` can produce, for the house-style checks.
     ///
-    /// A battery rather than a check bolted onto each test above, because the
-    /// thing being guarded is that they are consistent *with each other* - and
-    /// no test of one line can see that. This footer once alternated between
-    /// `Searching...`, `Building the file list - 812,000 files so far` and
-    /// `nothing to open` within a few seconds of each other, each of them
-    /// perfectly reasonable on its own.
-    ///
-    /// A line that this cannot reach is a line nothing here is checking, so a
-    /// new branch in `render` belongs in this list.
+    /// A new branch in `render` must be added here or it goes unchecked.
     fn every_line() -> Vec<String> {
         let now = Instant::now();
         let wall_old = EPOCH + crate::config::MAX_INDEX_AGE + Duration::from_secs(60);
@@ -1152,9 +911,8 @@ mod tests {
             say(&searching, EPOCH);
         }
 
-        // The codes used before. Opening is what commits a code to the list,
-        // so the code is opened, the notice that raised is cleared - it would
-        // otherwise outrank the line being asked for - and then Up.
+        // Recall history: opening commits the code, the resulting toast is
+        // cleared so it does not outrank the recall line, then Up.
         let mut recalling = state_at(now);
         with_index(&mut recalling, now, healthy_status(10, Duration::ZERO));
         typed_with_results(&mut recalling, now, 10);
@@ -1223,19 +981,9 @@ mod tests {
         );
     }
 
-    /// A line starts the way a line starts.
-    ///
-    /// Except where a drive's own name leads it: a drive is called whatever
-    /// the configuration calls it, and `Jobs: no live updates` names a drive
-    /// nobody configured. So the rule is applied to the lines this module
-    /// writes end to end, and the named ones are checked for the shape they
-    /// do have.
-    ///
-    /// Two shapes now, not one. `jobs: no live updates` is the older; the
-    /// other is `custompro unreachable`, which is what a drive failure reads
-    /// as outside developer mode - it used to lead with the drive's *path*,
-    /// and a path starts with a capital letter by accident rather than by
-    /// design.
+    /// Lines start capitalised, except those led by a configured drive name
+    /// (`jobs: no live updates`, `custompro unreachable`), which keep the
+    /// configured spelling.
     #[test]
     fn every_status_line_starts_the_way_a_line_should() {
         let configured: Vec<String> = ["custompro", "jobs"]
@@ -1248,8 +996,7 @@ mod tests {
                 continue;
             }
             if let Some((name, rest)) = line.split_once(": ") {
-                // A name leading the line, which happens only with several
-                // drives configured. Everything after it stays lowercase.
+                // A drive name leads only when several are configured.
                 if !name.contains(' ') {
                     assert!(
                         !rest.is_empty(),

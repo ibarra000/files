@@ -1,38 +1,22 @@
-//! The window itself, as Windows sees it.
-//!
-//! Four attributes and one style bit, applied once. Everything here is what
-//! makes the panel look like it belongs on this operating system rather than
-//! like a rectangle a program drew.
+//! Native window attributes: backdrop material, corner rounding, dark-mode
+//! border, and taskbar visibility.
 //!
 //! # No version checks
 //!
-//! Every attribute below is a no-op on a Windows that has never heard of it:
-//! `DwmSetWindowAttribute` answers `E_INVALIDARG` for an attribute it does not
-//! know and changes nothing. So the return value *is* the version check, and
-//! there is no build-number table here to go stale.
-
-//! # Why this is not `#![cfg(windows)]`
+//! `DwmSetWindowAttribute` returns `E_INVALIDARG` for an unknown attribute and
+//! changes nothing, so the return value serves as the version check.
 //!
-//! It was, and that made the whole of `gui` uncompilable anywhere else -
-//! `gui::mod` declares this module and names [`Backdrop`] unconditionally, so
-//! a file-wide gate deleted a type that the rest of the tree still referred
-//! to. That cost the panel's entire test suite on any machine that is not the
-//! target, which is the opposite of what `lib.rs` says the tests are for.
+//! # Not `#![cfg(windows)]`
 //!
-//! So the *calls* are gated and the *vocabulary* is not. [`Material`] and
-//! [`Backdrop`] have no Windows in them; everything below that touches DWM is
-//! `#[cfg(windows)]`, with a stub that answers [`Backdrop::Painted`] - which
-//! is the honest answer off Windows, and the same answer a Windows too old
-//! for any of these materials gives.
+//! `gui::mod` names [`Backdrop`] unconditionally, so a file-wide gate would
+//! break compilation, and the tests, on other platforms. Only the DWM calls are
+//! `#[cfg(windows)]`; the non-Windows stubs return [`Backdrop::Painted`].
 //!
-//! # Asked for, and granted
+//! # Requested versus granted
 //!
-//! Two types rather than one, because they are two questions.
-//! [`Material`] is what the configuration asks for and has four values,
-//! matching what Ueli offers. [`Backdrop`] is what the compositor granted and
-//! has two, because the only thing the renderer needs to know is whether to
-//! paint a fill of its own - and every material that is not `None` answers
-//! that the same way.
+//! [`Material`] is what the configuration requests. [`Backdrop`] is what the
+//! compositor granted, reduced to the one question the renderer needs: whether
+//! to paint its own fill.
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, S_OK};
@@ -51,42 +35,33 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// `DWMWA_USE_IMMERSIVE_DARK_MODE` before Windows 10 20H1.
 ///
-/// Not in `windows-sys`, because the header only ever shipped the later
-/// number. Both are tried, newer first; the wrong one costs an `E_INVALIDARG`
-/// and nothing else.
+/// Not in `windows-sys`, which ships only the later value. Both are tried,
+/// newer first.
 #[cfg(windows)]
 const DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1: i32 = 19;
 
-/// What the configuration asks the compositor for.
-///
-/// Ueli's four, and its own settings page offers exactly these. The default
-/// is not Ueli's, and that is deliberate - see [`Material::Acrylic`].
+/// The backdrop material requested from the compositor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Material {
-    /// The material Windows uses for a flyout: it samples **what is behind
-    /// the window** and blurs it.
+    /// The flyout material: blurs what is behind the window.
     ///
-    /// The default here, where Ueli defaults to Mica, and the reason is the
-    /// difference between the two. Mica samples the desktop wallpaper, so
-    /// under a panel summoned over somebody's drawing it would show the
-    /// wallpaper - which is both wrong and, because Mica does not follow a
-    /// window that moves, wrong in a way that lags. Ueli can afford Mica
-    /// because its window is centred and stays put; this one is dragged.
+    /// The default because Mica samples the wallpaper and does not track a
+    /// moving window, which looks wrong on a panel that is summoned over other
+    /// windows and can be dragged.
     #[default]
     Acrylic,
-    /// Samples the desktop wallpaper rather than the window behind. Ueli's
-    /// default, and offered here for anybody who prefers it.
+    /// Samples the desktop wallpaper rather than the window behind.
     Mica,
-    /// Mica's variant for a tabbed document window.
+    /// Mica's variant for tabbed windows.
     Tabbed,
-    /// Ask for nothing, and let the panel paint its own translucent fill.
+    /// No system backdrop; the panel paints its own translucent fill.
     None,
 }
 
 impl Material {
     pub const ALL: [Self; 4] = [Self::Acrylic, Self::Mica, Self::Tabbed, Self::None];
 
-    /// The spelling in the configuration file.
+    /// The configuration-file spelling.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Acrylic => "acrylic",
@@ -96,7 +71,7 @@ impl Material {
         }
     }
 
-    /// How the settings window spells it.
+    /// The label shown in the settings window.
     pub const fn display(self) -> &'static str {
         match self {
             Self::Acrylic => "Acrylic",
@@ -113,33 +88,22 @@ impl Material {
     }
 }
 
-/// What is actually behind the panel, once the compositor has answered.
-///
-/// Two values where [`Material`] has four, because the only thing the
-/// renderer does with this is decide whether to paint a fill - and every
-/// material that is not [`Material::None`] answers that the same way.
+/// The backdrop actually in effect after the compositor responds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backdrop {
-    /// The compositor is drawing it.
-    ///
-    /// Cannot be faded - it is on for as long as the window is visible - so a
-    /// summon shows the blur arriving while the content rises into it. That
-    /// reads well, because it is a blur of what was already there rather than
-    /// a colour appearing.
+    /// Drawn by the compositor, and visible whenever the window is.
     Compositor,
-    /// A translucent fill the panel paints itself.
+    /// A translucent fill painted by the panel.
     ///
-    /// What [`Material::None`] asks for, and what a Windows older than 11
-    /// 22H2 gets whatever it asked for - selected by asking rather than by
-    /// checking a version.
+    /// Used for [`Material::None`] and on Windows versions older than 11 22H2,
+    /// which reject the backdrop attribute.
     Painted,
 }
 
-/// Writes one attribute, and says whether this Windows understood it.
+/// Sets one DWM attribute and returns whether Windows accepted it.
 ///
-/// The cast on `attr` is not incidental: every `DWMWA_*` is an `i32` while the
-/// parameter is a `u32`, so without it each call site would need its own cast
-/// and one of them would eventually be wrong.
+/// `DWMWA_*` constants are `i32` while the parameter is `u32`; the cast lives
+/// here so call sites need none.
 #[cfg(windows)]
 fn set<T>(hwnd: HWND, attr: i32, value: &T) -> bool {
     // SAFETY: `value` is a live local of exactly `size_of::<T>()` bytes, read
@@ -156,11 +120,10 @@ fn set<T>(hwnd: HWND, attr: i32, value: &T) -> bool {
     }
 }
 
-/// Rounds the window's corners, or squares them.
+/// Rounds or squares the window's corners.
 ///
-/// Square when the panel is docked: a bar flush against the edge of the work
-/// area with its corners cut off shows four slivers of whatever is behind it,
-/// and reads as a window that did not quite fit rather than one pinned there.
+/// Square while docked, so a panel flush against the work-area edge shows no
+/// gaps at its corners.
 #[cfg(windows)]
 pub fn set_rounded(hwnd_bits: isize, rounded: bool) {
     let preference = if rounded {
@@ -175,28 +138,24 @@ pub fn set_rounded(hwnd_bits: isize, rounded: bool) {
     );
 }
 
-/// Dresses the window, and reports what it actually got.
+/// Applies the window attributes and returns the backdrop actually granted.
 ///
-/// `want` is what the configuration asks for; the answer is what this
-/// Windows agreed to, which may be less. `rounded` is false while the panel is
-/// docked - see [`set_rounded`].
+/// `rounded` is false while the panel is docked; see [`set_rounded`].
 #[cfg(windows)]
 pub fn apply(hwnd_bits: isize, dark: bool, want: Material, rounded: bool) -> Backdrop {
     let hwnd = hwnd_bits as HWND;
 
     let backdrop = match want {
         Material::None => {
-            // Explicitly off rather than merely not asked for: a window can
-            // inherit a backdrop from the system, and half a backdrop under a
-            // fill we are drawing ourselves is worse than either alone.
+            // Explicitly off, since a window can inherit a system backdrop that
+            // would show under the painted fill.
             set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_NONE);
             Backdrop::Painted
         }
         Material::Acrylic | Material::Mica | Material::Tabbed => {
-            // Extend the frame across the whole client area, so the compositor
-            // has somewhere to put a backdrop. Only on this path: the extension
-            // is what creates the sheet of glass, and a sheet of glass under a
-            // fill we are painting ourselves is a second background.
+            // Extend the frame over the whole client area so the compositor
+            // can draw the backdrop there. Only on this path, since the
+            // extended frame would otherwise show under the painted fill.
             let sheet = MARGINS {
                 cxLeftWidth: -1,
                 cxRightWidth: -1,
@@ -207,11 +166,8 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material, rounded: bool) -> Bac
             // this process's own window.
             unsafe { DwmExtendFrameIntoClientArea(hwnd, &sheet) };
 
-            // `DWMSBT_TRANSIENTWINDOW` is acrylic, the material Windows uses
-            // for flyouts: it samples what is *behind the window* and blurs
-            // it. `DWMSBT_MAINWINDOW` is Mica, which samples the desktop
-            // wallpaper instead - see `Material::Acrylic` for why that is the
-            // default here and not Mica, whatever Ueli does.
+            // `DWMSBT_TRANSIENTWINDOW` is acrylic; `DWMSBT_MAINWINDOW` is
+            // Mica. See `Material::Acrylic`.
             let kind = match want {
                 Material::Mica => DWMSBT_MAINWINDOW,
                 Material::Tabbed => DWMSBT_TABBEDWINDOW,
@@ -220,33 +176,23 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material, rounded: bool) -> Bac
             if set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &kind) {
                 Backdrop::Compositor
             } else {
-                // Too old for this material. Say so plainly rather than
-                // leaving a half-extended frame with nothing in it, and let
-                // the panel paint its own.
+                // Unsupported on this Windows: clear it and paint a fill.
                 set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &DWMSBT_NONE);
                 Backdrop::Painted
             }
         }
     };
 
-    // Eight points, which is the radius Windows 11 gives an ordinary window.
-    // `DWMWCP_ROUNDSMALL` is the four-point menu radius, and on a panel this
-    // wide it reads as a rendering mistake rather than as a choice.
-    //
-    // This is the *only* thing that rounds the panel, and the border below is
-    // the only thing that outlines it. There used to be a `DWMWA_BORDER_COLOR`
-    // of `DWMWA_COLOR_NONE` here, suppressing the system border so the panel
-    // could paint its own at its own radius in its own units - see
-    // `paint_surface`. Two curves computed two ways cannot be relied on to
-    // land on each other, so there is one of each now and it is DWM's.
-    //
-    // Square instead while docked, and the hotkey thread re-decides on every
-    // summon, because that is when the dock setting is acted on.
+    // `DWMWCP_ROUND` is the 8 pt Windows 11 window radius; `DWMWCP_ROUNDSMALL`
+    // is the 4 pt menu radius. DWM provides the panel's only rounding and
+    // outline, so the painted surface (`paint_surface` in
+    // `src/gui/panel/mod.rs`) need not match a second curve. The hotkey thread
+    // re-applies this on each summon, when the dock setting takes effect.
     set_rounded(hwnd_bits, rounded);
 
-    // The hairline Windows draws around a rounded window. Attribute 20 since
-    // 20H1, 19 before it, tried in that order - because 20 on an older build
-    // writes into a different attribute's slot.
+    // Sets the border colour for the theme. Attribute 20 since 20H1, 19
+    // before; 20 is tried first because on older builds it is a different
+    // attribute.
     let dark_flag: i32 = i32::from(dark);
     if !set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_flag) {
         set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_PRE_20H1, &dark_flag);
@@ -255,16 +201,10 @@ pub fn apply(hwnd_bits: isize, dark: bool, want: Material, rounded: bool) -> Bac
     backdrop
 }
 
-/// Takes the window out of the taskbar, and out of Alt-Tab with it.
+/// Removes the window from the taskbar and from Alt-Tab.
 ///
-/// The second half is the part usually wanted and rarely mentioned: something
-/// that answers a global hotkey should not also be somewhere you arrive at by
-/// accident while cycling windows.
-///
-/// Must run while the window is hidden. The shell reads these bits when a
-/// window is first shown and does not read them again, so flipping them on a
-/// visible window leaves the button behind until it is hidden and shown once
-/// more.
+/// Must run while the window is hidden: the shell reads these style bits only
+/// when a window is first shown.
 #[cfg(windows)]
 pub fn hide_from_taskbar(hwnd_bits: isize) {
     let hwnd = hwnd_bits as HWND;
@@ -276,14 +216,13 @@ pub fn hide_from_taskbar(hwnd_bits: isize) {
     }
 }
 
-/// Off Windows there is no compositor to ask, and [`Backdrop::Painted`] is
-/// what the panel does when nothing grants it anything else.
+/// Non-Windows stub; always [`Backdrop::Painted`].
 #[cfg(not(windows))]
 pub fn apply(_hwnd_bits: isize, _dark: bool, _want: Material) -> Backdrop {
     Backdrop::Painted
 }
 
-/// Off Windows there is no taskbar button to take away.
+/// Non-Windows stub; does nothing.
 #[cfg(not(windows))]
 pub fn hide_from_taskbar(_hwnd_bits: isize) {}
 
@@ -291,15 +230,9 @@ pub fn hide_from_taskbar(_hwnd_bits: isize) {}
 mod tests {
     use super::*;
 
-    /// A window that does not exist is not a reason to fall over.
-    ///
-    /// `apply` is called once, early, on a handle handed over by the toolkit -
-    /// but "the toolkit gave us something" is a claim, and the cost of testing
-    /// it is one call that Windows rejects harmlessly.
+    /// An invalid handle yields [`Backdrop::Painted`] rather than a panic.
     #[test]
     fn a_handle_that_is_not_a_window_is_survivable() {
-        // Every attribute is refused, so the honest answer is "paint it
-        // yourself" rather than a panic.
         for material in Material::ALL {
             assert_eq!(
                 apply(0, true, material, true),
@@ -310,17 +243,12 @@ mod tests {
         hide_from_taskbar(0);
     }
 
-    /// The two constants that must not be confused, since one is the menu
-    /// radius and the other is the window radius.
     #[test]
     fn the_corner_preference_is_the_window_radius_not_the_menu_one() {
         use windows_sys::Win32::Graphics::Dwm::DWMWCP_ROUNDSMALL;
         assert_ne!(DWMWCP_ROUND, DWMWCP_ROUNDSMALL);
     }
 
-    /// Acrylic samples what is behind the window; Mica samples the wallpaper.
-    /// Picking the wrong one is not a crash, it is a panel that shows the
-    /// desktop through somebody's drawing - so the four must stay four.
     #[test]
     fn every_material_asks_for_a_different_thing() {
         let mut seen = vec![
@@ -334,8 +262,7 @@ mod tests {
         assert_eq!(seen.len(), 4, "two materials ask for the same backdrop");
     }
 
-    /// And the names round-trip, because one of them is written to a file a
-    /// person edits by hand.
+    /// Names round-trip case-insensitively, since they are hand-edited.
     #[test]
     fn every_material_parses_back_from_what_it_writes() {
         for material in Material::ALL {

@@ -1,37 +1,22 @@
-//! The thread that owns the flat-root index.
+//! The thread that owns one mapping's index.
 //!
-//! Single writer by construction: every mutation of the shared index happens
-//! here, so there are no writer-writer races to reason about.
+//! Single writer: every mutation of this mapping's shared index happens here.
 //!
 //! # Freshness without rescanning
 //!
-//! The original implementation re-enumerated the whole share every five
-//! minutes, unconditionally. On a million-entry drive that is seconds of
-//! network traffic per cycle, whether or not anything changed, and it competes
-//! with whatever the user is doing at the time.
+//! A flat share's directory timestamps are probed about once a minute (about
+//! three round trips), and a full enumeration happens only when they move.
+//! The probe also proves to [`crate::search::verify`] that the local index is
+//! still authoritative.
 //!
-//! Instead the directory's timestamps are probed once a minute - about three
-//! round trips, a couple of milliseconds - and a full enumeration only happens
-//! when they have actually moved. That is roughly a 700x reduction in
-//! background cost, and the probe doubles as proof to
-//! [`crate::search::verify`] that the local index is still authoritative.
-//!
-//! # Why the decision lives elsewhere
-//!
-//! The *timing* used to be inline here, tangled up with the I/O, and it had
-//! three separate ways to collapse the hourly floor into a per-minute full
-//! enumeration - which is exactly what was reported from the field as "random
-//! indexing reloads". It now lives in [`super::schedule`], which reads no
-//! clock and does no I/O and can therefore be tested against a simulated day.
-//!
-//! This module is the driver: it waits, performs what it is told, and reports
-//! the outcome back. Every branch below corresponds to one [`Step`].
+//! Timing decisions live in [`super::schedule`], which reads no clock and does
+//! no I/O. This module is the driver: it waits, performs the [`Step`] it is
+//! given, and reports the outcome back.
 //!
 //! # Waiting
 //!
-//! The loop blocks on the command channel with a deadline; it never sleeps.
-//! That is what lets `F5` interrupt a five-minute backoff instantly instead of
-//! the user waiting it out.
+//! The loop blocks on the command channel with a deadline and never sleeps,
+//! so F5 interrupts a long backoff immediately.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -57,27 +42,24 @@ use crate::config::Settings;
 use crate::paths::{MappingId, MappingKind};
 use crate::util::cancel::CancelToken;
 
-/// Progress is rate limited at the source, so the UI channel is never close
-/// to full and the bounded-versus-unbounded question stays academic.
+/// Minimum interval between progress reports. Rate limiting at the source
+/// keeps the UI channel far from full.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const PROGRESS_ENTRIES: usize = 50_000;
 
 /// Consecutive empty enumerations required before a populated index is
 /// replaced with an empty one.
 ///
-/// `ERROR_FILE_NOT_FOUND` from a directory enumeration legitimately means
-/// "empty", so an empty listing is not an error - but it is also what a
-/// half-open SMB session can produce, and discarding a million entries on the
-/// strength of one such answer is not recoverable by anything the user can do.
-/// The second opinion costs one scan-backoff interval.
+/// An empty result is legitimate, but a half-open SMB session can also
+/// produce one, and discarding the whole index on one such answer is not
+/// recoverable. The second opinion costs one scan-backoff interval.
 const EMPTY_CONFIRMATIONS: u32 = 2;
 
 /// Upper bound on steps taken for one wake-up.
 ///
-/// The sequence is `Woke -> [Probe -> Probed ->] FullScan -> Scanned -> Wait`,
-/// so five is the longest legitimate chain. The bound exists so that a future
-/// rule which forgot to terminate becomes a caught assertion rather than a
-/// thread spinning against a file server.
+/// The longest legitimate chain is `Woke -> Probe -> Probed -> FullScan ->
+/// Scanned -> Wait` (five). The bound turns a non-terminating rule into a
+/// caught assertion rather than a thread spinning against a file server.
 const MAX_STEPS_PER_WAKE: usize = 6;
 
 #[derive(Debug, Clone)]
@@ -86,9 +68,9 @@ pub enum IndexCmd {
     Refresh {
         force: bool,
     },
-    /// The watch queue has something in it. Carries no payload: the dirty set
-    /// lives in the queue, so a message dropped on a full channel costs a
-    /// wake-up rather than a file nobody can find again.
+    /// The watch queue has something in it. Carries no payload because the
+    /// dirty set lives in the queue, so a dropped message costs only a
+    /// wake-up.
     Changed,
     Shutdown,
 }
@@ -98,18 +80,15 @@ pub struct IndexActor {
     /// Which share this actor owns, so a refresh can name one.
     mapping: MappingId,
     tx: Sender<IndexCmd>,
-    /// Set from the caller's thread, checked from inside a running scan.
+    /// Set from the caller's thread and checked from inside a running scan.
     ///
-    /// The command channel cannot deliver a shutdown while a scan is in
-    /// progress, because the actor is the channel's only reader and the actor
-    /// is the thing scanning. That has never mattered: a flat enumeration is
-    /// milliseconds. A recursive walk of a large share is minutes, and for all
-    /// of them `shutdown` would time out and leak the thread. A flag is the
-    /// only thing that crosses that gap.
+    /// The command channel cannot deliver a shutdown during a scan, because
+    /// the actor is both its only reader and the thing scanning. A tree walk
+    /// can take minutes, so this flag is how shutdown reaches it.
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
-    /// Kept only so shutdown can unblock it: a thread parked in
-    /// `ReadDirectoryChangesW` never gets to poll a cancellation flag.
+    /// Kept so shutdown can unblock it: a thread blocked in
+    /// `ReadDirectoryChangesW` cannot poll a cancellation flag.
     watcher: Option<Arc<dyn ChangeWatcher>>,
     pump: Option<JoinHandle<()>>,
 }
@@ -121,10 +100,8 @@ impl IndexActor {
 
     /// Asks for a refresh.
     ///
-    /// Requests are coalesced by the actor rather than here - see
-    /// [`next_wake`] - because dropping them on a full channel, which is all
-    /// this could do, left sixteen queued refreshes to be executed one after
-    /// another as sixteen separate full enumerations.
+    /// A full channel drops the request; the actor coalesces queued requests
+    /// in `next_wake`, so one pending refresh is enough.
     pub fn refresh(&self, force: bool) {
         match self.tx.try_send(IndexCmd::Refresh { force }) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
@@ -134,19 +111,15 @@ impl IndexActor {
 
     /// Tells the actor to stop, without waiting for it.
     ///
-    /// Separate from [`Self::join`] so a process with ten actors signals all
-    /// of them and then waits once. Signalling and joining one at a time makes
-    /// the shutdown budget per-thread, and quitting during a cold start would
-    /// take ten times as long as the budget promises.
+    /// Separate from [`Self::join`] so a process with many actors can signal
+    /// all of them and then wait once, keeping the shutdown budget global
+    /// rather than per thread.
     pub fn begin_shutdown(&mut self) {
-        // The flag first, so a scan that is between directories when the
-        // message lands has already been told to stop. Sending first and
-        // setting second would leave exactly the window this exists to close.
+        // Set the flag before sending, so a scan between directories when the
+        // message lands has already been told to stop.
         self.stop.store(true, Ordering::Relaxed);
-        // The watcher before the actor. Its thread is parked in a call the
-        // flag cannot reach, so it has to be told out of band or shutdown
-        // waits out the whole budget for a thread that was never going to
-        // notice.
+        // Stop the watcher before the actor: its thread is blocked in a call
+        // the flag cannot reach.
         if let Some(watcher) = &self.watcher {
             watcher.stop();
         }
@@ -184,36 +157,29 @@ pub struct IndexContext {
     pub settings: Settings,
     /// Which mapping this actor owns.
     ///
-    /// One actor per mapping, not one per kind: a tree walk runs for minutes,
-    /// and sharing a thread would mean another share's freshness waiting
-    /// behind it - or worse, a five-minute backoff on an unreachable share
-    /// delaying a healthy one. Each still has exactly one writer, which is
-    /// what the store's single-writer rule requires.
-    ///
-    /// Only the id is held. Path, kind and name are read from the slot, so an
-    /// actor cannot be pointed at one mapping and read another's state -
-    /// which is exactly what `custpro_path` did to every tree actor.
+    /// One actor per mapping, so a long walk or a backoff on one share never
+    /// delays another, and each slot still has exactly one writer. Only the
+    /// id is held; path, kind and name are read from the slot, so the actor
+    /// cannot mix one mapping's settings with another's state.
     pub mapping: MappingId,
     pub store: Arc<IndexStore>,
     pub source: Arc<dyn DirSource>,
     /// Volume serial resolved at startup, if it was available then.
     pub volume_serial: Option<u32>,
     pub cadence: Cadence,
-    /// Fixed jitter seed. `None` seeds from entropy, which is what the
-    /// application wants; a test passes `Some` and gets a fixed schedule.
+    /// Fixed jitter seed. `None` seeds from entropy; tests pass `Some` for a
+    /// fixed schedule.
     pub rng_seed: Option<u64>,
     pub log: Arc<IndexLog>,
-    /// Live change notifications, when they are available here.
-    ///
-    /// The queue rather than the watcher: the actor never talks to the
-    /// operating system about this, it reads a set somebody else fills in.
+    /// Live change notifications, when available. The actor reads only the
+    /// queue; the watcher thread fills it.
     pub watch: Option<Arc<WatchQueue>>,
     /// The watcher feeding [`Self::watch`], kept so shutdown can unblock it.
     pub watcher: Option<Arc<dyn ChangeWatcher>>,
     /// Shared cap on how many shares walk at once. See [`super::permit`].
     ///
-    /// Defaulted per-context so a single-actor test needs no set-up; the
-    /// running program hands every actor the same set.
+    /// Defaults to a private set so single-actor tests need no setup; the
+    /// running program gives every actor the same set.
     pub permits: Arc<WalkPermits>,
 }
 
@@ -224,9 +190,8 @@ impl IndexContext {
         store: Arc<IndexStore>,
         source: Arc<dyn DirSource>,
     ) -> Self {
-        // The cadence follows the kind rather than being chosen by a separate
-        // builder call, so "forgot `.for_tree()` and gave a three-hundred-
-        // thousand-directory walk the flat schedule" stops being reachable.
+        // The cadence follows the mapping kind, so a tree can never get the
+        // flat schedule by mistake.
         let kind = store
             .slot(mapping)
             .map(|s| s.kind())
@@ -234,12 +199,9 @@ impl IndexContext {
         let cadence = match kind {
             MappingKind::Tree => Cadence::tree(),
             MappingKind::Flat => Cadence::shipped(),
-            // Unreachable while `Actors::start` spawns actors for indexed
-            // mappings only, and spelled out rather than folded into the flat
-            // arm so that it stays unreachable by accident rather than by
-            // luck: a live share given the flat cadence would walk itself on
-            // its first wake, which is the one thing configuring it that way
-            // was meant to prevent.
+            // Unreachable while `Actors::start` spawns actors only for indexed
+            // mappings. Spelled out because the flat cadence would walk a
+            // live share on its first wake.
             MappingKind::Live => Cadence::tree(),
         };
         let settings_max_scans = settings.max_concurrent_scans;
@@ -248,8 +210,8 @@ impl IndexContext {
             mapping,
             store,
             source,
-            // Resolved on the actor thread instead, before the cache is read:
-            // ten possibly-dead shares must not be probed from startup.
+            // Resolved on the actor thread before the cache is read, so
+            // startup never blocks on possibly-dead shares.
             volume_serial: None,
             cadence: cadence.from_env(),
             rng_seed: None,
@@ -262,9 +224,7 @@ impl IndexContext {
 
     /// Pins the volume serial instead of resolving it from the share.
     ///
-    /// The running program leaves this `None` and lets the actor resolve it on
-    /// its own thread; a test uses this to stand in for a drive letter that
-    /// has been remapped to a different volume.
+    /// Used by tests to simulate a drive letter remapped to another volume.
     pub fn with_volume_serial(mut self, serial: u32) -> Self {
         self.volume_serial = Some(serial);
         self
@@ -283,13 +243,10 @@ impl IndexContext {
         self
     }
 
-    /// Attaches the operating system's change notifications, if they are
-    /// wanted and the share will open for them.
+    /// Attaches OS change notifications, if enabled and the share allows it.
     ///
-    /// A share that refuses is not a failure to report here. It is recorded in
-    /// the queue and reaches the status line on the next wake, which is where
-    /// the user is already being told what the index is doing - and the floor
-    /// carries on regardless, which is exactly what it is for.
+    /// A refusal is recorded in the queue and reported in the status line on
+    /// the next wake; the rescan floor still applies.
     #[cfg(windows)]
     pub fn with_live_updates(self, settings: &Settings) -> Self {
         use super::win_watch::DirectoryWatcher;
@@ -302,9 +259,8 @@ impl IndexContext {
             Ok(watcher) => self.with_watch(Arc::new(watcher), queue),
             Err(why) => {
                 queue.record(super::watch::WatchEvent::Unavailable(why), Instant::now());
-                // The queue is attached even so. It carries the reason, and
-                // the actor reads it every wake - so the status line says live
-                // updates are off instead of quietly implying they are on.
+                // Attach the queue anyway: it carries the reason, so the status
+                // line reports that live updates are off.
                 Self {
                     watch: Some(queue),
                     ..self
@@ -320,19 +276,10 @@ impl IndexContext {
 
     // --- which index this actor is talking about ---------------------------
     //
-    // Routed in one place rather than at each of the twenty call sites, for
-    // the same reason `indexed_dir` exists: an actor that read the *flat*
-    // index's state while owning the tree would be told it had no snapshot on
-    // every wake, make every scan a `FirstRun`, and leave `min_scan_spacing`
-    // as the only thing between the share and a continuous re-walk.
+    // Every accessor below routes through `slot()`, so an actor reads and
+    // writes only its own mapping's state.
 
     /// This actor's slot.
-    ///
-    /// One bounds-checked index. Every accessor below goes through it, which
-    /// is what makes "an actor writes only its own mapping's state" true by
-    /// construction rather than by each of twenty call sites remembering to
-    /// branch on the kind - two of which did not, and silently wrote the flat
-    /// mapping's health from the tree actor.
     pub fn slot(&self) -> &super::store::MappingSlot {
         self.store
             .slot(self.mapping)
@@ -343,8 +290,8 @@ impl IndexContext {
         self.slot().is_tree()
     }
 
-    /// Whether a timer may re-read this share, or only the user and the
-    /// watcher may.
+    /// Returns whether a timer may re-read this share, or only the user and
+    /// the watcher may.
     fn refresh(&self) -> crate::paths::RefreshPolicy {
         self.settings
             .routes
@@ -353,7 +300,7 @@ impl IndexContext {
             .unwrap_or_default()
     }
 
-    /// Whether this actor's index holds anything yet.
+    /// Returns whether this actor's index holds anything yet.
     fn have_index(&self) -> bool {
         self.slot().has_index()
     }
@@ -396,10 +343,9 @@ impl IndexContext {
 
     fn note_live_updates_unavailable(&self) {
         self.slot().note_live_updates_unavailable();
-        // On a share nothing re-reads on a timer, a dead watch means nothing
-        // is arriving at all - so the index is not merely degraded, it has
-        // stopped tracking the drive. An auto share has the floor to fall back
-        // on and is only degraded.
+        // On a manually refreshed share a dead watch means nothing arrives at
+        // all, so the index is stale, not merely degraded. An auto share
+        // still has the floor.
         if self.refresh().is_manual() {
             self.slot()
                 .note_stale(super::store::StaleReason::NoLiveUpdates);
@@ -432,8 +378,7 @@ pub fn spawn(ctx: IndexContext, events: Events) -> std::io::Result<IndexActor> {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = CancelToken::from_flag(Arc::clone(&stop));
     let watcher = ctx.watcher.clone();
-    // Read before `ctx` is moved into the thread, so the handle can say which
-    // share it speaks for.
+    // Read before `ctx` moves into the thread.
     let mapping = ctx.mapping;
     let pump = spawn_pump(&ctx, tx.clone(), &cancel, &events)?;
     let handle = std::thread::Builder::new()
@@ -461,10 +406,9 @@ pub fn spawn(ctx: IndexContext, events: Events) -> std::io::Result<IndexActor> {
 
 /// Starts the thread that drains the watcher into the queue.
 ///
-/// Its own thread because `next_event` blocks - over SMB it is an outstanding
-/// `CHANGE_NOTIFY` that may not answer for hours - and the actor thread cannot
-/// afford to be in it. All it ever does is fold events into a set and nudge
-/// the actor, so a lost nudge costs a wake-up rather than a change.
+/// A separate thread because `next_event` blocks, possibly for hours on an
+/// outstanding SMB `CHANGE_NOTIFY`. It only folds events into the queue and
+/// nudges the actor, so a lost nudge costs a wake-up, not a change.
 fn spawn_pump(
     ctx: &IndexContext,
     tx: Sender<IndexCmd>,
@@ -481,9 +425,8 @@ fn spawn_pump(
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 watch::pump(watcher.as_ref(), &queue, &cancel, || {
-                    // Dropped on a full channel on purpose. The actor reads
-                    // the queue, not the message, so the only thing lost is
-                    // one early wake-up out of the sixteen already queued.
+                    // Dropping on a full channel is fine: the actor reads the
+                    // queue, not the message.
                     let _ = tx.try_send(IndexCmd::Changed);
                 });
             }));
@@ -506,20 +449,18 @@ enum Wake {
     Shutdown,
 }
 
-/// A failure the store has not been told about yet, because the retry time is
-/// not known until the scheduler has decided.
+/// A failure not yet reported to the store, because the retry time is known
+/// only after the scheduler decides.
 #[derive(Debug, Clone, Copy)]
 struct PendingFailure {
     err: EnumError,
-    /// True when it was the cheap probe that failed rather than the scan.
+    /// True when the cheap probe failed rather than the scan.
     from_probe: bool,
 }
 
 fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &CancelToken) {
-    // A tree can never answer a stamp probe, so its cache's capture time is
-    // the only thing the floor can be measured from. Saying so here rather
-    // than letting the scheduler infer it from the first failed probe: a tree
-    // never probes at all, so there would be nothing to infer from.
+    // A tree cannot answer a stamp probe and never probes, so the scheduler
+    // is told up front to measure the floor from the cache's capture time.
     let mut sched = Scheduler::new(ctx.cadence, ctx.rng_seed);
     if ctx.is_tree() {
         sched = sched.without_stamps();
@@ -527,33 +468,26 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
     if ctx.refresh().is_manual() {
         sched = sched.on_demand_only();
     }
-    // This mapping's directory. It used to be `settings.custpro_path`
-    // unconditionally, so a tree actor prewarmed and probed the *flat* share -
-    // and an actor spawned where no flat mapping was configured probed the
-    // empty path, which is where the permanent `os error 3` came from.
+    // This mapping's directory; everything below probes and reads this path.
     let dir = indexed_dir(&ctx).to_path_buf();
     let mut serial = ctx.volume_serial;
     let mut failures: u32 = 0;
     let mut empty_streak: u32 = 0;
-    // Patches that have not reached the disk yet. A manually-refreshed share
-    // is kept current by the watcher alone, so patches that never get written
-    // are patches that are lost on every restart - and with nothing re-walking
-    // on a timer, lost for good.
+    // When unsaved patches began. A manually refreshed share is kept current
+    // only by the watcher, so unsaved patches would be lost on restart with
+    // nothing to re-walk them.
     let mut unsaved_since: Option<Instant> = None;
 
     // Warm the SMB session before anything needs it. First contact with a
     // mapped drive can cost seconds of session setup and DFS resolution.
     ctx.source.prewarm(&dir);
 
-    // Resolved here rather than at startup, and *before* the cache is read:
-    // `load_from_disk` uses it to check that the drive letter still points at
-    // the volume the cache was written from, and ten possibly-dead shares must
-    // not each cost a blocking volume query on the thread drawing the first
-    // frame.
+    // Resolved here, before the cache is read: `load_from_disk` uses it to
+    // check the drive letter still points at the cache's volume, and doing it
+    // on this thread keeps volume queries off the UI thread.
     ctx.volume_serial = volume_serial_for(&ctx, &mut serial, &dir);
 
-    // Serve the previous run's index immediately. This is what turns a cold
-    // start from "unusable for seconds" into "usable now, refreshing".
+    // Serve the previous run's index immediately, then refresh.
     let loaded = load_from_disk(&ctx, events);
     let mut decision = sched.on(
         Instant::now(),
@@ -566,20 +500,17 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
     log_decision(&ctx, &sched, "start", &describe_load(loaded), &decision);
 
     loop {
-        // The wait ends at whichever comes first: what the scheduler asked
-        // for, or the moment a pending change batch becomes actionable. The
-        // debounce is the queue's business, not the scheduler's, so it is
-        // folded in here rather than taught to `schedule.rs`.
+        // Wake at whichever comes first: the scheduler's deadline or the
+        // watch queue's debounce. The debounce belongs to the queue, so it is
+        // folded in here rather than into `schedule.rs`.
         let deadline = match ctx.watch.as_ref().and_then(|q| q.due_at()) {
             Some(due) => decision.next_action.min(due),
             None => decision.next_action,
         };
         let mut input = match next_wake(&rx, deadline) {
             Wake::Shutdown => {
-                // Quitting is the last chance to keep this session's patches.
-                // Losing them is not merely a slow start next time: with
-                // nothing re-walking on a timer, those folders stay stale
-                // until somebody asks for a pass.
+                // Save pending patches before exiting; with no timed re-walk
+                // those folders would otherwise stay stale.
                 if unsaved_since.is_some() {
                     persist_current(&ctx, events);
                 }
@@ -588,10 +519,9 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
             Wake::Refresh { force } => Input::Woke { forced: force },
             Wake::Timer | Wake::Changed => match pending_changes(&ctx, Instant::now()) {
                 Some(full) => {
-                    // `full` means the watcher lost events - a bulk copy
-                    // overran the remote buffer - so nothing short of a full
-                    // pass can say what the share holds. Where that pass is
-                    // the user's to ask for, say so rather than starting it.
+                    // `full` means the watcher lost events, so only a full
+                    // pass can say what the share holds. On a manual share,
+                    // mark it stale rather than start that pass.
                     if full && ctx.refresh().is_manual() {
                         ctx.note_stale(super::store::StaleReason::EventsLost);
                     }
@@ -600,9 +530,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
                 None => Input::Woke { forced: false },
             },
         };
-        // Mutable because a forced refresh can also arrive while this
-        // actor is queued for a walk permit; it applies to the pass that is
-        // about to start, so it is folded in rather than dropped.
+        // Mutable because a forced refresh can arrive while queued for a walk
+        // permit; it applies to the pass about to start.
         let mut forced = matches!(input, Input::Woke { forced: true });
         let mut event = match input {
             Input::Woke { forced: true } => "f5",
@@ -617,8 +546,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
             decision = sched.on(now, input, ctx.have_index());
             ctx.note_schedule(sched.counters(), sched.stamp_health());
 
-            // Told to the store only now: the retry instant is part of the
-            // decision, and the status line promises the user a countdown.
+            // Reported only now because the retry time, shown as a countdown
+            // in the status line, is part of the decision.
             if let Some(f) = pending.take() {
                 apply_failure(&ctx, f, &mut failures, decision.next_action);
             }
@@ -645,11 +574,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
                             from_probe: false,
                         });
                     } else {
-                        // Paced, not immediate. A patch is a handful of round
-                        // trips; the cache file is written whole, around a
-                        // hundred megabytes of it, so saving on every
-                        // two-second watch batch would cost far more than the
-                        // patching saves.
+                        // Saves are paced: a patch is a few round trips, but
+                        // the cache file is rewritten whole.
                         let since = *unsaved_since.get_or_insert(now);
                         if now.saturating_duration_since(since) >= ctx.cadence.persist_spacing {
                             persist_current(&ctx, events);
@@ -660,32 +586,23 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
                     event = "patch";
                 }
                 Step::FullScan(reason) => {
-                    // A full pass over a tree is the expensive thing this
-                    // process does, so it queues behind the shared cap. Said
-                    // out loud first: a share waiting three minutes behind two
-                    // others must not render as `Idle`, which is the
-                    // unexplained wait the activity states exist to prevent.
-                    //
-                    // An incremental patch deliberately takes no permit. It
-                    // reads the handful of folders that changed, and queueing
-                    // seconds of work behind minutes of it would throw away
-                    // the whole reason live updates are worth having.
+                    // A tree pass is the most expensive operation, so it
+                    // queues behind the shared cap, showing `Queued` meanwhile.
+                    // An incremental patch takes no permit; it is seconds of
+                    // work and must not wait behind minutes of walks.
                     let permit = if ctx.is_tree() {
                         ctx.set_activity(Activity::Queued);
                         publish_status(&ctx, events);
                         match ctx.permits.acquire(&rx, &mut forced) {
-                            // Told to stop while queueing. No permit was
-                            // taken, so nothing has to be given back.
+                            // Told to stop while queued. No permit was taken.
                             Acquired::Shutdown => return,
                             Acquired::Held(p) => Some(p),
                         }
                     } else {
                         None
                     };
-                    // Whatever the watcher had pending is about to be covered
-                    // by a pass over the whole share, so it is dropped rather
-                    // than left to trigger a second one the moment this
-                    // finishes.
+                    // The full pass covers anything the watcher had pending,
+                    // so drop it rather than trigger a second pass afterwards.
                     if let Some(queue) = &ctx.watch {
                         let _ = queue.take();
                     }
@@ -699,10 +616,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
                         &mut detail,
                         cancel,
                     );
-                    // Explicit, and before the scheduler is told anything: the
-                    // permit covers the pass, not the bookkeeping after it,
-                    // and it must never be alive when the loop reaches
-                    // `Step::Wait`.
+                    // Release the permit right after the pass; it must never
+                    // be held when the loop reaches `Step::Wait`.
                     drop(permit);
                     if let Err(err) = outcome {
                         pending = Some(PendingFailure {
@@ -711,16 +626,16 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
                         });
                     } else {
                         failures = 0;
-                        // `scan_and_publish` persists on the way out, and what
-                        // it wrote covers every patch that came before it.
+                        // `scan_and_publish` persists on the way out, covering
+                        // every earlier patch.
                         unsaved_since = None;
                     }
                     input = Input::Scanned(outcome);
                     event = "scan";
                 }
                 Step::ConfirmFresh => {
-                    // The common case by far: nothing moved, so the listing is
-                    // provably still correct and no enumeration is needed.
+                    // The common case: nothing moved, so the listing is still
+                    // correct and no enumeration is needed.
                     ctx.confirm_fresh(sched.recorded_stamp(), SystemTime::now());
                     failures = 0;
                     break;
@@ -734,9 +649,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
             );
         }
 
-        // Re-asserted rather than set once. A walk that succeeds publishes a
-        // fresh verdict on the tree's health, and a walk succeeding is not
-        // evidence that a dead watch came back.
+        // Re-asserted every wake: a successful walk publishes a fresh health
+        // verdict, which does not mean a dead watch came back.
         if ctx
             .watch
             .as_ref()
@@ -745,9 +659,8 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
             ctx.note_live_updates_unavailable();
         }
 
-        // Belt and braces. A non-terminal decision carries `next_action ==
-        // now`, so leaving one in place would spin this thread against the
-        // file server - the single worst outcome available here.
+        // Safety net: a non-terminal decision has `next_action == now`, and
+        // leaving it would spin this thread against the file server.
         if !decision.step.is_terminal() {
             debug_assert!(false, "unterminated decision: {:?}", decision.step);
             decision.next_action = Instant::now() + ctx.cadence.probe_interval;
@@ -757,20 +670,17 @@ fn run(mut ctx: IndexContext, rx: Receiver<IndexCmd>, events: &Events, cancel: &
     }
 }
 
-/// Whether the watch queue has an actionable batch, and whether it needs a
-/// full re-walk.
+/// Returns whether the watch queue has an actionable batch, and whether it
+/// needs a full re-walk.
 ///
-/// A peek. The scheduler may still defer the update to its spacing floor, and
-/// a set consumed before that decision would be a set of changes nobody ever
-/// applies.
+/// Does not consume the set: the scheduler may defer the update, and a
+/// consumed set would then be lost.
 fn pending_changes(ctx: &IndexContext, now: Instant) -> Option<bool> {
     ctx.watch.as_ref()?.due(now)
 }
 
-/// Blocks until the deadline or a command, coalescing queued refreshes.
-///
-/// Holding F5 down used to enqueue up to sixteen `Refresh` messages, each of
-/// which was drained and executed as its own full enumeration.
+/// Blocks until the deadline or a command, coalescing queued refreshes into
+/// one wake.
 fn next_wake(rx: &Receiver<IndexCmd>, deadline: Instant) -> Wake {
     let mut refresh = false;
     let mut force = false;
@@ -806,11 +716,8 @@ fn next_wake(rx: &Receiver<IndexCmd>, deadline: Instant) -> Wake {
 
 /// Reflects a failure in the shared status.
 ///
-/// A probe the share *refused* is reported as degraded, not unreachable: the
-/// drive is fine, it just will not answer the cheap freshness question.
-/// Telling the user their drive is unreachable would be a lie they would act
-/// on, and the only thing they could do about it is the one thing that cannot
-/// help.
+/// A probe the share refused is reported as degraded, not unreachable: the
+/// drive works but will not answer the freshness check.
 fn apply_failure(
     ctx: &IndexContext,
     failure: PendingFailure,
@@ -846,11 +753,8 @@ fn load_from_disk(ctx: &IndexContext, events: &Events) -> Option<DiskLoad> {
     let key = persist::MappingKey::of(dir);
     let expect = persist::Expect::new(dir, ctx.volume_serial);
 
-    // A tree and a flat listing are different file layouts, and the loader
-    // refuses to read one as the other - so a tree actor cannot decode the
-    // flat share's cache and publish one directory as the whole share. The
-    // cache key already differs, since it is derived from the directory; this
-    // is the backstop for that, not a substitute.
+    // The loader refuses to read a tree file as flat or vice versa. The cache
+    // key already differs per directory; this is a backstop.
     let result = if ctx.is_tree() {
         load_tree_from_disk(ctx, events, &cache_dir, key, expect)
     } else {
@@ -860,10 +764,8 @@ fn load_from_disk(ctx: &IndexContext, events: &Events) -> Option<DiskLoad> {
     let loaded = match result {
         Ok(loaded) => Some(loaded),
         Err(err) => {
-            // A missing cache is normal on first run. A *rejected* one is not,
-            // and used to be indistinguishable from it - so a drive letter
-            // pointing at a different volume looked exactly like a cold start,
-            // every single launch, with nothing on screen to say why.
+            // A missing cache is normal on first run. A rejected one is
+            // recorded so it is distinguishable from a cold start.
             if !matches!(err, persist::LoadError::Missing) {
                 ctx.note_cache_rejected(err.to_string());
             }
@@ -905,20 +807,16 @@ fn load_tree_from_disk(
     let age = SystemTime::now()
         .duration_since(loaded.index.captured_at())
         .ok();
-    // The coverage is published with the index, not withheld until the next
-    // walk confirms it. A cache written from a walk that could not read part
-    // of the share must come back still saying so; otherwise the one restart
-    // between the walk and the re-walk is a window in which the status line
-    // quietly claims complete coverage of a share it never had.
+    // Publish the cached coverage with the index, so a cache from a partial
+    // walk still reports its gaps after a restart.
     ctx.slot().publish_tree(
         Arc::new(loaded.index),
         Origin::DiskCache,
         Some(Arc::new(loaded.coverage)),
     );
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
-    // A tree records no directory stamp, by design: no single timestamp can
-    // stand for a whole share. That is what settles the scheduler into
-    // `Blind`, where the re-walk floor is the whole freshness guarantee.
+    // A tree records no directory stamp, so the scheduler settles into
+    // `Blind` and the re-walk floor is the freshness guarantee.
     Ok(DiskLoad { stamp: None, age })
 }
 
@@ -933,8 +831,7 @@ fn persist_current(ctx: &IndexContext, events: &Events) {
 
     ctx.set_activity(Activity::Persisting);
     publish_status(ctx, events);
-    // Best effort throughout: failing to write the cache costs a slow cold
-    // start next time and nothing else.
+    // Best effort: a failed write costs only a slower cold start next time.
     if ctx.is_tree() {
         if let Some(index) = ctx.slot().as_tree() {
             let coverage = ctx.status().coverage.clone();
@@ -949,8 +846,8 @@ fn persist_current(ctx: &IndexContext, events: &Events) {
 
 /// Enumerates, decides whether to trust the result, and publishes it.
 ///
-/// Returns the stamp recorded alongside the listing, which is what the
-/// scheduler needs to decide whether change detection is available at all.
+/// Returns the stamp recorded with the listing, which tells the scheduler
+/// whether change detection is available.
 fn scan_and_publish(
     ctx: &IndexContext,
     events: &Events,
@@ -976,8 +873,8 @@ fn scan_and_publish(
                     error: Some(err),
                 }));
             }
-            // The previous snapshot is deliberately left in place: stale
-            // results with an honest label beat an empty screen.
+            // Keep the previous snapshot: stale results with an accurate label
+            // beat an empty screen.
             return Err(err);
         }
     };
@@ -1004,11 +901,8 @@ fn scan_and_publish(
     let stamp = snapshot.stamp();
     ctx.slot().publish_flat(Arc::new(snapshot), Origin::Network);
     if stamp.is_none() {
-        // Set *after* the publish, which clears the health because a fresh
-        // listing normally resolves whatever was wrong. Change detection is
-        // unavailable here, so the scheduler drops to the rescan floor rather
-        // than re-enumerating on the probe cadence - the whole of the bug this
-        // module was rewritten for - and the user is told why.
+        // Set after the publish, which resets health. Without a stamp the
+        // scheduler falls back to the rescan floor, and the user is told why.
         ctx.set_degraded(DegradeReason::StampUnreliable);
     }
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
@@ -1026,19 +920,15 @@ fn scan_and_publish(
     Ok(stamp)
 }
 
-/// The directory this actor indexes.
-///
-/// One accessor rather than repeated field reads, so making the actor
-/// per-mapping is a change in one place.
+/// Returns the directory this actor indexes.
 fn indexed_dir(ctx: &IndexContext) -> &Path {
     ctx.slot().dir()
 }
 
-/// The volume serial for the persisted index's identity check.
+/// Returns the volume serial for the persisted index's identity check.
 ///
-/// Retried on the actor thread when startup could not resolve it: that attempt
-/// races the SMB session warm-up, and a `None` there is written into the cache
-/// as "unknown".
+/// Retried on the actor thread when not yet known, since an earlier attempt
+/// may have raced SMB session warm-up.
 fn volume_serial_for(ctx: &IndexContext, cached: &mut Option<u32>, dir: &Path) -> Option<u32> {
     if cached.is_none() && ctx.settings.persist {
         *cached = resolve_volume_serial(dir);
@@ -1066,17 +956,13 @@ fn full_scan(
     let dir = indexed_dir(ctx).to_path_buf();
     let prefix = dir.to_string_lossy().into_owned();
 
-    // Probed *before* the listing, and that is the value recorded with it.
-    //
-    // Recording the stamp read afterwards would hide a change that landed
-    // mid-scan: the listing would be missing the new entry while its stamp
-    // said "current as of after the change", and the next probe would agree.
-    // Taking it first is conservative in the only direction that is safe -
-    // one extra rescan rather than a silently incomplete index.
+    // Probe the stamp before listing and record that value. A stamp read
+    // afterwards could hide a change that landed mid-scan; reading it first
+    // errs toward one extra rescan instead of a silently incomplete index.
     let stamp = ctx.source.probe_stamp(&dir).ok();
 
-    // Size the arenas from what the previous run actually held, so from the
-    // second run onward the buffers never grow.
+    // Size the arenas from the previous listing, so later runs do not grow
+    // the buffers.
     let (hint_entries, hint_avg) = ctx
         .slot()
         .as_flat()
@@ -1119,8 +1005,8 @@ fn full_scan(
 }
 
 fn publish_status(ctx: &IndexContext, events: &Events) {
-    // Droppable by nature: the next status supersedes this one, so a full
-    // channel is not worth blocking the scan for.
+    // Droppable: the next status supersedes this one, so a full channel is
+    // not worth blocking the scan for.
     let _ = events.try_send(AppEvent::Index(IndexMsg::Status {
         id: ctx.mapping,
         status: ctx.status(),
@@ -1226,7 +1112,7 @@ impl super::enumerate::EntrySink for ProgressSink<'_> {
     }
 }
 
-/// Convenience for `--doctor`: one full scan, no actor, no publishing.
+/// Runs one full scan for `--doctor`, without an actor or publishing.
 pub fn scan_once(
     source: &dyn DirSource,
     dir: &Path,
@@ -1241,15 +1127,11 @@ pub fn scan_once(
 
 /// Walks the tree and publishes it, segment by segment as it goes.
 ///
-/// Always reports `Ok(None)` - no stamp - and that is the honest answer, not a
-/// convenience. A directory's timestamp moves when *its own* children change,
-/// so the root of a three-hundred-thousand-directory tree says nothing about a
-/// file added three levels down. If a walk recorded one, the scheduler would
-/// go healthy, probe, see an unchanged root and report the index as *proven
-/// current* while a thousand files had been added underneath - a worse version
-/// of the bug this index exists to remove. Reporting no stamp settles the
-/// scheduler into `Blind`, where the rescan floor is the whole guarantee,
-/// which is exactly a tree's situation.
+/// Always returns `Ok(None)`. A directory's timestamp moves only when its own
+/// children change, so a root stamp cannot detect a file added deeper down;
+/// recording one would let a probe falsely confirm the index as current. No
+/// stamp settles the scheduler into `Blind`, where the rescan floor is the
+/// guarantee.
 fn walk_and_publish(
     ctx: &IndexContext,
     events: &Events,
@@ -1268,10 +1150,8 @@ fn walk_and_publish(
     publish_status(ctx, events);
 
     let opts = walk::WalkOpts {
-        // The one setting here that comes from configuration. Read at scan
-        // time because the attribute is never stored, which is why turning it
-        // on only shows up once a drive has been re-read - see
-        // `config::hidden`.
+        // Read at scan time because the attribute is not stored, so a change
+        // takes effect on the next re-read (see `config::hidden`).
         hide_system: ctx.settings.hidden.hides_system(),
         ..walk::WalkOpts::default()
     };
@@ -1283,8 +1163,8 @@ fn walk_and_publish(
         return Err(EnumError::Cancelled);
     }
     if let Some(err) = report.aborted {
-        // The share stopped answering. Whatever was published mid-walk stays:
-        // a partial tree with an honest label beats an empty screen.
+        // The share stopped answering. Mid-walk publishes stay: a partial tree
+        // with an accurate label beats an empty screen.
         *detail = format!("walk aborted: {err}");
         if forced {
             let _ = events.send(AppEvent::Index(IndexMsg::RefreshReport {
@@ -1338,26 +1218,22 @@ fn walk_and_publish(
             error: None,
         }));
     }
-    // Persisted only here, at the end, never from the mid-walk publishes.
-    // Writing a 300 MB file twenty-odd times during a walk would cost more
-    // than the walk does, and every one of those files would be superseded
-    // minutes later by the next.
+    // Persisted only at the end, never from mid-walk publishes: each save
+    // rewrites the whole (possibly hundreds of MB) file.
     persist_current(ctx, events);
 
-    // Deliberately no stamp; see this function's own doc comment.
+    // No stamp; see this function's doc comment.
     Ok(None)
 }
 
 /// Publishes a tree index as the walk seals each segment.
 ///
-/// Wraps [`tree::SegmentSink`] with the two things the actor needs on top of
-/// it: publication into the store, and progress the UI can render without
-/// being flooded.
+/// Wraps [`tree::SegmentSink`] with publication into the store and
+/// rate-limited progress for the UI.
 struct WalkSink<'a> {
     inner: tree::SegmentSink,
-    /// Borrowed rather than an `Arc<IndexStore>` plus an id: the sink lives
-    /// only for the walk, and holding the slot directly is what stops a
-    /// progress tick from publishing into a different mapping.
+    /// The slot itself rather than a store and id, so progress cannot be
+    /// published into a different mapping.
     slot: &'a MappingSlot,
     events: Events,
     gate: ProgressGate,
@@ -1390,15 +1266,12 @@ impl walk::TreeSink for WalkSink<'_> {
         if !self.gate.claim(Instant::now(), files) {
             return;
         }
-        // Published as it goes, so the share is searchable about a second in
-        // rather than after the whole walk. The index is rebuilt from the
-        // sealed segments each time, which is a vector of refcounts rather
-        // than a byte of the hundreds of megabytes behind them.
+        // Publish as the walk goes, so the share is searchable early.
+        // Rebuilding the index from sealed segments copies only `Arc`s.
         self.slot.publish_tree(
             Arc::new(self.inner.index()),
             Origin::Network,
-            // No verdict yet: judging a half-finished walk would flag every
-            // one of them as incomplete for the minutes it is running.
+            // No coverage verdict until the walk finishes.
             None,
         );
         self.slot.set_activity(Activity::Walking {
@@ -1413,15 +1286,11 @@ impl walk::TreeSink for WalkSink<'_> {
     }
 }
 
-/// The same rate limit `ProgressSink` applies, for a sink called from every
-/// walk worker at once.
+/// A lock-free rate limit for progress from many walk workers at once.
 ///
-/// `ProgressSink` can keep an `Instant` and a count in plain fields because
-/// the enumerator calls it from one thread. A walk calls `progress` once per
-/// directory from eight, which over three hundred thousand directories is some
-/// seventeen hundred calls a second into a 256-slot channel - so the limit has
-/// to hold without taking a lock, or the limiter costs more than the sends it
-/// suppresses.
+/// `ProgressSink` uses plain fields because one thread calls it. A walk calls
+/// `progress` once per directory from every worker, so the limit must hold
+/// without a lock.
 struct ProgressGate {
     started: Instant,
     last_report_nanos: AtomicU64,
@@ -1437,7 +1306,7 @@ impl ProgressGate {
         }
     }
 
-    /// True for exactly one caller per interval.
+    /// Returns true for exactly one caller per interval.
     fn claim(&self, now: Instant, count: usize) -> bool {
         let t = now.saturating_duration_since(self.started).as_nanos() as u64;
         let previous = self.last_report_nanos.load(Ordering::Relaxed);
@@ -1447,10 +1316,8 @@ impl ProgressGate {
         if !by_time && !by_count {
             return false;
         }
-        // Compare-exchange rather than `fetch_max`: with `fetch_max` two
-        // workers arriving in the same microsecond both move the value and
-        // both believe they won, which turns a rate limit into a rate
-        // multiplier under exactly the load it exists for.
+        // Compare-exchange rather than `fetch_max`: with `fetch_max`, two
+        // workers arriving together would both believe they won.
         if self
             .last_report_nanos
             .compare_exchange(previous, t, Ordering::Relaxed, Ordering::Relaxed)
@@ -1464,11 +1331,7 @@ impl ProgressGate {
 }
 /// Re-reads the dirty subtrees and patches them into the published index.
 ///
-/// Cheap where a walk is expensive: the batch names the folders that changed,
-/// so this is a handful of round trips against the nine hundred thousand a
-/// full pass costs. That difference is the entire reason live updates are
-/// worth having - without it a change would either trigger a re-walk every few
-/// minutes or wait for the floor.
+/// A handful of round trips for the changed folders, instead of a full walk.
 fn apply_changes(
     ctx: &IndexContext,
     events: &Events,
@@ -1478,10 +1341,9 @@ fn apply_changes(
     let (Some(queue), Some(index)) = (ctx.watch.as_ref(), ctx.slot().as_tree()) else {
         return Ok(());
     };
-    // Taken, not peeked. The batch is consumed whether or not it can be
-    // applied: retaining it would have a share that refuses to answer retried
-    // every few seconds for as long as it refuses, and the floor already
-    // guarantees that a lost notification costs at most one floor.
+    // Taken, not peeked: the batch is consumed even if it cannot be applied,
+    // so an unresponsive share is not retried every few seconds. The floor
+    // bounds the cost of a lost notification.
     let Some(batch) = queue.take() else {
         return Ok(());
     };
@@ -1499,10 +1361,8 @@ fn apply_changes(
 
     let sink = tree::SegmentSink::new(&root.to_string_lossy());
     let opts = walk::WalkOpts {
-        // The one setting here that comes from configuration. Read at scan
-        // time because the attribute is never stored, which is why turning it
-        // on only shows up once a drive has been re-read - see
-        // `config::hidden`.
+        // Read at scan time because the attribute is not stored, so a change
+        // takes effect on the next re-read (see `config::hidden`).
         hide_system: ctx.settings.hidden.hides_system(),
         ..walk::WalkOpts::default()
     };
@@ -1527,9 +1387,8 @@ fn apply_changes(
     let replaced = covered(&batch.dirs, &report);
     if replaced.is_empty() {
         // Every dirty folder failed to read. Replacing them would delete
-        // folders that are still there and whose files are still findable -
-        // turning a transient network error into exactly the silent
-        // disappearance this index exists to prevent.
+        // folders that still exist and turn a transient error into missing
+        // files.
         *detail = format!("{} folders unreadable, left alone", batch.dirs.len());
         return Ok(());
     }
@@ -1540,24 +1399,19 @@ fn apply_changes(
         report.dirs_visited,
         next.len()
     );
-    // `coverage` stays `None`: a patch has nothing to say about whether the
-    // *share* is fully covered, and overwriting the walk's verdict with the
-    // opinion of a three-folder update would clear a warning it never checked.
+    // `coverage` stays `None`: a patch says nothing about whole-share
+    // coverage and must not clear the walk's verdict.
     ctx.slot()
         .publish_tree(Arc::new(next), Origin::Network, None);
     let _ = events.send(AppEvent::Index(IndexMsg::SnapshotChanged));
     Ok(())
 }
 
-/// The seeds the walk actually covered, and which may therefore be replaced.
+/// Returns the seeds the walk covered, which may therefore be replaced.
 ///
-/// A folder that could not be read is left exactly as it was. The direction
-/// matters and is the same one the whole rewrite turns on: a stale entry is a
-/// result that might be wrong, while a dropped subtree is a file that cannot
-/// be found at all.
-///
-/// A folder that has *gone* is different, and is replaced - by nothing. That
-/// is a deletion, not a failure, and `WalkErrors` already separates the two.
+/// An unreadable folder is left as it was: a stale entry is better than a
+/// dropped subtree. A folder that has gone is replaced by nothing, since
+/// that is a deletion; `WalkErrors` separates the two.
 fn covered(seeds: &[String], report: &walk::WalkReport) -> Vec<String> {
     let holes = report.errors.holes() as usize;
     if holes == 0 {
@@ -1570,8 +1424,8 @@ fn covered(seeds: &[String], report: &walk::WalkReport) -> Vec<String> {
         .filter(|(_, err)| walk::is_hole(*err))
         .map(|(rel, _)| rel.as_str())
         .collect();
-    // More holes than examples kept, so which seeds they belong to cannot be
-    // worked out. Replacing none of them is the only safe reading.
+    // More holes than recorded examples, so the affected seeds cannot be
+    // identified. Replace none of them.
     if recorded.len() < holes {
         return Vec::new();
     }
@@ -1591,15 +1445,15 @@ mod tests {
     use crate::index::schedule::{ScanReason, StampHealth};
     use crossbeam_channel::bounded;
 
-    /// The fast cadence puts an "hour" at 400ms, so the timer-driven paths
-    /// this module exists to get right can actually be watched in a test.
+    /// The fast cadence puts the floor at 400 ms, so timer-driven paths can be
+    /// observed in tests.
     const FLOOR: Duration = Duration::from_millis(400);
     const SEED: u64 = 0x5EED_5EED_5EED_5EED;
 
     fn ctx(src: FakeDirSource, store: Arc<IndexStore>) -> IndexContext {
         let settings = Settings {
             persist: false,
-            ..Default::default()
+            ..Settings::fixture()
         };
         IndexContext::new(settings, MappingId(0), store, Arc::new(src))
     }
@@ -1613,8 +1467,8 @@ mod tests {
 
     /// Drains the event channel in the background.
     ///
-    /// `SnapshotChanged` is sent blocking, so a test that provokes many scans
-    /// without a reader would wedge the actor once 256 events accumulated.
+    /// `SnapshotChanged` is sent blocking, so without a reader the actor would
+    /// stall once 256 events accumulated.
     fn draining_events() -> Events {
         let (tx, rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1633,10 +1487,8 @@ mod tests {
         false
     }
 
-    /// Waits for a line to reach the decision log.
-    ///
-    /// The log is appended from the actor thread, so "has it happened yet" is
-    /// a question about another thread's progress, not about elapsed time.
+    /// Waits for a line to reach the decision log, which the actor thread
+    /// appends asynchronously.
     fn wait_for_log(path: &std::path::Path, needle: &str, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
@@ -1651,7 +1503,7 @@ mod tests {
     #[test]
     fn the_actor_publishes_an_initial_snapshot() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1668,7 +1520,7 @@ mod tests {
     #[test]
     fn the_session_is_warmed_before_anything_needs_it() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1685,12 +1537,12 @@ mod tests {
         actor.shutdown(Duration::from_millis(500));
     }
 
-    /// The change that replaces a full rescan every five minutes.
+    /// An unchanged stamp avoids a full rescan.
     #[test]
     fn an_unchanged_stamp_avoids_re_enumeration() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1720,7 +1572,7 @@ mod tests {
     fn a_changed_stamp_triggers_a_rescan() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(fast_ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1750,7 +1602,7 @@ mod tests {
     fn a_forced_refresh_bypasses_the_stamp_check() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1774,12 +1626,11 @@ mod tests {
         actor.shutdown(Duration::from_millis(500));
     }
 
-    /// The behaviour the previous implementation got wrong: an error must
-    /// never cost the user the data they already had.
+    /// An error must never discard the data already held.
     #[test]
     fn a_failing_refresh_keeps_serving_the_previous_snapshot() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src.clone(), Arc::clone(&store)), tx).unwrap();
@@ -1809,7 +1660,7 @@ mod tests {
     #[test]
     fn a_refresh_report_reaches_the_ui() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1837,7 +1688,7 @@ mod tests {
     #[test]
     fn shutdown_is_prompt() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
@@ -1852,29 +1703,21 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
-    /// Shutdown has to reach a scan that is already running.
-    ///
-    /// The command channel cannot: the actor is its only reader and the actor
-    /// is the thing scanning. That never mattered while a scan was one
-    /// millisecond-scale listing, but a recursive walk of a large share runs
-    /// for minutes, and without the flag every exit during one would time out
-    /// and leak the thread along with its outstanding queries.
+    /// Shutdown reaches a scan that is already running, via the stop flag.
     #[test]
     fn shutdown_reaches_a_scan_that_is_already_running() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
-        // The probe answers at once and the *listing* is what blocks, which is
-        // where a walk spends its minutes. `probe_stamp` takes no cancellation
-        // token at all, so hanging that instead would exercise a path nothing
-        // can interrupt and prove nothing about this one.
+        // Make the listing block, not the probe: `probe_stamp` takes no
+        // cancellation token, so hanging it would test nothing here.
         src.set_stamp_error(Some(EnumError::Unsupported(50)));
         src.set_hang(true);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
         let mut actor = spawn(ctx(src, Arc::clone(&store)), tx).unwrap();
 
-        // Let the scan get properly under way, or this proves only that an
-        // idle actor exits.
+        // Wait until the scan is under way, or this proves only that an idle
+        // actor exits.
         assert!(
             wait_for(
                 &store,
@@ -1892,19 +1735,15 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 
-    // --- the reload storm, end to end --------------------------------------
+    // --- reload storm, end to end -------------------------------------------
 
-    /// The reported bug. A share that enumerates fine but will not answer the
-    /// freshness probe used to be re-enumerated on every probe interval,
-    /// forever; it must instead fall back to the rescan floor.
-    ///
-    /// Reachable at all only because `FakeDirSource` can now fail the probe
-    /// independently of the listing.
+    /// A share that enumerates but will not answer the freshness probe is
+    /// rescanned on the floor, not on every probe interval.
     #[test]
     fn a_share_that_will_not_report_a_stamp_is_rescanned_on_the_floor_not_the_probe_interval() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp_supported(false);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -1914,8 +1753,8 @@ mod tests {
             Duration::from_secs(3)
         ));
 
-        // Three floors' worth of wall clock. On the probe cadence that would
-        // be around sixty enumerations.
+        // Three floors of wall clock; on the probe cadence that would be
+        // around sixty enumerations.
         std::thread::sleep(FLOOR * 3);
         let scans = src.list_count(CUSTPRO_PATH);
         actor.shutdown(Duration::from_millis(500));
@@ -1934,7 +1773,7 @@ mod tests {
     fn a_transient_stamp_failure_never_triggers_an_enumeration() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -1957,14 +1796,12 @@ mod tests {
         );
     }
 
-    /// RC2: `last_full_scan` was only set on success, so a failing first scan
-    /// left the floor permanently due and every full-jitter retry attempted
-    /// another full enumeration - sometimes under a second apart.
+    /// A failing first scan is retried no faster than the minimum spacing.
     #[test]
     fn a_failed_first_scan_is_retried_no_faster_than_the_minimum_spacing() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_error(Some(EnumError::Transient(53)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let cadence = Cadence::fast();
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
@@ -1987,7 +1824,7 @@ mod tests {
     fn an_unchanged_stamp_is_never_re_enumerated_however_long_the_app_runs() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(7, 7)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2015,7 +1852,7 @@ mod tests {
     fn sixteen_f5_presses_produce_one_enumeration() {
         let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2043,14 +1880,13 @@ mod tests {
         );
     }
 
-    /// A half-open session can report a directory as empty. Replacing a
-    /// million entries with zero on one such answer is not something the user
-    /// can recover from.
+    /// A half-open session can report a directory as empty, so one empty
+    /// answer must not replace a populated index.
     #[test]
     fn an_empty_listing_does_not_immediately_replace_a_populated_index() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2076,7 +1912,7 @@ mod tests {
     fn a_genuinely_emptied_directory_is_accepted_on_the_second_answer() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2103,7 +1939,7 @@ mod tests {
     fn the_scan_reason_reaches_the_ui() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor =
             spawn(fast_ctx(src.clone(), Arc::clone(&store)), draining_events()).unwrap();
 
@@ -2131,7 +1967,7 @@ mod tests {
         let path = dir.path().join("index.log");
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context =
             fast_ctx(src.clone(), Arc::clone(&store)).with_log(Arc::new(IndexLog::to_path(&path)));
         let mut actor = spawn(context, draining_events()).unwrap();
@@ -2141,9 +1977,8 @@ mod tests {
             |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        // Polled rather than slept on. Fixed sleeps were long enough on an
-        // idle machine and not on a loaded one, so this failed only when the
-        // rest of the suite happened to be running beside it.
+        // Polled rather than slept on, so the test is not timing-sensitive
+        // under load.
         assert!(wait_for_log(
             &path,
             "reason=first-run",
@@ -2151,8 +1986,8 @@ mod tests {
         ));
         actor.refresh(true);
         assert!(wait_for_log(&path, "reason=f5", Duration::from_secs(3)));
-        // The quiet path is the probe that follows the forced scan, so it is
-        // waited for rather than assumed to have happened by now.
+        // The confirm-fresh line comes from the probe after the forced scan,
+        // so wait for it.
         assert!(wait_for_log(
             &path,
             "step=confirm-fresh",
@@ -2171,9 +2006,8 @@ mod tests {
 
     // --- warm start --------------------------------------------------------
 
-    /// The disk cache used to buy only the few seconds before the startup scan
-    /// superseded it, because the rescan floor was measured from process start
-    /// rather than from when the data was captured.
+    /// The rescan floor is measured from the cache's capture time, so a warm
+    /// start with a matching stamp does not enumerate.
     #[test]
     fn a_warm_start_with_a_matching_stamp_serves_the_cache_without_enumerating() {
         let cache = tempfile::tempdir().unwrap();
@@ -2183,11 +2017,11 @@ mod tests {
 
         // First run: populate the cache.
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let settings = Settings {
                 persist: true,
                 cache_dir: Some(cache.path().to_path_buf()),
-                ..Default::default()
+                ..Settings::fixture()
             };
             let context = IndexContext::new(
                 settings,
@@ -2209,11 +2043,11 @@ mod tests {
 
         // Second run: the stamp still matches, so no enumeration is needed.
         src.clear_calls();
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let settings = Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
         let context = IndexContext::new(
             settings,
@@ -2251,11 +2085,11 @@ mod tests {
         let settings = || Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
 
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let context = IndexContext::new(
                 settings(),
                 MappingId(0),
@@ -2279,7 +2113,7 @@ mod tests {
         src.bump_stamp();
         src.clear_calls();
 
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context = IndexContext::new(
             settings(),
             MappingId(0),
@@ -2306,14 +2140,12 @@ mod tests {
         actor.shutdown(Duration::from_millis(500));
     }
 
-    /// Replaces a test that could not reach this path at all, and said so:
-    /// it asserted against `IndexStore` directly because the fake source
-    /// always answered the probe.
+    /// A source without stamp support is reported as degraded.
     #[test]
     fn a_source_with_no_stamp_support_is_marked_degraded() {
         let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
         src.set_stamp_supported(false);
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let mut actor = spawn(fast_ctx(src, Arc::clone(&store)), draining_events()).unwrap();
 
         assert!(
@@ -2345,12 +2177,12 @@ mod tests {
         let settings = Settings {
             persist: true,
             cache_dir: Some(cache.path().to_path_buf()),
-            ..Default::default()
+            ..Settings::fixture()
         };
 
         // Write a cache under one volume identity...
         {
-            let store = Arc::new(IndexStore::default());
+            let store = Arc::new(IndexStore::fixture());
             let context = IndexContext::new(
                 settings.clone(),
                 MappingId(0),
@@ -2371,7 +2203,7 @@ mod tests {
         }
 
         // ...then read it back as a different one.
-        let store = Arc::new(IndexStore::default());
+        let store = Arc::new(IndexStore::fixture());
         let context = IndexContext::new(
             settings,
             MappingId(0),

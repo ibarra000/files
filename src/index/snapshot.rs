@@ -15,20 +15,17 @@
 //! Entry `i` occupies `offsets[i] .. offsets[i+1]`, of which the final byte is
 //! always a NUL separator, so its name is `offsets[i] .. offsets[i+1] - 1`.
 //!
-//! Three properties do the work:
+//! Properties:
 //!
-//! * **The directory prefix is stored once.** The previous implementation
-//!   copied the full path into every entry, duplicating `"V:\"` a million
-//!   times. Paths are rebuilt only for the handful of rows actually displayed.
-//! * **A single offsets table serves both arenas**, which is only sound
-//!   because [`crate::util::fold`] is byte-length preserving.
-//! * **Entries are NUL-separated.** NUL is illegal in a Windows filename, so a
-//!   substring match can never span two entries - provided the needle itself
-//!   contains no NUL. The matcher enforces that; see
-//!   [`crate::search::matcher`].
+//! * **The directory prefix is stored once.** Full paths are rebuilt only for
+//!   displayed rows.
+//! * **One offsets table serves both arenas**, which is sound only because
+//!   [`crate::util::fold`] preserves byte length.
+//! * **Entries are NUL-separated.** NUL is illegal in Windows filenames, so a
+//!   substring match cannot span two entries provided the needle contains no
+//!   NUL; [`crate::search::matcher`] enforces that.
 //!
-//! A snapshot is sealed at construction and shared as `Arc<Snapshot>`. Nothing
-//! is ever deep-copied to hand it to a reader.
+//! A snapshot is immutable once built and shared as `Arc<Snapshot>`.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -44,19 +41,16 @@ pub const SEP: u8 = 0;
 
 /// Backing storage for the two arenas.
 ///
-/// The mapped variant holds the `Mmap` together with byte *ranges* rather than
-/// references, which is what keeps the type free of a self-referential borrow.
+/// The mapped variant stores byte ranges into the `Mmap` rather than
+/// references, avoiding a self-referential borrow.
 pub enum Arenas {
     Owned {
         lower: Box<[u8]>,
         orig: Box<[u8]>,
     },
     Mapped {
-        /// Shared, because a tree index stores its filenames and its folder
-        /// names as two snapshots inside one file. Mapping that file twice
-        /// would work and would be a waste; more importantly, each mapping is
-        /// an independent kernel object, so the two halves of one index could
-        /// then be backed by different views of the same bytes.
+        /// Shared because a tree index stores its file and folder names as
+        /// two snapshots in one file; both must be backed by the same view.
         map: Arc<Mmap>,
         lower: Range<usize>,
         orig: Range<usize>,
@@ -114,8 +108,7 @@ impl Snapshot {
     /// Assembles a snapshot from already-validated parts.
     ///
     /// Prefer [`crate::index::builder::SnapshotBuilder`]; this exists for the
-    /// persistence loader, which validates the same invariants against
-    /// untrusted file bytes before calling in.
+    /// persistence loader.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         prefix: Box<str>,
@@ -141,10 +134,8 @@ impl Snapshot {
         }
     }
 
-    /// Assembles a snapshot from *untrusted* parts, validating first.
-    ///
-    /// The persistence loader uses this: the bytes come from a file, so every
-    /// structural invariant is proven before any of them is indexed.
+    /// Assembles a snapshot from untrusted parts, validating every structural
+    /// invariant first. Used by the persistence loader.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_from_parts(
         prefix: Box<str>,
@@ -173,7 +164,7 @@ impl Snapshot {
         Ok(s)
     }
 
-    /// An empty listing for `prefix`.
+    /// Returns an empty listing for `prefix`.
     pub fn empty(prefix: &str) -> Self {
         Self::from_parts(
             prefix.into(),
@@ -205,40 +196,40 @@ impl Snapshot {
         &self.prefix
     }
 
-    /// `n + 1` byte offsets into both arenas.
+    /// Returns the `n + 1` byte offsets into both arenas.
     #[inline]
     pub fn offsets(&self) -> &[u32] {
         &self.offsets
     }
 
-    /// The folded arena, including NUL separators. This is what the matcher
-    /// scans.
+    /// Returns the folded arena, including NUL separators. This is what the
+    /// matcher scans.
     #[inline]
     pub fn lower(&self) -> &[u8] {
         self.arenas.lower()
     }
 
-    /// The original-case arena, including NUL separators.
+    /// Returns the original-case arena, including NUL separators.
     #[inline]
     pub fn orig(&self) -> &[u8] {
         self.arenas.orig()
     }
 
-    /// Length in bytes of entry `i`'s name, excluding the separator.
+    /// Returns the byte length of entry `i`'s name, excluding the separator.
     #[inline]
     pub fn name_len(&self, i: u32) -> u32 {
         let i = i as usize;
         self.offsets[i + 1] - self.offsets[i] - 1
     }
 
-    /// Folded name bytes of entry `i`, excluding the separator.
+    /// Returns the folded name bytes of entry `i`, excluding the separator.
     #[inline]
     pub fn name_lower(&self, i: u32) -> &[u8] {
         let r = self.name_range(i);
         &self.arenas.lower()[r]
     }
 
-    /// Original-case name bytes of entry `i`, excluding the separator.
+    /// Returns the original-case name bytes of entry `i`, excluding the separator.
     #[inline]
     pub fn name_orig(&self, i: u32) -> &[u8] {
         let r = self.name_range(i);
@@ -253,18 +244,16 @@ impl Snapshot {
         start..end
     }
 
-    /// Entry `i`'s name as text.
+    /// Returns entry `i`'s name as text.
     ///
-    /// Deliberately lossy: for a mapped snapshot these bytes come from a file
-    /// that another process could in principle have altered, so this must
-    /// never be `from_utf8_unchecked`.
+    /// Lossy because mapped bytes come from a file another process could
+    /// alter; this must never use `from_utf8_unchecked`.
     pub fn display_name(&self, i: u32) -> Cow<'_, str> {
         String::from_utf8_lossy(self.name_orig(i))
     }
 
-    /// Full path to entry `i`, allocated on demand.
-    ///
-    /// Called only for the rows actually shown, never per entry.
+    /// Returns the full path to entry `i`. Allocates, so call it only for
+    /// displayed rows.
     pub fn full_path(&self, i: u32) -> String {
         let name = self.display_name(i);
         let mut s = String::with_capacity(self.prefix.len() + name.len() + 1);
@@ -276,8 +265,8 @@ impl Snapshot {
         s
     }
 
-    /// Longest name in the snapshot. Lets the matcher reject an over-long
-    /// query in O(1) instead of scanning the whole arena.
+    /// Returns the longest name length, letting the matcher reject an
+    /// over-long query in O(1).
     #[inline]
     pub fn max_name_len(&self) -> u32 {
         self.max_name_len
@@ -293,30 +282,29 @@ impl Snapshot {
         self.volume_serial
     }
 
-    /// Directory timestamp at capture time, when the source could supply one.
-    /// An unchanged stamp proves the listing is still current.
+    /// Returns the directory stamp at capture time, if the source supplied one.
+    /// An unchanged stamp means the listing is still current.
     #[inline]
     pub fn stamp(&self) -> Option<DirStamp> {
         self.stamp
     }
 
-    /// True when the source directory held more entries than the arena could
-    /// address. The UI must say so rather than silently showing a prefix.
+    /// Returns true when the directory held more entries than the arena could
+    /// address. The UI must report this.
     #[inline]
     pub fn truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Total bytes held by the arenas and the offsets table.
+    /// Returns the total bytes held by the arenas and the offsets table.
     pub fn memory_bytes(&self) -> usize {
         self.arenas.lower().len() + self.arenas.orig().len() + self.offsets.len() * 4
     }
 
     /// Verifies every structural invariant.
     ///
-    /// Cheap enough (a single pass over the offsets) to run against untrusted
-    /// persisted bytes at load time, which converts every subsequent indexing
-    /// operation from "trusted" to "proven in bounds".
+    /// A single pass over the offsets, cheap enough to run on persisted bytes
+    /// at load time so that all later indexing is proven in bounds.
     pub fn check_invariants(&self) -> Result<(), &'static str> {
         if self.offsets.is_empty() {
             return Err("offsets must contain at least the initial zero");
@@ -337,8 +325,7 @@ impl Snapshot {
         }
         let mut max_seen = 0u32;
         for w in self.offsets.windows(2) {
-            // Every entry carries at least its separator, so offsets are
-            // strictly increasing.
+            // Every entry includes its separator, so offsets strictly increase.
             if w[1] <= w[0] {
                 return Err("offsets must be strictly increasing");
             }
@@ -350,11 +337,11 @@ impl Snapshot {
         Ok(())
     }
 
-    /// Samples separator placement.
+    /// Samples separator placement every `stride` entries.
     ///
-    /// Checking every entry would touch every page and defeat lazy mapping;
-    /// a missing separator can only produce a wrong result, never unsafety,
-    /// because all indexing goes through the validated offsets.
+    /// Checking every entry would touch every page of a mapping. A missing
+    /// separator can only produce wrong results, not unsafety, because all
+    /// indexing uses the validated offsets.
     pub fn sample_separators(&self, stride: usize) -> Result<(), &'static str> {
         if self.len == 0 {
             return Ok(());
@@ -444,9 +431,9 @@ mod tests {
 
     #[test]
     fn offsets_are_strictly_increasing_even_for_empty_names() {
-        // An empty name still occupies its separator byte, which is what keeps
-        // the offsets strictly increasing and the galloping cursor in the
-        // matcher monotone.
+        // An empty name still occupies its separator byte, which keeps the
+        // offsets strictly increasing and the matcher's galloping cursor
+        // monotone.
         let mut b = SnapshotBuilder::new("V:\\");
         assert!(b.push_str(""));
         assert!(b.push_str("a"));
@@ -495,8 +482,6 @@ mod tests {
         s.check_invariants().unwrap();
     }
 
-    /// Validation of untrusted parts, which is what the persistence loader
-    /// relies on before it indexes a single byte of a mapped file.
     #[test]
     fn try_from_parts_rejects_corrupt_input() {
         let good = snap(["aa", "bb"].as_slice());

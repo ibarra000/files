@@ -1,12 +1,8 @@
-//! The interaction model, driven end to end with a fake clock.
+//! End-to-end tests of the interaction model, driven with a fake clock.
 //!
-//! `AppState::update` is a pure function of (event, time), which is what
-//! makes the whole debounce, staleness, selection and error model testable
-//! on a machine where neither network drive exists. These are the cases that
-//! would otherwise only be discoverable in production.
-//!
-//! Everything here goes through the public API, so it also serves as a check
-//! that the surface is usable from outside the crate.
+//! `AppState::update` is a pure function of (event, time), so debounce,
+//! staleness, selection and error handling are testable without the network
+//! drives. Everything goes through the public API.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,14 +26,14 @@ use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use files::search::verify::{AuditVerdict, VerifyOutcome};
 
-/// The settings every test here starts from: the defaults, plus the viewer
-/// that used to be built in, configured the way somebody would write it.
+/// The base settings for these tests: the defaults plus an `avwin` viewer for
+/// `.dwg` files.
 fn with_avwin() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
@@ -46,14 +42,10 @@ fn state() -> (AppState, Instant) {
     (AppState::new(with_avwin(), now), now)
 }
 
-/// A state with no share configured at all.
-///
-/// The only way a query now reaches nothing: every share is indexed, so there
-/// is no pattern left to fail to match.
+/// A state with no share configured.
 fn unconfigured_state() -> (AppState, Instant) {
-    // Built directly rather than parsed: the config layer refuses a file with
-    // no enabled mapping in it, which is why this phase is a defensive branch
-    // rather than something a user can reach by editing the file.
+    // Built directly because the config layer rejects a file with no enabled
+    // mapping; this state is a defensive branch, not reachable from config.
     let routes = files::paths::Routes::new(Vec::new(), files::paths::ConfigSource::BuiltIn);
     let settings = Settings::with_routes(Arc::new(routes), |s| s);
     let now = Instant::now();
@@ -95,9 +87,7 @@ fn hit(name: &str) -> Hit {
 
 // --- typing -----------------------------------------------------------
 
-/// Two characters is a search now, and so is one. The floor was three and
-/// is one, which is what Ueli does; what is still not a search is a line
-/// with nothing on it to search for.
+/// Any non-empty term is dispatched; only a line with no term is not.
 #[test]
 fn a_two_character_query_is_dispatched() {
     let (mut s, now) = state();
@@ -130,8 +120,7 @@ fn typing_arms_one_search_rather_than_one_per_keystroke() {
     assert!(s.search_due_at().is_some(), "nothing was armed");
     assert_eq!(s.phase, QueryPhase::LocalPending);
 
-    // And the pause produces exactly one, carrying the whole code rather than
-    // any of the eight prefixes on the way to it.
+    // The pause dispatches exactly one search, for the whole code.
     let tick = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
     let dispatched: Vec<_> = tick
         .cmds
@@ -146,25 +135,17 @@ fn typing_arms_one_search_rather_than_one_per_keystroke() {
 }
 
 /// An unusual query is searched for rather than refused.
-///
-/// This asserted the opposite: a pattern had to recognise a code before
-/// anything would look anywhere, so a string matching none of them never
-/// reached the index at all. Both shares are indexed now, so there is nothing
-/// to recognise - the query runs and finds nothing, which is a different
-/// answer from declining to look, and the two used to be indistinguishable.
 #[test]
 fn an_unusual_code_is_searched_for_rather_than_refused() {
     let (mut s, now) = state();
     type_in(&mut s, "!!!", now);
     assert_eq!(s.phase, QueryPhase::LocalPending);
     assert_ne!(s.empty_reason, Some(EmptyReason::NoSharesConfigured));
-    // Behind the pause now, like any other typed code.
     let r = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
     assert!(r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
 }
 
-/// With no share enabled there is nowhere to look, and saying so beats
-/// searching nothing and reporting no matches.
+/// With no share enabled the state reports that instead of searching nothing.
 #[test]
 fn a_configuration_with_no_enabled_share_says_so() {
     let (mut s, now) = unconfigured_state();
@@ -187,7 +168,7 @@ fn backspacing_to_empty_returns_to_idle() {
 
 #[test]
 fn key_releases_are_ignored() {
-    // Windows delivers both press and release; handling both doubles
+    // Windows delivers both press and release; handling both would double
     // every keystroke.
     let (mut s, now) = state();
     let mut ev = KeyEvent::new(Key::Char('a'), Mods::NONE);
@@ -241,9 +222,7 @@ fn a_cancelled_result_changes_nothing() {
 
 // --- keys -------------------------------------------------------------
 
-/// Esc clears and never exits. Two taps used to be enough to end the session
-/// by accident, which is the whole reason this changed - so the second tap is
-/// the interesting half of this test, not the first.
+/// Esc clears the input and never exits, including on an empty input.
 #[test]
 fn escape_clears_the_input_and_never_quits() {
     let (mut s, now) = state();
@@ -259,7 +238,7 @@ fn escape_clears_the_input_and_never_quits() {
         "Esc on an empty input must not end it either"
     );
 
-    // Still usable afterwards: clearing is not a terminal state.
+    // Clearing is not a terminal state.
     type_in(&mut s, "11-D-0704", now);
     assert_eq!(s.input, "11-D-0704");
     assert!(!s.should_quit);
@@ -284,14 +263,10 @@ fn ctrl_c_copies_the_selected_text() {
     assert!(!s.should_quit);
 }
 
-/// With no text selected it copies the path of the row the cursor is on,
-/// which is Ueli's binding for the same key.
+/// With no text selected, Ctrl+C copies the selected row's path.
 ///
-/// Neither meaning loses. A text selection is something the user made a
-/// moment ago and is unambiguously what they meant; with none, the only
-/// other thing on screen worth copying is the path. `view::actions` only
-/// advertises `Ctrl+C` on "Copy the path" while there is no selection, so
-/// nothing on screen ever names the key doing the other thing.
+/// `view::actions` advertises `Ctrl+C` on "Copy the path" only while there is
+/// no text selection, so the label always matches what the key does.
 #[test]
 fn ctrl_c_with_no_text_selected_copies_the_path() {
     let (mut s, now) = state();
@@ -312,8 +287,7 @@ fn ctrl_c_with_no_text_selected_copies_the_path() {
     assert_eq!(s.input, "11-D-0704", "the code must survive");
 }
 
-/// And with nothing at all it says so. Silence would read as the program
-/// ignoring the key, to anyone who remembers when it quit.
+/// With nothing to copy, Ctrl+C shows a toast and the session continues.
 #[test]
 fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
     let (mut s, now) = state();
@@ -331,11 +305,10 @@ fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
     assert_eq!(s.input, "11-D-0704", "the code must survive");
 }
 
-/// Ctrl+X takes the selection with it.
+/// Ctrl+X copies and removes the selection.
 ///
-/// Reaches the state machine as a `Char('x')` with Ctrl, which no keyboard
-/// ever sends: `gui::input` reconstructs it from the toolkit's `Event::Cut`,
-/// which is also what Shift+Delete arrives as.
+/// `gui::input` synthesizes Ctrl+`Char('x')` from the toolkit's `Event::Cut`,
+/// which Shift+Delete also produces.
 #[test]
 fn ctrl_x_cuts_the_selected_text() {
     let (mut s, now) = state();
@@ -358,8 +331,7 @@ fn ctrl_x_cuts_the_selected_text() {
     assert!(!s.should_quit);
 }
 
-/// With nothing selected there is nothing to remove, and saying so beats a
-/// key that silently does nothing.
+/// With nothing selected, Ctrl+X leaves the input alone and shows a toast.
 #[test]
 fn ctrl_x_with_no_selection_leaves_the_code_alone() {
     let (mut s, now) = state();
@@ -381,9 +353,8 @@ fn ctrl_x_with_no_selection_leaves_the_code_alone() {
     );
 }
 
-/// Ctrl+Q is the *only* way out, and the bindings most likely to be hit by
-/// accident are the ones this checks hardest. Esc in particular: two taps of
-/// it used to end the session, which is what put a deliberate quit key here.
+/// Ctrl+Q is the only binding that quits; common keys and their Ctrl and
+/// Shift forms do not.
 #[test]
 fn nothing_except_ctrl_q_quits_the_application() {
     let (mut s, now) = state();
@@ -438,8 +409,6 @@ fn ctrl_q_quits_and_asks_exactly_once() {
     );
 }
 
-/// Ctrl+C copies; it must not also be a way out. This is the binding someone
-/// reaching for a quit key is most likely to try first.
 #[test]
 fn ctrl_c_copies_rather_than_quitting() {
     let (mut s, now) = state();
@@ -450,14 +419,11 @@ fn ctrl_c_copies_rather_than_quitting() {
     assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Quit)));
 }
 
-/// AltGr is not a modifier this program has a binding for; it is how a
-/// European keyboard types a character.
+/// AltGr combinations type their character.
 ///
-/// Windows reports AltGr as `CONTROL | ALT`, so on a German, Polish or French
-/// layout it is how `@`, `{`, `[` and every accented letter are produced. The
-/// guard above exists to stop `Ctrl+W` inserting a literal `w`, and it was
-/// swallowing those too - which makes a whole class of characters untypable in
-/// the search box with no indication of why.
+/// Windows reports AltGr as `CONTROL | ALT`; on German, Polish or French
+/// layouts it produces `@`, `{`, `[` and accented letters, so the guard that
+/// drops unbound Ctrl/Alt combinations must not catch it.
 #[test]
 fn altgr_types_a_character_rather_than_being_swallowed() {
     let (mut s, now) = state();
@@ -471,7 +437,6 @@ fn altgr_types_a_character_rather_than_being_swallowed() {
     );
 }
 
-/// And the guard still does the job it was written for.
 #[test]
 fn a_control_combination_this_program_does_not_have_still_types_nothing() {
     let (mut s, now) = state();
@@ -482,8 +447,6 @@ fn a_control_combination_this_program_does_not_have_still_types_nothing() {
     assert_eq!(s.input, "", "a lone Ctrl or Alt combination is not text");
 }
 
-/// Ctrl and Alt combinations this program has no binding for used to fall
-/// through to the "it is a character, type it" arm: Ctrl+W typed a `w`.
 #[test]
 fn an_unbound_control_combination_does_not_type_a_letter() {
     let (mut s, now) = state();
@@ -504,8 +467,8 @@ fn enter_opens_the_selection() {
     );
 
     let r = s.update(press(Key::Enter), now);
-    // The request carries the typed code as well as the row, because the page
-    // set is rebuilt from the code rather than from the fifteen rows on screen.
+    // The request carries the typed code because the page set is rebuilt from
+    // the code, not from the rows on screen.
     assert!(matches!(
         &r.cmds[0],
         Cmd::Open(req)
@@ -518,8 +481,7 @@ fn enter_opens_the_selection() {
         1,
         "exactly one file is opened"
     );
-    // Opening is also the strongest signal that this was the code meant, so
-    // it is remembered at the same time.
+    // Opening a result also saves the query to history.
     assert!(
         r.cmds.iter().any(|c| matches!(c, Cmd::SaveHistory(_))),
         "{:?}",
@@ -531,8 +493,8 @@ fn enter_opens_the_selection() {
 fn enter_with_no_results_reports_rather_than_opening() {
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
-    // Enter inside the pause asks the matcher rather than answering from a
-    // list that belongs to the previous code. The report comes when it does.
+    // Enter during the debounce flushes the search instead of acting on the
+    // previous query's results; the report follows the result.
     let asked = s.update(press(Key::Enter), now);
     assert!(
         asked.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
@@ -554,12 +516,10 @@ fn enter_with_no_results_reports_rather_than_opening() {
     assert!(s.toast.is_some());
 }
 
-/// `F5` asks which drive rather than re-reading all of them.
+/// `F5` opens the drive list instead of refreshing anything.
 ///
-/// It used to mean "re-read every share, now". Almost every press wanted one
-/// of them, and across a few hundred people the difference is between a
-/// handful of passes over a three-hundred-thousand-folder share and several
-/// hundred simultaneous ones.
+/// Refreshing every share at once from many machines would load the file
+/// servers heavily, so refreshes are per drive.
 #[test]
 fn f5_opens_the_drive_list_rather_than_refreshing_everything() {
     let (mut s, now) = state();
@@ -595,10 +555,7 @@ fn enter_in_the_drive_list_updates_only_that_drive() {
     );
 }
 
-/// `A` used to refresh every drive at once. It does not any more: re-reading
-/// every share is some nine hundred trips to somebody else's file server, and
-/// one keystroke that starts all of them - on a few hundred machines - is an
-/// outage rather than a shortcut. Drives are refreshed one at a time now.
+/// `A` in the drive list refreshes nothing; drives are refreshed one at a time.
 #[test]
 fn a_in_the_drive_list_refreshes_nothing() {
     let (mut s, now) = state();
@@ -636,15 +593,7 @@ fn the_first_result_is_selected_by_default() {
     assert_eq!(s.selected_row(), Some(0));
 }
 
-/// Both ends of the list wrap, which is Ueli's arrow.
-///
-/// This used to assert the opposite, and the argument was not about the
-/// cursor: the panel drew a twelve-row window over the list, so a step off
-/// the foot landed on rank 0 and *the page* snapped back to the first
-/// screen. The results already read reappeared, and getting back meant
-/// walking the whole list again. The content band is a scroller now.
-/// Wrapping scrolls it to where rank 0 is, and Up from the first row is the
-/// quickest way to the three-hundredth.
+/// Up and Down wrap at both ends of the list.
 #[test]
 fn both_ends_of_the_list_wrap() {
     let (mut s, now) = state();
@@ -670,12 +619,10 @@ fn both_ends_of_the_list_wrap() {
     assert!(!s.should_quit);
 }
 
-/// A page does not, and Ueli has no page key to appeal to either way.
+/// PageUp and PageDown stop at the ends rather than wrapping.
 ///
-/// Six rows is not a landmark. A `PageDown` that came out somewhere near the
-/// top would be indistinguishable from one that had not moved at all, which
-/// is the failure wrapping a *step* cannot have - a step is one row, and one
-/// row is always visibly one row.
+/// A wrapped page would land at an arbitrary row near the other end, which
+/// is hard to tell apart from not moving.
 #[test]
 fn a_page_stops_at_the_ends_rather_than_wrapping() {
     let (mut s, now) = state();
@@ -692,7 +639,7 @@ fn a_page_stops_at_the_ends_rather_than_wrapping() {
     assert_eq!(s.selected_row(), Some(0), "PageUp wrapped");
 }
 
-/// The specific annoyance this design exists to avoid.
+/// A pinned selection follows its file when the results are reordered.
 #[test]
 fn a_pinned_selection_survives_a_result_update() {
     let (mut s, now) = state();
@@ -733,11 +680,10 @@ fn a_pinned_selection_that_disappears_clamps_and_reports() {
         now,
     );
     assert!(s.selection_lost, "the user should be told the list shifted");
-    // And is: the flag was maintained and read by nothing but this assertion
-    // for the whole of the rewrite, so it is checked here where it comes out.
+    // The flag must also reach the status line.
     let line = files::view::status::render(&s, std::time::SystemTime::now());
     assert!(
-        line.text.contains("The list changed"),
+        line.text.contains("File list changed"),
         "nothing on screen says so: {line:?}"
     );
     assert_eq!(
@@ -812,9 +758,8 @@ fn an_idle_state_has_no_deadline_so_the_loop_can_block() {
 
 // --- the clock ----------------------------------------------------------
 //
-// The reported symptom was that the age readout froze and then jumped: the
-// loop parked in an unbounded receive whenever nothing else was pending, so
-// time-derived text was only recomputed when a keystroke happened to arrive.
+// Time-derived text needs its own deadlines; otherwise the loop blocks
+// indefinitely and the readout only updates when other input arrives.
 
 fn publish(s: &mut AppState, id: MappingId, now: Instant, f: impl FnOnce(&mut IndexStatus)) {
     let mut status = IndexStatus::default();
@@ -837,14 +782,8 @@ fn a_session_with_no_index_still_costs_zero_wakeups() {
     assert_eq!(s.next_deadline(), None, "idle must stay free");
 }
 
-/// The ages are only on screen while the drive picker is open, so the wakeups
-/// they cost are only owed while it is.
-///
-/// They used to lead the status line in every healthy phase, which meant an
-/// idle panel with a loaded index ticked for as long as it was up - once a
-/// second, then once a minute, for a number nobody had asked to see. The
-/// picker is where somebody goes when they suspect the list is stale, and that
-/// is where the clock now runs.
+/// Index ages are shown only in the drive picker, so they schedule wakeups
+/// only while it is open.
 #[test]
 fn a_loaded_index_costs_nothing_until_the_drive_list_is_open() {
     let (mut s, now) = state();
@@ -866,8 +805,8 @@ fn a_loaded_index_costs_nothing_until_the_drive_list_is_open() {
     );
 }
 
-/// The assertion that distinguishes an aligned tick from a flat 1 Hz one: at
-/// ten minutes old the readout says `10m` and only changes on the minute.
+/// At ten minutes old the readout says `10m`, so the next wakeup is aligned to
+/// the minute rather than a flat 1 Hz tick.
 #[test]
 fn an_aged_index_wakes_on_the_minute_rather_than_every_second() {
     let (mut s, now) = state();
@@ -879,9 +818,8 @@ fn an_aged_index_wakes_on_the_minute_rather_than_every_second() {
     assert_eq!(s.next_deadline(), Some(now + Duration::from_secs(43)));
 }
 
-/// The most important test here. A deadline with no matching redraw arm is a
-/// busy spin: the loop wakes, gets `Response::none()`, leaves `dirty` false
-/// and re-blocks on a deadline already in the past.
+/// A deadline without a matching redraw is a busy spin: the loop wakes, gets
+/// `Response::none()`, leaves `dirty` false and re-blocks on a past deadline.
 #[test]
 fn redrawing_advances_the_anchor_so_the_deadline_moves_forward() {
     let (mut s, now) = state();
@@ -904,8 +842,8 @@ fn redrawing_advances_the_anchor_so_the_deadline_moves_forward() {
     );
 }
 
-/// Guards against "fixing" the freeze by redrawing on every tick, which would
-/// restore the fifty-frames-a-second poll through the back door.
+/// A tick before the readout changes must not redraw; redrawing on every tick
+/// would amount to constant polling.
 #[test]
 fn a_tick_before_the_readout_changes_asks_for_nothing() {
     let (mut s, now) = state();
@@ -953,9 +891,8 @@ fn the_retry_moment_itself_is_a_deadline() {
     assert_eq!(s.next_deadline(), Some(now + Duration::from_millis(400)));
 }
 
-/// `next_retry_at` is an absolute instant, unlike every other deadline here.
-/// Once it passes, an ungated term is permanently due - a full-speed redraw
-/// loop rather than a countdown.
+/// `next_retry_at` is an absolute instant, unlike the other deadlines. Once it
+/// passes it must stop scheduling wakeups, or the loop redraws at full speed.
 #[test]
 fn an_overdue_retry_stops_costing_wakeups() {
     let (mut s, now) = state();
@@ -977,8 +914,8 @@ fn an_overdue_retry_stops_costing_wakeups() {
 
 // --- one status per share ------------------------------------------------
 
-/// The regression test for the reported flicker. Two actors wrote one field,
-/// so the status line described whichever published last.
+/// Each share keeps its own status; one share's update does not replace
+/// another's.
 #[test]
 fn two_shares_publishing_statuses_do_not_overwrite_each_other() {
     let (mut s, now) = state();
@@ -993,7 +930,7 @@ fn two_shares_publishing_statuses_do_not_overwrite_each_other() {
     assert_eq!(s.index.entries, 1_284_551, "both shares are counted");
 }
 
-/// A fresh share must not vouch for a stale one.
+/// The aggregate age is that of the oldest share.
 #[test]
 fn the_aggregate_ages_from_the_oldest_share_not_the_newest() {
     let (mut s, now) = state();
@@ -1040,7 +977,7 @@ fn a_status_for_an_unknown_mapping_is_dropped_rather_than_panicking() {
     assert_eq!(r.redraw, Redraw::No);
 }
 
-/// The spinner must not stop while two of three shares are still walking.
+/// The state is busy while any share is busy.
 #[test]
 fn busy_means_any_share_is_busy() {
     let (mut s, now) = state();
@@ -1290,8 +1227,7 @@ fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
         r.cmds
     );
 
-    // All the way round, so a mode that F2 cannot reach is a failure here
-    // rather than something nobody notices.
+    // Cycle through every mode so an unreachable one fails here.
     s.update(press(Key::F(2)), now);
     assert_eq!(s.viewer, ViewerKind::App(0));
     assert!(
@@ -1303,19 +1239,18 @@ fn f2_toggles_the_viewer_and_asks_for_it_to_be_saved() {
     assert_eq!(s.viewer, ViewerKind::Auto, "it cycles back");
 }
 
-/// With no viewer configured F2 has only the built-in two to visit.
 #[test]
 fn f2_without_viewers_toggles_between_the_built_in_two() {
     let now = Instant::now();
-    let mut s = AppState::new(Settings::default(), now);
+    let mut s = AppState::new(Settings::fixture(), now);
     s.update(press(Key::F(2)), now);
     assert_eq!(s.viewer, ViewerKind::Pdf);
     s.update(press(Key::F(2)), now);
     assert_eq!(s.viewer, ViewerKind::Auto);
 }
 
-/// `Ctrl+E` opens with the first configured viewer, and with none it does
-/// nothing at all rather than open with something nobody chose.
+/// `Ctrl+E` opens with the first configured viewer, and does nothing when
+/// none is configured.
 #[test]
 fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     let (mut s, now) = state();
@@ -1328,7 +1263,7 @@ fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     });
     assert_eq!(opened, Some(ViewerKind::App(0)), "{:?}", r.cmds);
 
-    let mut none = AppState::new(Settings::default(), now);
+    let mut none = AppState::new(Settings::fixture(), now);
     type_in(&mut none, "11-D-0704", now);
     none.update(search_result(&view(&none), vec![hit("a.dwg")], 1, 9), now);
     let r = none.update(ctrl(Key::Char('e')), now);
@@ -1339,8 +1274,7 @@ fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     );
 }
 
-/// A doubled character is visible; a doubled toggle is a silent no-op that
-/// looks exactly like the key being broken.
+/// A key release must not toggle; a double toggle looks like a broken key.
 #[test]
 fn f2_on_key_release_does_not_toggle_twice() {
     let (mut s, now) = state();
@@ -1350,8 +1284,8 @@ fn f2_on_key_release_does_not_toggle_twice() {
     assert_eq!(s.viewer, ViewerKind::Auto, "a release must change nothing");
 }
 
-/// With FILES_VIEWER or --viewer in play the file value is ignored at the next
-/// start, so writing it would report a save that does nothing.
+/// With `FILES_VIEWER` or `--viewer` set, the config value is ignored at the
+/// next start, so F2 applies for the session only and saves nothing.
 #[test]
 fn f2_says_so_when_the_choice_cannot_be_persisted() {
     let (mut s, now) = state();
@@ -1367,10 +1301,9 @@ fn f2_says_so_when_the_choice_cannot_be_persisted() {
     assert!(t.text.contains("session only"), "{}", t.text);
 }
 
-/// Recall owns the arrows, Enter and Esc; every *other* key means "back to
-/// editing" and commits the highlighted entry. F2 is not editing - it changes
-/// which program opens a file - so it must not drag a code into the search box
-/// and run a query for it.
+/// During history recall, any key other than the arrows, Enter and Esc commits
+/// the highlighted entry. F2 is the exception: it changes the viewer without
+/// committing the entry or running a search.
 #[test]
 fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
     let (mut s, now) = state();
@@ -1388,8 +1321,6 @@ fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
     assert!(!r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })));
 }
 
-/// Choosing a different program to open a file with is not a reason to run
-/// the search again.
 #[test]
 fn f2_does_not_disturb_the_query_or_the_results() {
     let (mut s, now) = state();
@@ -1425,8 +1356,7 @@ fn enter_carries_the_viewer_that_is_active_now_not_the_one_configured_at_startup
     );
 }
 
-/// A drawing set silently missing page seven is the worst outcome here,
-/// because nothing on screen would ever reveal it.
+/// A partially assembled drawing set warns and names the skipped pages.
 #[test]
 fn a_partial_assembly_warns_and_names_what_was_skipped() {
     let (mut s, now) = state();
@@ -1460,8 +1390,7 @@ fn a_complete_assembly_says_nothing() {
     assert!(s.toast.is_none(), "{:?}", s.toast);
 }
 
-/// A drawing set longer than the ceiling opens without its tail. Saying
-/// nothing would leave the user believing they had seen the whole thing.
+/// A drawing set longer than the page limit opens truncated, with a warning.
 #[test]
 fn a_truncated_document_says_the_set_is_longer() {
     let (mut s, now) = state();
@@ -1494,8 +1423,7 @@ fn a_saved_viewer_is_confirmed_on_screen() {
     assert!(t.text.contains("avwin"), "{}", t.text);
 }
 
-/// The toggle still applies, so this is a warning about persistence rather
-/// than a failure of the keypress.
+/// The toggle still applies, so a failed save is a warning, not an error.
 #[test]
 fn a_failed_viewer_save_warns_rather_than_ending_the_session() {
     let (mut s, now) = dev_state();
@@ -1561,8 +1489,8 @@ fn a_busy_index_keeps_the_frame_animating() {
     assert!(s.is_busy());
 }
 
-/// Several assertions need an immutable view of the state while also
-/// mutating it.
+/// A snapshot of the fields `search_result` needs, so a result can be built
+/// while the state is mutably borrowed.
 fn view(s: &AppState) -> AppStateView {
     AppStateView {
         query_epoch: s.query_epoch(),
@@ -1591,16 +1519,6 @@ fn search_result(view: &AppStateView, hits: Vec<Hit>, matched: u32, total: u32) 
 }
 
 // --- the results list --------------------------------------------------
-//
-// This section used to be about a *grid*: results flowed down each column and
-// wrapped into the next, the way a newspaper does, and Left and Right walked
-// between columns. That earned its complexity in a terminal, where the pane was
-// as wide as somebody's window and a single column wasted most of it.
-//
-// A window shows one scrolling list, which is both the native idiom and one
-// fewer thing to explain - and with it went `Grid`, `visible_range`,
-// `move_columns`, `move_pages` and the four tests that covered the flow. What
-// is kept below is every invariant that was never about columns.
 
 fn with_results(s: &mut AppState, now: Instant, n: usize) {
     type_in(s, "11-D-0704", now);
@@ -1612,7 +1530,7 @@ fn many_hits(n: usize) -> Vec<Hit> {
     (0..n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect()
 }
 
-/// Down walks the list rank by rank and stops at the end rather than wrapping.
+/// Down walks the list one rank at a time.
 #[test]
 fn down_walks_the_list_and_stops_at_the_end() {
     let (mut s, now) = state();
@@ -1626,11 +1544,7 @@ fn down_walks_the_list_and_stops_at_the_end() {
     assert_eq!(s.selected_row(), Some(3), "walked off the end");
 }
 
-/// And the head of the list comes round to its foot.
-///
-/// The keyboard is not handed anywhere: the search field never gave it up,
-/// so Up at the top has always been a key with nothing above it. It is the
-/// way to the end of the list now rather than a key that does nothing.
+/// Up from the first row wraps to the last.
 #[test]
 fn up_at_the_top_of_the_list_comes_round_to_the_end() {
     let (mut s, now) = state();
@@ -1645,8 +1559,8 @@ fn up_at_the_top_of_the_list_comes_round_to_the_end() {
     assert_eq!(again.redraw, Redraw::Yes, "and it is a new frame");
 }
 
-/// Down is the way into the shortcuts, as Up is the way into the codes used
-/// before. One sentence: up is what you looked for, down is what you set up.
+/// On an empty line, Down steps into the shortcut list (Up steps into history),
+/// and Enter takes the highlighted shortcut.
 #[test]
 fn down_steps_into_the_shortcuts_and_enter_takes_one() {
     let now = Instant::now();
@@ -1658,21 +1572,20 @@ fn down_steps_into_the_shortcuts_and_enter_takes_one() {
     assert_eq!(s.alias_cursor(), Some(0));
     s.update(press(Key::Down), now);
     assert_eq!(s.alias_cursor(), Some(1));
-    // A handful of entries, so the far end is one press away either way.
     s.update(press(Key::Down), now);
     assert_eq!(s.alias_cursor(), Some(0), "the list did not come round");
     s.update(press(Key::Up), now);
     assert_eq!(s.alias_cursor(), Some(1));
 
-    // Enter puts the *name* in the box, because that is what a user would
-    // have typed - so the expansion fires the ordinary way.
+    // Enter inserts the shortcut's name, so it expands the same way as typed
+    // text.
     s.update(press(Key::Enter), now);
     assert_eq!(s.input.text(), "gd");
     assert_eq!(s.alias_cursor(), None, "the list stayed up under the code");
 }
 
-/// Escape steps off the list rather than taking the panel with it, which is
-/// the same exception the drive picker and the recall list get.
+/// The first Escape leaves the shortcut list; only the second dismisses the
+/// panel, as with the drive picker and the recall list.
 #[test]
 fn escape_steps_off_the_shortcuts_first() {
     let now = Instant::now();
@@ -1692,12 +1605,10 @@ fn escape_steps_off_the_shortcuts_first() {
         r.cmds
     );
 
-    // And a second press does put it away.
     let r = s.update(press(Key::Esc), now);
     assert!(r.cmds.iter().any(|c| matches!(c, Cmd::DismissOverlay)));
 }
 
-/// Typing steps off the list, whichever way the line was changed.
 #[test]
 fn typing_steps_off_the_shortcuts() {
     let now = Instant::now();
@@ -1710,7 +1621,7 @@ fn typing_steps_off_the_shortcuts() {
     assert!(!s.showing_aliases(), "the box is not empty any more");
 }
 
-/// Two shortcuts, so a cursor that moves has somewhere to move to.
+/// Settings with two shortcuts.
 fn with_aliases() -> Settings {
     Settings {
         aliases: std::sync::Arc::new(files::alias::Aliases::new(vec![
@@ -1725,13 +1636,11 @@ fn with_aliases() -> Settings {
                 note: None,
             },
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
-/// Ctrl+P and Ctrl+N are the arrows, for a hand that does not want to leave
-/// the home row - and they are the *same* arrows, not a second copy of the
-/// arithmetic.
+/// Ctrl+P and Ctrl+N behave exactly like Up and Down.
 #[test]
 fn the_home_row_arrows_are_the_arrows() {
     for (chord, arrow) in [(Key::Char('n'), Key::Down), (Key::Char('p'), Key::Up)] {
@@ -1752,8 +1661,7 @@ fn the_home_row_arrows_are_the_arrows() {
     }
 }
 
-/// And Ctrl+L selects the code, which is what focusing a search box does
-/// everywhere else on this machine.
+/// Ctrl+L selects the whole input, as focusing a search box does elsewhere.
 #[test]
 fn ctrl_l_selects_the_whole_code() {
     let (mut s, now) = state();
@@ -1764,15 +1672,12 @@ fn ctrl_l_selects_the_whole_code() {
     assert_eq!(s.input.selected_text(), Some("11-D-0704"));
 }
 
-/// The arrows move the selection; the caret keys move the caret. There is no
-/// mode in which one becomes the other, which is the whole of what collapsing
-/// `Focus` bought.
+/// Up and Down move the selection; Left and Right always move the caret.
 #[test]
 fn left_and_right_always_move_the_caret() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
 
-    // Even with the selection deep in the list.
     for _ in 0..5 {
         s.update(press(Key::Down), now);
     }
@@ -1783,13 +1688,9 @@ fn left_and_right_always_move_the_caret() {
     let typed = s.update(key('X'), now);
 
     assert_eq!(s.input.text(), "11-D-070X4", "the caret moved, not the row");
-    // Asserted on the deadline rather than on the dispatch, and on the
-    // dispatch rather than on the selection going away. Typing used to empty
-    // the list, so "the row changed" was a usable proxy for "the search
-    // re-ran"; then the results began surviving the keystroke, and now the
-    // search itself waits for a pause. What must still be true is that the
-    // keystroke *re-armed* it. See
-    // `typing_keeps_the_results_until_the_new_ones_arrive` below.
+    // Typing keeps the results and debounces the search, so the check is that
+    // the keystroke re-armed it. See
+    // `typing_keeps_the_results_until_the_new_ones_arrive`.
     assert!(
         typed.cmds.is_empty(),
         "typing dispatched rather than arming: {:?}",
@@ -1807,18 +1708,11 @@ fn left_and_right_always_move_the_caret() {
     let _ = row;
 }
 
-/// What is on screen stays on screen until there is something to put in its
-/// place.
+/// Results stay on screen until their replacement arrives.
 ///
-/// `Cmd::Search` is dispatched at the end of the turn and answered on another
-/// thread, so the frame that asks the question is always drawn before the
-/// answer arrives. Emptying the list here meant every frame drawn in that gap
-/// showed no results - which is not a shorter list, it is a different body
-/// three hundred points shorter, reached through a cross-fade. Once per
-/// character typed.
-///
-/// Keeping them is safe because `on_search` is epoch-guarded and `apply_hits`
-/// replaces wholesale: the worst a superseded set can do is survive one frame.
+/// The search is answered on another thread, so clearing the list on each
+/// keystroke would collapse the panel between frames. This is safe because
+/// `on_search` is epoch-guarded and `apply_hits` replaces wholesale.
 #[test]
 fn typing_keeps_the_results_until_the_new_ones_arrive() {
     let (mut s, now) = state();
@@ -1839,15 +1733,13 @@ fn typing_keeps_the_results_until_the_new_ones_arrive() {
         "and the selection went with them"
     );
 
-    // And they are replaced, not merged, when the answer does arrive.
+    // The answer replaces them rather than merging.
     let v = view(&s);
     s.update(search_result(&v, many_hits(2), 2, 9_000), now);
     assert_eq!(s.hits.len(), 2);
 }
 
-/// The branches that have *decided* there is nothing to search for still
-/// clear the list. A code deleted back to nothing must not leave the previous
-/// code's results sitting under an empty search box.
+/// A line with nothing to search for clears the results.
 #[test]
 fn a_query_that_stops_being_one_does_clear_the_results() {
     let (mut s, now) = state();
@@ -1863,7 +1755,6 @@ fn a_query_that_stops_being_one_does_clear_the_results() {
     assert_eq!(s.selected_row(), None);
 }
 
-/// A whole listful at a time, and the ends still hold.
 #[test]
 fn paging_reaches_the_ends_of_the_list() {
     let (mut s, now) = state();
@@ -1879,51 +1770,36 @@ fn paging_reaches_the_ends_of_the_list() {
     assert_eq!(s.selected_row(), Some(0), "PageUp did not reach the top");
 }
 
-/// The bug that made holding an arrow key look like the program had hung.
-///
-/// The selection walked the whole list while the panel drew the first
-/// screenful and pinned the highlight to its last row, so every frame past
-/// that was pixel-identical to the one before it. Frames were still being
-/// produced - each auto-repeat woke the loop - the panel simply had nothing
-/// new to say, and `Enter` would have opened a file that was not on screen.
-///
-/// This used to assert on `scroll_top` as well, because the state machine
-/// held the first rank on screen and the renderer drew a window from it. The
-/// content band is a scroller now and owns that; what is left here is the
-/// half that was always the state machine's - the cursor walks the whole
-/// list, in both directions, and stops at each end.
+/// Holding Down walks the whole list, past the first screenful, and wraps.
 #[test]
 fn holding_down_walks_the_whole_list_rather_than_freezing_on_one_row() {
     let (mut s, now) = state();
     with_results(&mut s, now, 200);
 
-    // Down to the foot of what fits on one screen.
+    // To the last row of the first screenful.
     for _ in 0..VISIBLE_ROWS - 1 {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS - 1));
 
-    // And one past it, which is where it used to stop moving.
+    // And one past it.
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(VISIBLE_ROWS));
 
-    // All the way to the end. Exactly to it, because the arrows wrap now and
-    // an overshoot would come round rather than pile up against the foot.
+    // Exactly to the end; an overshoot would wrap.
     for _ in 0..(199 - VISIBLE_ROWS) {
         s.update(press(Key::Down), now);
     }
     assert_eq!(s.selected_row(), Some(199));
 
-    // One more brings it round to the top, and the way back is the way it
-    // came.
+    // One more wraps to the top, and Up wraps back.
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(0), "the foot did not come round");
     s.update(press(Key::Up), now);
     assert_eq!(s.selected_row(), Some(199));
 }
 
-/// A list that shrinks under a cursor near its end must not leave the cursor
-/// pointing past it - one keystroke from opening a file that is not there.
+/// When the list shrinks, the cursor is clamped into range.
 #[test]
 fn a_shorter_result_set_pulls_the_cursor_back() {
     let (mut s, now) = state();
@@ -1949,14 +1825,13 @@ fn a_shorter_result_set_pulls_the_cursor_back() {
     );
 }
 
-/// The cap is what makes a long list worth having at all.
+/// The last of `MAX_RESULTS` results is reachable.
 #[test]
 fn far_more_than_one_screenful_of_results_is_reachable() {
     let (mut s, now) = state();
     with_results(&mut s, now, files::config::MAX_RESULTS);
 
-    // One Up, which wraps straight onto the last of them. The arrows used to
-    // stop at both ends, so this walked the whole list down to get here.
+    // Up from the first row wraps to the last.
     s.update(press(Key::Up), now);
     assert_eq!(
         s.selected_row(),
@@ -1973,7 +1848,7 @@ fn in_columns(columns: usize) -> (AppState, Instant) {
     let now = Instant::now();
     let settings = Settings {
         columns,
-        ..Settings::default()
+        ..Settings::fixture()
     };
     (AppState::new(settings, now), now)
 }
@@ -1999,8 +1874,8 @@ fn in_columns_down_and_up_stay_in_the_column() {
     assert_eq!(s.selected_row(), Some(3));
 }
 
-/// Tab moves to the same place one column over, and after that Up and Down
-/// keep to the new column - there is no mode to leave.
+/// Tab moves one column right on the same line; Up and Down then stay in the
+/// new column.
 #[test]
 fn tab_moves_to_the_same_line_of_the_next_column() {
     let (mut s, now) = in_columns(3);
@@ -2020,7 +1895,6 @@ fn tab_moves_to_the_same_line_of_the_next_column() {
     assert_eq!(s.selected_row(), Some(10), "Down stayed in the new column");
 }
 
-/// Shift+Tab is the way back, to the same line.
 #[test]
 fn shift_tab_moves_to_the_same_line_of_the_previous_column() {
     let (mut s, now) = in_columns(3);
@@ -2040,8 +1914,7 @@ fn shift_tab_moves_to_the_same_line_of_the_previous_column() {
     assert_eq!(s.selected_row(), Some(3));
 }
 
-/// The ends of a line hold rather than wrapping onto the next one, which is
-/// Down's job.
+/// Tab and Shift+Tab stop at the ends of a line rather than wrapping.
 #[test]
 fn tab_holds_at_the_ends_of_the_line() {
     let (mut s, now) = in_columns(2);
@@ -2055,7 +1928,6 @@ fn tab_holds_at_the_ends_of_the_line() {
     assert_eq!(s.selected_row(), Some(1), "Tab left the last column");
 }
 
-/// One column has nowhere sideways to go, so Tab does nothing to the list.
 #[test]
 fn tab_leaves_a_single_column_alone() {
     let (mut s, now) = state();
@@ -2064,8 +1936,7 @@ fn tab_leaves_a_single_column_alone() {
     assert_eq!(s.selected_row(), Some(0));
 }
 
-/// Off the foot of a column is its head, as off the foot of a single list is
-/// its top - never a jump sideways into another column.
+/// Up and Down wrap within the current column, never into another one.
 #[test]
 fn in_columns_the_wrap_keeps_to_the_column() {
     let (mut s, now) = in_columns(3);
@@ -2075,16 +1946,15 @@ fn in_columns_the_wrap_keeps_to_the_column() {
     s.update(press(Key::Tab), now);
     assert_eq!(s.selected_row(), Some(2), "precondition: the third column");
 
-    // Up from its head goes to its foot, which is on the line above the last.
+    // The column's last row is on the second-to-last line.
     s.update(press(Key::Up), now);
     assert_eq!(s.selected_row(), Some(5));
-    // And Down from there comes back round to its head.
     s.update(press(Key::Down), now);
     assert_eq!(s.selected_row(), Some(2));
 }
 
-/// A page is a screen of lines, which in columns is that many times more
-/// results - and the column is kept.
+/// A page moves `VISIBLE_ROWS` lines, which is `VISIBLE_ROWS * columns`
+/// results, and keeps the column.
 #[test]
 fn in_columns_a_page_moves_a_screen_of_lines_and_keeps_the_column() {
     let (mut s, now) = in_columns(2);
@@ -2095,16 +1965,14 @@ fn in_columns_a_page_moves_a_screen_of_lines_and_keeps_the_column() {
     assert_eq!(s.selected_row(), Some(1 + VISIBLE_ROWS * 2));
 }
 
-// --- the pause, and what must not go wrong inside it --------------------
+// --- the debounce window -------------------------------------------------
 
-/// Enter typed before the pause elapses must not open the row on screen: that
-/// row answers the *previous* code. Opening it would open the wrong file
-/// without saying so, which is the worst thing this program could do.
+/// Enter before the debounce elapses must not open the row on screen, which
+/// belongs to the previous query; it waits for the new result instead.
 #[test]
 fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
     let (mut s, now) = state();
 
-    // A settled query, with results for the code as it stands.
     type_in(&mut s, "11-D-070", now);
     let v = view(&s);
     s.update(
@@ -2113,7 +1981,6 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
     );
     assert_eq!(s.hits.len(), 1);
 
-    // One more character, then Enter straight away.
     s.update(key('4'), now);
     assert!(s.search_due_at().is_some());
     let pressed = s.update(press(Key::Enter), now);
@@ -2128,7 +1995,7 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
         pressed.cmds
     );
 
-    // And when the answer lands, that is what gets opened.
+    // The new result is what gets opened.
     let v = view(&s);
     let r = s.update(
         search_result(&v, vec![hit("11-D-0704-NEW.pdf")], 1, 9_000),
@@ -2145,8 +2012,6 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
     );
 }
 
-/// An edit between Enter and the answer cancels the open. The keystroke was
-/// about a code the user has since moved on from.
 #[test]
 fn an_edit_between_enter_and_the_answer_cancels_the_open() {
     let (mut s, now) = state();
@@ -2162,7 +2027,7 @@ fn an_edit_between_enter_and_the_answer_cancels_the_open() {
     );
 }
 
-/// A matcher that never answers must not leave Enter dead.
+/// If the matcher never answers a pending Enter, the watchdog reports it.
 #[test]
 fn a_matcher_that_never_answers_an_enter_gives_the_keystroke_back() {
     let (mut s, now) = state();
@@ -2174,10 +2039,10 @@ fn a_matcher_that_never_answers_an_enter_gives_the_keystroke_back() {
     assert!(s.toast.is_some(), "the keystroke was swallowed");
 }
 
-/// The local answer may not walk the phase back out of the verification.
+/// A local result does not move the phase back out of verifying.
 ///
-/// Both deadlines are 300ms, so both fall due on one tick and either can
-/// answer first. A local answer is never news about the server.
+/// Both debounces are 300 ms, so they fall due on the same tick and either
+/// can answer first.
 #[test]
 fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
     let (mut s, now) = state();
@@ -2187,7 +2052,6 @@ fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
     s.update(AppEvent::Tick, due);
     assert!(s.phase.is_verifying(), "the verification did not start");
 
-    // The matcher answers a frame later, as it always does.
     let v = view(&s);
     s.update(search_result(&v, vec![hit("a.pdf")], 1, 9_000), due);
     assert!(
@@ -2198,9 +2062,10 @@ fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
     assert_eq!(s.hits.len(), 1, "and it still applied the results");
 }
 
-/// A cleared field must leave nothing armed. This one is not caught by the
-/// epoch guard: the edit bumps the epoch on its way past, so a late dispatch
-/// carries the current one and its answer would be accepted.
+/// Clearing the field disarms every deadline.
+///
+/// The epoch guard does not cover this: a late dispatch would carry the
+/// current epoch, so its answer would be accepted.
 #[test]
 fn clearing_the_field_stands_every_clock_down() {
     let (mut s, now) = state();
@@ -2216,8 +2081,7 @@ fn clearing_the_field_stands_every_clock_down() {
     assert!(s.next_deadline().is_none(), "the loop cannot block");
 }
 
-/// A pasted code arrives whole, so it is searched for at once. Nobody pastes
-/// half a job number.
+/// A paste is complete input, so it is searched immediately without debounce.
 #[test]
 fn a_paste_is_searched_for_at_once_rather_than_debounced() {
     let (mut s, now) = state();
@@ -2232,17 +2096,10 @@ fn a_paste_is_searched_for_at_once_rather_than_debounced() {
 
 // --- the house style ----------------------------------------------------
 
-/// Every toast this state machine can raise, held to the house style.
+/// Raises every toast the state machine can produce and returns their text.
 ///
-/// Toasts are written here and drawn by `view::status` in the same 13 pt run
-/// as the status line, which is what makes them status text however far from
-/// `view` they live. For the whole of the rewrite that was invisible, because
-/// they were computed and thrown away - so by the time anything drew them the
-/// footer alternated between `Searching...` and `nothing to open` seconds
-/// apart, in two different conventions, and nobody had ever seen it happen.
-///
-/// A toast this cannot reach is a toast nothing here is checking, so a new
-/// `set_toast` belongs in this list.
+/// Toasts are drawn by `view::status` as status text, so they follow the same
+/// style. Add each new `set_toast` call site here.
 fn every_toast() -> Vec<String> {
     let mut out = Vec::new();
     let mut raised = |s: &AppState| {
@@ -2255,7 +2112,7 @@ fn every_toast() -> Vec<String> {
         )
     };
 
-    // Nothing selected, and nothing to open.
+    // Nothing to copy, and nothing to open.
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(ctrl(Key::Char('c')), now);
@@ -2267,10 +2124,8 @@ fn every_toast() -> Vec<String> {
     s.update(press(Key::Enter), now);
     raised(&s);
 
-    // And something to open, which says so while it is being assembled. In
-    // `Pdf`, because that is now the only mode that assembles anything:
-    // `Auto` hands the file to the system, which is a call that returns before
-    // a notice about it could be read.
+    // An open in progress. Uses `Pdf` because it is the only mode that
+    // assembles a document; `Auto` hands off to the system immediately.
     let (mut s, now) = state();
     s.viewer = ViewerKind::Pdf;
     with_results(&mut s, now, 4);
@@ -2278,7 +2133,7 @@ fn every_toast() -> Vec<String> {
     s.update(press(Key::Enter), now);
     raised(&s);
 
-    // The clipboard, in all three of its answers.
+    // Clipboard outcomes.
     for msg in [
         ClipboardMsg::Copied { chars: 1 },
         ClipboardMsg::Copied { chars: 9 },
@@ -2292,7 +2147,7 @@ fn every_toast() -> Vec<String> {
         raised(&s);
     }
 
-    // Opening, in every way it can end other than cleanly.
+    // Open outcomes other than a clean launch.
     for msg in [
         OpenMsg::Launched {
             path: "R:\\11d\\a.pdf".into(),
@@ -2319,7 +2174,7 @@ fn every_toast() -> Vec<String> {
         raised(&s);
     }
 
-    // Every viewer, saved and unsaveable.
+    // Every viewer, saved and not saveable.
     for viewer in [ViewerKind::Auto, ViewerKind::Pdf, ViewerKind::App(0)] {
         let (mut s, now) = state();
         let name = viewer.name(&s.settings.viewers).into();
@@ -2338,7 +2193,6 @@ fn every_toast() -> Vec<String> {
         raised(&unsaveable);
     }
 
-    // An actor that stopped.
     let (mut s, now) = state();
     s.update(
         AppEvent::ActorDied {
@@ -2349,7 +2203,7 @@ fn every_toast() -> Vec<String> {
     );
     raised(&s);
 
-    // The hotkey that could not be claimed.
+    // The hotkey could not be registered.
     let (mut s, now) = state();
     s.update(
         AppEvent::Hotkey(files::app::event::HotkeyMsg::Unavailable {
@@ -2361,7 +2215,7 @@ fn every_toast() -> Vec<String> {
     );
     raised(&s);
 
-    // A refresh, both ways.
+    // A refresh, succeeding and failing.
     for error in [None, Some(EnumError::Transient(53))] {
         let (mut s, now) = state();
         s.update(
@@ -2376,17 +2230,14 @@ fn every_toast() -> Vec<String> {
         raised(&s);
     }
 
-    // The drive picker. One drive, because there is no longer a key that
-    // updates all of them.
+    // The drive picker refreshing one drive.
     let (mut s, now) = state();
     s.update(press(Key::F(5)), now);
     s.update(press(Key::Enter), now);
     raised(&s);
 
-    // A search that never came back. Enter has to land while one is still
-    // due, which is what arms the watchdog - pressing it over a list that has
-    // already arrived opens a file instead, and pressing it after the debounce
-    // has fired opens nothing and says so.
+    // A search that never returned. Enter must arrive while a search is still
+    // pending, since that is what arms the watchdog.
     let (mut s, now) = state();
     type_in(&mut s, "11-D-0704", now);
     s.update(press(Key::Enter), now);
@@ -2415,10 +2266,10 @@ fn every_toast_keeps_the_house_style() {
     );
 }
 
-/// A toast starts the way a line starts.
+/// Every toast starts with a capital letter.
 ///
-/// The exception is the actor name in `<actor> stopped unexpectedly`, which is
-/// an internal identifier printed verbatim beside the same name in the log.
+/// The exception is `<actor> stopped unexpectedly`, where the actor name is an
+/// internal identifier printed verbatim, matching the log.
 #[test]
 fn every_toast_starts_the_way_a_line_should() {
     for toast in every_toast() {
@@ -2434,9 +2285,8 @@ fn every_toast_starts_the_way_a_line_should() {
 
 // --- narrowing what is already on screen ------------------------------------
 
-/// F3 and F4 edit the line rather than holding a filter beside it. That is
-/// what keeps the query in one place: recalled with the line, copied with the
-/// line, and visible without a chip anybody has to notice.
+/// F3 and F4 rewrite the input text rather than holding a separate filter, so
+/// the whole query is visible, recalled and copied with the line.
 #[test]
 fn f3_writes_the_narrowing_into_the_search_box() {
     let (mut s, now) = state();
@@ -2473,8 +2323,8 @@ fn the_two_narrowings_compose_without_either_dropping_the_other() {
     assert_eq!(s.input.text(), "11-D-0704* ext:pdf");
 }
 
-/// A deliberate press is not a character on the way to a longer code, so
-/// there is nothing to wait for - the same argument the paste path makes.
+/// Narrowing is a complete edit, so the search is dispatched without debounce,
+/// as with a paste.
 #[test]
 fn narrowing_dispatches_the_search_at_once_rather_than_waiting_out_the_pause() {
     let (mut s, now) = state();
@@ -2491,10 +2341,7 @@ fn narrowing_dispatches_the_search_at_once_rather_than_waiting_out_the_pause() {
     assert!(s.search_due_at().is_none());
 }
 
-/// A hand-typed filter the key could not have produced cycles back to no
-/// filter. Guessing where `ext:sldprt` sits in a list that does not hold it
-/// would be inventing an answer; clearing it is the one step that is always
-/// what it looks like.
+/// F4 clears a typed `ext:` filter that is not in its cycle.
 #[test]
 fn a_hand_typed_type_the_key_does_not_know_is_cleared_rather_than_guessed_at() {
     let (mut s, now) = state();
@@ -2504,8 +2351,7 @@ fn a_hand_typed_type_the_key_does_not_know_is_cleared_rather_than_guessed_at() {
     assert_eq!(s.input.text(), "11-D-0704");
 }
 
-/// The line is the query, so a narrowed search is what gets remembered and
-/// what comes back on Up.
+/// The dispatched query carries the type filter added by F4.
 #[test]
 fn a_narrowed_search_is_dispatched_with_its_filter_intact() {
     let (mut s, now) = state();
@@ -2525,8 +2371,8 @@ fn a_narrowed_search_is_dispatched_with_its_filter_intact() {
     assert_eq!(dispatched[0].types().len(), 1);
 }
 
-/// `*` cannot occur in a Windows filename, so reading it literally would be a
-/// guaranteed empty list with nothing on screen to explain it.
+/// A `*` inside a term is reported as a bad query; it cannot occur in a
+/// Windows filename, so a literal search could never match.
 #[test]
 fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
     let (mut s, now) = state();
@@ -2540,8 +2386,8 @@ fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
     assert!(matches!(s.empty_reason, Some(EmptyReason::BadQuery { .. })));
 }
 
-/// The floor is counted on the thing that is swept for, not on the line.
-/// `  ext:pdf` is a nine-character line with no needle in it.
+/// The minimum length applies to the search term, not the whole line:
+/// `  ext:pdf` has nine characters but no term.
 #[test]
 fn the_minimum_length_is_judged_on_the_code_and_not_on_the_whole_line() {
     let (mut s, now) = state();
@@ -2629,8 +2475,8 @@ fn local_answer(s: &AppState, hits: Vec<Hit>) -> AppEvent {
     })
 }
 
-/// Typing must not put a round trip on somebody elses file server per
-/// keystroke, so the live shares wait longer than the local sweep does.
+/// Live shares use a longer debounce than the local search, so typing does not
+/// cost a file-server round trip per keystroke.
 #[test]
 fn the_live_shares_are_asked_only_after_a_longer_pause_than_the_indexes() {
     let (mut s, now) = live_state();
@@ -2650,9 +2496,8 @@ fn the_live_shares_are_asked_only_after_a_longer_pause_than_the_indexes() {
     assert!(s.live.as_ref().is_some_and(|l| l.is_asking()));
 }
 
-/// Phase two arrives a second after phase one. Replacing the list would empty
-/// it and refill it, which is the flinch `on_input_changed` avoids during
-/// typing, except this one lands after the typing stopped.
+/// A live answer is merged into the local results; replacing them would empty
+/// and refill the list after typing has stopped.
 #[test]
 fn a_live_answer_merges_into_the_local_results_rather_than_replacing_them() {
     let (mut s, now) = live_state();
@@ -2671,8 +2516,8 @@ fn a_live_answer_merges_into_the_local_results_rather_than_replacing_them() {
     assert!(s.live.as_ref().is_some_and(|l| !l.is_asking()));
 }
 
-/// The keystroke that superseded it already bumped the epoch, so a late answer
-/// has to be dropped rather than folded into a different querys results.
+/// A live answer with a superseded epoch is dropped rather than merged into
+/// another query's results.
 #[test]
 fn a_live_answer_for_a_superseded_keystroke_is_dropped() {
     let (mut s, now) = live_state();
@@ -2690,9 +2535,8 @@ fn a_live_answer_for_a_superseded_keystroke_is_dropped() {
     assert!(s.hits.is_empty(), "a superseded answer reached the list");
 }
 
-/// The note on `stand_down`: a command armed on a field that has since been
-/// cleared is not caught by the epoch guard, because the epoch was already
-/// bumped on the way past.
+/// Clearing the field also disarms the live deadline; see `stand_down`. The
+/// epoch guard cannot catch it because the epoch was already bumped.
 #[test]
 fn clearing_the_field_retires_the_live_deadline_too() {
     let (mut s, now) = live_state();
@@ -2707,23 +2551,16 @@ fn clearing_the_field_retires_the_live_deadline_too() {
     assert!(s.live.is_none());
 }
 
-/// The claim this program exists not to let somebody act on by mistake. A live
-/// share answers for the folders one query reached, so an empty list is only
-/// honestly "no matches" when everything was reached.
-///
-/// Note what the list never passes *through*: not "no matches" before the
-/// drive is asked, and not "no matches" after it came back short. There is no
-/// moment in the sequence where the panel claims the file does not exist.
+/// An empty list from a partly searched live share never reads as "no
+/// matches", neither before the share answers nor after a partial answer.
 #[test]
 fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
     let (mut s, now) = live_state();
     type_in(&mut s, "11-D-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
-    // The local sweep answers first and finds nothing. That is *not* an
-    // answer about the share: the drive has not been asked yet, and on a live
-    // share whose whole index is what past searches found, an empty first
-    // sweep is the ordinary case rather than the interesting one.
+    // The local search answers first and finds nothing. That says nothing
+    // about the live share, which has not been asked yet.
     let local = local_answer(&s, Vec::new());
     s.update(local, now);
     assert!(
@@ -2745,8 +2582,7 @@ fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
     }
 }
 
-/// A share that could not be asked at all is a different sentence again, and
-/// the one most likely to be acted on wrongly.
+/// A live share that could not be asked is reported as unavailable.
 #[test]
 fn a_share_that_could_not_be_asked_says_so_rather_than_reporting_nothing() {
     let (mut s, now) = live_state();
@@ -2765,8 +2601,6 @@ fn a_share_that_could_not_be_asked_says_so_rather_than_reporting_nothing() {
     }
 }
 
-/// A configuration holding nothing but live shares is searchable, and the gate
-/// that decides whether to dispatch at all has to agree.
 #[test]
 fn a_configuration_of_only_live_shares_still_accepts_a_query() {
     use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
@@ -2804,7 +2638,7 @@ fn aliased_state() -> (AppState, Instant) {
     }]);
     let settings = Settings {
         aliases: Arc::new(aliases),
-        ..Default::default()
+        ..Settings::fixture()
     };
     let now = Instant::now();
     (AppState::new(settings, now), now)
@@ -2817,8 +2651,7 @@ fn searched_for(r: &Response) -> Option<String> {
     })
 }
 
-/// The whole point: two characters, and the code they stand for is searched
-/// for without waiting out the pause meant for somebody still typing.
+/// An alias searches for its code immediately, without the typing debounce.
 #[test]
 fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
     let (mut s, now) = aliased_state();
@@ -2828,9 +2661,6 @@ fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// Two characters, and what reaches the index is the expansion rather than
-/// the name - which is what makes an alias an alias rather than a short
-/// search that happens to work.
 #[test]
 fn an_alias_is_searched_for_as_its_expansion() {
     let (mut s, now) = aliased_state();
@@ -2838,8 +2668,6 @@ fn an_alias_is_searched_for_as_its_expansion() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// And a two-character line that is not an alias is searched for as itself.
-/// It used to be refused; the floor is one now.
 #[test]
 fn a_short_line_that_is_not_an_alias_is_searched_for_as_written() {
     let (mut s, now) = aliased_state();
@@ -2849,8 +2677,8 @@ fn a_short_line_that_is_not_an_alias_is_searched_for_as_written() {
     assert!(s.expansion().is_none());
 }
 
-/// The line stays exactly as it was typed. Rewriting the field under somebody
-/// mid-edit would fight their caret and their selection.
+/// The input keeps the typed text; rewriting it mid-edit would disturb the
+/// caret and selection.
 #[test]
 fn an_alias_does_not_rewrite_what_was_typed() {
     let (mut s, now) = aliased_state();
@@ -2860,8 +2688,8 @@ fn an_alias_does_not_rewrite_what_was_typed() {
     assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
 }
 
-/// An alias that fired and said nothing is the program searching for
-/// something nobody typed.
+/// The active expansion is exposed so the UI can show what the alias stands
+/// for.
 #[test]
 fn an_alias_reports_what_it_stood_for() {
     let (mut s, now) = aliased_state();
@@ -2872,8 +2700,8 @@ fn an_alias_reports_what_it_stood_for() {
     assert_eq!(alias.describe(), "pw \u{b7} 11-D-0704");
 }
 
-/// Typing on past an alias is an ordinary search again, or every longer code
-/// beginning with one would be unreachable.
+/// Typing past an alias searches for the literal line, so longer codes that
+/// start with an alias name stay reachable.
 #[test]
 fn typing_past_an_alias_goes_back_to_searching_for_what_is_on_the_line() {
     let (mut s, now) = aliased_state();
@@ -2886,7 +2714,6 @@ fn typing_past_an_alias_goes_back_to_searching_for_what_is_on_the_line() {
     assert!(searched_for(&r).is_none_or(|q| q == "pwxyz"));
 }
 
-/// Backspacing back onto an alias resolves it again.
 #[test]
 fn an_alias_resolves_again_when_the_line_becomes_one() {
     let (mut s, now) = aliased_state();
@@ -2897,7 +2724,7 @@ fn an_alias_resolves_again_when_the_line_becomes_one() {
     assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
 }
 
-/// Case is not part of the name. Somebody who types it capitalised meant it.
+/// Alias names are case-insensitive.
 #[test]
 fn an_alias_resolves_whatever_case_it_is_typed_in() {
     let (mut s, now) = aliased_state();
@@ -2905,7 +2732,6 @@ fn an_alias_resolves_whatever_case_it_is_typed_in() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// Clearing the line clears the expansion with it.
 #[test]
 fn emptying_the_line_forgets_the_alias() {
     let (mut s, now) = aliased_state();
@@ -2916,8 +2742,6 @@ fn emptying_the_line_forgets_the_alias() {
     assert!(matches!(s.phase, QueryPhase::Idle));
 }
 
-/// A configuration with no aliases behaves exactly as it did before they
-/// existed.
 #[test]
 fn a_configuration_without_aliases_is_unchanged() {
     let (mut s, now) = state();
@@ -2931,7 +2755,7 @@ fn a_configuration_without_aliases_is_unchanged() {
 
 use files::config::write::SettingKey;
 
-/// One alias, for the two tests below.
+/// Builds an alias with no note.
 fn alias(name: &str, code: &str) -> files::alias::Alias {
     files::alias::Alias {
         name: name.into(),
@@ -2943,36 +2767,30 @@ fn alias(name: &str, code: &str) -> files::alias::Alias {
 fn saveable() -> (AppState, Instant) {
     let settings = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     let now = Instant::now();
     (AppState::new(settings, now), now)
 }
 
-/// The same as `state()`, with the technical half of every message switched
-/// on. Several tests below are *about* a diagnostic reaching the screen, so
-/// they have to ask for it; what an ordinary user sees is asserted
-/// separately.
+/// The same as `state()` with developer mode on, so messages include their
+/// technical detail.
 fn dev_state() -> (AppState, Instant) {
     let (mut s, now) = state();
     s.settings.dev_mode = true;
     (s, now)
 }
 
-/// Hands the panel a whole new `Settings`, the way the settings window does
-/// once it has written the file.
+/// Delivers a new `Settings` to the panel, as after the settings window
+/// writes the file.
 fn adopt(s: &mut AppState, fresh: Settings, now: Instant) -> Response {
     s.update(AppEvent::Adopt(Box::new(fresh)), now)
 }
 
-/// The panel takes what the file now says, and says so.
+/// The panel adopts the rewritten settings whole and shows a toast.
 ///
-/// This replaces a block of tests about `AppEvent::Setting`,
-/// `AppEvent::Aliases` and `AppEvent::Drives` - three events the settings
-/// window used to send and that nothing constructs any more. The window is
-/// a separate process now: it writes the file itself and sends "it moved",
-/// and the panel reads the whole thing back. One event where there were
-/// three, and no schema shared across a process boundary.
+/// The settings window is a separate process that writes the file itself;
+/// the panel then reloads all of it.
 #[test]
 fn a_file_rewritten_elsewhere_is_taken_whole() {
     let (mut s, now) = saveable();
@@ -2982,7 +2800,7 @@ fn a_file_rewritten_elsewhere_is_taken_whole() {
         have_file: true,
         history: false,
         result_layout: files::config::ResultLayout::Detailed,
-        ..Default::default()
+        ..Settings::fixture()
     };
     adopt(&mut s, fresh, now);
 
@@ -2998,9 +2816,8 @@ fn a_file_rewritten_elsewhere_is_taken_whole() {
     assert!(toast.text.contains("Settings"), "{}", toast.text);
 }
 
-/// Turning the history off throws away what is in memory as well as stopping
-/// new entries, or the up arrow would still recall codes from a list the
-/// user has just asked not to be kept.
+/// Turning history off also clears the in-memory entries, so Up no longer
+/// recalls them.
 #[test]
 fn turning_the_history_off_elsewhere_forgets_what_it_held() {
     let (mut s, now) = saveable();
@@ -3012,19 +2829,17 @@ fn turning_the_history_off_elsewhere_forgets_what_it_held() {
         Settings {
             have_file: true,
             history: false,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );
     assert!(s.history.is_empty(), "the codes outlived the setting");
 }
 
-/// An alias added in the other window applies to the line already typed.
+/// An alias added in the settings window applies to the line already typed.
 ///
-/// Put back through the ordinary path rather than re-resolved on the side,
-/// so the expansion, the query and the results move together - a field
-/// showing an expansion for an alias that has been removed is exactly the
-/// silent disagreement the resolution exists to avoid.
+/// The line is re-resolved through the ordinary input path so the expansion,
+/// query and results stay consistent.
 #[test]
 fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
     let (mut s, now) = saveable();
@@ -3033,7 +2848,7 @@ fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
 
     let mut fresh = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
     adopt(&mut s, fresh, now);
@@ -3042,13 +2857,12 @@ fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
     assert_eq!(s.query().term(), "11-D-0704");
 }
 
-/// And one removed elsewhere stops expanding it.
 #[test]
 fn an_alias_removed_elsewhere_stops_expanding_the_line() {
     let (mut s, now) = saveable();
     let mut with = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
     adopt(&mut s, with, now);
@@ -3059,7 +2873,7 @@ fn an_alias_removed_elsewhere_stops_expanding_the_line() {
         &mut s,
         Settings {
             have_file: true,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -3067,8 +2881,8 @@ fn an_alias_removed_elsewhere_stops_expanding_the_line() {
     assert_eq!(s.query().term(), "pw");
 }
 
-/// One status slot per configured drive, or the next report from an actor is
-/// filed against a slot that no longer exists.
+/// The status slots are resized with the drive list, so an actor's report
+/// never targets a missing slot.
 #[test]
 fn the_status_slots_follow_the_drive_list() {
     use files::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
@@ -3093,7 +2907,7 @@ fn the_status_slots_follow_the_drive_list() {
     ];
     let mut fresh = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fresh.routes = std::sync::Arc::new(Routes::new(three, ConfigSource::BuiltIn));
     adopt(&mut s, fresh, now);
@@ -3101,7 +2915,7 @@ fn the_status_slots_follow_the_drive_list() {
 
     let mut fewer = Settings {
         have_file: true,
-        ..Default::default()
+        ..Settings::fixture()
     };
     fewer.routes = std::sync::Arc::new(Routes::new(
         vec![drive(0, "only", r"Z:\")],
@@ -3110,20 +2924,11 @@ fn the_status_slots_follow_the_drive_list() {
     adopt(&mut s, fewer, now);
     assert_eq!(s.settings.routes.all().len(), 1);
 
-    // The slot count itself is private, so this asserts the thing it is
-    // for: the routing table and the statuses are resized together, and
-    // `resize_statuses` in `adopt` is the only thing that does it. Without
-    // it the next report from the third drive's actor would be filed
-    // against a slot that is no longer there.
+    // The slot count is private, so this checks the routing table, which
+    // `resize_statuses` in `adopt` keeps in step with the statuses.
 }
 
-/// A failed save is a change that already happened, so the message says
-/// which part of it did not.
-///
-/// Still reachable: the panel installs updates, and reports a failure the
-/// same way. What is gone is the settings path, because the window reports
-/// its own failures where the setting is rather than in a toast on a panel
-/// that may not even be running.
+/// A failed save warns that the named setting applies for this session only.
 #[test]
 fn a_failed_save_says_the_change_applies_for_this_session() {
     let (mut s, now) = saveable();
@@ -3141,23 +2946,17 @@ fn a_failed_save_says_the_change_applies_for_this_session() {
     assert_eq!(toast.severity, Severity::Warn);
 }
 
-/// The form promises which settings move now and which wait, and `adopt` is
-/// the only thing that can keep the promise.
+/// What `applies_at_once` claims about each key matches what `adopt` does.
 ///
-/// Table-driven over every key, with a value that differs from the default,
-/// so a key added without a decision in `adopt_one` fails here rather than
-/// becoming a control that silently does nothing until a restart.
-///
-/// It used to drive `apply_live`, which took one `Edit`. The mechanism
-/// changed and the invariant did not: what `applies_at_once` claims about a
-/// key has to be what happens when the file carrying it is adopted.
+/// Runs over every `SettingKey` with a non-default value, so a key added
+/// without handling in `adopt_one` fails here.
 #[test]
 fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
     /// A `Settings` differing from the default in exactly one key.
     fn differing(key: SettingKey) -> Settings {
         let mut s = Settings {
             have_file: true,
-            ..Default::default()
+            ..Settings::fixture()
         };
         match key {
             SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
@@ -3180,8 +2979,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
                     s.hidden.hides_system(),
                 ))
             }
-            // The one flag that ships off, so `false` would be no change at
-            // all and this test would pass by moving nothing.
+            // Defaults to off, so `true` is the differing value.
             SettingKey::DevMode => s.dev_mode = true,
             SettingKey::History => s.history = false,
             SettingKey::StaleNotices => s.stale_notices = false,
@@ -3201,8 +2999,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
         s
     }
 
-    /// Everything a running panel reads from its own copy, rather than from
-    /// the file at the next start.
+    /// The state a running panel holds outside `settings`.
     fn live(s: &AppState) -> String {
         format!("{:?}|{}", s.viewer, s.history.is_empty())
     }
@@ -3213,9 +3010,8 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
         let before = live(&s);
         adopt(&mut s, differing(key), now);
 
-        // `settings` itself is always replaced whole, so what the claim is
-        // about is the *derived* state: the fields a running panel holds
-        // separately and that would otherwise go stale.
+        // `settings` is always replaced whole, so the claim concerns the
+        // derived state held separately from it.
         let moved = live(&s) != before;
         assert!(
             !moved || key.applies_at_once(),
@@ -3243,7 +3039,6 @@ fn available(version: &str) -> Found {
             notes: None,
         },
         msi: std::path::PathBuf::from("files.msi"),
-        // Not on disk, which is what a bare relative name in a test is.
         msi_present: false,
     }
 }
@@ -3258,9 +3053,7 @@ fn a_new_version_is_announced_once_it_is_known_about() {
     assert_eq!(toast.severity, Severity::Info);
 }
 
-/// The timer fires every few hours and the answer does not change between
-/// releases. A toast each time would be nagging about something the settings
-/// window is already showing.
+/// The periodic check announces each version only once.
 #[test]
 fn the_same_version_is_not_announced_twice() {
     let (mut s, now) = state();
@@ -3271,8 +3064,6 @@ fn the_same_version_is_not_announced_twice() {
     assert!(s.toast.is_none(), "it nagged about a version already seen");
 }
 
-/// But a second release, published while the program was left running, is
-/// news again.
 #[test]
 fn a_further_version_is_announced_again() {
     let (mut s, now) = state();
@@ -3284,8 +3075,8 @@ fn a_further_version_is_announced_again() {
     assert!(toast.text.contains("0.4.0"), "{}", toast.text);
 }
 
-/// The dull answers are recorded and said nothing about. The window reads
-/// them; nobody needs interrupting to hear that nothing has changed.
+/// Up-to-date and unavailable results are stored for the settings window but
+/// raise no toast.
 #[test]
 fn a_dull_answer_is_remembered_without_being_announced() {
     for found in [
@@ -3302,8 +3093,8 @@ fn a_dull_answer_is_remembered_without_being_announced() {
     }
 }
 
-/// Until the checker has answered once, the window must not claim to be up to
-/// date - not knowing is a different thing from knowing there is nothing.
+/// The update state stays unknown until the first check answers, so the
+/// window does not claim to be up to date.
 #[test]
 fn nothing_is_known_about_updates_until_a_look_answers() {
     let (s, _now) = state();
@@ -3312,8 +3103,8 @@ fn nothing_is_known_about_updates_until_a_look_answers() {
 
 // --- what an ordinary user is shown -----------------------------------------
 
-/// The point of the setting. A drive failure reads as a sentence naming the
-/// drive, and stops there.
+/// Outside developer mode, a drive failure names the drive without OS error
+/// codes or paths.
 #[test]
 fn a_drive_failure_is_a_sentence_until_somebody_asks() {
     fn reported(dev: bool) -> String {
@@ -3348,13 +3139,11 @@ fn a_drive_failure_is_a_sentence_until_somebody_asks() {
         "the drive is not named at all: {plain}"
     );
 
-    // The same failure, for whoever is being telephoned about it.
+    // Developer mode includes the technical detail.
     let technical = reported(true);
     assert!(technical.contains("53"), "{technical}");
 }
 
-/// A toast is the same bargain: the sentence somebody can act on, and the
-/// detail only when it was asked for.
 #[test]
 fn a_toast_carries_its_detail_only_in_developer_mode() {
     fn toast(dev: bool) -> String {
@@ -3384,8 +3173,8 @@ fn a_toast_carries_its_detail_only_in_developer_mode() {
     assert!(toast(true).contains("os error 6"));
 }
 
-/// Switching it on is felt immediately, because it gates nothing but the
-/// drawing - there is no worker holding a copy of it.
+/// Developer mode applies immediately; it only affects rendering, and no
+/// worker holds a copy.
 #[test]
 fn developer_mode_changes_the_next_message_drawn() {
     let (mut s, now) = saveable();
@@ -3396,7 +3185,7 @@ fn developer_mode_changes_the_next_message_drawn() {
         Settings {
             have_file: true,
             dev_mode: true,
-            ..Default::default()
+            ..Settings::fixture()
         },
         now,
     );

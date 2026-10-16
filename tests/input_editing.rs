@@ -1,15 +1,6 @@
 //! Caret movement, selection and recall, driven through the real state machine
-//! with a fake clock.
-//!
-//! `AppState::update` is a pure function of (event, time), so all of this is
-//! reachable without a window - which matters more here than usual, because the
-//! behaviour being tested is almost entirely about where a caret is and what is
-//! highlighted, and neither is visible from outside a running program.
-//!
-//! The mouse half of this file is gone. It drove `AppEvent::Mouse` with cell
-//! coordinates and re-derived the layout to work out what had been clicked;
-//! what replaced it is `app::state::pointer`, where a click arrives already
-//! resolved and there are no coordinates left to be wrong about.
+//! with a fake clock. `AppState::update` is a pure function of (event, time), so
+//! no window is needed.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -23,7 +14,7 @@ use files::search::verify::VerifyOutcome;
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    let s = AppState::new(Settings::default(), now);
+    let s = AppState::new(Settings::fixture(), now);
     (s, now)
 }
 
@@ -58,14 +49,8 @@ fn hit(name: &str) -> Hit {
     }
 }
 
-/// Drives a code through a verification and then all the way to rest, which is
-/// what makes it eligible for recall.
-///
-/// The two used to be the same event. Recording rode on the verification
-/// coming back, which is `VERIFY_DEBOUNCE` after the last keystroke - a third
-/// of a second, which is an ordinary mid-word pause rather than the end of
-/// anything. It is its own, much longer, deadline now, so a helper that wants
-/// a code remembered has to say so by letting the typing stop.
+/// Drives a code through verification and on to `REMEMBER_DEBOUNCE`, which
+/// makes it eligible for recall.
 fn search_and_settle(s: &mut AppState, code: &str, now: Instant) -> Response {
     type_in(s, code, now);
     let at = now + VERIFY_DEBOUNCE;
@@ -127,10 +112,8 @@ fn ctrl_a_selects_the_whole_code_and_typing_replaces_it() {
     assert_eq!(s.input, "P");
 }
 
-/// The one that matters most for a network-bound tool: extending a selection
-/// changes nothing about the query, so it must not bump the epoch, discard
-/// the results or re-arm the server-side verification. Every Shift+Left
-/// costing a round trip would be unusable over a VPN.
+/// Caret and selection changes leave the query unchanged, so they must not bump
+/// the epoch, discard results or re-arm server-side verification.
 #[test]
 fn moving_the_caret_or_selecting_never_re_runs_the_search() {
     let (mut s, now) = state();
@@ -219,13 +202,8 @@ fn a_settled_code_becomes_recallable_and_is_stored() {
     );
 }
 
-/// The prefixes typed on the way to a code must not fill the list.
-///
-/// Two things stop them, and this asserts the first: a prefix is only ever
-/// on screen while the typing is still going, so the quiet period never
-/// expires for one. See `tests/overlay.rs` for the second, which is what
-/// catches the prefix that gets through anyway because somebody stopped in
-/// the middle to read the next four digits off a drawing.
+/// Prefixes are never on screen long enough for the quiet period to expire.
+/// `tests/overlay.rs` covers a prefix that survives a pause mid-typing.
 #[test]
 fn the_prefixes_typed_on_the_way_to_a_code_are_not_remembered() {
     let (mut s, now) = state();
@@ -234,9 +212,7 @@ fn the_prefixes_typed_on_the_way_to_a_code_are_not_remembered() {
     assert_eq!(s.history.entries(), ["11-D-0704"]);
 }
 
-/// With nothing typed the list is the codes used before, and the arrows walk
-/// it. This used to be a mode entered from a half-typed code, with a draft
-/// preserved underneath; it is the empty state now, so there is no underneath.
+/// With nothing typed, the arrows walk the recent codes.
 #[test]
 fn the_arrows_walk_the_recent_codes_when_nothing_is_typed() {
     let (mut s, now) = state();
@@ -255,23 +231,18 @@ fn the_arrows_walk_the_recent_codes_when_nothing_is_typed() {
     assert_eq!(s.input, "", "past the newest, the field is empty again");
 }
 
-/// Down never resurrects a field it cleared.
-///
-/// It used to call `begin_recall` exactly as Up does, so on an empty field the
-/// first Down put the code just cleared back, the second cleared it, and the
-/// third put it back - a two-state oscillator on one key.
+/// Down never restores a code it cleared.
 #[test]
 fn down_never_puts_a_cleared_code_back() {
     let (mut s, now) = state();
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
 
-    // Down alone, on an empty field, must not open the list at all.
+    // Down on an empty field must not open the list.
     s.update(press(Key::Down), now);
     assert_eq!(s.input, "", "Down opened the recall list");
     assert!(!s.history.is_browsing(), "Down started browsing");
 
-    // And after a walk that ends by stepping past the newest, it stays empty
-    // however many times it is pressed.
+    // After stepping past the newest entry, the field stays empty.
     s.update(press(Key::Up), now);
     assert_eq!(s.input, "P12345-001", "Up did not open the list");
     s.update(press(Key::Down), now);
@@ -283,9 +254,7 @@ fn down_never_puts_a_cleared_code_back() {
     assert!(!s.history.is_browsing());
 }
 
-/// Something typed means the arrows belong to the results, not to recall.
-/// That is the rule that replaced the mode: the list you can see is the list
-/// the arrows move in.
+/// Once something is typed, the arrows move in the results, not in recall.
 #[test]
 fn the_arrows_do_not_reach_the_recent_codes_once_something_is_typed() {
     let (mut s, now) = state();
@@ -296,8 +265,7 @@ fn the_arrows_do_not_reach_the_recent_codes_once_something_is_typed() {
     assert_eq!(s.input, "AB1", "recall stole a half-typed code");
 }
 
-/// Stepping through recall must not touch the network: twenty codes would be
-/// twenty round trips for codes nobody has chosen.
+/// Stepping through recall must not issue searches or verifications.
 #[test]
 fn browsing_recall_dispatches_no_work_until_an_entry_is_taken() {
     let (mut s, now) = state();
@@ -337,9 +305,6 @@ fn typing_after_recalling_a_code_keeps_it_and_edits_it() {
     assert_eq!(s.input, "11-D-0704X");
 }
 
-/// Nothing remembered and nothing typed is the first screen after an install,
-/// and Up there has nowhere to go. It must do nothing rather than something
-/// surprising.
 #[test]
 fn the_arrows_do_nothing_when_there_is_nothing_to_recall() {
     let (mut s, now) = state();

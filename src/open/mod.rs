@@ -1,36 +1,20 @@
-//! Opening what the user chose.
+//! Opening the selected file. Every launch reports success or failure, and
+//! configured viewers are probed once at startup.
 //!
-//! The original implementation was
-//! `let _ = Command::new("avwin.exe").arg(path).spawn();`, so a missing viewer
-//! or a deleted file produced exactly nothing: the user pressed Enter and the
-//! program appeared to ignore them. Every launch is reported either way now,
-//! and every configured viewer is probed once at startup so its absence is
-//! learned before it is needed rather than after.
+//! # Destinations
 //!
-//! # Three destinations, one keypress
+//! - [`ViewerKind::App`]: the selected file, passed to a program named in a
+//!   `[[viewer]]` table. None is built in; see [`crate::config::viewers`].
+//! - [`ViewerKind::Auto`]: the selected file, opened by whatever the system has
+//!   registered for its extension.
+//! - [`ViewerKind::Pdf`]: the typed code names a document whose pages are
+//!   separate files. They are re-collected ([`crate::search::pages`]), merged
+//!   ([`pdf`]) and opened ([`launch`]). The page set is rebuilt from the
+//!   snapshot because the rows on screen are capped at `MAX_RESULTS` and ranked
+//!   by match position, so they can be truncated and out of order.
 //!
-//! [`ViewerKind::App`] is that original behaviour, generalised: the one file
-//! under the cursor, handed to a program somebody named in a `[[viewer]]`
-//! table. None is built in - see [`crate::config::viewers`].
-//!
-//! [`ViewerKind::Auto`] hands the file to the desktop instead, and names no
-//! program at all: whatever is registered for that extension opens it, which
-//! is the program the user would have got from Explorer.
-//!
-//! [`ViewerKind::Pdf`] treats the typed code as naming a *document*. The pages
-//! of a drawing set are separate files on the share, so it re-collects them
-//! ([`crate::search::pages`]), merges them ([`pdf`]) and opens the result
-//! ([`launch`]). The page set is deliberately rebuilt from the snapshot rather
-//! than taken from the rows on screen: those are capped at `MAX_RESULTS` and
-//! ranked by match position, so a twenty-page set would arrive truncated and
-//! out of order.
-//!
-//! # Why the work does not happen here
-//!
-//! Merging tens of files off an SMB share takes real time, so it runs on the
-//! worker in [`worker`] - one thread for the life of the process, as
-//! `app::actors` requires - and reports back through [`OpenMsg`]. Nothing in
-//! this module blocks the UI thread.
+//! The work runs on the [`worker`] thread (one for the life of the process, as
+//! `app::actors` requires) and reports back through `app::event::OpenMsg`.
 
 pub mod launch;
 pub mod pdf;
@@ -46,32 +30,29 @@ use crate::search::pages::{self, PageGroup};
 pub use launch::shell_open;
 pub use launch::{LaunchError, program_on_path};
 
-/// Everything an open needs, gathered where it is still testable.
+/// Everything an open needs.
 ///
-/// Carries the viewer rather than reading it from shared state: `Cmd` derives
-/// `Eq` precisely so a test can assert what a keypress will do, and a command
-/// whose effect depended on a field some other thread might change is not that.
+/// Carries the viewer rather than reading shared state, so `Cmd` can derive
+/// `Eq` and tests can assert exactly what a keypress does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenRequest {
-    /// The row the user was on.
+    /// The selected row.
     pub path: Arc<str>,
-    /// The typed code, which the page group is rebuilt from.
+    /// The typed code, from which the page group is rebuilt.
     pub query: String,
     pub viewer: ViewerKind,
-    /// The list `viewer` is an index into, as it was when the key was pressed.
+    /// The list `viewer` indexes, as it was when the key was pressed.
     ///
-    /// Carried rather than read off the worker's copy of the settings, which
-    /// is the one taken at startup: after the file is edited the two lists can
-    /// differ, and an index read against the wrong one opens the wrong program.
+    /// The worker's settings are from startup and may differ after the config
+    /// file is edited; indexing the wrong list opens the wrong program.
     pub viewers: Arc<Viewers>,
 }
 
-/// Why an open failed outright.
+/// Why an open failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
     FileMissing,
-    /// Nothing in the page group could be used. Carries the first reason, so
-    /// the message says which file and why rather than only that it failed.
+    /// No file in the page group was usable. Carries the first reason.
     NothingUsable(String),
     Launch(LaunchError),
 }
@@ -90,83 +71,65 @@ impl OpenError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Opened {
     pub path: Arc<str>,
-    /// How many pages were handed over. One for a viewer, so that path is not a
-    /// special case anywhere downstream.
+    /// Number of pages handed over; 1 for a single file.
     pub pages: usize,
-    /// Pages that were left out, if any.
+    /// Pages that were left out.
     pub skipped: Vec<pdf::Skipped>,
-    /// The code has more pages than `MAX_PAGES` and this document stops short
-    /// of the end. Carried rather than dropped: a document that is missing its
-    /// tail with nothing on screen to say so is the outcome this whole path
-    /// exists to avoid.
+    /// The code has more than `MAX_PAGES` pages and the document stops short.
+    /// Surfaced so the user is told the document is incomplete.
     pub truncated: bool,
 }
 
-/// Everything the open needs from the rest of the program.
-///
-/// Passed in rather than reached for, so the whole decision is exercisable
-/// without a share, a viewer or a terminal.
+/// Dependencies of an open, passed in so the logic is testable without a
+/// share, a viewer or a terminal.
 pub struct OpenContext<'a> {
-    /// The listing the code resolves to, if one could be obtained. `None`
-    /// means the share did not answer - which must degrade to opening the
-    /// selected file, never to failing.
+    /// The listing the code resolves to. `None` means the share did not
+    /// answer, which degrades to opening the selected file, never to failing.
     pub snapshot: Option<&'a crate::index::snapshot::Snapshot>,
     pub cache_dir: Option<&'a Path>,
     pub pdf_viewer: Option<&'a Path>,
-    /// Whether a document this program assembled is handed over read-only.
+    /// Whether an assembled document is marked read-only.
     pub read_only: bool,
 }
 
-/// Where one open actually goes, once the mode and the file are both known.
+/// Where an open goes once the mode and the file are known.
 ///
-/// [`ViewerKind`] is what the user chose; this is what that means for the file
-/// under the cursor. They are separate types because `Auto` is not reducible to
-/// either of the others - it hands the file over without naming a program at
-/// all, which is somewhere neither `Pdf` nor a viewer has ever gone.
+/// Separate from [`ViewerKind`] because `Auto` hands the file over without
+/// naming a program, which neither `Pdf` nor a viewer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     /// Every page of the code, merged.
     Document,
-    /// One file, handed to the configured viewer at this position.
+    /// One file, passed to the configured viewer at this index.
     App(usize),
-    /// One file, handed to whatever the system has registered for it.
+    /// One file, opened by the system's registered handler.
     Shell,
 }
 
-/// Which of the three a mode and a file name add up to.
+/// Returns the route for a mode and a file name.
 ///
-/// Pure, total and filesystem-free, which is the point: the whole routing table
-/// is testable with no share, no viewer and no disk, and it is asked twice - by
-/// [`open`] below and by the worker deciding whether it needs a listing - so
-/// the two can no longer drift apart.
+/// Pure and filesystem-free. Used by both [`open`] and the worker (to decide
+/// whether a listing is needed), so the two cannot disagree.
 pub fn route_of(viewer: ViewerKind, path: &str, viewers: &Viewers) -> Route {
     match viewer.within(viewers) {
-        // Forced: everything, including documents and drawings, goes to the
-        // viewer that was asked for.
+        // Every file goes to the chosen viewer.
         ViewerKind::App(i) => Route::App(i),
-        // Forced the other way: `pdf` means "always give me a PDF". A drawing
-        // is the one thing that cannot be made into one - there is no Rust that
-        // reads DWG, and every route to a PDF is somebody else's program - so a
-        // type a configured viewer claims goes to that viewer, which reads it
-        // natively. Without one it takes the document route, which opens a
-        // file that is not part of a document with whatever Windows has.
+        // Drawings cannot be converted to PDF in-process, so a type claimed by
+        // a configured viewer goes to that viewer. Otherwise the document
+        // route, which opens a non-document file with the system handler.
         ViewerKind::Pdf => {
             let claimed = Path::new(path)
                 .extension()
                 .and_then(|e| viewers.claiming(&e.to_string_lossy()));
             claimed.map_or(Route::Document, Route::App)
         }
-        // Not by type at all: the file is handed to the system, which already
-        // knows what opens a `.xlsx` and never needed this program to have an
-        // opinion about it.
         ViewerKind::Auto => Route::Shell,
     }
 }
 
-/// Which configured viewers cannot be found, indexed like `viewers`.
+/// Returns which configured viewers cannot be found, indexed like `viewers`.
 ///
-/// For the startup warning: looked up rather than run, because the point is to
-/// warn somebody before they need a viewer, not to open one.
+/// Looks the programs up without running them, for the startup warning.
 pub fn probe_viewers(viewers: &Viewers) -> Box<[bool]> {
     viewers
         .all()
@@ -188,11 +151,10 @@ pub fn open(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenE
     }
 }
 
-/// Opens one file the way the desktop would, which is what `Auto` means.
+/// Opens one file with the system's registered handler.
 ///
-/// The existence check is the same one the viewer path makes, for the same
-/// reason: a stale index should say the file is gone, rather than leave the
-/// shell to report it in a dialog this program did not write.
+/// Checks existence first so a stale index reports the missing file itself
+/// instead of leaving it to a shell dialog.
 fn open_one_with_shell(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
     if !Path::new(path.as_ref()).exists() {
         return Err(OpenError::FileMissing);
@@ -206,24 +168,14 @@ fn open_one_with_shell(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, 
     })
 }
 
-/// Hands a document this program assembled over read-only, or gives it back.
+/// Sets or clears the read-only attribute on an assembled document.
 ///
-/// Only ever applied to a file inside the cache. The share is somebody else's
-/// disk and nothing here writes to it - and `pdf::assemble` returns the
-/// original path when a code has a single page, so "the file about to be
-/// opened" and "a file this program produced" are not the same question.
-///
-/// The reason is not politeness about the share. A merged document is named
-/// after a hash of its own contents, so a viewer that saves an annotation back
-/// into it leaves a file whose name is a lie, and every later open of that code
-/// serves the edited copy rather than the drawing. Read-only closes that.
-///
-/// Clearing matters as much as setting: turning the option off has to free the
-/// documents an earlier run already marked, or it only takes effect for codes
-/// nobody has opened yet.
-///
-/// Best effort. A viewer that opens the document anyway is a better outcome
-/// than an open refused over a file attribute, so this reports and carries on.
+/// Applies only to files inside the cache; `pdf::assemble` returns the
+/// original share path for a single page, and the share is never written.
+/// Cached documents are named by content hash, so an annotation saved into one
+/// would be served on every later open. Clearing is needed too, so turning the
+/// option off frees documents marked by an earlier run. Failures are logged
+/// and the open proceeds.
 fn guard_cached(path: &str, cx: &OpenContext<'_>) {
     let Some(cache_dir) = cx.cache_dir else {
         return;
@@ -258,18 +210,13 @@ fn open_one_with(app: &ViewerApp, path: &Arc<str>) -> Result<Opened, OpenError> 
 fn open_as_document(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opened, OpenError> {
     let group = collect_group(request, cx);
 
-    // Three ways to end up opening the one file the cursor was on, and all
-    // three are deliberate:
-    //
-    //  * the share did not answer, so there is no group to build;
-    //  * the selected row is not part of this code's document - it might be
-    //    `11-D-0704 revision notes.pdf` - and assembling the group would open
-    //    something the user did not point at;
-    //  * the group is empty, which means the same thing.
+    // Falls back to the selected file alone when the share did not answer,
+    // the group is empty, or the selected row is not part of the group (for
+    // example `11-D-0704 revision notes.pdf`).
     let (assembled, truncated) = match group {
         Some(group) if group.contains_path(&request.path) => {
             let Some(cache_dir) = cx.cache_dir else {
-                // Nowhere to write the merge, so degrade rather than refuse.
+                // No cache to write the merge to; open the file alone.
                 return open_one_as_pdf(&request.path, cx);
             };
             let truncated = group.capped;
@@ -306,18 +253,15 @@ fn open_one_as_pdf(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, Open
 
 /// Rebuilds the code's page group, restricted to the selected file's folder.
 ///
-/// The directory filter matters once more than one mapping is enabled: the
-/// query is re-resolved on this thread and `Backend::snapshot_for` answers
-/// with the *first* matching target, which need not be the share the selected
-/// row came from. Without this, a code present in two shares could quietly
-/// produce a document made of pages from both.
+/// With several mappings enabled, `Backend::snapshot_for` returns the first
+/// matching target, which may not be the selected row's share. The folder
+/// filter keeps pages from two shares out of one document.
 fn collect_group(request: &OpenRequest, cx: &OpenContext<'_>) -> Option<PageGroup> {
     let snapshot = cx.snapshot?;
     let mut group = pages::collect(
         snapshot,
         &request.query,
-        // An open is not superseded by anything. The user carrying on typing
-        // must not cancel the document they just asked for.
+        // Further typing must not cancel a requested open.
         &crate::util::cancel::CancelToken::never(),
     );
     if group.cancelled {
@@ -360,16 +304,13 @@ mod tests {
         }
     }
 
-    /// The viewer every machine used to get, now as somebody would write it.
+    /// A single viewer that claims `dwg`.
     fn avwin() -> Viewers {
         Viewers::new(vec![ViewerApp::new("avwin", "avwin.exe", &["dwg"])])
     }
 
-    /// The invariant that keeps read-only off somebody else's disk.
-    ///
-    /// `pdf::assemble` hands back the original path when a code has a single
-    /// page, so the file about to be opened is routinely one on the share -
-    /// and this program does not write to a share, attributes included.
+    /// Single-page codes open the share file directly, which must never be
+    /// marked read-only.
     #[test]
     fn only_a_document_in_the_cache_is_ever_marked_read_only() {
         let cache = tempfile::tempdir().unwrap();
@@ -399,7 +340,7 @@ mod tests {
             "an attribute was written to the share"
         );
 
-        // And the option turns it back off, for the document only.
+        // Turning the option off clears the attribute again.
         let writable = OpenContext {
             read_only: false,
             ..cx
@@ -444,8 +385,7 @@ mod tests {
             read_only: true,
         };
 
-        // avwin.exe is not present on a development machine, so this
-        // exercises the real path.
+        // avwin.exe is normally absent on a development machine.
         match open(
             &request(file.to_str().unwrap(), "real", ViewerKind::App(0)),
             &cx,
@@ -454,7 +394,7 @@ mod tests {
                 assert!(name.contains("avwin.exe"));
             }
             Err(other) => panic!("unexpected failure: {other:?}"),
-            // A machine that genuinely has the viewer installed.
+            // The viewer is installed on this machine.
             Ok(_) => {}
         }
     }
@@ -473,9 +413,7 @@ mod tests {
         );
     }
 
-    /// The row the cursor is on decides which document is opened, so a row
-    /// that belongs to no document opens alone rather than dragging in a set
-    /// the user was not pointing at.
+    /// A selected row outside the page group is not treated as a member.
     #[test]
     fn a_selected_row_outside_the_group_is_not_part_of_a_document() {
         let snap = snapshot(
@@ -506,9 +444,7 @@ mod tests {
         assert!(!group.contains_path(&outside.path));
     }
 
-    /// Once two mappings are enabled the query can re-resolve to a different
-    /// share than the row came from. Pages from two shares are never one
-    /// document.
+    /// Pages from a different share than the selected row are excluded.
     #[test]
     fn a_group_never_reaches_outside_the_selected_files_folder() {
         let snap = snapshot(r"S:\archive", &["11-d-0704.pdf", "11-d-0704_Page1.pdf"]);
@@ -526,9 +462,7 @@ mod tests {
         );
     }
 
-    /// A cold job folder is one round trip, and the prefetcher usually has it
-    /// warm - but "usually" is not a guarantee, and a slow share must not turn
-    /// Enter into a failure.
+    /// Without a listing, the open falls back to the selected file.
     #[test]
     fn no_listing_means_the_selected_file_is_still_opened() {
         let cx = OpenContext {
@@ -544,7 +478,7 @@ mod tests {
         );
         assert!(collect_group(&picked, &cx).is_none());
 
-        // It still tries, and fails on the file rather than on the listing.
+        // Fails on the missing file, not on the listing.
         assert_eq!(open(&picked, &cx).unwrap_err(), OpenError::FileMissing);
     }
 
@@ -561,19 +495,14 @@ mod tests {
         assert!(collect_group(&picked, &cx).is_none());
     }
 
-    /// The seam nothing else covers: real files on disk, through the listing,
-    /// the membership rule and the merge, to one document. Stops short of the
-    /// launch, which would open a window.
-    ///
-    /// Deliberately more than fifteen pages - `MAX_RESULTS`, and the whole
-    /// reason the group is rebuilt from the code rather than from the rows on
-    /// screen.
+    /// Real files through listing, membership and merge to one document,
+    /// stopping short of the launch.
     #[test]
     fn a_folder_of_pages_becomes_one_document_in_page_order() {
         let dir = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
 
-        // Named out of order and with decoys, exactly as a share would be.
+        // Out of order and with decoys.
         let mut names = vec![
             "11-d-0704 revision notes.pdf".to_string(),
             "11-d-0704_Page10.pdf".to_string(),
@@ -614,15 +543,9 @@ mod tests {
         assert!(std::path::Path::new(doc.path.as_ref()).is_file());
     }
 
-    /// A document is rebuilt from the code, not from the rows on screen.
-    ///
-    /// This used to be a clause on the assembly test above, which compared a
-    /// nineteen-page document against a fifteen-row display cap. The cap is
-    /// three hundred now, so nineteen pages no longer tell the two
-    /// implementations apart - every page would be on screen either way and a
-    /// version that reused the visible rows would pass. Hence a document
-    /// deliberately larger than the cap, and no files on disk, since
-    /// `collect_group` reads the snapshot and never the filesystem.
+    /// A document is rebuilt from the code, not from the rows on screen, so it
+    /// can exceed `MAX_RESULTS`. No files are needed: `collect_group` reads
+    /// only the snapshot.
     #[test]
     fn a_document_larger_than_the_result_cap_is_still_assembled_whole() {
         let pages = crate::config::MAX_RESULTS + 100;
@@ -646,13 +569,13 @@ mod tests {
             "the fixture has to outgrow the cap or it proves nothing"
         );
 
-        // The tail is what a capped implementation would have lost.
+        // A capped implementation would lose the tail.
         let order: Vec<Option<u32>> = group.pages.iter().map(|p| p.page).collect();
         assert_eq!(order.first(), Some(&None), "the bare file leads");
         assert_eq!(order.last(), Some(&Some(pages as u32)), "the last page");
     }
 
-    /// A one-page PDF, as terse as a valid one gets.
+    /// Returns a minimal valid one-page PDF.
     fn minimal_pdf() -> Vec<u8> {
         use lopdf::{Document, Object, dictionary};
 
@@ -678,8 +601,6 @@ mod tests {
         buf
     }
 
-    /// The whole routing table, which is pure and therefore checkable with no
-    /// share, no viewer and no disk.
     #[test]
     fn route_of_sends_each_kind_of_file_to_the_right_place() {
         use ViewerKind::{App, Auto, Pdf};
@@ -687,21 +608,17 @@ mod tests {
         let avwin = App(0);
 
         for (viewer, path, want) in [
-            // Auto does not pick at all: every kind of file, the one this
-            // program has an opinion about included, goes to the system.
+            // Auto: every file goes to the system.
             (Auto, r"R:\11d\11-D-0704.pdf", Route::Shell),
             (Auto, r"R:\11d\11-D-0704.DWG", Route::Shell),
             (Auto, r"R:\11d\notes.docx", Route::Shell),
             (Auto, r"R:\11d\scan.tif", Route::Shell),
             (Auto, r"R:\11d\README", Route::Shell),
-            // Forced: pdf assembles a document out of anything it can. A
-            // drawing is the one thing it cannot, so it goes to the viewer
-            // that claims it.
+            // Pdf: documents are assembled; drawings go to the claiming viewer.
             (Pdf, r"R:\11d\11-D-0704.pdf", Route::Document),
             (Pdf, r"R:\11d\11-D-0704.dwg", Route::App(0)),
             (Pdf, r"R:\11d\notes.docx", Route::Document),
-            // Forced the other way: everything goes to the viewer, including
-            // the one kind this program has an opinion about.
+            // App: every file goes to the viewer.
             (avwin, r"R:\11d\11-D-0704.pdf", Route::App(0)),
             (avwin, r"R:\11d\11-D-0704.dwg", Route::App(0)),
             (avwin, r"R:\11d\notes.docx", Route::App(0)),
@@ -710,9 +627,8 @@ mod tests {
         }
     }
 
-    /// With no viewer claiming drawings, PDF mode has nowhere special to send
-    /// one, so it takes the document route - which opens a file that is not
-    /// part of a document with whatever Windows has registered for it.
+    /// With no viewer claiming drawings, PDF mode sends one down the document
+    /// route.
     #[test]
     fn with_no_viewers_a_drawing_takes_the_document_route() {
         let none = Viewers::default();
@@ -722,7 +638,7 @@ mod tests {
         );
     }
 
-    /// A viewer the list no longer has is `Auto`, never an index past the end.
+    /// An out-of-range viewer index routes to the shell.
     #[test]
     fn a_viewer_that_is_gone_goes_to_the_shell() {
         let none = Viewers::default();
@@ -736,16 +652,10 @@ mod tests {
         );
     }
 
-    /// Case comes off a share and is nobody's to rely on.
-    ///
-    /// Spelled with `pdf` rather than `dwg`, because `pdf` is now the only
-    /// extension the routing table names: asking about `dwg` would pass
-    /// whether the fold was applied or not, and so prove nothing.
+    /// Extension matching is case-insensitive. Tested under `Pdf`, the only
+    /// mode that reads the extension.
     #[test]
     fn the_extension_is_matched_however_it_is_spelled() {
-        // Asked of `Pdf`, which is the only mode left that reads the extension
-        // at all: `Auto` hands every file to the system without looking, and a
-        // share where somebody typed `.DWG` is still a share full of drawings.
         for spelling in ["dwg", "DWG", "Dwg", "dWg"] {
             let path = format!(r"R:\11d\11-D-0704.{spelling}");
             assert_eq!(route_of(ViewerKind::Pdf, &path, &avwin()), Route::App(0));

@@ -1,38 +1,24 @@
-//! Changing values in `config.toml` without disturbing the rest of it.
+//! Edits values in `config.toml` while preserving the rest of the file.
 //!
-//! This is the only thing in the program that writes to the user's
-//! configuration. It began with one value, because F2 switches viewers and the
-//! choice should still be there tomorrow; the settings window writes the rest
-//! through the same steps, every one of which is here because of a way this
-//! can go wrong.
+//! The only writer of the user's configuration, used by F2 and the settings
+//! window.
 //!
-//! # Why a format-preserving edit
+//! # Format preservation
 //!
-//! That file is meant to be opened and edited by hand - it ships full of
-//! comments explaining why CustomPro has to come first and why a pattern must
-//! be a literal string. Re-serialising it from a parsed model would return it
-//! with every one of those comments gone, from a keypress the user might have
-//! hit by accident. `toml_edit` replaces the one value and leaves every byte
-//! around it alone.
+//! The file is meant to be hand-edited and ships with explanatory comments, so
+//! edits go through `toml_edit`, which replaces only the changed values.
 //!
-//! # Why the result is parsed before it is kept
+//! # Validation before saving
 //!
-//! `SETTINGS_KEYS` is an allowlist and an unrecognised key is a *hard startup
-//! error* - see the note at the top of [`super::file`] about why a bad
-//! configuration must stop the program rather than fall back. That rule is
-//! aimed at the user's typos, but it applies just as well to ours: a mistake
-//! in this writer would leave the app refusing to start, which is a spectacular
-//! punishment for pressing F2. So the rendered text goes back through the very
-//! same parser the next launch will use, and is abandoned if it does not pass.
+//! An unrecognised key is a hard startup error (see [`super::file`]), so the
+//! rendered text is parsed with the same loader the next launch uses and
+//! discarded if it fails.
 //!
-//! # Why there is no lock
+//! # No lock
 //!
-//! Two copies running, both pressing F2, is a genuine race. It is also a race
-//! where the worst outcome is that one of two viewer settings wins - both
-//! re-read the file, both rewrite one value, and temp-then-rename means
-//! neither can observe a half-written file. A lock file would add a
-//! stale-lock failure mode that outlives the process that took it, which is
-//! strictly worse than the problem it solves.
+//! Concurrent saves from two instances can only make one value win: each
+//! re-reads the file and the temp-then-rename write is atomic. A lock file
+//! would add a stale-lock failure mode, which is worse.
 
 use std::path::{Path, PathBuf};
 
@@ -44,17 +30,14 @@ use std::sync::Arc;
 /// Why the configuration could not be updated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
-    /// There is no file to write to: `--no-config`, or a profile where one
-    /// could never be created.
+    /// No file to write to, as with `--no-config` or an uncreatable profile.
     NoConfigFile,
     Io(String),
-    /// The rewrite would not have parsed. Refused rather than saved, because
-    /// saving it would stop the program starting next time.
+    /// The rewritten file would fail to load, so it was not saved.
     WouldNotReload(String),
-    /// `[settings]` is there but is not a table, so there is nothing to set a
-    /// key on.
+    /// `settings` exists but is not a table.
     NotATable,
-    /// The value went in but did not come back out - see `save_viewer`.
+    /// The file reloaded, but the new value did not read back.
     DidNotStick,
 }
 
@@ -64,22 +47,20 @@ impl WriteError {
             Self::NoConfigFile => "there is no configuration file to save to".into(),
             Self::Io(e) => e.clone(),
             Self::WouldNotReload(e) => {
-                format!("the change was refused because it would not reload: {e}")
+                format!("the change was rejected because the file would not reload: {e}")
             }
             Self::NotATable => {
                 "`settings` in the configuration file is not a [settings] table".into()
             }
-            Self::DidNotStick => "the configuration file would not have taken the new value".into(),
+            Self::DidNotStick => "the configuration file did not keep the new value".into(),
         }
     }
 }
 
-/// A key this module is allowed to write.
+/// A `[settings]` key this module can write.
 ///
-/// An enum rather than a `&str`, so [`current`] is exhaustive over it. The
-/// read-back check is the only thing that proves a save did anything, and a
-/// key it forgot to check is a save that silently does nothing - which is the
-/// failure this whole module exists to avoid.
+/// An enum so that [`current`], which verifies each save by reading it back,
+/// must handle every key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKey {
     Viewer,
@@ -92,11 +73,8 @@ pub enum SettingKey {
     PdfViewer,
     HideExtensions,
     HideSystemFiles,
-    // Appended rather than slotted in beside their neighbours. `bit()` is
-    // the variant's position and `Settings::cli_pinned` is a bitmask of it -
-    // built from the command line at startup and never written down, so a
-    // renumbering costs nothing at rest and everything mid-run. Appending is
-    // how that stays true without anybody having to check.
+    // Append new keys at the end: `bit()` is the variant's position, and
+    // `Settings::cli_pinned` is a runtime bitmask of it.
     PdfReadOnly,
     UpdateFrom,
     IndexLog,
@@ -135,7 +113,7 @@ impl SettingKey {
         Self::CheckForUpdates,
     ];
 
-    /// The spelling in the file.
+    /// Returns the key's name in `config.toml`.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Viewer => "viewer",
@@ -162,11 +140,7 @@ impl SettingKey {
         }
     }
 
-    /// The environment variable that outranks the file for this key.
-    ///
-    /// Kept beside the file spelling because the two are one fact: a key the
-    /// loader reads from two places is a key that can be written to one of
-    /// them and then quietly ignored.
+    /// Returns the environment variable that overrides this key in the file.
     pub const fn env(self) -> &'static str {
         match self {
             Self::Viewer => "FILES_VIEWER",
@@ -195,21 +169,16 @@ impl SettingKey {
 
     /// Whether an empty value of [`Self::env`] still counts as set.
     ///
-    /// True only for the hide list, where `FILES_HIDE_EXTENSIONS=` is the
-    /// deliberate way to say "hide nothing for this run" - a request that
-    /// would otherwise look unset and let the file quietly win.
-    /// [`crate::config::Settings::apply_file_settings`] makes the same
-    /// distinction, and these two have to agree.
+    /// True only for the hide list, where `FILES_HIDE_EXTENSIONS=` means "hide
+    /// nothing". Must agree with
+    /// [`crate::config::Settings::apply_file_settings`].
     pub const fn empty_is_a_value(self) -> bool {
         matches!(self, Self::HideExtensions)
     }
 
-    /// Its position, for the bitmask in [`crate::config::Settings`].
+    /// Returns the key's bit in the bitmask in [`crate::config::Settings`].
     ///
-    /// Thirty-two bits for eighteen keys, and the width is checked rather
-    /// than assumed: it was a `u16` and the eighteenth key overflowed the
-    /// shift, which in debug is a panic in every test that builds a
-    /// `Settings` and in release is a pin silently landing on the wrong key.
+    /// The const assertion fails the build if the keys outgrow a `u32`.
     pub const fn bit(self) -> u32 {
         const _: () = assert!(SettingKey::ALL.len() <= u32::BITS as usize);
         1 << (self as u32)
@@ -217,15 +186,10 @@ impl SettingKey {
 
     /// Whether a change is picked up without restarting.
     ///
-    /// A property of the key because two places need it and must not
-    /// disagree: `app::state::settings` applies exactly these, and
-    /// `view::settings` is what tells the user the rest will wait. Two lists
-    /// would be one promise and one way of breaking it.
-    ///
-    /// What makes a key one of these is that it is read where it is used.
-    /// `Settings` is cloned into the backend, both workers and every index
-    /// actor, so anything one of them captured at startup cannot be changed
-    /// underneath it.
+    /// `app::state::settings` applies exactly these keys live and
+    /// `view::settings` marks the rest as needing a restart. A key qualifies
+    /// only if it is read at the point of use, since `Settings` is cloned into
+    /// the backend, workers and index actors at startup.
     pub const fn applies_at_once(self) -> bool {
         matches!(
             self,
@@ -244,12 +208,8 @@ impl SettingKey {
     }
 }
 
-/// Every key above is one the loader accepts.
-///
-/// Checked rather than trusted, because `SETTINGS_KEYS` is an allowlist and an
-/// unrecognised key is a hard startup error. A typo in the table above would
-/// not fail here - it would fail on the user's next launch, in a file a button
-/// they pressed had just written. This makes it a build error instead.
+/// Asserts at compile time that every [`SettingKey`] name is in
+/// `SETTINGS_KEYS`, since writing an unknown key would break the next startup.
 const _: () = {
     const fn same(a: &str, b: &str) -> bool {
         let (a, b) = (a.as_bytes(), b.as_bytes());
@@ -282,21 +242,16 @@ const _: () = {
     }
 };
 
-/// A value in the shape it will be written, and compared in on the way back.
+/// A setting value, as written and as compared on read-back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scalar {
     Str(String),
     Bool(bool),
-    /// A path, written as a TOML *literal* string.
-    ///
-    /// `'V:\Documents'` rather than `"V:\\Documents"`. A basic string
-    /// processes backslash escapes, so a Windows path written into one comes
-    /// back either mangled or as a parse error. That is the first thing the
-    /// shipped file warns the user about, and it would be a poor thing for the
-    /// program to then do to its own file.
+    /// A path, written as a TOML literal string (`'V:\Documents'`) so that
+    /// backslashes are not treated as escapes.
     Path(String),
     List(Vec<String>),
-    /// A whole number, written as one: `columns = 2`, not `columns = "2"`.
+    /// An integer, written unquoted (`columns = 2`).
     Int(i64),
 }
 
@@ -318,23 +273,15 @@ impl Scalar {
     }
 }
 
-/// A path as a literal string, falling back to a basic one.
-///
-/// A literal string has no escape mechanism at all, so it cannot hold a single
-/// quote. `V:\O'Brien` therefore has to be written the other way - which is
-/// correct there, because the backslash escaping `toml_edit` applies is what
-/// the loader will undo.
+/// Returns `path` as a literal string, or as an escaped basic string when it
+/// contains a single quote or newline, which literal strings cannot hold.
 fn literal(path: &str) -> toml_edit::Value {
-    // The two characters a literal string cannot hold. There is no escape for
-    // either, so these go back to a basic string - which is correct there,
-    // because the escaping `toml_edit` applies is what the loader will undo.
     if path.contains('\'') || path.contains('\n') {
         return path.into();
     }
-    // `toml_edit` will not build a literal string directly: both repr
-    // constructors are private to the crate. So one is parsed and its value
-    // taken, which is sound precisely because the two cases that could make
-    // the snippet mean something else are handled above.
+    // `toml_edit` has no public constructor for a literal string, so parse one.
+    // Safe because the characters that could break the snippet are excluded
+    // above.
     format!("x = '{path}'")
         .parse::<DocumentMut>()
         .ok()
@@ -349,29 +296,19 @@ pub enum Edit {
     Set { key: SettingKey, value: Scalar },
     /// Remove the key, returning the setting to its default.
     Unset { key: SettingKey },
-    /// Replace the whole `[[alias]]` array.
-    ///
-    /// All of it rather than one entry, because an alias list is short, is
-    /// rewritten whole by the window that edits it, and has no comments of
-    /// its own worth preserving - the explanation of what an alias *is* lives
-    /// in the block above them, which this does not touch.
+    /// Replace the whole `[[alias]]` array. The comment block above the
+    /// array is preserved.
     Aliases(Vec<crate::alias::Alias>),
     /// Replace the whole `[[mapping]]` array.
     ///
-    /// All of it, like the aliases, and for the same reason: the window edits
-    /// the list rather than one entry of it. Unlike the aliases these tables
-    /// often carry comments - the shipped file explains each drive at length -
-    /// and those are lost when a drive is edited. That is the one place in
-    /// this module where something the user wrote is not preserved, and it is
-    /// why the window says so before it does it.
+    /// Comments inside the mapping tables are lost; this is the only edit
+    /// that drops user text, and the settings window warns before doing it.
     Mappings(Vec<crate::paths::Mapping>),
 }
 
-/// What a control in the settings window produced.
+/// A raw value from a settings-window control: a text box or a switch.
 ///
-/// Two shapes, because there are two kinds of control that can produce a
-/// value: a box with text in it and a switch. Which of the four [`Scalar`]s
-/// that becomes is the key's business, not the window's.
+/// [`Edit::from_typed`] converts it to the key's [`Scalar`] shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Typed {
     Text(String),
@@ -379,19 +316,15 @@ pub enum Typed {
 }
 
 impl Edit {
-    /// What a control's value amounts to, for this key.
+    /// Converts a control's value into the edit for `key`.
     ///
-    /// The per-key shape lives here rather than in the window because it is
-    /// the same knowledge [`current`] needs to read the value back: a key
-    /// written as a list and checked as a string would report every save as
-    /// having not stuck.
+    /// Must produce the same shape [`current`] reads back, or the save is
+    /// reported as not sticking.
     pub fn from_typed(key: SettingKey, typed: Typed) -> Self {
         let value = match (key, typed) {
             (_, Typed::Flag(on)) => Scalar::Bool(on),
 
-            // An emptied box means "no viewer of my own", which is the
-            // default - so the key goes away rather than being written as a
-            // path to nowhere.
+            // An empty path box means the default, so the key is removed.
             (
                 SettingKey::PdfViewer | SettingKey::UpdateFrom | SettingKey::IndexLog,
                 Typed::Text(text),
@@ -403,9 +336,8 @@ impl Edit {
                 Typed::Text(text),
             ) => Scalar::Path(text.trim().to_string()),
 
-            // An empty list is not an absent one. `hide_extensions = []` is
-            // the documented way to hide nothing, and unsetting it here would
-            // silently restore the shipped list instead.
+            // An empty list is written, not unset: `hide_extensions = []`
+            // hides nothing, while an absent key restores the default list.
             (SettingKey::HideExtensions, Typed::Text(text)) => Scalar::List(
                 text.split(',')
                     .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
@@ -413,22 +345,10 @@ impl Edit {
                     .collect(),
             ),
 
-            // Written in the spelling `current` reads back, which is the
-            // canonical one, because that comparison is the only proof a
-            // save did anything.
-            //
-            // Without this, typing `ctrl+alt+j` into the box saved perfectly
-            // well and then reported a failure: the file said `ctrl+alt+j`,
-            // the loader parsed it, `describe` handed back `Ctrl+Alt+J`, and
-            // the read-back check compared that against the lower-case text
-            // that went in and concluded the value had not stuck. A chord is
-            // the one setting whose written form and parsed form differ, and
-            // this is the same knowledge the hide list and the paths above
-            // already carry.
-            //
-            // A chord that does not parse is passed through untouched, so
-            // the refusal comes from the loader with its line and column
-            // rather than from a silent fallback here.
+            // Written in canonical form (`Ctrl+Alt+J`) so the read-back
+            // comparison in `save` matches what `describe` returns. An
+            // unparseable chord is passed through so the loader reports it
+            // with a line and column.
             (SettingKey::Hotkey, Typed::Text(text)) => {
                 let text = text.trim();
                 let tidy = crate::hotkey::spec::parse(text)
@@ -440,9 +360,8 @@ impl Edit {
                 Scalar::Str(tidy)
             }
 
-            // A number is written as a number. One that does not parse is
-            // passed through as text, so the loader refuses it with its line
-            // and column rather than this guessing at what was meant.
+            // Non-numeric text is passed through so the loader reports it with
+            // a line and column.
             (SettingKey::Columns, Typed::Text(text)) => match text.trim().parse() {
                 Ok(n) => Scalar::Int(n),
                 Err(_) => Scalar::Str(text.trim().to_string()),
@@ -453,10 +372,7 @@ impl Edit {
         Self::Set { key, value }
     }
 
-    /// The setting this names, where it names one.
-    ///
-    /// `None` for an alias list, which is not a setting and has no key - the
-    /// reason this returns an option rather than picking one.
+    /// Returns the setting key, or `None` for alias and mapping edits.
     pub fn key(&self) -> Option<SettingKey> {
         match self {
             Self::Set { key, .. } | Self::Unset { key } => Some(*key),
@@ -467,13 +383,12 @@ impl Edit {
 
 /// Applies every edit, preserving everything else in the file.
 pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
-    // Re-read rather than reuse whatever was parsed at startup. Another
-    // instance - or the user, in an editor - may have changed a mapping since,
-    // and rewriting from stale text would quietly undo their work.
+    // Re-read so changes made since startup, by another instance or an
+    // editor, are not overwritten.
     let text = std::fs::read_to_string(path).map_err(|e| WriteError::Io(e.to_string()))?;
     let updated = apply(&text, edits)?;
 
-    // Proof that the next start will accept what is about to be written.
+    // Verify the next start will accept the file.
     let reloaded = super::file::parse(
         &updated,
         path,
@@ -487,20 +402,14 @@ pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
         )
     })?;
 
-    // Parsing is not enough: it proves the file is still *valid*, not that the
-    // value is still *there*. Reading it back through the real loader is the
-    // only thing that proves what the next start will actually see, and
-    // reporting a save that silently does nothing is the one failure this
-    // whole module exists to avoid.
+    // A valid file is not enough; confirm each value reads back as written.
     for edit in edits {
         let stuck = match edit {
             Edit::Set { key, value } => current(*key, &reloaded.settings).as_ref() == Some(value),
             Edit::Unset { key } => current(*key, &reloaded.settings).is_none(),
             Edit::Aliases(want) => reloaded.aliases.all() == want.as_slice(),
-            // By what the loader made of them rather than by equality: an id
-            // is a position in the list, and a path is normalised on the way
-            // in, so the values that come back are not the values that went
-            // out even when the save was perfect.
+            // Compared field by field: ids are list positions and paths are
+            // normalised on load, so plain equality would fail.
             Edit::Mappings(want) => {
                 let got = reloaded.routes.all();
                 got.len() == want.len()
@@ -522,46 +431,36 @@ pub fn save(path: &Path, edits: &[Edit]) -> Result<(), WriteError> {
 
 /// Returns `text` with every edit applied, as a pure string transformation.
 ///
-/// Separated from the filesystem so every shape the user's file can be in is
-/// testable without one.
 pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
     let mut doc: DocumentMut = text
         .parse()
         .map_err(|e: toml_edit::TomlError| WriteError::Io(e.to_string()))?;
 
-    // `settings` present but not a table - `settings = 3`, or `[[settings]]`
-    // mistyped for `[settings]` - would send the assignment below into
-    // toml_edit's `IndexMut`, which is an `.expect("index not found")`. The
-    // loader rejects this shape now, but this runs against whatever is on disk
-    // at the moment the key is pressed, which need not be what started the
-    // program.
+    // A non-table `settings` (`settings = 3`, `[[settings]]`) would make the
+    // `IndexMut` assignment below panic. The file on disk may have changed
+    // since the loader validated it.
     if let Some(existing) = doc.get("settings")
         && !existing.is_table()
     {
         return Err(WriteError::NotATable);
     }
 
-    // Only for an edit that needs somewhere to put a value. Removing a key
-    // from a table that does not exist is already done.
+    // Create `[settings]` only when a value must be set.
     if edits.iter().any(|e| matches!(e, Edit::Set { .. })) && !doc.contains_key("settings") {
         let mut table = Table::new();
-        // Without this the table is "implicit" and is not rendered at all, so
-        // the key would be written under no heading and read back as a
-        // top-level key - which `ROOT_KEYS` rejects.
+        // An implicit table renders no header, so its keys would land at the
+        // root, which `ROOT_KEYS` rejects.
         table.set_implicit(false);
-        // The shipped file ends in a comment block. A new table with no decor
-        // of its own absorbs the text above it as its prefix, which visibly
-        // eats the user's comments; an explicit blank line stops that.
+        // Without its own prefix the new table absorbs the trailing comment
+        // block of the file as its decor.
         table.decor_mut().set_prefix("\n");
         doc["settings"] = Item::Table(table);
     }
 
     for edit in edits {
         match edit {
-            // A plain assignment. Deliberately no attempt to find and
-            // uncomment an existing `# viewer = ...` line: toml_edit has no
-            // notion of commented-out keys, and doing it by string surgery is
-            // how a hand-edited file gets corrupted.
+            // A commented-out `# key = ...` line is left alone; uncommenting
+            // it would need string surgery on a hand-edited file.
             Edit::Set { key, value } => doc["settings"][key.name()] = value.to_item(),
             Edit::Unset { key } => {
                 if let Some(table) = doc.get_mut("settings").and_then(Item::as_table_mut) {
@@ -576,10 +475,8 @@ pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
                     table["path"] = Item::Value(literal(&mapping.path.to_string_lossy()));
                     table["kind"] = value(mapping.kind.label());
                     table["enabled"] = value(mapping.enabled);
-                    // Only where it means something. `refresh` on a live
-                    // mapping and `depth` on an indexed one are both refused
-                    // by the loader rather than ignored, so writing them
-                    // unconditionally would produce a file that will not load.
+                    // The loader rejects `refresh` on a live mapping and
+                    // `depth` on an indexed one, so write each only where valid.
                     if mapping.kind.is_indexed() {
                         table["refresh"] = value(mapping.refresh.label());
                     }
@@ -611,16 +508,13 @@ pub fn apply(text: &str, edits: &[Edit]) -> Result<String, WriteError> {
     Ok(doc.to_string())
 }
 
-/// What the loader would now apply for `key`, in the shape it was written in.
-///
-/// `None` means the file says nothing about it, so the default is in force.
+/// Returns the loaded value for `key` in its written [`Scalar`] shape, or
+/// `None` when the file leaves it at the default.
 fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
     match key {
         SettingKey::Viewer => s.viewer.clone().map(Scalar::Str),
         SettingKey::Theme => s.theme.clone().map(Scalar::Str),
-        // Compared through the canonical spelling rather than the text that
-        // was written, because `ctrl+shift+space` and `Ctrl+Shift+Space` are
-        // the same chord and a save is not a failure for having been tidied.
+        // Canonical spelling, matching what `Edit::from_typed` writes.
         SettingKey::Hotkey => s.hotkey.map(|spec| {
             Scalar::Str(match spec.bound() {
                 Some(hk) => crate::hotkey::spec::describe(hk),
@@ -657,12 +551,10 @@ fn current(key: SettingKey, s: &super::file::FileSettings) -> Option<Scalar> {
     }
 }
 
-/// Writes the viewer called `name` into `[settings]`, preserving everything
-/// else.
+/// Writes `viewer = name` into `[settings]`, preserving everything else.
 ///
-/// The configuration spelling rather than a [`crate::config::ViewerKind`]: a
-/// configured viewer is an index, and only the caller holds the list it is an
-/// index into. See [`crate::config::ViewerKind::name`].
+/// Takes the configured spelling (see [`crate::config::ViewerKind::name`])
+/// because only the caller holds the viewer list.
 pub fn save_viewer(path: &Path, name: &str) -> Result<(), WriteError> {
     save(path, &[viewer_edit(name)])
 }
@@ -679,21 +571,15 @@ fn viewer_edit(name: &str) -> Edit {
     }
 }
 
-/// Replaces the whole file, for a caller that has already proved the text.
+/// Atomically replaces the whole file with already-validated text.
 ///
-/// The migration is the one thing besides an edit that rewrites this file, and
-/// it rewrites all of it. It gets to the same temp-then-rename rather than a
-/// `fs::write` of its own, because the reason for that is the file and not the
-/// caller - see [`write_atomically`].
+/// Used by migration.
 pub fn replace(path: &Path, text: &str) -> Result<(), String> {
     write_atomically(path, text).map_err(|e| e.to_string())
 }
 
-/// Replaces the file in one step.
-///
-/// The same temp-then-rename this crate uses for the index, for a sharper
-/// reason: a half-written `config.toml` is not a degraded cache, it is a
-/// startup failure with exit code 2, on a file the user wrote by hand.
+/// Replaces the file via temp-then-rename, so a failed write can never leave a
+/// truncated `config.toml`, which would be a startup failure.
 fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
 
@@ -719,17 +605,11 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     }
 }
 
-/// Saves off the UI thread, and reports what happened.
+/// Saves the viewer choice on a background thread and reports the outcome.
 ///
-/// Detached rather than run inline in `dispatch`, because `%APPDATA%` roams:
-/// in a domain that maps `R:\` and `V:\` it is very often redirected to a
-/// network path, and a synchronous write would put an SMB round trip - or an
-/// SMB timeout - directly in the keypress.
-///
-/// The cost of that choice is that this thread is not tracked by
-/// `Actors::shutdown`, so F2 immediately followed by closing the window can
-/// kill it mid-write. Temp-then-rename bounds that to a stray `.tmp` beside
-/// the configuration rather than a damaged one.
+/// Runs off the UI thread because `%APPDATA%` is often redirected to a network
+/// share. The thread is not tracked by `Actors::shutdown`, so exiting mid-write
+/// can leave a stray `.tmp`, but never a damaged configuration.
 pub fn save_viewer_async(path: Option<PathBuf>, name: Arc<str>, events: Events) {
     save_async(path, vec![viewer_edit(&name)], events, move |outcome| {
         AppEvent::Open(match outcome {
@@ -741,9 +621,8 @@ pub fn save_viewer_async(path: Option<PathBuf>, name: Arc<str>, events: Events) 
 
 /// Saves off the UI thread, reporting the outcome through `report`.
 ///
-/// The caller supplies the event because what to say about a failed save
-/// depends on what was being saved: F2 has a footer to correct, and the
-/// settings window has a field to put back.
+/// The caller builds the event, since F2 and the settings window handle a
+/// failed save differently.
 pub fn save_async(
     path: Option<PathBuf>,
     edits: Vec<Edit>,
@@ -754,12 +633,8 @@ pub fn save_async(
     let spawned = std::thread::Builder::new()
         .name("files-config-write".into())
         .spawn(move || {
-            // Every other worker in this crate catches its own panics, and
-            // this one parses a file a user hand-edits. Without this a panic
-            // would take the thread with it and send nothing at all, so F2
-            // would flip the footer and silently never save - and the default
-            // hook would print the panic straight into the raw-mode terminal
-            // the panel is drawn in.
+            // Catch panics so a failure is still reported rather than the
+            // thread dying silently.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match path {
                 None => Err(WriteError::NoConfigFile.detail()),
                 Some(path) => save(&path, &edits).map_err(|e| e.detail()),
@@ -770,8 +645,6 @@ pub fn save_async(
             })));
         });
 
-    // A thread that never started would otherwise be the quietest failure of
-    // the lot.
     if spawned.is_err() {
         let _ = reporter.send(AppEvent::Open(OpenMsg::ViewerSaveFailed {
             detail: "could not start the configuration writer".into(),
@@ -784,19 +657,15 @@ mod tests {
     use super::*;
     use crate::config::file::DEFAULT_CONFIG_TOML;
 
-    /// A value that is not the shipped default, for every key.
-    ///
-    /// Exhaustive on purpose. A key added without one is a compile error
-    /// rather than a key the round trip below silently skips.
+    /// Returns a non-default value for `key`. Exhaustive, so a new key must
+    /// be added here.
     fn different(key: SettingKey) -> Typed {
         match key {
             SettingKey::Viewer => Typed::Text("pdf".into()),
             SettingKey::Theme => Typed::Text("dark".into()),
             SettingKey::Hotkey => Typed::Text("ctrl+alt+j".into()),
             SettingKey::PdfViewer => Typed::Text(r"C:\viewer.exe".into()),
-            // A UNC path, because that is what this one actually gets, and
-            // it is the value that proves `Scalar::Path` writes a literal
-            // string rather than a basic one.
+            // A UNC path checks that `Scalar::Path` writes a literal string.
             SettingKey::UpdateFrom => Typed::Text(r"\\fileserver\software\files".into()),
             SettingKey::IndexLog => Typed::Text(r"C:\temp\files-index.log".into()),
             SettingKey::Backdrop => Typed::Text("mica".into()),
@@ -817,14 +686,7 @@ mod tests {
         }
     }
 
-    /// Every key goes in, comes back out of the parser, and is recognised.
-    ///
-    /// This is the test that catches a missing arm in [`current`], which is
-    /// the one failure in this module with no symptom: the value is written
-    /// correctly, the file reloads, and the read-back check says the save
-    /// did not stick - so a perfectly good save reports itself as a failure,
-    /// or a broken one reports success. Written over `SettingKey::ALL`, so
-    /// the fifteenth key is covered the moment it exists.
+    /// Every key round-trips through `apply`, the loader and [`current`].
     #[test]
     fn every_writable_key_goes_into_the_file_and_is_recognised_coming_back() {
         for key in SettingKey::ALL {
@@ -847,15 +709,6 @@ mod tests {
         }
     }
 
-    /// A chord typed in any spelling saves, and says it saved.
-    ///
-    /// It did not. The box wrote the text exactly as typed, the loader
-    /// parsed it, and the read-back check compared the canonical spelling
-    /// `describe` produces against the lower-case one that went in - so
-    /// `ctrl+alt+j` was written correctly to the file and then reported as a
-    /// failure. A chord is the one setting whose written and parsed forms
-    /// differ, and every other such setting was already shaped in
-    /// `from_typed`.
     #[test]
     fn a_chord_typed_in_lower_case_still_reports_that_it_saved() {
         let edit = Edit::from_typed(SettingKey::Hotkey, Typed::Text("ctrl+alt+j".into()));
@@ -871,7 +724,6 @@ mod tests {
         );
     }
 
-    /// And "off" is a chord too, in the sense that matters here.
     #[test]
     fn claiming_no_key_at_all_also_reports_that_it_saved() {
         let edit = Edit::from_typed(SettingKey::Hotkey, Typed::Text("OFF".into()));
@@ -886,8 +738,6 @@ mod tests {
         );
     }
 
-    /// Emptying a path box removes the key rather than writing a path to
-    /// nowhere, and the reader agrees it is gone.
     #[test]
     fn emptying_a_path_box_takes_the_key_out_of_the_file() {
         for key in [
@@ -903,7 +753,6 @@ mod tests {
                 key.name()
             );
 
-            // Set it first, so there is something to remove.
             let set = apply(
                 DEFAULT_CONFIG_TOML,
                 &[Edit::from_typed(key, different(key))],
@@ -919,11 +768,7 @@ mod tests {
         }
     }
 
-    /// A UNC folder has to come back out spelled the way it went in.
-    ///
-    /// The one way this breaks is writing it as a basic string, where every
-    /// backslash is an escape and the path quietly loses half of itself.
-    /// `Scalar::Path` writes a literal, and this is what says so.
+    /// A UNC path is written as a literal string and reads back unchanged.
     #[test]
     fn a_unc_folder_survives_the_round_trip_intact() {
         const UNC: &str = r"\\fileserver\software\files";
@@ -954,7 +799,6 @@ mod tests {
         .expect("a rewritten configuration must load")
     }
 
-    /// The whole reason this uses `toml_edit` rather than re-serialising.
     #[test]
     fn rewriting_the_viewer_leaves_every_comment_intact() {
         let before = DEFAULT_CONFIG_TOML;
@@ -971,11 +815,8 @@ mod tests {
         let once = with_viewer(DEFAULT_CONFIG_TOML, "auto").unwrap();
         let twice = with_viewer(&once, "pdf").unwrap();
 
-        // Whole lines that are actually the key, rather than every
-        // occurrence of the text. A substring count also matched the `#
-        // pdf_viewer = ...` the shipped file documents the override with,
-        // which is a comment about a different setting and not a duplicate
-        // of this one.
+        // Count whole `viewer =` lines; a substring count would also match
+        // `# pdf_viewer = ...` in the shipped comments.
         let written = twice
             .lines()
             .filter(|l| l.trim_start().starts_with("viewer ="))
@@ -984,7 +825,6 @@ mod tests {
         assert_eq!(reload(&twice).settings.viewer.as_deref(), Some("pdf"));
     }
 
-    /// What an older config looks like: the table is there, the key is not.
     #[test]
     fn rewriting_the_viewer_when_the_key_is_absent_adds_it_to_the_existing_table() {
         let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
@@ -997,8 +837,6 @@ mod tests {
         assert_eq!(reload(&after).settings.viewer.as_deref(), Some("pdf"));
     }
 
-    /// A new table appended to a file that ends in comments will swallow them
-    /// into its own decor unless it is given a prefix of its own.
     #[test]
     fn rewriting_the_viewer_with_no_settings_table_does_not_swallow_the_trailing_comments() {
         let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
@@ -1015,11 +853,9 @@ mod tests {
         assert_eq!(reload(&after).settings.viewer.as_deref(), Some("pdf"));
     }
 
-    /// Everything the writer can emit has to survive the loader, or F2 could
-    /// leave the program unable to start.
     #[test]
     fn every_viewer_the_writer_emits_still_reloads() {
-        // With a viewer configured, so every kind of mode is covered.
+        // Configure an app viewer so every `ViewerKind` variant is covered.
         let text = format!(
             "{DEFAULT_CONFIG_TOML}
 [[viewer]]
@@ -1045,7 +881,7 @@ program = 'avwin.exe'
         let after = std::fs::read_to_string(&path).unwrap();
 
         assert!(after.contains("viewer = \"pdf\""), "{after}");
-        assert!(after.contains("CustomPro"), "the body must be untouched");
+        assert!(after.contains("example-flat"), "the body must be untouched");
         assert!(
             std::fs::read_dir(dir.path())
                 .unwrap()
@@ -1063,13 +899,11 @@ program = 'avwin.exe'
         assert!(!err.detail().is_empty());
     }
 
-    /// Refusing is the point: the alternative is a config that stops the
-    /// program starting, caused by a keypress.
     #[test]
     fn a_rewrite_that_would_not_reload_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        // Valid TOML, but not a valid configuration - no mappings at all.
+        // Valid TOML but an invalid configuration.
         std::fs::write(&path, "version = 1\n").unwrap();
 
         let err = save_viewer(&path, "pdf").unwrap_err();
@@ -1081,9 +915,6 @@ program = 'avwin.exe'
         );
     }
 
-    /// `doc["settings"]["viewer"] = ...` is an `.expect()` underneath, so a
-    /// `settings` that is not a table used to panic the writer thread - which
-    /// had no panic handler, so F2 silently did nothing at all.
     #[test]
     fn a_malformed_settings_table_is_refused_rather_than_panicking() {
         for text in [
@@ -1105,9 +936,8 @@ settings = []
         }
     }
 
-    /// Parsing only proves the file is still valid. An inline
-    /// `settings = { .. }` accepts the key and then the loader ignores the
-    /// whole block, so the save "succeeded" and the setting never applied.
+    /// An inline `settings = { .. }` parses but is ignored by the loader, so
+    /// the read-back check must reject the save.
     #[test]
     fn a_rewrite_the_loader_would_ignore_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1169,8 +999,6 @@ settings = {{ persist = true }}
         assert_eq!(parsed.routes.all()[1].kind, MappingKind::Tree);
     }
 
-    /// A Windows path must go in as a literal string, or the backslashes are
-    /// escapes and the file either means something else or will not parse.
     #[test]
     fn a_drive_path_is_written_as_a_literal_string() {
         use crate::paths::MappingKind;
@@ -1192,9 +1020,7 @@ settings = {{ persist = true }}
         );
     }
 
-    /// `refresh` on a live mapping and `depth` on an indexed one are both
-    /// refused by the loader rather than ignored, so writing them everywhere
-    /// would produce a file that will not load.
+    /// `refresh` is written only for indexed kinds and `depth` only for live.
     #[test]
     fn only_the_keys_that_mean_something_for_a_kind_are_written() {
         use crate::paths::MappingKind;
@@ -1212,8 +1038,7 @@ settings = {{ persist = true }}
         assert_eq!(after.matches("depth =").count(), 1, "{after}");
     }
 
-    /// The writer must never produce a file the loader refuses - here, two
-    /// drives on one directory.
+    /// Two mappings on one directory are rejected and the file is unchanged.
     #[test]
     fn a_drive_list_the_loader_would_refuse_is_refused_by_the_writer_too() {
         use crate::paths::MappingKind;
@@ -1235,7 +1060,6 @@ settings = {{ persist = true }}
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
-    /// Replaced wholesale. Writing twice must not leave the old drives behind.
     #[test]
     fn writing_drives_twice_replaces_rather_than_appends() {
         use crate::paths::MappingKind;
@@ -1300,8 +1124,6 @@ settings = {{ persist = true }}
         );
     }
 
-    /// The block explaining what an alias *is* lives above them in the shipped
-    /// file, and rewriting the list must not take it away.
     #[test]
     fn writing_aliases_leaves_the_comments_around_them_intact() {
         let after = apply(
@@ -1318,8 +1140,6 @@ settings = {{ persist = true }}
         }
     }
 
-    /// Replaced wholesale, not appended to. Writing twice must not leave two
-    /// aliases called `pw`, which the loader would then refuse.
     #[test]
     fn writing_aliases_twice_replaces_rather_than_appends() {
         let once = apply(
@@ -1337,8 +1157,6 @@ settings = {{ persist = true }}
         );
     }
 
-    /// An empty list means no aliases, which is the shipped state - so the
-    /// array goes away rather than being written as an empty one.
     #[test]
     fn writing_an_empty_list_removes_the_aliases_entirely() {
         let with = apply(
@@ -1349,8 +1167,7 @@ settings = {{ persist = true }}
         let without = apply(&with, &[Edit::Aliases(Vec::new())]).unwrap();
 
         assert!(reload(&without).aliases.is_empty());
-        // A *live* table. The shipped file carries a commented-out example of
-        // one, which must survive: it is the documentation for the feature.
+        // No live table remains, but the commented-out example survives.
         assert!(
             !without.lines().any(|l| l.trim() == "[[alias]]"),
             "{without}"
@@ -1361,8 +1178,6 @@ settings = {{ persist = true }}
         );
     }
 
-    /// The read-back check has to cover aliases too, or a save that silently
-    /// did nothing would be reported as having worked.
     #[test]
     fn an_alias_write_is_checked_on_the_way_back_out() {
         let dir = tempfile::tempdir().unwrap();
@@ -1375,8 +1190,7 @@ settings = {{ persist = true }}
         assert_eq!(reload(&after).aliases.len(), 1);
     }
 
-    /// The writer must never produce a file the loader refuses - here, an
-    /// alias whose code has nothing in it to search for.
+    /// An alias with no search terms is rejected and the file is unchanged.
     #[test]
     fn an_alias_the_loader_would_refuse_is_refused_by_the_writer_too() {
         let dir = tempfile::tempdir().unwrap();

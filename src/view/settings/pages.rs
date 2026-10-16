@@ -1,8 +1,4 @@
-//! The form as it stands right now: every page, group, row and word.
-//!
-//! A pure function of the live state, called every frame, for the reason the
-//! module note above gives. Nothing here is a buffer and nothing here is
-//! remembered.
+//! Builds every page of the settings form from the live state, each frame.
 
 use super::shape::{Action, ActionId, Block, Fact, Group, Page, PageId, Switch};
 use std::borrow::Cow;
@@ -14,19 +10,11 @@ use crate::config::write::SettingKey;
 use crate::config::{Dock, Settings};
 use crate::view::status::Tone;
 
-/// The whole form.
+/// Returns the whole form.
 ///
-/// Several arguments rather than one because several things are being
-/// described: the settings, the one piece of runtime state the About page
-/// reads, the remembered window position, and whether Windows starts files at
-/// sign-in - the last two being neither settings nor state. `autostart` is
-/// `None` when the registry could not be read.
-///
-/// The first used to be the whole of `AppState`, which was a lie about the
-/// dependency: this reads `state.update` and nothing else. Naming the fact
-/// rather than the struct is what lets the settings window run in a process
-/// that has no `AppState` at all - it looks for an update itself, on a
-/// worker, and hands the answer in here.
+/// Takes the update result rather than `AppState`, so the settings window can
+/// run in a process without one. `autostart` is `None` when the registry
+/// could not be read.
 pub fn pages(
     update: Option<&crate::update::Found>,
     settings: &Settings,
@@ -51,20 +39,16 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
         settings,
         SettingKey::History,
         "Recent codes",
-        "Keep the codes you search for, so the up arrow brings them back tomorrow.",
+        "Remember searched codes so the up arrow can recall them later.",
         Field::Toggle {
             on: settings.history,
         },
     )])];
-    // Said whether or not there is anywhere to keep them. A block that
-    // vanishes is a page that changes shape, and a page that changes shape
-    // is harder to learn than one that says "nowhere".
+    // Shown even when there is nowhere to keep them, so the page keeps its
+    // shape.
     remembering.push(Block::Facts(vec![match &settings.history_path {
         Some(path) => Fact::new("Stored in", path.display().to_string()),
-        None => Fact::new(
-            "Stored in",
-            "Nowhere \u{b7} recall lasts until files closes",
-        ),
+        None => Fact::new("Stored in", "Not saved \u{b7} cleared when files closes"),
     }]));
 
     Page {
@@ -75,9 +59,8 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
                 blocks: vec![Block::Rows(vec![row(
                     settings,
                     SettingKey::Hotkey,
-                    "Summon with",
-                    "The key that brings the panel up from wherever you are working. Use \
-                     off to claim no key at all.",
+                    "Hotkey",
+                    "Shows the panel from any application. Enter off to disable it.",
                     Field::Text {
                         value: hotkey_of(settings),
                         placeholder: "ctrl+shift+space",
@@ -89,18 +72,17 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
                 blocks: vec![starting(autostart)],
             },
             Group {
-                heading: Some("Remembering"),
+                heading: Some("History"),
                 blocks: remembering,
             },
             Group {
-                heading: Some("When the panel puts itself away"),
+                heading: Some("Auto-hide"),
                 blocks: vec![Block::Rows(vec![
                     row(
                         settings,
                         SettingKey::HideOnBlur,
                         "When it loses focus",
-                        "Put the panel away when you click on something else. This is \
-                         what a launcher normally does.",
+                        "Hide the panel when another window is clicked.",
                         Field::Toggle {
                             on: settings.hide_on_blur,
                         },
@@ -108,11 +90,9 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
                     row(
                         settings,
                         SettingKey::HideAfterOpening,
-                        "After something opens",
-                        "Put the panel away once a file is on its way. Anything the \
-                         open has to say arrives in a message box instead, so nothing \
-                         is lost with the window. Copying leaves the panel up either \
-                         way, so you can see that it worked.",
+                        "After opening a file",
+                        "Hide the panel once a file opens. Errors appear in a message \
+                         box. Copying always keeps the panel open.",
                         Field::Toggle {
                             on: settings.hide_after_opening,
                         },
@@ -121,8 +101,8 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
                         settings,
                         SettingKey::HideOnEscape,
                         "When Escape is pressed",
-                        "Escape puts the panel away rather than clearing the box. \
-                         Turn it off and the shortcut is the only way out.",
+                        "Escape hides the panel instead of clearing the search box. \
+                         When off, only the hotkey hides it.",
                         Field::Toggle {
                             on: settings.hide_on_escape,
                         },
@@ -137,18 +117,14 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
     }
 }
 
-/// The switch for starting at sign-in, or why there is not one.
+/// Returns the start-at-sign-in switch, or why it is unavailable.
 ///
-/// Hidden is not a choice offered here, because it is not one: the panel
-/// always starts put away, and a launch at sign-in is a tray icon and
-/// nothing else.
+/// A sign-in launch always starts hidden in the tray.
 fn starting(autostart: Option<bool>) -> Block {
     match autostart {
         Some(on) => Block::Switches(vec![Switch::new(
             "Start with Windows",
-            "Start files in the tray when you sign in, so the shortcut works \
-             without opening it first. The panel stays out of the way until you \
-             call it up.",
+            "Start files in the tray at sign-in, so the hotkey works immediately.",
             on,
             ActionId::StartWithWindows,
             ActionId::StopStartingWithWindows,
@@ -161,23 +137,20 @@ fn starting(autostart: Option<bool>) -> Block {
     }
 }
 
-/// The path, and a button to open it in whatever handles a `.toml`.
-///
-/// On General rather than with the diagnostics, which is where a repair tool
-/// would go: this file is what every page in this window writes to, not
-/// something you reach for when something is broken.
+/// Returns the configuration path and a button to open it in the `.toml`
+/// handler.
 fn config_file() -> Vec<Block> {
     match crate::config::file::default_config_path() {
         Some(path) => vec![
             Block::Facts(vec![Fact::new("Path", path.display().to_string())]),
             Block::Actions(vec![Action::new(
                 ActionId::OpenConfigFile,
-                "Open the configuration file",
+                "Open configuration file",
             )]),
         ],
         None => vec![Block::Facts(vec![Fact::new(
             "Path",
-            "None \u{b7} running on the built-in defaults",
+            "None \u{b7} using built-in defaults",
         )])],
     }
 }
@@ -187,35 +160,28 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
         settings,
         SettingKey::Dock,
         "Docked",
-        "Floating is a window you can drag anywhere. Along the top or the bottom \
-         pins it to that edge as a bar the width of the screen, which stays put \
-         and never changes size.",
+        "Floating can be dragged anywhere. Top or bottom pins it to that edge as a \
+         full-width bar.",
         Field::Choice {
             options: Cow::Borrowed(DOCKS),
             current: index_of(DOCKS, settings.dock.name()),
         },
     )])];
-    // A docked panel is not where anybody left it, and cannot be dragged, so
-    // the line says where it is instead of repeating an invitation that would
-    // do nothing. The remembered position is kept either way - it is where
-    // the panel goes back to when it floats again.
+    // A docked panel cannot be dragged, so the line says where it is. The
+    // remembered position is kept for when it floats again.
     where_it_appears.push(Block::Facts(vec![match (settings.dock, placement) {
-        (Dock::Top, _) => Fact::new("Position", "Against the top edge of the screen"),
-        (Dock::Bottom, _) => Fact::new("Position", "Against the bottom edge of the screen"),
+        (Dock::Top, _) => Fact::new("Position", "Top edge of the screen"),
+        (Dock::Bottom, _) => Fact::new("Position", "Bottom edge of the screen"),
         (Dock::Free, Some((left, top))) => {
-            Fact::new("Position", format!("Where you left it, {left},{top}"))
+            Fact::new("Position", format!("Last dragged to {left},{top}"))
         }
-        (Dock::Free, None) => Fact::new(
-            "Position",
-            "Chosen by the program \u{b7} drag the panel to move it",
-        ),
+        (Dock::Free, None) => Fact::new("Position", "Automatic \u{b7} drag the panel to move it"),
     }]));
-    // Only when there is something to forget. A button that does nothing is
-    // a button that should not have been there.
+    // Only when there is a remembered position to forget.
     if placement.is_some() {
         where_it_appears.push(Block::Actions(vec![Action::new(
             ActionId::ForgetPlacement,
-            "Forget the remembered position",
+            "Reset position",
         )]));
     }
 
@@ -223,12 +189,12 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
         id: PageId::Appearance,
         groups: vec![
             Group {
-                heading: Some("Colours"),
+                heading: Some("Theme"),
                 blocks: vec![Block::Rows(vec![row(
                     settings,
                     SettingKey::Theme,
                     "Colours",
-                    "Follow Windows to change with the system, or pick one and keep it.",
+                    "Follow Windows, or always use light or dark.",
                     Field::Choice {
                         options: Cow::Borrowed(THEMES),
                         current: index_of(THEMES, settings.theme.name()),
@@ -236,16 +202,14 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                 )])],
             },
             Group {
-                heading: Some("What shows through"),
+                heading: Some("Background"),
                 blocks: vec![Block::Rows(vec![row(
                     settings,
                     SettingKey::Backdrop,
-                    "Behind the panel",
-                    "Acrylic blurs the window underneath, which is what the panel is \
-                     usually over. Mica samples the desktop wallpaper instead, so it \
-                     shows the wallpaper wherever the panel happens to be. None lets \
-                     the panel paint its own, which is what an older Windows gives \
-                     you whatever you pick here.",
+                    "Backdrop",
+                    "Acrylic blurs the windows behind the panel. Mica tints it with the \
+                     desktop wallpaper. None uses a solid fill, as do Windows versions \
+                     without these effects.",
                     Field::Choice {
                         options: Cow::Borrowed(BACKDROPS),
                         current: index_of(BACKDROPS, settings.backdrop.name()),
@@ -253,15 +217,14 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                 )])],
             },
             Group {
-                heading: Some("How a result is listed"),
+                heading: Some("Results"),
                 blocks: vec![Block::Rows(vec![
                     row(
                         settings,
                         SettingKey::ResultLayout,
                         "Rows",
-                        "Compact fits six results on screen and shows the name and the \
-                         drive. Detailed fits four and puts the folder under each name, \
-                         which is how you tell two drawings with the same name apart.",
+                        "Compact shows six results with name and drive. Detailed shows \
+                         four and adds the folder, to tell apart files with the same name.",
                         Field::Choice {
                             options: Cow::Borrowed(LAYOUTS),
                             current: index_of(LAYOUTS, settings.result_layout.name()),
@@ -271,9 +234,9 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                         settings,
                         SettingKey::Columns,
                         "Columns",
-                        "More columns show more results at once, with less room for \
-                         each name. Up and down stay in a column, and Tab or Shift+Tab \
-                         moves to the same place in the next one.",
+                        "More columns show more results with less room for each name. \
+                         Up and Down move within a column; Tab and Shift+Tab move between \
+                         columns.",
                         Field::Choice {
                             options: Cow::Borrowed(COLUMNS),
                             current: index_of(COLUMNS, &settings.columns.to_string()),
@@ -282,7 +245,7 @@ fn appearance(settings: &Settings, placement: Option<(i32, i32)>) -> Page {
                 ])],
             },
             Group {
-                heading: Some("Where the panel appears"),
+                heading: Some("Position"),
                 blocks: where_it_appears,
             },
         ],
@@ -294,18 +257,18 @@ fn drives(settings: &Settings) -> Page {
         id: PageId::Drives,
         groups: vec![
             Group {
-                heading: Some("Where to search"),
+                heading: Some("Drives"),
                 blocks: vec![Block::Drives],
             },
             Group {
-                heading: Some("Keeping drives up to date"),
+                heading: Some("Change tracking"),
                 blocks: vec![Block::Rows(vec![
                     row(
                         settings,
                         SettingKey::LiveUpdates,
-                        "Follow changes as they happen",
-                        "Let the file server say which folders have changed, so a new job \
-                         appears within seconds instead of at the next full read.",
+                        "Live updates",
+                        "Let the file server report changed folders, so new files appear \
+                         within seconds instead of at the next full scan.",
                         Field::Toggle {
                             on: settings.live_updates,
                         },
@@ -313,9 +276,8 @@ fn drives(settings: &Settings) -> Page {
                     row(
                         settings,
                         SettingKey::StaleNotices,
-                        "Warn when a drive is out of date",
-                        "Say so on the status line when a drive has stopped tracking what \
-                         is on it.",
+                        "Stale drive warnings",
+                        "Show a status line notice when a drive stops tracking changes.",
                         Field::Toggle {
                             on: settings.stale_notices,
                         },
@@ -330,9 +292,7 @@ fn aliases() -> Page {
     Page {
         id: PageId::Aliases,
         groups: vec![Group {
-            // No heading. The page is called Aliases and the group would be
-            // called Aliases, which is the repetition `Group::heading` is
-            // optional to avoid.
+            // No heading; it would repeat the page title.
             heading: None,
             blocks: vec![Block::Aliases],
         }],
@@ -343,33 +303,32 @@ fn searching(settings: &Settings) -> Page {
     Page {
         id: PageId::Searching,
         groups: vec![Group {
-            heading: Some("What is left out of results"),
+            heading: Some("Excluded from results"),
             blocks: vec![Block::Rows(vec![
                 row(
                     settings,
                     SettingKey::HideExtensions,
                     "Hidden file types",
-                    "Extensions never shown, however well they match. Separate them with \
-                     commas, or empty the box to hide nothing.",
+                    "File extensions never shown in results, separated by commas. Leave \
+                     empty to show all types.",
                     Field::Text {
-                        // Undotted, which is how the file is written and how
-                        // the help above asks for them. `suffixes` dots them
-                        // because that is what the matching wants.
+                        // Undotted, as in the file; `suffixes` adds the dots
+                        // for matching.
                         value: settings
                             .hidden
                             .suffixes()
                             .map(|s| s.trim_start_matches('.'))
                             .collect::<Vec<_>>()
                             .join(", "),
-                        placeholder: "Nothing is hidden",
+                        placeholder: "None",
                     },
                 ),
                 row(
                     settings,
                     SettingKey::HideSystemFiles,
                     "Hidden and system files",
-                    "Also leave out whatever Windows marks hidden or system. This one \
-                     needs the drive read again, which F5 does.",
+                    "Also exclude files Windows marks hidden or system. Takes effect \
+                     after F5 rescans the drive.",
                     Field::Toggle {
                         on: settings.hidden.hides_system(),
                     },
@@ -389,9 +348,9 @@ fn opening(settings: &Settings) -> Page {
                     settings,
                     SettingKey::Viewer,
                     "Enter opens",
-                    "Automatic opens each file with the program Windows has for it. PDF \
-                     assembles a document from its pages. Viewers added as [[viewer]] in the \
-                     configuration file are listed here too. F2 switches this while you work.",
+                    "Automatic uses each file's default app. PDF combines a code's pages \
+                     into one document. Viewers defined as [[viewer]] in the configuration \
+                     file are also listed. F2 switches between them.",
                     Field::Choice {
                         options: viewer_choices(settings),
                         current: viewer_index(settings),
@@ -401,21 +360,19 @@ fn opening(settings: &Settings) -> Page {
                     settings,
                     SettingKey::PdfViewer,
                     "PDF viewer",
-                    "A program to open assembled documents with, instead of whatever \
-                     Windows has registered for PDFs.",
+                    "Program for combined PDFs. Leave empty to use the default PDF app.",
                     Field::Text {
                         value: path_of(settings.pdf_viewer.as_deref()),
-                        placeholder: "Default App",
+                        placeholder: "Default app",
                     },
                 ),
                 row(
                     settings,
                     SettingKey::PdfReadOnly,
-                    "Assembled documents open read-only",
-                    "An assembled document is named after a hash of its own contents, so a \
-                     viewer that saves into it leaves a file whose name no longer describes \
-                     it. Turn this off to annotate one and keep the result. A file opened \
-                     straight off the drive is untouched either way.",
+                    "Open combined PDFs read-only",
+                    "Combined PDFs are named by a hash of their contents, so saving into \
+                     one leaves a misnamed file. Turn off to annotate and keep the result. \
+                     Files opened from the drive are unaffected.",
                     Field::Toggle {
                         on: settings.pdf_read_only,
                     },
@@ -431,10 +388,9 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
         row(
             settings,
             SettingKey::CheckForUpdates,
-            "Check GitHub for new versions",
-            "Look for a newer release every few hours, and say so when there is one. \
-             Nothing is installed until you choose to install it. A folder below takes \
-             the place of GitHub.",
+            "Check for updates",
+            "Check GitHub for a new release every four hours. Nothing installs until \
+             you choose to. A folder set below replaces GitHub.",
             Field::Toggle {
                 on: settings.check_for_updates,
             },
@@ -442,9 +398,9 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
         row(
             settings,
             SettingKey::UpdateFrom,
-            "Look for new versions in",
-            "A shared folder holding latest.toml and the installer beside it, for an \
-             office that publishes its own. Empty, files looks on GitHub instead.",
+            "Update source",
+            "A shared folder containing latest.toml and its installer, for offices that \
+             publish their own builds. Leave empty to use GitHub.",
             Field::Text {
                 value: path_of(settings.update_from.as_deref()),
                 placeholder: "GitHub",
@@ -454,15 +410,12 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
 
     // Everything below the rows depends on there being somewhere to look.
     if let Some(source) = &source {
-        let mut facts = vec![Fact::new("Looking in", source.describe())];
+        let mut facts = vec![Fact::new("Source", source.describe())];
         match update {
-            // Three states, and the third is not the second. "Looking" means
-            // the checker has not answered, which is a different thing from
-            // having looked and found nothing - claiming to be up to date
-            // before knowing would be the one lie this page could tell.
-            None => facts.push(Fact::new("Status", "Looking\u{2026}")),
+            // "Looking" (no answer yet) is distinct from "up to date".
+            None => facts.push(Fact::new("Status", "Checking\u{2026}")),
             Some(crate::update::Found::UpToDate) => {
-                facts.push(Fact::new("Status", "This is the newest version"));
+                facts.push(Fact::new("Status", "Up to date"));
             }
             Some(crate::update::Found::Unavailable { detail }) => {
                 facts.push(Fact::new("Status", detail.clone()));
@@ -474,15 +427,15 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
             }) => {
                 facts.push(Fact::new("Available", manifest.version.to_string()));
                 if let Some(notes) = &manifest.notes {
-                    facts.push(Fact::new("What changed", notes.clone()));
+                    facts.push(Fact::new("Release notes", notes.clone()));
                 }
                 if !*msi_present {
                     facts.push(Fact::toned(
                         "Installer",
                         if source.is_remote() {
-                            "Not downloaded \u{b7} it is tried again at the next check"
+                            "Not downloaded \u{b7} retried at the next check"
                         } else {
-                            "Not where the manifest says it is \u{b7} ask whoever published it"
+                            "Missing from the update folder \u{b7} contact the publisher"
                         },
                         Tone::Warn,
                     ));
@@ -496,24 +449,18 @@ fn about(update: Option<&crate::update::Found>, settings: &Settings, panel: bool
             Some(crate::update::Found::Available { msi_present, .. }) if *msi_present
         );
         let mut buttons = vec![Action::new(ActionId::CheckForUpdates, "Check now")];
-        // Only with a panel behind the window. Installing an update means
-        // waiting for the running program to exit, replacing it, and
-        // starting it again - `update::apply::hand_over` bakes in the pid
-        // and the executable path of the process that calls it, so a
-        // settings window doing it on its own would wait on itself and
-        // relaunch itself. With nothing running there is also nothing to
-        // replace: the next start picks up whatever is installed.
+        // Only with a running panel: `update::apply::hand_over` uses the
+        // caller's pid and executable path, so a standalone settings window
+        // would wait on and relaunch itself.
         if ready && panel {
             buttons.push(
-                Action::new(ActionId::InstallUpdate, "Install and restart").saying(
-                    "Installing closes files, asks Windows for permission, and opens it \
-                     again.",
-                ),
+                Action::new(ActionId::InstallUpdate, "Install and restart")
+                    .saying("Closes files, asks Windows for permission, then restarts it."),
             );
         } else if ready {
             updates.push(Block::Facts(vec![Fact::new(
                 "Installing",
-                "Start files first \u{b7} an update replaces the running program",
+                "Start files first \u{b7} the update replaces the running program",
             )]));
         }
         updates.push(Block::Actions(buttons));
@@ -542,15 +489,14 @@ fn diagnostics(settings: &Settings) -> Page {
         id: PageId::Diagnostics,
         groups: vec![
             Group {
-                heading: Some("Detail"),
+                heading: Some("Error details"),
                 blocks: vec![Block::Rows(vec![
                     row(
                         settings,
                         SettingKey::DevMode,
                         "Show technical detail",
-                        "Add the error codes and folder paths behind a message. Useful when \
-                         somebody is helping you, and noise the rest of the time. The \
-                         report below carries them either way.",
+                        "Include error codes and folder paths in messages. The report \
+                         below always includes them.",
                         Field::Toggle {
                             on: settings.dev_mode,
                         },
@@ -558,34 +504,31 @@ fn diagnostics(settings: &Settings) -> Page {
                     row(
                         settings,
                         SettingKey::IndexLog,
-                        "Record why the drives are read again",
-                        "Append a line to a file each time the index decides whether to \
-                         read a drive again: what woke it, what the folder stamp said, and \
-                         what it did. Leave this empty unless somebody has asked you to \
-                         turn it on.",
+                        "Index log",
+                        "Log each decision to re-read a drive to this file: the trigger, \
+                         the folder stamp, and the outcome. Leave empty unless \
+                         troubleshooting.",
                         Field::Text {
                             value: path_of(settings.index_log.as_deref()),
-                            placeholder: "Nothing is recorded",
+                            placeholder: "Off",
                         },
                     ),
                 ])],
             },
             Group {
                 heading: Some("Report"),
-                // The button first, then the report. It used to be the
-                // other way round, which put the one thing anybody comes to
-                // this page to do underneath three hundred points of
-                // monospaced text they had to scroll past to reach it.
+                // The button goes above the long report so it needs no
+                // scrolling.
                 blocks: vec![
                     Block::Actions(vec![
                         Action::new(ActionId::CopyReport, "Copy to clipboard")
-                            .saying("Paste this into an email if you are asking for help."),
-                        Action::new(ActionId::RefreshReport, "Take it again").saying(
-                            "This reading is kept for a minute. Use this after changing something.",
+                            .saying("Paste into an email when asking for help."),
+                        Action::new(ActionId::RefreshReport, "Refresh").saying(
+                            "The report is cached for one minute. Refresh after changing a setting.",
                         ),
                     ]),
                     Block::Report {
-                        intro: "Everything below is also what files --doctor prints.",
+                        intro: "files-cli --doctor prints the same report.",
                     },
                 ],
             },

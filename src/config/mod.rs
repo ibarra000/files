@@ -1,14 +1,11 @@
-//! Tunables, the routing table they are resolved against, and the settings
-//! the rest of the crate reads.
+//! Tunables, the routing table, and the resolved settings the crate reads.
 //!
-//! Settings are layered, each overriding the one before it: the shipped
-//! defaults (see [`default_routes`]), the configuration file named by
-//! [`ConfigChoice`], the environment, then the command line.
+//! Settings are layered, each overriding the one before: the shipped defaults
+//! (see [`default_routes`]), the configuration file named by [`ConfigChoice`],
+//! the environment, then the command line.
 //!
 //! Every strategy switch is readable from the environment so a fast path that
-//! misbehaves on the real network shares can be turned off in the field
-//! without a rebuild. That matters more than usual here: none of the Windows
-//! I/O in this crate can be exercised on the machine it is written on.
+//! misbehaves on a real network share can be turned off without a rebuild.
 
 pub mod file;
 pub mod hidden;
@@ -29,200 +26,123 @@ pub use viewers::{ViewerApp, Viewers};
 /// Per-job folders. Each job code resolves to one small subdirectory.
 pub const BASE_PATH: &str = "R:\\";
 
-/// CustomPro. A flat directory: every job's files sit directly in it, so a
-/// listing here is the whole share.
+/// CustomPro: a flat directory holding every job's files directly.
 ///
-/// Note this is a *subdirectory*, not a drive root. Several Win32 calls accept
-/// only a volume root, so anything volume-level derives one first - see
-/// [`crate::util::winpath::volume_root_of`]. Getting that wrong fails quietly:
-/// the volume serial disappears, which disables the persisted index's identity
-/// check.
+/// This is a subdirectory, not a drive root. Win32 calls that accept only a
+/// volume root must derive one with [`crate::util::winpath::volume_root_of`];
+/// otherwise the volume serial is lost and the persisted index's identity
+/// check is silently disabled.
 pub const CUSTPRO_PATH: &str = r"V:\Documents\custpro";
 
 // --- Query -----------------------------------------------------------------
 
-/// The shortest term this program will search for.
+/// The shortest term the local search runs for.
 ///
-/// One. It was three, and dropping it is what Ueli does - it has no minimum
-/// and no debounce, and typing one character gives you results.
-///
-/// The three constants below used to be one, and that is the important part
-/// of this change rather than the number. `MIN_QUERY_LEN` was doing three
-/// different jobs under one name - a floor on the local search, a floor on
-/// what gets sent to a file server, and, by accident, a floor on what gets
-/// remembered - and two of those jobs still want a three.
+/// Separate from [`MIN_SERVER_QUERY_LEN`] and [`MIN_REMEMBERED_LEN`], which
+/// bound different costs.
 pub const MIN_TERM_LEN: usize = 1;
 
-/// The shortest term worth sending to a *file server*.
+/// The shortest term sent to a file server.
 ///
-/// Still three, and for a reason that has nothing to do with the local
-/// search. A server-side filter is a network round trip per share, and a
-/// one-character filter matches most of the share - so the round trip costs
-/// a full listing and saves nothing. Below this the local index answers and
-/// the live shares are left alone.
+/// A shorter filter matches most of the share, so the round trip costs a full
+/// listing and saves nothing. Below this only the local index answers.
 pub const MIN_SERVER_QUERY_LEN: usize = 3;
 
-/// The shortest code worth writing into the history file.
+/// The shortest code written to the history file.
 ///
-/// Three, and this one used to be enforced by accident. `query_settled`
-/// accepts only a query that reached a settled phase, and short queries sat
-/// in a `TooShort` phase that never settled - so the floor was a side effect
-/// of a rejection, and lowering the search floor without naming this job
-/// would have quietly filled the recent-codes list with every one- and
-/// two-character prefix anybody typed on the way to a real code.
+/// Keeps one- and two-character prefixes typed on the way to a real code out
+/// of the recent-codes list.
 pub const MIN_REMEMBERED_LEN: usize = 3;
 
 /// Results retained and reachable by scrolling.
 ///
-/// Fifteen was a single column's worth. A broad code legitimately matches far
-/// more than that, and the cap was silently deciding which ones were worth
-/// seeing - the drawing you wanted could be the sixteenth. Three hundred is
-/// five screens of the grid below: enough that a broad query is useful,
-/// bounded enough that ranking still means something and the tail stays
-/// reachable by arrow key.
+/// Large enough that a broad query is useful, small enough that ranking still
+/// matters and the tail stays reachable by arrow key.
 pub const MAX_RESULTS: usize = 300;
 
-/// How many results are on screen at once.
+/// Compact result rows on one screen, and the distance `PageDown` moves.
 ///
-/// Here rather than beside the other layout numbers in `gui::theme` because the
-/// state machine needs it: the arrows scroll a window over the result list, and
-/// the window has to know how big it is. `keys.rs` used to reach into
-/// `gui::theme` for this, which is a dependency pointing the wrong way - the
-/// interaction model is meant to be drawable by anything.
-///
-/// Six, and no longer a free choice: the panel is a fixed four hundred points
-/// tall, and six forty-point rows is what is left once the field and the
-/// footer have taken theirs. It was twelve while the window grew to fit the
-/// list. `gui::theme` asserts the arithmetic so the two cannot drift.
-///
-/// This is the page size the arrows move by, and no longer the window the
-/// state machine keeps over the results: the content band is a scroll area
-/// and owns its own offset. What is left of the number is how far `PageDown`
-/// goes, which has to be one screen.
+/// Lives here rather than in `gui::theme` so the state machine does not depend
+/// on the GUI. Fixed by the panel height: six forty-point rows fill what the
+/// field and footer leave, and `gui::theme` asserts that arithmetic.
 pub const VISIBLE_ROWS: usize = 6;
 
-/// And four, when the rows are the taller kind.
-///
-/// See [`ResultLayout`]. A detailed row is fifty-two points where a compact
-/// one is thirty-six, so a screen is four of them rather than six - and a
-/// `PageDown` that moved six would scroll past two rows nobody saw.
+/// [`VISIBLE_ROWS`] for the taller rows of [`ResultLayout::Detailed`].
 pub const VISIBLE_ROWS_DETAILED: usize = 4;
 
 /// Arena bytes in the first segment a walk publishes.
 ///
-/// Small on purpose. A walk of a large share runs for minutes, and the
-/// difference between useful and useless is whether anything is searchable
-/// after the first second - so the first segment is sealed early and the
-/// ladder doubles from there, rather than every segment being the size that
-/// suits the last one.
+/// Small so something is searchable within the first second of a
+/// minutes-long walk; later segment sizes double from here.
 pub const SEGMENT_MIN_BYTES: usize = 512 << 10;
 
 /// Ceiling on a segment's arenas.
 ///
-/// Above this, sealing costs a visible copy and the marginal gain in search
-/// efficiency is nil: at around twenty segments the per-segment overhead is
-/// already lost in the sweep itself.
+/// Above this, sealing costs a visible copy and search efficiency barely
+/// improves.
 pub const SEGMENT_MAX_BYTES: usize = 16 << 20;
 
 /// Most files one matching folder may contribute to a result set.
 ///
-/// A job code names a folder as often as it names a file, and someone typing
-/// one wants that folder's contents - at about seventeen files per folder, a
-/// dozen matching folders still fit. The bound exists for the folder that
-/// holds five thousand: without it, one such folder fills every slot and hides
-/// every other folder that matched, which is the "files are missing" bug this
-/// index was built to remove, wearing a new hat.
+/// Stops one very large folder from filling every slot and hiding the other
+/// folders that matched.
 pub const MAX_FILES_PER_FOLDER: usize = 64;
 
 /// Most results laid side by side on one line of the list.
 ///
-/// Three, because at the panel's 600 points a fourth column is a name cut to
-/// a dozen characters, and a docked bar is the only place there would be
-/// room for more. There was a grid here once, in the terminal build, and it
-/// went with it; this is the setting that brings one back on request, with
-/// the list still a single column unless somebody asks. See
-/// `app::state::grid` for how the keys move through it.
+/// At the panel's 600 points a fourth column truncates names to about a dozen
+/// characters. See `app::state::grid` for keyboard movement.
 pub const MAX_COLUMNS: usize = 3;
 
-/// Upper bound on a query we are willing to hand to the server as a wildcard.
-/// Folders below the root a live query descends, unless the mapping says
-/// otherwise.
+/// Folders below the root a live query descends, unless the mapping overrides.
 ///
-/// One: the share's own folder, answered by a single filtered round trip that
-/// returns both the matching files and the matching *folder* names - which is
-/// the common case, because a job code names a folder at least as often as it
-/// names a file.
-///
-/// Deeper is not one more round trip, it is one per folder on the way down: a
-/// filtered query cannot reveal a folder whose name does not match, so the
-/// level above has to be listed in full first. Depth two against a root
-/// holding two hundred folders is two hundred round trips for one keystroke,
-/// which is a decision somebody should have to write down.
+/// Depth one is a single filtered round trip returning matching files and
+/// folder names. Each further level costs one round trip per folder, because a
+/// filtered query cannot reveal a non-matching folder, so the level above must
+/// be listed in full.
 pub const DEFAULT_LIVE_DEPTH: u16 = 1;
 
 /// Deepest a configuration may ask a live query to go.
 ///
-/// Four. With a branching factor of eight, depth four is already 512
-/// directories against a round-trip budget of 64 - so past this the number
-/// stops describing anything that will actually happen, and a number in a
-/// configuration file that will not be honoured is worse than no key at all.
+/// With a branching factor of eight, depth four is already 512 directories
+/// against [`LIVE_ROUND_TRIP_BUDGET`], so deeper values could not be honoured.
 pub const MAX_LIVE_DEPTH: u16 = 4;
 
 /// Round trips one live pass may spend.
 ///
-/// Sixty-four is the root's filtered query plus sixty-three folders expanded
-/// or listed. On a LAN, where a `FindFirstFileExW` round trip is well under a
-/// millisecond, that is under 60 ms - so the budget is not what bounds the
-/// latency, it is what bounds the *server*. Over the VPN this is also run
-/// across, where a round trip is 30-80 ms, sixty-four of them is four seconds,
-/// which is why there is a deadline as well.
+/// Bounds server load rather than latency: on a LAN this is under 60 ms. Over
+/// a VPN (30-80 ms per round trip) it can reach seconds, so [`LIVE_DEADLINE`]
+/// also applies.
 pub const LIVE_ROUND_TRIP_BUDGET: u32 = 64;
 
 /// Where a live pass stops, whatever it has reached by then.
 ///
-/// Shorter than [`REMEMBER_DEBOUNCE`] on purpose: that one decides when the
-/// code on the line is a code somebody meant, and a live answer landing after
-/// it would leave the recall list and the result list disagreeing about which
-/// query was the finished one. Longer than any local answer by three orders of
-/// magnitude, so the two phases are never mistaken for one.
+/// Must stay shorter than [`REMEMBER_DEBOUNCE`], or a late live answer could
+/// leave the recall list and result list disagreeing about the finished query.
 pub const LIVE_DEADLINE: Duration = Duration::from_millis(1_200);
 
 /// Quiet period after the last keystroke before a live share is asked.
 ///
-/// Paced by what somebody else's file server can afford, where
-/// [`SEARCH_DEBOUNCE`] is paced by what a reader can use: a leading `*`
-/// defeats the NTFS index, so the server walks its own directory to answer
-/// and the answer costs it real CPU rather than a seek.
-///
-/// Somebody reading a code off a drawing pauses about 200-300 ms between
-/// groups. Six hundred clears the pause between a code and the modifier after
-/// it as well, so `11-D-0704` costs one query rather than two - halving the
-/// load across the fleet for a delay nobody notices, because the local
-/// results are already on screen by then.
-///
-/// This is deliberately *not* tied to [`SEARCH_DEBOUNCE`]. It used to be
-/// twice it, and the doubling read as the justification; it is not. This
-/// number answers a question about a file server and that one answers a
-/// question about a screen, and when the second was shortened this one had
-/// no reason to move.
+/// Set by file-server cost, independently of [`SEARCH_DEBOUNCE`]: a leading
+/// `*` defeats the NTFS index, so each query costs the server real CPU. 600 ms
+/// clears the 200-300 ms pauses between the groups of a code such as
+/// `11-D-0704`, so typing it costs one query rather than several.
 pub const LIVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// Floor between two queries of the same share, whatever asks for them.
 ///
-/// One second. The debounce above bounds what *typing* can cause; this bounds
-/// everything else - a held key, a paste loop, a burst of index updates each
-/// re-running the match. One client can therefore cost a share at most one
-/// query per second however pathological its input.
+/// Covers held keys, paste loops and bursts of index updates that the debounce
+/// does not, limiting each client to one query per share per second.
 pub const LIVE_MIN_SPACING: Duration = Duration::from_secs(1);
 
 /// Refusals to filter before a live share is switched off for the process.
 ///
-/// Three, matching [`SERVER_FILTER_MISS_LIMIT`]. A source that will not push
-/// the filter down would answer every query with a full enumeration wearing a
-/// filter, which is precisely the cost configuring the share this way was
-/// meant to avoid - so the honest response is to stop and say so.
+/// Matches [`SERVER_FILTER_MISS_LIMIT`]. A source that ignores the filter
+/// answers every query with a full enumeration, which live mode exists to
+/// avoid.
 pub const LIVE_FAILURE_LIMIT: u32 = 3;
 
+/// Longest query handed to the server as a wildcard.
 pub const MAX_SERVER_QUERY_LEN: usize = 64;
 
 /// Stop a server-side wildcard enumeration past this many hits and report the
@@ -240,53 +160,23 @@ pub const SERVER_FILTER_MISS_LIMIT: u32 = 3;
 /// re-scan is one round trip.
 pub const JOB_CACHE_TTL: Duration = Duration::from_secs(20);
 
-/// Bounded number of `R:\` job listings kept resident. Replaces the unbounded
-/// map the previous implementation grew for the life of a session.
+/// Bounded number of `R:\` job listings kept resident.
 pub const JOB_CACHE_CAPACITY: usize = 64;
 
 /// Quiet period after the last keystroke before the local match runs.
 ///
-/// The match itself is sub-millisecond and touches no network, so this is not
-/// about what the machine can afford - it is about what the screen should say.
-/// Somebody reading a code off a drawing does not want the list for `11`, then
-/// `11-`, then `11-D`; they want the list for the code they finished typing.
-/// Answering every prefix meant a result set, a body change and a window resize
-/// per character, for answers nobody reads.
+/// The match is sub-millisecond and local; the delay only avoids showing a
+/// list for every prefix of a code being typed. The network is paced
+/// separately by [`VERIFY_DEBOUNCE`] and [`LIVE_DEBOUNCE`].
 ///
-/// **A hundred and eighty, and it was three hundred.** Three hundred was
-/// chosen to sit just past the 200-300 ms pause somebody makes between the
-/// groups of a code, so that `11-D-0704` cost one sweep rather than three.
-/// That is the thing being traded away here and it is worth saying plainly:
-/// at a hundred and eighty, a slow reader's pause between `11-` and `D-` will
-/// sometimes dispatch a sweep nobody reads.
-///
-/// Two of the three costs that bought have since gone. A result set arriving
-/// no longer resizes the window - it is a fixed six hundred by four hundred -
-/// and it no longer empties the list on the way, because `on_input_changed`
-/// keeps the previous results on screen until the next ones land. What is
-/// left is one in-memory sweep and one list swap, both local, and the server
-/// is untouched either way: [`VERIFY_DEBOUNCE`] and [`LIVE_DEBOUNCE`] are
-/// what pace the network and neither moves.
-///
-/// What it buys is the list appearing a hundred and twenty milliseconds
-/// sooner after the typing stops, every single time. Ueli searches on every
-/// keystroke against an in-memory index and feels instant; this cannot do
-/// that against a network index, and this is how close it gets.
-///
-/// No longer equal to [`VERIFY_DEBOUNCE`], and that is an improvement rather
-/// than a thing to watch: they used to fall due on the same tick, and
-/// `AppState::on_tick` had to run the matcher first so the verification was
-/// checked against a fresh local answer. Now the local answer has been back
-/// for over a hundred milliseconds by the time the check is asked for. The
-/// ordering in `on_tick` stays, because a burst can still land both on one
-/// tick after a long stall.
+/// `AppState::on_tick` still runs the matcher before verification, because
+/// after a long stall both can fall due on the same tick.
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(180);
 
-/// The local match answers before the server is asked, always.
+/// The local match answers before the server is asked.
 ///
-/// The invariant `on_tick`'s ordering used to carry on its own. Checked here
-/// so that raising one of the two without the other is a build error rather
-/// than a verification run against the previous code's results.
+/// Raising one debounce without the other is a build error rather than a
+/// verification run against the previous query's results.
 const _: () = assert!(SEARCH_DEBOUNCE.as_millis() <= VERIFY_DEBOUNCE.as_millis());
 
 /// Quiet period after the last keystroke before the authoritative server-side
@@ -297,45 +187,32 @@ pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Quiet period after the last keystroke before the code on the line reaches
 /// the recall list.
 ///
-/// Five times [`VERIFY_DEBOUNCE`], and a separate constant rather than a
-/// multiple of it, because the two are paying for different things. That one
-/// buys a round trip against somebody else's file server and is set by what a
-/// server costs; this one decides what somebody reads off their recall list
-/// tomorrow morning, and is set by how long a person pauses in the middle of
-/// typing a code they are reading off a drawing.
-///
-/// Recording rode on the verification for most of this program's life, which
-/// meant a third of a second. That is an ordinary mid-word pause, so `11`,
-/// `11-D` and `11-D-07` all reached the list on the way to `11-D-0704`. A
-/// second and a half is longer than a typist stops and shorter than anybody
-/// notices, and `History::record` collapses the chain that gets through
-/// anyway.
+/// Independent of [`VERIFY_DEBOUNCE`]: this is set by how long a person pauses
+/// mid-code, so partial codes such as `11-D` are not recorded on the way to
+/// `11-D-0704`. `History::record` collapses any prefix chain that gets through.
 pub const REMEMBER_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// How close together two clicks must be to count as a double-click.
 ///
-/// The terminal reports presses, not clicks, so this is the program's own
-/// definition. Matches the Windows default closely enough that a double-click
-/// which selects a code in Explorer selects one here too.
+/// Close to the Windows default, so a double-click that works in Explorer
+/// works here too.
 pub const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
-/// If a verify has not reported back by now, transition out of the spinner
-/// regardless. Guards against a wedged or panicked worker.
+/// Time after which an unanswered verify leaves the spinner state.
+///
+/// Guards against a wedged or panicked worker.
 pub const VERIFY_WATCHDOG: Duration = Duration::from_secs(10);
 
-/// If the matcher has not answered an Enter by now, give the keystroke back.
+/// Time after which an Enter still waiting on the matcher is given back.
 ///
-/// Enter typed inside [`SEARCH_DEBOUNCE`] cannot open the row on screen - that
-/// row answers the *previous* code - so it asks the matcher and opens whatever
-/// comes back. This is the backstop for an answer that never does.
-///
-/// Far shorter than [`VERIFY_WATCHDOG`]: that one waits on somebody else's file
-/// server, this one waits on a sweep over bytes this process already holds. A
-/// second is a hundred times longer than it has ever taken.
+/// Enter typed inside [`SEARCH_DEBOUNCE`] waits for the matcher, since the row
+/// on screen answers the previous query. Shorter than [`VERIFY_WATCHDOG`]
+/// because the match is local.
 pub const ENTER_WATCHDOG: Duration = Duration::from_secs(1);
 
-/// How often to ask the server whether `V:\` changed. This is a ~3 round-trip
-/// metadata probe, not an enumeration.
+/// How often to ask the server whether `V:\` changed.
+///
+/// A metadata probe of about three round trips, not an enumeration.
 pub const STAMP_PROBE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Re-enumerate `V:\` unconditionally at least this often, in case the server
@@ -345,185 +222,134 @@ pub const FULL_RESCAN_FLOOR: Duration = Duration::from_secs(60 * 60);
 
 /// Longest a walked tree may go without a complete re-walk.
 ///
-/// Half an hour is roughly a 3-7% duty cycle against the share, for a pass
-/// that costs one to three minutes. With live updates working this is a
-/// backstop against a watcher that accepted the request and then silently
-/// stopped firing - a failure with no symptom, which is exactly why the
-/// backstop is not optional. With them unavailable it is the entire freshness
-/// guarantee, and half an hour is the longest a new job folder should stay
-/// invisible.
+/// A backstop against a watcher that silently stops firing, and the only
+/// freshness guarantee when change notifications are unavailable. Roughly a
+/// 3-7% duty cycle for a one-to-three-minute walk.
 pub const TREE_RESCAN_FLOOR: Duration = Duration::from_secs(30 * 60);
 
 /// Two incremental updates are never started closer together than this.
 ///
-/// A patch reads the folders that changed, not the share, so it is paced in
-/// seconds where a full pass is paced in minutes. Its own floor rather than a
-/// share of [`MIN_FULL_SCAN_SPACING`], because a single number would have to
-/// be wrong for one of them.
+/// A patch reads only the changed folders, so it is paced in seconds where
+/// [`MIN_FULL_SCAN_SPACING`] paces full passes in minutes.
 pub const PATCH_SPACING: Duration = Duration::from_secs(5);
 
-/// How long a burst of change notifications is allowed to accumulate before
-/// it is acted on.
+/// How long a burst of change notifications accumulates before it is acted on.
 ///
-/// Measured from the *first* pending event, not the last; see
-/// [`crate::index::watch`] for why that distinction is the whole point.
-/// Two seconds is long enough that copying a job folder in arrives as one
-/// update rather than forty, and short enough that nobody waits for it.
+/// Measured from the first pending event, not the last; see
+/// [`crate::index::watch`]. Long enough that copying in a job folder arrives
+/// as one update.
 pub const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 
-/// Dirty directories past which a full re-walk is cheaper than re-reading them
-/// one at a time.
+/// Dirty directories past which a full re-walk replaces re-reading them
+/// individually.
 ///
-/// Three round trips each, so a thousand directories is three thousand - about
-/// a third of a full walk, for a result that covers a fraction of the share.
-/// Past that the honest answer is to walk it.
+/// At three round trips each, a thousand directories already costs about a
+/// third of a full walk.
 pub const WATCH_DIRTY_CAP: usize = 1_000;
 
 /// Two re-walks are never started closer together than this.
 ///
-/// Ten times [`MIN_FULL_SCAN_SPACING`], in proportion to what a walk costs
-/// against a flat enumeration.
+/// Ten times [`MIN_FULL_SCAN_SPACING`], in proportion to a walk's cost
+/// relative to a flat enumeration.
 pub const TREE_MIN_SCAN_SPACING: Duration = Duration::from_secs(5 * 60);
 
-/// How old a persisted index may get before it is called stale.
+/// How old a persisted index may get before it is labelled stale.
 ///
-/// Advisory, not a rejection. It used to be one, and that was safe only while
-/// every launch re-read the share anyway: with shares refreshed on demand, a
-/// week-old index is an ordinary state rather than a fault, and discarding it
-/// would leave nothing to serve and start exactly the full pass the on-demand
-/// policy exists to avoid - simultaneously, on every machine whose cache was
-/// built on the same rollout day.
-///
-/// A stale answer with an honest label beats an empty screen. The status line
-/// says how old it is and names the share, and `F5` is one keystroke.
+/// Advisory only: a stale index is still served, with its age shown in the
+/// status line. Discarding it would force the full pass that on-demand refresh
+/// avoids, on every machine at once.
 pub const MAX_INDEX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 pub const BACKOFF_BASE: Duration = Duration::from_secs(5);
 pub const BACKOFF_CAP: Duration = Duration::from_secs(5 * 60);
 
-/// Retry pacing for a failed *full enumeration*, as opposed to a failed probe.
+/// Retry pacing for a failed full enumeration, as opposed to a failed probe.
 ///
-/// Deliberately far slower than [`BACKOFF_BASE`]: a probe is three round trips
-/// and retrying it a second later is free, whereas a full scan is seconds of
-/// traffic against a million-entry share. The previous implementation used the
-/// probe schedule for both, and because the jitter is *full* jitter - uniform
-/// in `0 ..= ceiling` - a failing scan could be retried under a second later,
-/// repeatedly.
+/// Much slower than [`BACKOFF_BASE`] because a scan is seconds of traffic
+/// against a large share. With full jitter (uniform in `0 ..= ceiling`), the
+/// probe schedule could retry a failing scan within a second.
 pub const SCAN_BACKOFF_BASE: Duration = Duration::from_secs(30);
 pub const SCAN_BACKOFF_CAP: Duration = Duration::from_secs(10 * 60);
 
-/// Two full enumerations are never started closer together than this, by any
-/// path except an explicit F5.
+/// Two full enumerations are never started closer together than this, except
+/// by an explicit F5.
 ///
-/// This is a backstop, not a schedule: every individual decision already
-/// paces itself. It exists because the cost of getting one of those decisions
-/// wrong is a million-entry enumeration in a loop, and a single invariant
-/// enforced in one place is cheaper to trust than five separate ones.
+/// A single backstop against any scheduling path looping a million-entry
+/// enumeration.
 pub const MIN_FULL_SCAN_SPACING: Duration = Duration::from_secs(30);
 
 /// Consecutive "this share cannot answer the probe" failures before change
 /// detection is declared unavailable.
 ///
-/// Not one: a freak `ERROR_ACCESS_DENIED` should not permanently disable the
-/// cheap freshness check. Not many: each attempt is a wasted round trip.
+/// More than one so a transient `ERROR_ACCESS_DENIED` does not disable the
+/// check permanently.
 pub const STAMP_FAILURES_BEFORE_BLIND: u32 = 2;
 
 /// Jitter applied to the healthy probe cadence, in percent, so a fleet of
 /// these apps does not hammer the file server in lockstep on the minute.
 pub const PROBE_JITTER_PERCENT: u32 = 10;
 
-/// Spread applied to the full-rescan floor, in percent, added on top of it.
+/// Spread added on top of the full-rescan floor, in percent.
 ///
-/// The probe jitter above does not reach a full pass: a scan is decided at a
-/// probe wake by comparing against the floor, and a *tree* never probes at
-/// all. So three hundred clients that started within a minute of each other
-/// re-walked in permanent lockstep, and nothing in the schedule widened that
-/// window - the floor is measured from the previous pass's completion, so each
-/// cycle re-synchronised them.
-///
-/// One-sided, and deliberately: the floor is a promise about the longest an
-/// index may go unchecked, so spreading a client *later* only ever costs
-/// freshness it already agreed to, while spreading one earlier would break the
-/// promise to buy nothing.
-///
-/// Twenty-five percent of half an hour is a seven-minute window, which is wide
-/// enough that a fleet arrives as a trickle rather than a wall.
+/// Probe jitter does not reach full passes (trees never probe), so without
+/// this, clients started together re-walk in lockstep. Only ever later than
+/// the floor, so the floor's freshness promise still holds.
 pub const FLOOR_SPREAD_PERCENT: u32 = 25;
 
 /// Shortest gap between two writes of the index to disk.
 ///
-/// The watcher's patches are what keep a manually-refreshed share current, and
-/// they only survive a restart if they reach the cache. But the cache file is
-/// written whole - around a hundred megabytes for the job share - so writing
-/// on every two-second watch batch would cost more than the patching saves.
-///
-/// Five minutes is the compromise: the most a crash can cost is five minutes
-/// of folder updates, against a full pass that costs nine hundred thousand
-/// round trips.
+/// The cache is written whole (around 100 MB for the job share), so watcher
+/// patches are persisted at most this often. A crash loses at most this
+/// interval of folder updates.
 pub const PERSIST_SPACING: Duration = Duration::from_secs(5 * 60);
 
-/// Redraw cadence while something is animating. Nothing animates at a finer
-/// granularity than a spinner frame, and the elapsed readout is rounded to
-/// match so consecutive frames actually differ.
+/// Redraw cadence while something is animating.
+///
+/// One spinner frame; the elapsed readout is rounded to match.
 pub const ANIMATION_TICK: Duration = Duration::from_millis(100);
 
-/// How often a visible countdown is redrawn.
+/// How often a visible retry countdown is redrawn.
 ///
-/// Only ever armed while a share is unreachable and a retry is still in the
-/// future, so a healthy idle session still costs nothing. One second rather
-/// than a hundred milliseconds because `humanize::elapsed` renders the
-/// sub-minute form to a tenth, and a tenth that moves ten times a second is
-/// noise rather than information.
+/// Armed only while a share is unreachable and a retry is pending.
 pub const COUNTDOWN_TICK: Duration = Duration::from_secs(1);
 
-/// Per-thread budget when shutting down. Past this the process exits rather
-/// than waiting on a blocked SMB syscall that cannot be cancelled.
+/// Per-thread join budget at shutdown.
+///
+/// Past this the process exits rather than wait on an uncancellable SMB call.
 pub const SHUTDOWN_JOIN_BUDGET: Duration = Duration::from_millis(250);
 
 // --- Enumeration -----------------------------------------------------------
 
-/// Directory buffer for the handle-based enumerator. The whole point is to
-/// turn tens of thousands of SMB round trips into a few hundred.
+/// Directory buffer for the handle-based enumerator.
+///
+/// Large enough to turn tens of thousands of SMB round trips into a few hundred.
 pub const DIR_BUFFER_BYTES: usize = 1 << 20;
 pub const DIR_BUFFER_MIN: usize = 64 << 10;
 
 /// Directories read at once during a recursive walk.
 ///
-/// A tree walk is bound by round trips per *directory*, so walking several at
-/// once converts almost directly into wall clock. Eight rather than more
-/// because SMB2 flow control is credit-based: a 1 MiB directory query spends
-/// around sixteen credits of a session's few hundred, so past roughly this
-/// many large requests the client starts waiting for credits rather than
-/// gaining throughput - and because a share is someone else's production file
-/// server. It is the same default `robocopy /MT` picked.
+/// SMB2 flow control is credit-based, so past about eight large requests the
+/// client waits for credits instead of gaining throughput. Same default as
+/// `robocopy /MT`.
 pub const WALK_CONCURRENCY: usize = 8;
 
 /// How many shares are walked at once, by default.
 ///
-/// Multiplies against [`WALK_CONCURRENCY`], so two is sixteen directory reads
-/// in flight - already twice what that constant was sized for, and the reason
-/// this is not simply "all of them". A configuration naming ten tree shares
-/// would otherwise open eighty concurrent requests against one file server on
-/// its first run, which is the behaviour a server administrator blocks rather
-/// than tunes.
-///
-/// Two rather than one because a share that is merely slow should not stall
-/// every other share behind it, and because the second walk is usually
-/// waiting on the network rather than on this machine.
+/// Multiplies with [`WALK_CONCURRENCY`], so it stays low to protect a shared
+/// file server. Two rather than one so a slow share does not stall the rest.
 pub const DEFAULT_MAX_CONCURRENT_SCANS: usize = 2;
 
 /// Per-directory buffer during a tree walk.
 ///
-/// An eighth of [`DIR_BUFFER_BYTES`], which is sized for a single flat
-/// directory of a million entries. In a job tree the median directory holds
-/// well under a hundred, so this still reads almost all of them in one round
-/// trip while costing sixteen times fewer SMB2 credits - which is what lets
-/// eight walkers actually be in flight at once instead of starving each other.
+/// An eighth of [`DIR_BUFFER_BYTES`]: still one round trip for nearly every
+/// job-tree directory, at far fewer SMB2 credits, so eight walkers can run at
+/// once.
 pub const WALK_DIR_BUFFER_BYTES: usize = 128 << 10;
 
-/// Entries per rayon chunk in the matcher. Sized so a cancelled search stops
-/// within a few hundred microseconds without putting a branch in the inner
-/// vectorized scan.
+/// Entries per rayon chunk in the matcher.
+///
+/// Lets a cancelled search stop within a few hundred microseconds without a
+/// branch in the inner vectorized scan.
 pub const MATCH_CHUNK_ENTRIES: usize = 8_192;
 
 // --- Strategy selection ----------------------------------------------------
@@ -531,15 +357,15 @@ pub const MATCH_CHUNK_ENTRIES: usize = 8_192;
 /// Which directory-enumeration implementation to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnumStrategy {
-    /// `GetFileInformationByHandleEx` with a 1 MiB buffer. Documented, no
-    /// ntdll linkage, and captures essentially the whole round-trip win.
+    /// `GetFileInformationByHandleEx` with a 1 MiB buffer. Documented, with no
+    /// ntdll linkage.
     #[default]
     HandleDirInfo,
     /// `FindFirstFileExW` + `FindExInfoBasic` + `FIND_FIRST_EX_LARGE_FETCH`.
     /// Also the only API that accepts a search pattern, so the server-side
     /// filter uses it regardless of this setting.
     FindFirstEx,
-    /// `std::fs::read_dir`. Always available; the field escape hatch.
+    /// `std::fs::read_dir`. Always available; the fallback.
     StdReadDir,
 }
 
@@ -561,9 +387,10 @@ impl EnumStrategy {
         }
     }
 
-    /// Strategies to try in order. Advance only on `Unsupported` - the other
-    /// errors are answers, and retrying them through a different API just
-    /// multiplies latency on an operation that is already failing.
+    /// Strategies to try in order.
+    ///
+    /// Advance only on `Unsupported`; other errors are genuine answers, and
+    /// retrying them through another API only adds latency.
     pub fn chain(self) -> &'static [EnumStrategy] {
         match self {
             Self::HandleDirInfo => &[Self::HandleDirInfo, Self::FindFirstEx, Self::StdReadDir],
@@ -573,8 +400,9 @@ impl EnumStrategy {
     }
 }
 
-/// Which matching implementation to use. The naive one is retained for one
-/// release so a field regression is a flag flip rather than a rebuild.
+/// Which matching implementation to use.
+///
+/// The naive matcher is a fallback selectable without a rebuild.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MatcherKind {
     #[default]
@@ -594,48 +422,32 @@ impl MatcherKind {
 
 /// Which application a chosen result is handed to.
 ///
-/// They differ in more than which executable is spawned. A configured viewer
-/// ([`Self::App`]) opens the one file the cursor is on, which is all it can
-/// do: the pages of a drawing set are separate files on the share, and a
-/// viewer given one of them shows one page. `Pdf` treats the code as naming a
-/// *document*, gathers every page of it and hands over a single assembled PDF
-/// - which is what someone asking for `11-D-0704` almost always meant.
-///
-/// `Auto` is neither, and hands the file to Windows. See
-/// [`crate::open::route_of`], which is where a mode and a file name become a
-/// destination.
+/// [`Self::App`] opens the single selected file. [`Self::Pdf`] gathers every
+/// page of the code and opens one assembled PDF. [`Self::Auto`] hands the file
+/// to Windows. See [`crate::open::route_of`] for how a mode and file name
+/// become a destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewerKind {
     /// Whatever Windows has registered for the file.
     #[default]
     Auto,
-    /// Every page of the code, merged into one PDF, opened with the system's
-    /// `.pdf` handler. A file a configured viewer claims - a drawing, which
-    /// there is no Rust to read - goes to that viewer instead.
+    /// Every page of the code, merged into one PDF and opened with the
+    /// system's `.pdf` handler. A file a configured viewer claims goes to that
+    /// viewer instead.
     Pdf,
     /// The single selected file, handed to the configured viewer at this
     /// position in [`Viewers`].
     ///
-    /// An index rather than a name so the mode stays `Copy`. It is only ever
-    /// read against the list it was made from; one that is out of range -
-    /// the list shrank under it - behaves as [`Self::Auto`].
+    /// An index so the mode stays `Copy`; only meaningful against the list it
+    /// came from. An out-of-range index behaves as [`Self::Auto`].
     App(usize),
 }
 
 /// How much of itself a result row shows.
 ///
-/// Ueli's two, and its default. A compact row is an icon, a name and a badge
-/// on one line; a detailed row puts the folder under the name and is half as
-/// tall again, so four fit where six did.
-///
-/// **The default is worth arguing about, and it ships as Ueli has it.** Ueli's
-/// rows are installed applications, whose names are unique - so the folder
-/// under them would be noise and compact is obviously right. Ours are files,
-/// and two drawings called `GA.pdf` in different job folders are the ordinary
-/// case rather than the odd one: compact shows them as two identical rows
-/// distinguished only by their drive badge. The instruction was to keep the
-/// experience Ueli's, so compact is the default and [`Self::Detailed`] is one
-/// switch away on the Appearance page.
+/// [`Self::Detailed`] adds the folder under the name, which distinguishes
+/// same-named files in different job folders, at the cost of fewer rows per
+/// screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResultLayout {
     /// One line: an icon, the name, the drive it came off.
@@ -671,12 +483,10 @@ impl ResultLayout {
             .find(|l| l.name().eq_ignore_ascii_case(text.trim()))
     }
 
-    /// How far `PageUp` and `PageDown` move.
+    /// How far `PageUp` and `PageDown` move: one screen of this layout.
     ///
-    /// A screen, which is a different number for each layout. Here rather
-    /// than in `gui::theme` because the state machine is what moves the
-    /// cursor; the geometry that makes these two numbers true is asserted
-    /// beside the row heights.
+    /// The geometry behind these numbers is asserted beside the row heights in
+    /// `gui::theme`.
     pub const fn rows_per_page(self) -> usize {
         match self {
             Self::Compact => VISIBLE_ROWS,
@@ -687,13 +497,10 @@ impl ResultLayout {
 
 /// Where the panel sits when it is summoned.
 ///
-/// [`Self::Free`] is what it has always done: a 600 by 400 window, placed
-/// twelve per cent down the screen or wherever it was last dragged to. The
-/// other two pin it against an edge of the work area, as wide as the screen
-/// and as tall as it always is - a bar rather than a window, and one that
-/// never moves or changes size, so nothing about it has to be animated or
-/// remembered. Against the work area and not the monitor, so a bottom bar
-/// sits on the taskbar rather than under it.
+/// [`Self::Free`] is a 600 by 400 window, placed twelve per cent down the
+/// screen or where it was last dragged. The others pin a full-width bar to an
+/// edge of the work area (not the monitor), so a bottom bar sits above the
+/// taskbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dock {
     #[default]
@@ -728,20 +535,12 @@ impl Dock {
 }
 
 /// Which palette the panel is drawn in.
-///
-/// A setting rather than a follow of the Windows theme, which is what it used
-/// to be. The panel is a small bright thing summoned over whatever somebody is
-/// working in, and "what the rest of my desktop does" turned out to be a poor
-/// proxy for "what I want this to look like": a machine in dark mode got a
-/// near-black panel nobody had asked for.
-///
-/// [`Self::System`] keeps the old behaviour for anyone who wants it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ThemeChoice {
     #[default]
     Light,
     Dark,
-    /// Follow the Windows setting, as the panel used to.
+    /// Follow the Windows setting.
     System,
 }
 
@@ -767,8 +566,7 @@ impl ThemeChoice {
 
     /// Whether to draw dark, given what the system says.
     ///
-    /// The system answer is passed in rather than read here: this module does
-    /// no I/O and has never heard of a window.
+    /// The system answer is passed in because this module does no I/O.
     pub fn is_dark(self, system_is_dark: bool) -> bool {
         match self {
             Self::Light => false,
@@ -814,8 +612,7 @@ impl ViewerKind {
         }
     }
 
-    /// This mode, with an index that no longer names anything put back to
-    /// `Auto`.
+    /// This mode, with an out-of-range viewer index replaced by `Auto`.
     pub fn within(self, viewers: &Viewers) -> Self {
         match self {
             Self::App(i) if i >= viewers.len() => Self::Auto,
@@ -823,9 +620,11 @@ impl ViewerKind {
         }
     }
 
-    /// The spelling written to the config file, so it must be one `parse`
-    /// accepts against the same list - `every_name_the_writer_emits_parses_back`
-    /// pins that, because an unknown value is a hard startup error.
+    /// The spelling written to the config file.
+    ///
+    /// Must be one `parse` accepts against the same list, because an unknown
+    /// value is a startup error; `every_name_the_writer_emits_parses_back`
+    /// checks this.
     pub fn name(self, viewers: &Viewers) -> &str {
         match self.within(viewers) {
             Self::Auto => "auto",
@@ -836,11 +635,8 @@ impl ViewerKind {
 
     /// How the mode is spelled on screen.
     ///
-    /// Separate from [`Self::name`], which is the configuration file's spelling
-    /// and is round-tripped through [`Self::parse`]. Using a serialisation
-    /// identifier as a label is how the footer came to say `viewer: pdf` in a
-    /// panel where every other word is capitalised. A configured viewer is
-    /// shown as its owner wrote it.
+    /// Separate from [`Self::name`], the configuration spelling. A configured
+    /// viewer is shown as its name is written.
     pub fn display(self, viewers: &Viewers) -> &str {
         match self.within(viewers) {
             Self::Auto => "Auto",
@@ -864,39 +660,76 @@ impl ViewerKind {
 
 /// The routing table the shipped defaults describe.
 ///
-/// Parsed from `assets/default_config.toml` through the ordinary loader, so
-/// the file written on first run and the compiled-in fallback are the same
-/// bytes validated the same way - they cannot drift.
-///
-/// Reproduces the previous hardcoded behaviour exactly, with the corrected
-/// CustomPro directory: CustomPro is listed first and its rules `stop`, so a
-/// dashed code such as `P12345-001` resolves there and nowhere else.
-/// `tests/routing_parity.rs` proves that against a frozen copy of the
-/// original implementation.
+/// Parsed from `assets/default_config.toml` through the ordinary loader, so the
+/// file written on first run and the compiled-in fallback cannot drift.
 pub fn default_routes() -> Routes {
     file::builtin().routes
+}
+
+/// Two enabled drives for tests to search: the flat `custompro` at
+/// [`CUSTPRO_PATH`] and the tree `jobs` at `R:\`.
+const FIXTURE_MAPPINGS: &str = r#"
+[[mapping]]
+name    = "custompro"
+path    = 'V:\Documents\custpro'
+kind    = "flat"
+enabled = true
+refresh = "auto"
+
+[[mapping]]
+name    = "jobs"
+path    = 'R:\'
+kind    = "tree"
+enabled = true
+refresh = "manual"
+"#;
+
+/// The shipped template with [`FIXTURE_MAPPINGS`] ahead of its examples.
+///
+/// Test fixture only. The shipped template enables no drives, so tests that
+/// search, index or report on drives start from this instead.
+#[doc(hidden)]
+pub fn fixture_toml() -> &'static str {
+    static TOML: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let template = file::DEFAULT_CONFIG_TOML;
+        let version = template
+            .find("\nversion = ")
+            .expect("the template declares a version");
+        let end = version + 1 + template[version + 1..].find('\n').unwrap_or(0);
+        format!("{}{FIXTURE_MAPPINGS}{}", &template[..end], &template[end..])
+    });
+    &TOML
+}
+
+/// The routing table of [`fixture_toml`]. Test fixture only.
+#[doc(hidden)]
+pub fn fixture_routes() -> Routes {
+    file::parse(
+        fixture_toml(),
+        std::path::Path::new("<fixture>"),
+        crate::paths::ConfigSource::BuiltIn,
+    )
+    .expect("the test fixture configuration must parse")
+    .routes
 }
 
 /// Which configuration file to read, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConfigChoice {
-    /// `%APPDATA%\files\config.toml`, created with the shipped defaults if
+    /// `%APPDATA%\files\config.toml`, created from the shipped defaults if
     /// absent.
     #[default]
     Default,
-    /// An explicit `--config <path>`. A missing file here is an error: it was
-    /// asked for by name.
+    /// An explicit `--config <path>`. A missing file is an error.
     Explicit(PathBuf),
-    /// `--no-config`. The one-flag answer to "is my config the problem?".
+    /// `--no-config`: run on the shipped defaults only.
     None,
 }
 
 impl ConfigChoice {
     /// The file this resolves to, where there is one.
     ///
-    /// `Default` answers the same path `Settings::load` would use, so a
-    /// process that loaded from the default and then wants to write to it
-    /// does not have to work out where it was.
+    /// `Default` resolves to the same path `Settings::load` uses.
     pub fn path(&self) -> Option<std::path::PathBuf> {
         match self {
             Self::Explicit(path) => Some(path.clone()),
@@ -908,9 +741,7 @@ impl ConfigChoice {
 
 /// Why a setting cannot be written back to the configuration file.
 ///
-/// Carried rather than flattened to a bool because the three have different
-/// answers: two of them the user can undo, and which one it is decides what
-/// they would have to do about it.
+/// Each variant tells the user something different to do about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pin {
     /// An environment variable holds it. Named, so it can be found and unset.
@@ -924,8 +755,8 @@ pub enum Pin {
 impl Pin {
     /// What to say beside a setting that cannot be changed.
     ///
-    /// A fragment, lowercase, for the second half of a ` · ` join - which is
-    /// where every one of these is used. See `crate::view`.
+    /// A lowercase fragment for the second half of a ` · ` join. See
+    /// `crate::view`.
     pub fn detail(self) -> String {
         match self {
             Self::Environment(var) => format!("set by {var} \u{b7} this session only"),
@@ -942,149 +773,91 @@ pub struct Settings {
     pub routes: Arc<Routes>,
     /// The short names configured for codes typed often.
     ///
-    /// Shared for the same reason [`Self::routes`] is: `Settings` is cloned
-    /// into the backend and every worker, and an alias table is read on a
-    /// keystroke rather than copied on one.
+    /// Shared because `Settings` is cloned into every worker.
     pub aliases: Arc<crate::alias::Aliases>,
     /// The programs `[[viewer]]` names, in the order the file lists them.
     ///
-    /// An `Arc` for the reason `aliases` is one, and carried on every open
-    /// request rather than read off the backend's copy: a [`ViewerKind::App`]
-    /// is an index, and only means something against the list it came from.
+    /// Carried on every open request because a [`ViewerKind::App`] index is
+    /// only meaningful against the list it came from.
     pub viewers: Arc<Viewers>,
     pub enum_strategy: EnumStrategy,
     pub matcher: MatcherKind,
-    /// Server-side wildcard filtering. Ships **off** so it can be enabled only
-    /// after `--bench` confirms the server's pattern matching drops nothing.
+    /// Server-side wildcard filtering.
+    ///
+    /// Off by default; enable only after `--bench` confirms the server's
+    /// pattern matching drops nothing.
     pub server_filter: bool,
     pub persist: bool,
     /// Whether the status line says a share needs refreshing.
     ///
-    /// On by default, because a list that has stopped tracking the drive is
-    /// exactly the thing this program refuses to hide. Off for someone handed
-    /// the tool who does not need current data and should not be nagged about
-    /// it - the ages are still there in the share list, which they only see by
-    /// asking for it.
+    /// When off, share ages are still shown in the share list.
     pub stale_notices: bool,
     /// Whether a message may carry the technical detail behind it.
     ///
-    /// Off, so an ordinary failure reads as a sentence: "jobs cannot be
-    /// reached" rather than "V:\Documents\custpro unreachable (os error
-    /// 53)". The second is the more useful of the two to exactly one person,
-    /// and they can turn it on.
-    ///
-    /// `--doctor` is not gated by this and never will be. It is the report a
-    /// support call asks for, and a report that has to be switched on first is
-    /// a report nobody has when they need it.
+    /// Off by default, so a failure reads as "jobs cannot be reached" rather
+    /// than an OS error. `--doctor` output is never gated by this.
     pub dev_mode: bool,
-    /// Whether the panel ever puts itself away.
-    ///
-    /// Off by default, which is a reversal. The panel used to vanish the
-    /// instant Enter opened something, and everything the open had to say
-    /// arrived afterwards from the worker thread - `Opening...`, the count of
-    /// pages it had to skip, `Could not open ...` - onto a window that was
-    /// already gone. None of it was ever read by anybody. Staying up is also
-    /// what makes opening a second code a keystroke rather than a hotkey.
-    ///
-    /// On for anyone who wants the old behaviour. Escape and the hotkey close
     /// Whether clicking on something else puts the panel away.
-    ///
-    /// On, which is what a launcher does and what Ueli does. The panel is
-    /// summoned over somebody's work and is in the way until it is not
-    /// wanted; a launcher that had to be dismissed by hand would be one more
-    /// window to manage.
     pub hide_on_blur: bool,
     /// Whether the panel goes away once a file is on its way.
     ///
-    /// On, and it used to be off. The objection was specific and correct: an
-    /// open is answered on another thread, so "Opened 11 of 13 pages", the
-    /// list of pages skipped and "Could not open …" all arrived at a window
-    /// that had already gone, and nobody ever read one. That is answered
-    /// rather than overruled - anything the open has to say that the user
-    /// must see now arrives in a message box. See [`crate::notify`].
-    ///
-    /// Per action rather than per open, which is the other half: a copy
-    /// leaves the panel up so its toast can be read, and only the opens and
-    /// the reveal take it away. See [`crate::view::actions::Action::hides`].
+    /// Open results that must be seen arrive in a message box, since the
+    /// panel is gone by then; see [`crate::notify`]. Applies per action: a
+    /// copy leaves the panel up so its toast can be read. See
+    /// [`crate::view::actions::Action::hides`].
     pub hide_after_opening: bool,
     /// Whether Escape puts the panel away rather than clearing the box.
     ///
-    /// On. Switched off, Escape clears the code and the shortcut is the way
-    /// out - which is the arrangement somebody who lives in the panel may
-    /// want, and is not the one to default to: a window covering somebody's
-    /// work has to be dismissable without them working out which layer they
-    /// are on.
+    /// When off, Escape clears the code and only the hotkey hides the panel.
     pub hide_on_escape: bool,
     /// Whether an assembled document is handed to the viewer read-only.
     ///
-    /// On by default, and the reason is the cache rather than the share. A
-    /// merged document is named after a hash of its own contents, so a viewer
-    /// that saves a change back into it leaves a file whose name no longer
-    /// describes it, and every later open of that code gets the edited copy.
-    ///
-    /// Off for somebody who genuinely wants to annotate what comes out and
-    /// save it somewhere. It reaches only files this program wrote: a single
-    /// PDF opened straight off the share is as writable as it is on disk.
+    /// On by default because merged documents are cached under a hash of their
+    /// contents; an edit saved back would be served for every later open.
+    /// Affects only files this program wrote, not PDFs opened from the share.
     pub pdf_read_only: bool,
     /// How many shares may be walked at once.
     ///
-    /// One walk already keeps [`WALK_CONCURRENCY`] directory reads in flight,
-    /// so this multiplies against that: the shipped 2 is sixteen outstanding
-    /// requests against a file server that belongs to somebody else. Raising
-    /// it shortens a cold start over several shares and lengthens everyone
-    /// else's afternoon.
+    /// Multiplies with [`WALK_CONCURRENCY`]: the default of 2 means sixteen
+    /// outstanding requests against the file server.
     pub max_concurrent_scans: usize,
     /// Live change notification for the walked tree.
     ///
-    /// Ships **on**, unlike [`Self::server_filter`], and the asymmetry is
-    /// deliberate. A server filter that silently drops matches makes a file
-    /// unfindable, so it has to be proven before it is trusted; a watch that
-    /// silently stops firing costs nothing, because the rescan floor still
-    /// re-walks the share every half hour and the status line says the watch
-    /// is dead. The downside is bounded and the upside is a new job folder
-    /// appearing in seconds rather than in half an hour.
+    /// On by default, unlike [`Self::server_filter`]: a watch that silently
+    /// stops is bounded by [`TREE_RESCAN_FLOOR`] and reported in the status
+    /// line, whereas a faulty filter makes files unfindable.
     pub live_updates: bool,
     pub cache_dir: Option<PathBuf>,
     /// Where to append the index decision log, if anywhere.
     ///
-    /// Off by default. It exists so that "the index reloads at random" can be
-    /// answered from the machine that has the problem, without a debugger and
-    /// without a rebuild - see [`crate::index::log`].
+    /// Off by default. Diagnoses unexpected index reloads on the affected
+    /// machine; see [`crate::index::log`].
     pub index_log: Option<PathBuf>,
     /// Remember codes between runs, for recall with the Up arrow.
     pub history: bool,
-    /// Where they are remembered. `None` disables storage without disabling
-    /// recall within the session.
+    /// Where history is stored. `None` disables storage but keeps in-session
+    /// recall.
     pub history_path: Option<PathBuf>,
     /// Where the panel remembers the spot it was dragged to.
     ///
-    /// Derived rather than configured, exactly like [`Self::history_path`]:
-    /// there is no `placement_path` key, so no existing configuration file can
-    /// become a hard startup error over a feature it has never heard of. `None`
-    /// means the panel can still be dragged, and simply forgets on exit.
-    ///
-    /// See [`crate::placement`] for why a position is not a setting.
+    /// Derived, not configured. `None` means the position is forgotten on
+    /// exit. See [`crate::placement`].
     pub placement_path: Option<PathBuf>,
     /// The chord that summons the window into the compact overlay.
     ///
-    /// Parsed at the edge rather than carried as text, so a typo is reported
-    /// against the line of the configuration file that holds it instead of
-    /// becoming a key that silently never fires.
+    /// Parsed at load so a typo is reported against its configuration line.
     pub hotkey: crate::hotkey::spec::HotkeySpec,
     /// The viewer at startup.
     ///
-    /// Deliberately the *initial* value and nothing more. F2 changes which
-    /// viewer is in use, and that lives on `AppState`, not here: `Settings` is
-    /// cloned into the backend and every worker, so a mutable field would be
-    /// one truth with several stale copies of it. See `AppState::viewer`.
+    /// Only the initial value. The current viewer, changed by F2, lives in
+    /// `AppState::viewer`, since `Settings` is cloned into every worker.
     pub viewer: ViewerKind,
     /// Which palette the panel is drawn in.
     pub theme: ThemeChoice,
     /// What the compositor is asked to put behind the panel.
     ///
-    /// Only readable at startup: `DWMWA_SYSTEMBACKDROP_TYPE` is set on the
-    /// window handle once, and the shell re-applies it on a theme change and
-    /// nowhere else. See [`crate::gui::window::Material`].
+    /// Read only at startup: `DWMWA_SYSTEMBACKDROP_TYPE` is set once on the
+    /// window handle. See [`crate::gui::window::Material`].
     pub backdrop: crate::gui::window::Material,
     /// How much of itself a result row shows.
     pub result_layout: ResultLayout,
@@ -1093,54 +866,39 @@ pub struct Settings {
     /// How many results sit side by side on a line, from one to
     /// [`MAX_COLUMNS`].
     pub columns: usize,
-    /// Whether to look on GitHub for a newer version when no `update_from`
-    /// share is configured. On by default: without it, a machine with no
-    /// share is never told there is anything newer.
+    /// Whether to check GitHub for a newer version when no `update_from`
+    /// share is configured.
     pub check_for_updates: bool,
     /// Overrides the system's `.pdf` association when set.
     ///
-    /// Not validated at load, unlike every other path in the configuration. A
-    /// mistyped *share* path is silent - the search simply finds nothing and
-    /// the user concludes the job has no files - which is why `file` refuses
-    /// to start on one. A missing viewer executable is the opposite: it fails
-    /// loudly the first time it is used, and this same file roams to laptops
-    /// where that executable legitimately is not installed. Refusing to start
-    /// there would be a regression, so this is reported by `--doctor` and
-    /// surfaced as a toast instead.
+    /// Not validated at load, unlike share paths: a missing viewer fails
+    /// visibly on use, and the same file roams to machines without it.
+    /// `--doctor` and a toast report the problem instead.
     pub pdf_viewer: Option<PathBuf>,
     /// What was done to a configuration too old for this build to read.
     ///
-    /// Carried so it can be said out loud. A program that rewrites a file the
-    /// user maintains and never mentions it is one whose first symptom is a
-    /// comment of theirs having vanished.
+    /// Carried so the rewrite can be reported to the user.
     pub migrated: Option<file::Migrated>,
     /// The folder to look in for a newer version.
     ///
-    /// Unset means the whole feature is inert: no thread, no round trip and
-    /// nothing on screen. That matters, because this ships to machines where
-    /// no such share exists and to laptops that are off the domain half the
-    /// week.
+    /// Unset disables share-based updates entirely: no thread, no round trip,
+    /// nothing on screen.
     pub update_from: Option<PathBuf>,
 
     /// Whether a configuration file was actually read.
     ///
-    /// `--no-config`, or a profile with nowhere to put one, means there is
-    /// nothing to write back to - so a setting changed in the window applies
-    /// for the session and no longer.
+    /// When false, settings changed in the window last only for the session.
     pub have_file: bool,
     /// Settings a command-line flag has fixed for this run.
     ///
-    /// The environment can be asked directly whenever the question comes up,
-    /// because it cannot change while this runs. A flag leaves nothing to ask,
-    /// so it is recorded here as it is applied. One bit per
-    /// [`write::SettingKey`]; see [`Self::pin`].
+    /// One bit per [`write::SettingKey`]; see [`Self::pin`]. The environment
+    /// needs no record because it cannot change while the process runs.
     pub cli_pinned: u32,
     /// The files that are never shown, however well they match.
     ///
-    /// One derived value rather than the two settings it is built from, so
-    /// that nothing downstream can consult the list while disagreeing about
-    /// the flag. `Arc` for the same reason as [`Self::routes`]: it is shared
-    /// by every worker and read in the matcher's inner loop.
+    /// Derived from the list and the flag together so no consumer can read one
+    /// without the other. Shared by every worker and read in the matcher's
+    /// inner loop.
     pub hidden: Arc<hidden::Hidden>,
 }
 
@@ -1151,29 +909,24 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Builds settings around a routing table.
-    ///
-    /// It used to also derive a `custpro_path` and a `tree_path` by taking the
-    /// first enabled mapping of each kind. Everything downstream was written
-    /// against those two paths, which is why a configuration could name ten
-    /// shares and have two of them indexed - and why an actor spawned with no
-    /// flat mapping configured probed an empty path forever.
+    /// Defaults over [`fixture_routes`]. Test fixture only.
+    #[doc(hidden)]
+    pub fn fixture() -> Self {
+        Self::with_routes(Arc::new(fixture_routes()), |s| s)
+    }
+}
+
+impl Settings {
     /// Why a setting cannot be written back, if it cannot.
     ///
-    /// Generalises the question `viewer_persistable` asked for one key. It
-    /// exists because the layering runs file, then environment, then command
-    /// line: writing a key one of the upper two holds would report a save,
-    /// change the file, and change nothing about the program - now or at the
-    /// next start. The window greys the field and says who is holding it
-    /// instead, which is what F2 has always done in words.
+    /// The environment and command line override the file, so writing a key
+    /// either holds would change nothing. The window greys such a field.
     pub fn pin(&self, key: write::SettingKey) -> Option<Pin> {
         if self.cli_pinned & key.bit() != 0 {
             return Some(Pin::CommandLine);
         }
-        // Asked exactly the way `apply_file_settings` asks it. For most keys
-        // an empty value is not a value; for the hide list it is a deliberate
-        // "nothing, for this run". The two have to agree, or the window would
-        // offer to change something the loader is about to overrule.
+        // Must match `apply_file_settings`: an empty value counts only for
+        // keys where it means "nothing, for this run" (the hide list).
         let set = if key.empty_is_a_value() {
             std::env::var(key.env()).is_ok()
         } else {
@@ -1188,19 +941,19 @@ impl Settings {
         None
     }
 
-    /// Whether a change to this setting would still be there tomorrow.
+    /// Whether a change to this setting would persist across restarts.
     pub fn can_save(&self, key: write::SettingKey) -> bool {
         self.pin(key).is_none()
     }
 
     /// Records that a command-line flag has fixed this setting.
     ///
-    /// Called by the flag parser as it applies an override, because that is
-    /// the only moment anything knows a flag was given.
+    /// Called by the flag parser as it applies each override.
     pub fn pin_to_session(&mut self, key: write::SettingKey) {
         self.cli_pinned |= key.bit();
     }
 
+    /// Builds default settings around a routing table, then applies `tweak`.
     pub fn with_routes(routes: Arc<Routes>, tweak: impl FnOnce(Self) -> Self) -> Self {
         tweak(Self {
             routes,
@@ -1234,15 +987,12 @@ impl Settings {
             pdf_viewer: None,
             migrated: None,
             update_from: None,
-            // Assume not, and let `load` say otherwise once it knows there
-            // is a file. Defaulting the other way would make every test
-            // fixture and every `--no-config` session claim it could save.
+            // `load` sets this once a file is read; test fixtures and
+            // `--no-config` sessions must not claim they can save.
             have_file: false,
             cli_pinned: 0,
-            // Set here and not only in the shipped TOML, because
-            // `write_default_if_absent` never rewrites a file that exists:
-            // everybody who already has a `config.toml` gets this value and
-            // never sees the block the asset file documents it with.
+            // Set here as well as in the shipped TOML, because
+            // `write_default_if_absent` never rewrites an existing file.
             hidden: Arc::new(hidden::Hidden::new(
                 hidden::DEFAULT_HIDE_EXTENSIONS,
                 hidden::DEFAULT_HIDE_SYSTEM_FILES,
@@ -1252,18 +1002,14 @@ impl Settings {
 
     /// Replaces whichever half of [`Self::hidden`] was specified.
     ///
-    /// One setter rather than two assignments, because `Hidden` is a single
-    /// value derived from two settings that arrive by different routes - the
-    /// list from the file, the flag possibly only from the environment. Left
-    /// to write into it separately they would each rebuild it from the other's
-    /// default and the last one would win.
+    /// The list and the flag can arrive from different layers; setting them
+    /// separately would rebuild `Hidden` from the other's default.
     fn set_hidden(&mut self, extensions: Option<Vec<String>>, system: Option<bool>) {
         if extensions.is_none() && system.is_none() {
             return;
         }
-        // Round-trips through the dotted form `Hidden` stores, which its
-        // constructor strips again - so "keep what is already there" needs no
-        // second copy of the list hanging off `Settings`.
+        // Round-trips through the dotted form `Hidden` stores; its constructor
+        // strips the dots again.
         let keep: Vec<String> = self.hidden.suffixes().map(str::to_string).collect();
         self.hidden = Arc::new(hidden::Hidden::new(
             &extensions.unwrap_or(keep),
@@ -1284,13 +1030,11 @@ impl Settings {
 
     /// Loads configuration, then layers the environment over it.
     ///
-    /// Precedence, lowest first: the shipped defaults, the config file, the
+    /// Precedence, lowest first: shipped defaults, the config file, the
     /// environment, the command line (applied by the caller). A bad file is
-    /// returned as errors rather than swallowed - see [`file`] for why
-    /// falling back would be worse.
+    /// returned as errors rather than replaced by defaults; see [`mod@file`].
     pub fn load(choice: &ConfigChoice) -> Result<Self, Vec<file::ConfigError>> {
-        // Whether a file was actually read decides whether F2 has anywhere to
-        // save to, so it is tracked here rather than rediscovered later.
+        // Whether a file was read decides whether settings can be saved.
         let mut have_file = false;
         let mut migrated = None;
         let parsed = match choice {
@@ -1304,7 +1048,7 @@ impl Settings {
             ConfigChoice::Default => match file::default_config_path() {
                 Some(path) => {
                     // Best effort: a read-only profile means no file, and the
-                    // built-in defaults are the same bytes anyway.
+                    // built-in defaults are the same bytes.
                     let _ = file::write_default_if_absent(&path);
                     if path.exists() {
                         have_file = true;
@@ -1324,9 +1068,8 @@ impl Settings {
         s.viewers = Arc::new(parsed.viewers);
         s.migrated = migrated;
         s.apply_file_settings(&parsed.settings);
-        // Everything else about what may be written is asked of the
-        // environment when the question comes up; this is the one part of the
-        // answer that is not still lying around to be read.
+        // The only part of `Settings::pin`'s answer that cannot be re-read
+        // later.
         s.have_file = have_file;
         Ok(s)
     }
@@ -1409,13 +1152,9 @@ impl Settings {
         {
             self.hotkey = v;
         }
-        // Here rather than with the other environment variables, because a
-        // viewer is only a name until the file has said which viewers exist.
-        // The environment still wins.
-        // A `FILES_VIEWER` that is set still outranks the file when it names
-        // nothing, as it always has: the environment is pinning the setting,
-        // and quietly applying the file's value under that pin would be a
-        // viewer nobody chose.
+        // Read here because a viewer name resolves only once the file has
+        // listed the viewers. A set `FILES_VIEWER` still outranks the file
+        // even when it names nothing, since the environment pins the setting.
         let viewers = Arc::clone(&self.viewers);
         if let Some(env) = env_str("FILES_VIEWER") {
             match ViewerKind::parse(&env, &viewers) {
@@ -1478,11 +1217,9 @@ impl Settings {
             self.check_for_updates = v;
         }
         self.set_hidden(
-            // `env_str` rather than `var` everywhere else, but not here: it
-            // discards an empty value, and an empty `FILES_HIDE_EXTENSIONS` is
-            // the deliberate way to say "hide nothing for this run". Asked the
-            // usual way, that request would look unset and the file would
-            // quietly win.
+            // `var`, not `env_str`: an empty `FILES_HIDE_EXTENSIONS` means
+            // "hide nothing for this run", and `env_str` would treat it as
+            // unset.
             std::env::var("FILES_HIDE_EXTENSIONS")
                 .is_err()
                 .then(|| f.hide_extensions.clone())
@@ -1496,12 +1233,9 @@ impl Settings {
 
     /// As [`Settings::from_env`], but over a supplied routing table.
     ///
-    /// The path overrides repoint a mapping *in the table* rather than
-    /// writing to the derived fields, so the two can never disagree. Paths are
-    /// normalised on the way in: a volume root keeps its trailing separator,
-    /// anything deeper loses one, so a stray trailing backslash on a
-    /// subdirectory can never reach `CreateFileW` as a non-root path with a
-    /// separator.
+    /// Path overrides repoint a mapping in the table. Paths are normalised: a
+    /// volume root keeps its trailing separator and anything deeper loses it,
+    /// so `CreateFileW` never sees a non-root path with a trailing separator.
     pub fn from_env_with(mut routes: Routes) -> Self {
         if let Some(v) = env_str("FILES_BASE_PATH") {
             routes.set_path("jobs", PathBuf::from(v));
@@ -1556,9 +1290,8 @@ impl Settings {
         if let Some(v) = env_bool("FILES_HISTORY") {
             s.history = v;
         }
-        // Unparseable is ignored rather than fatal, which is this loader's
-        // rule for the environment throughout - unlike the configuration file,
-        // where the same mistake is reported against its line.
+        // Unparseable environment values are ignored, unlike file values,
+        // which are reported against their line.
         if let Some(v) = env_str("FILES_HOTKEY").and_then(|v| crate::hotkey::spec::parse(&v).ok()) {
             s.hotkey = v;
         }
@@ -1576,17 +1309,15 @@ impl Settings {
         if let Some(v) = env_str("FILES_DOCK").and_then(|v| Dock::parse(&v)) {
             s.dock = v;
         }
-        // Out of range is ignored rather than clamped, like every other
-        // environment value here that does not parse.
+        // Out of range is ignored rather than clamped.
         if let Some(v) = env_usize("FILES_COLUMNS").filter(|n| *n <= MAX_COLUMNS) {
             s.columns = v;
         }
         if let Some(v) = env_bool("FILES_CHECK_FOR_UPDATES") {
             s.check_for_updates = v;
         }
-        // `FILES_VIEWER` is read in `apply_file_settings`, once the file has
-        // said which viewers exist. Of the built-in two it can name either
-        // here, which is all a run with no file can have.
+        // `FILES_VIEWER` is re-read in `apply_file_settings` once the file has
+        // listed the viewers; here it can name only the built-in modes.
         if let Some(v) =
             env_str("FILES_VIEWER").and_then(|v| ViewerKind::parse(&v, &Viewers::default()))
         {
@@ -1598,10 +1329,8 @@ impl Settings {
         if let Some(v) = env_str("FILES_UPDATE_FROM") {
             s.update_from = Some(PathBuf::from(v));
         }
-        // Commas as well as spaces, because `db,js,lnk` is how anybody would
-        // write this one. An empty value means "hide nothing", which is the
-        // one-variable way to ask whether the filter is what is hiding a file
-        // - the same job `--no-config` does for the file as a whole.
+        // Accepts commas, spaces, tabs and semicolons. An empty value means
+        // "hide nothing".
         s.set_hidden(
             std::env::var("FILES_HIDE_EXTENSIONS").ok().map(|v| {
                 v.split([',', ' ', '\t', ';'])
@@ -1623,16 +1352,16 @@ pub(crate) fn env_str(key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// Reads a duration given in whole seconds. Zero and unparseable values are
-/// ignored rather than accepted: a zero probe interval would busy-loop the
-/// index thread against the file server.
+/// Reads a duration given in whole seconds.
+///
+/// Zero and unparseable values are ignored: a zero probe interval would
+/// busy-loop the index thread against the file server.
 pub(crate) fn env_secs(key: &str) -> Option<Duration> {
     let secs: u64 = env_str(key)?.parse().ok()?;
     (secs > 0).then(|| Duration::from_secs(secs))
 }
 
-/// Reads a positive whole number. Zero and unparseable values are ignored
-/// rather than accepted, for the same reason [`env_secs`] rejects zero.
+/// Reads a positive whole number; zero and unparseable values are ignored.
 pub(crate) fn env_usize(key: &str) -> Option<usize> {
     let n: usize = env_str(key)?.parse().ok()?;
     (n > 0).then_some(n)
@@ -1648,8 +1377,8 @@ pub(crate) fn env_bool(key: &str) -> Option<bool> {
 
 /// `%LOCALAPPDATA%\files`, falling back to the system temp directory.
 ///
-/// The index must live on a local disk: it is memory-mapped, and mapping a
-/// file over SMB would reintroduce the very latency the cache exists to avoid.
+/// The index is memory-mapped, so it must live on a local disk rather than
+/// over SMB.
 pub fn default_cache_dir() -> Option<PathBuf> {
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let p = PathBuf::from(local);
@@ -1689,15 +1418,13 @@ mod tests {
 
     // --- hiding files -------------------------------------------------------
 
-    /// Serialises everything below, because `apply_file_settings` reads the
-    /// environment and one of these tests writes to it. Modelled on the same
-    /// guard in `crate::log`, and needed for the same reason: `cargo test`
-    /// runs these in parallel against one process-wide environment.
+    /// Serialises the tests below, because `apply_file_settings` reads the
+    /// process-wide environment and some tests write to it while `cargo test`
+    /// runs them in parallel. Mirrors the guard in `crate::log`.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        // A poisoned lock means another of these tests panicked mid-assertion.
-        // That is a failure to report, not a reason to stop taking the lock.
+        // A poisoned lock only means another test panicked; keep going.
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -1708,9 +1435,6 @@ mod tests {
         s
     }
 
-    /// The index log used to be reachable only from a flag or a variable,
-    /// which put the one diagnostic for "the drives reload at random" out of
-    /// reach of anybody who could not be talked through a command line.
     #[test]
     fn the_index_log_can_be_set_in_the_configuration_file() {
         let s = applied(file::FileSettings {
@@ -1720,16 +1444,13 @@ mod tests {
         assert_eq!(s.index_log, Some(PathBuf::from(r"C:\temp\files.log")));
     }
 
-    /// And obeys the same layering as every other path: the environment sits
-    /// over the file, so a variable set for one run is not quietly overruled
-    /// by what the file says.
     #[test]
     fn an_index_log_in_the_environment_outranks_the_file() {
         const ENV: &str = "FILES_INDEX_LOG";
         let _guard = lock();
 
-        // SAFETY: as in the test below - the lock is what makes the write
-        // safe, and both calls happen before the guard is dropped.
+        // SAFETY: as in the test below - the lock makes the write safe, and
+        // both calls happen before the guard is dropped.
         unsafe { std::env::set_var(ENV, r"C:\temp\from-env.log") };
 
         let mut s = Settings::from_env_with(default_routes());
@@ -1748,13 +1469,8 @@ mod tests {
         );
     }
 
-    /// An empty `FILES_HIDE_EXTENSIONS` is the deliberate one-variable way to
-    /// ask "is the filter what is hiding my file?", so it has to outrank the
-    /// configuration file like every other override.
-    ///
-    /// It did not. The precedence guard used `env_str`, which discards an
-    /// empty value, so the request looked unset and the file quietly won -
-    /// leaving the one diagnostic for this feature silently doing nothing.
+    /// An empty `FILES_HIDE_EXTENSIONS` means "hide nothing" and must outrank
+    /// the configuration file like any other override.
     #[test]
     fn an_empty_override_still_outranks_the_configuration_file() {
         const ENV: &str = "FILES_HIDE_EXTENSIONS";
@@ -1768,10 +1484,9 @@ mod tests {
         // lock - and both calls below happen before the guard is dropped.
         unsafe { std::env::set_var(ENV, "") };
 
-        // The two steps `load` performs, in its order: the environment over
-        // the built-in defaults, then the file yielding to the environment.
-        // Testing only the second would prove nothing - the override is
-        // applied in the first.
+        // Both steps of `load`, in order: the environment over the defaults,
+        // then the file yielding to the environment. The override is applied
+        // in the first step, so testing only the second would prove nothing.
         let mut s = Settings::from_env_with(default_routes());
         s.apply_file_settings(&file::FileSettings {
             hide_extensions: Some(vec!["db".into()]),
@@ -1810,9 +1525,7 @@ mod tests {
         );
     }
 
-    /// An empty list is a real answer - "hide nothing" - and the quickest way
-    /// to find out whether this is why an expected file is missing. It must
-    /// not read as "unset" and fall back to the shipped list.
+    /// An empty list means "hide nothing", not "unset".
     #[test]
     fn an_empty_list_hides_nothing() {
         let s = applied(file::FileSettings {
@@ -1823,9 +1536,6 @@ mod tests {
         assert!(!s.hidden.hides("Thumbs.db"));
     }
 
-    /// The reason the two settings go through one setter. Each arrives by its
-    /// own route, and written separately the second would rebuild `Hidden`
-    /// from the first's default and discard it.
     #[test]
     fn setting_one_half_leaves_the_other_alone() {
         let flag_only = applied(file::FileSettings {
@@ -1877,7 +1587,7 @@ mod tests {
         );
         assert_eq!(ViewerKind::parse("pdf", &none), Some(ViewerKind::Pdf));
         assert_eq!(ViewerKind::parse("  MERGE ", &none), Some(ViewerKind::Pdf));
-        // Nothing is built in beyond those two.
+        // No built-in modes beyond those two.
         assert_eq!(ViewerKind::parse("avwin", &none), None);
 
         let two = two_viewers();
@@ -1886,8 +1596,6 @@ mod tests {
         assert_eq!(ViewerKind::parse("notepad", &two), None);
     }
 
-    /// Assembling the whole document is what someone typing a code almost
-    /// always meant; opening one page of it is the special case.
     #[test]
     fn opening_by_file_type_is_the_default() {
         assert_eq!(Settings::default().viewer, ViewerKind::Auto);
@@ -1917,8 +1625,7 @@ mod tests {
         }
     }
 
-    /// Every spelling the writer can emit has to be one the parser accepts,
-    /// or F2 would write a value that stops the program at the next start.
+    /// An unparseable written value would be a startup error on next launch.
     #[test]
     fn every_name_the_writer_emits_parses_back() {
         let viewers = two_viewers();
@@ -1927,7 +1634,6 @@ mod tests {
         }
     }
 
-    /// A viewer index the list no longer has is `Auto`, not a panic.
     #[test]
     fn a_viewer_that_is_gone_behaves_as_auto() {
         let none = Viewers::default();
@@ -1945,8 +1651,6 @@ mod tests {
         assert!(!ViewerKind::is_reserved("avwin"));
     }
 
-    /// Nothing to save to, so F2 must say "this session only" rather than
-    /// report a save that goes nowhere.
     #[test]
     fn the_built_in_defaults_have_nowhere_to_persist_a_viewer() {
         let s = Settings::load(&ConfigChoice::None).expect("built-ins must load");
@@ -1972,31 +1676,12 @@ mod tests {
 
     #[test]
     fn server_filter_is_off_by_default() {
-        // It is enabled only after --bench proves the server's pattern
-        // matching returns a superset of a full enumeration.
+        // Enabled only after --bench proves the server's pattern matching
+        // returns a superset of a full enumeration.
         assert!(!Settings::default().server_filter);
     }
 
-    /// The shipped configuration names two shares, and both are indexed.
-    ///
-    /// Replaces a test for `is_flat_root`, which asked whether a path was
-    /// *the* flat root - a question with no answer once a configuration can
-    /// name several.
-    #[test]
-    fn the_shipped_configuration_indexes_every_share_it_names() {
-        let s = Settings::default();
-        let indexed: Vec<_> = s
-            .routes
-            .enabled()
-            .filter(|m| m.kind.is_indexed())
-            .map(|m| m.name.as_ref())
-            .collect();
-        assert_eq!(indexed, vec!["custompro", "jobs"]);
-    }
-
-    /// Checked at compile time: a shorter needle would make `memmem` weak
-    /// and would make a leading wildcard match an unreasonable share of a
-    /// million-entry directory.
+    /// Ordering of the query-length limits, checked at compile time.
     const _: () = assert!(MIN_TERM_LEN >= 1);
     const _: () = assert!(MIN_SERVER_QUERY_LEN >= MIN_TERM_LEN);
     const _: () = assert!(MIN_REMEMBERED_LEN >= MIN_TERM_LEN);
@@ -2017,8 +1702,7 @@ mod tests {
         assert!(s.can_save(SettingKey::Theme));
     }
 
-    /// `--no-config`, or a profile with nowhere to put a file. The setting
-    /// still applies; it just will not be there tomorrow.
+    /// Covers `--no-config` and a profile with nowhere to put a file.
     #[test]
     fn nothing_can_be_saved_when_there_is_no_configuration_file() {
         let _guard = lock();
@@ -2043,7 +1727,6 @@ mod tests {
         assert!(s.can_save(SettingKey::Theme), "a flag pinned the wrong key");
     }
 
-    /// The variable is named, because the user has to find and unset it.
     #[test]
     fn an_environment_variable_pins_a_setting_and_says_which_one_it_is() {
         let _guard = lock();
@@ -2063,7 +1746,6 @@ mod tests {
         assert_eq!(pin, Some(Pin::Environment("FILES_THEME")));
     }
 
-    /// One bit each, or two settings would pin each other.
     #[test]
     fn every_writable_key_has_a_bit_of_its_own() {
         let mut seen = 0u32;
@@ -2074,8 +1756,6 @@ mod tests {
         assert_eq!(seen.count_ones() as usize, SettingKey::ALL.len());
     }
 
-    /// Each key names the variable that actually overrules it. A wrong name
-    /// here would send somebody hunting for a variable that is not the one.
     #[test]
     fn every_writable_key_names_an_environment_variable_the_loader_reads() {
         for key in SettingKey::ALL {

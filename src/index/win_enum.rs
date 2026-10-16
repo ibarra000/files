@@ -1,11 +1,8 @@
 //! Windows directory enumeration.
 //!
-//! `std::fs::read_dir` goes through `FindFirstFileW` with a roughly 4 KB
-//! fetch buffer. Over SMB2 that is one `QUERY_DIRECTORY` round trip per
-//! ~25 entries, so a million-entry share costs on the order of **45,000
-//! serialised round trips** - about 22 seconds at 0.5 ms RTT and minutes over
-//! a VPN. The wall clock is governed by round-trip count, not bandwidth, and
-//! that is what this module attacks.
+//! `std::fs::read_dir` uses `FindFirstFileW` with a ~4 KB buffer, which over
+//! SMB2 is one `QUERY_DIRECTORY` round trip per ~25 entries. Wall clock time
+//! is governed by round-trip count, not bandwidth:
 //!
 //! | Strategy | Buffer | Round trips @ 1M entries |
 //! |---|---|---|
@@ -14,19 +11,11 @@
 //! | `GetFileInformationByHandleEx` | 1 MiB | ~150 |
 //! | server-side wildcard | n/a | **1** |
 //!
-//! # Why the handle API is the default
-//!
-//! `GetFileInformationByHandleEx` was chosen over `NtQueryDirectoryFileEx`
-//! deliberately. It takes an arbitrary caller-supplied buffer, so it captures
-//! essentially the whole round-trip win, while being fully documented, free of
-//! any `ntdll` linkage, and free of the `STATUS_PENDING` hazard that comes
-//! with getting the handle's synchronicity wrong. Since none of this can be
-//! exercised before it reaches the real drives, that risk difference outweighs
-//! the last ~35% of throughput.
-//!
-//! `FindFirstFileExW` remains, both as the fallback and because it is the only
-//! API here that accepts a search pattern - which is what makes server-side
-//! filtering possible.
+//! `GetFileInformationByHandleEx` is the default over `NtQueryDirectoryFileEx`:
+//! it accepts a caller-sized buffer, is documented, needs no `ntdll` linkage,
+//! and avoids the `STATUS_PENDING` hazard of a mis-set handle mode, at the cost
+//! of roughly 35% throughput. `FindFirstFileExW` is the fallback and the only
+//! API here that accepts a search pattern, enabling server-side filtering.
 //!
 //! # Safety model
 //!
@@ -83,24 +72,18 @@ fn open_dir_handle(dir: &Path) -> Result<OwnedHandle, EnumError> {
 
     // SAFETY: `wide` is NUL-terminated and outlives the call.
     //
-    // FILE_FLAG_BACKUP_SEMANTICS is mandatory for a directory handle; without
-    // it CreateFileW fails with ERROR_ACCESS_DENIED, which reads as a
-    // permissions problem and is not one.
+    // FILE_FLAG_BACKUP_SEMANTICS is required for a directory handle; without
+    // it CreateFileW fails with a misleading ERROR_ACCESS_DENIED.
     //
-    // FILE_LIST_DIRECTORY is requested rather than GENERIC_READ: some SMB
-    // shares grant the former where they deny the latter.
+    // FILE_LIST_DIRECTORY rather than GENERIC_READ: some SMB shares grant the
+    // former and deny the latter.
     //
-    // FILE_READ_ATTRIBUTES is requested *as well*, and it is load-bearing.
-    // `GetFileInformationByHandleEx(FileBasicInfo)` is an attribute query, and
-    // a server that enforces the granted access mask strictly - which local
-    // NTFS does not, but several SMB implementations do - fails it with
-    // ERROR_ACCESS_DENIED when only FILE_LIST_DIRECTORY was asked for. That
-    // made the freshness probe fail on the real share and never on a
-    // development machine, and a probe that always fails used to mean a full
-    // re-enumeration every sixty seconds.
+    // FILE_READ_ATTRIBUTES is required for the `FileBasicInfo` stamp probe.
+    // Local NTFS does not enforce the access mask, but some SMB servers do and
+    // fail the probe with ERROR_ACCESS_DENIED without it.
     //
-    // FILE_FLAG_OVERLAPPED is deliberately absent, which keeps the handle
-    // synchronous - GetFileInformationByHandleEx has no asynchronous form.
+    // FILE_FLAG_OVERLAPPED is absent so the handle is synchronous;
+    // GetFileInformationByHandleEx has no asynchronous form.
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -114,9 +97,8 @@ fn open_dir_handle(dir: &Path) -> Result<OwnedHandle, EnumError> {
     };
 
     if handle == INVALID_HANDLE_VALUE || handle.is_null() {
-        // Note `from_win_open`, not `from_win`: ERROR_FILE_NOT_FOUND here
-        // means the directory does not exist, whereas the same code from an
-        // enumeration means "no more entries".
+        // `from_win_open`: ERROR_FILE_NOT_FOUND here means the directory does
+        // not exist, not "no more entries".
         return Err(EnumError::from_win_open(last_error()));
     }
     Ok(OwnedHandle(handle))
@@ -142,7 +124,7 @@ fn list_handle_dirinfo(
     let mut round_trips = 0u32;
     let mut complete = true;
     // Two consecutive under-filled refills mean the server negotiated a
-    // smaller transfer size than we asked for, so stop paying for the memory.
+    // smaller transfer size than requested, so the buffer is halved.
     let mut sparse_refills = 0u32;
 
     loop {
@@ -163,8 +145,8 @@ fn list_handle_dirinfo(
 
         if ok == 0 {
             return match last_error() {
-                // Both are normal termination: the chain ended, or the
-                // directory was empty to begin with.
+                // Normal termination: the chain ended, or the directory was
+                // empty.
                 code::NO_MORE_FILES | code::FILE_NOT_FOUND => Ok(ListStats {
                     entries,
                     round_trips,
@@ -173,8 +155,8 @@ fn list_handle_dirinfo(
                     complete,
                 }),
                 code::MORE_DATA => {
-                    // A single name did not fit. Grow and retry from the
-                    // start, since the cursor state is now unknown.
+                    // A single name did not fit. Grow and restart, since the
+                    // cursor state is unknown.
                     if !buf.grow() {
                         return Err(EnumError::Corrupt(code::INVALID_DATA));
                     }
@@ -272,16 +254,15 @@ fn list_handle_dirinfo(
             break;
         }
 
-        // Adaptive sizing: a server capped below our request wastes a
-        // megabyte of resident memory per scan for no benefit.
+        // Adaptive sizing: avoid holding a 1 MiB buffer when the server caps
+        // transfers lower.
         if consumed * 4 < buf.len() && buf.len() > DIR_BUFFER_MIN {
             sparse_refills += 1;
             if sparse_refills >= 2 {
                 let smaller = (buf.len() / 2).max(DIR_BUFFER_MIN);
                 buf = AlignedBuf::new(smaller);
                 sparse_refills = 0;
-                // The kernel cursor survives a buffer change, so enumeration
-                // simply continues with the smaller buffer.
+                // The kernel cursor survives a buffer change.
             }
         } else {
             sparse_refills = 0;
@@ -309,16 +290,15 @@ fn find_first(
     // SAFETY: `wide` is NUL-terminated and outlives the call; `data` is a
     // valid, correctly aligned, caller-owned WIN32_FIND_DATAW.
     //
-    // FindExInfoBasic suppresses 8.3 short-name retrieval, which removes
-    // bytes from the wire and work from the server. It needs Windows 7+;
-    // older systems answer ERROR_INVALID_PARAMETER, handled by the caller.
+    // FindExInfoBasic skips 8.3 short names, reducing wire bytes and server
+    // work. Pre-Windows 7 rejects it with ERROR_INVALID_PARAMETER, handled by
+    // the caller.
     //
-    // FIND_FIRST_EX_LARGE_FETCH raises kernel32's internal buffer to 64 KiB
-    // and is where most of the gap to `read_dir` comes from.
+    // FIND_FIRST_EX_LARGE_FETCH raises kernel32's buffer to 64 KiB.
     //
-    // FIND_FIRST_EX_CASE_SENSITIVE is deliberately not set: it would break
-    // matching against mixed-case job codes. FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY
-    // is also avoided, as it can silently drop entries behind some filters.
+    // FIND_FIRST_EX_CASE_SENSITIVE is not set, so mixed-case names match.
+    // FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY is avoided because it can drop
+    // entries behind some filters.
     let handle = unsafe {
         FindFirstFileExW(
             wide.as_ptr(),
@@ -368,8 +348,8 @@ fn list_find_first(
 
     let handle = match find_first(dir, pattern, true, &mut data) {
         Ok(h) => h,
-        // Pre-Windows-7 rejects FindExInfoBasic. Retry once at the standard
-        // level; this is an intra-strategy fallback, not a chain step.
+        // Pre-Windows 7 rejects FindExInfoBasic; retry once at the standard
+        // level. This is not a fallback-chain step.
         Err(EnumError::Unsupported(code::INVALID_PARAMETER)) => {
             find_first(dir, pattern, false, &mut data)?
         }
@@ -423,21 +403,13 @@ fn list_find_first(
 
 /// Reads the directory's timestamps.
 ///
-/// Two paths, in order of preference:
+/// Tries `GetFileInformationByHandleEx(FileBasicInfo)` for both `LastWriteTime`
+/// and `ChangeTime`, then falls back to `GetFileAttributesExW`, which needs no
+/// handle and returns the write time only.
 ///
-/// 1. `GetFileInformationByHandleEx(FileBasicInfo)`, which returns both
-///    `LastWriteTime` and `ChangeTime`;
-/// 2. `GetFileAttributesExW`, which needs no handle at all and returns the
-///    write time only.
-///
-/// The fallback exists because the alternative to a coarse stamp is *no*
-/// stamp, and no stamp means falling back to the hourly floor - change
-/// detection at one-hour granularity instead of one minute. A write-only
-/// stamp still detects entry churn on NTFS; it is only blind to metadata-only
-/// changes, which do not alter a listing.
-///
-/// The two kinds are tagged and never compared against each other - see
-/// [`super::StampKind`] - because `change_time` means different things in each.
+/// Without a stamp, change detection drops to the hourly floor. A write-only
+/// stamp still detects entry churn on NTFS. The two kinds are never compared
+/// with each other; see [`super::StampKind`].
 fn probe_stamp_win(dir: &Path) -> Result<DirStamp, EnumError> {
     match probe_stamp_by_handle(dir) {
         Ok(stamp) => Ok(stamp),
@@ -447,7 +419,7 @@ fn probe_stamp_win(dir: &Path) -> Result<DirStamp, EnumError> {
 
 fn probe_stamp_by_handle(dir: &Path) -> Result<DirStamp, EnumError> {
     #[cfg(test)]
-    if FORCE_STAMP_FALLBACK.load(std::sync::atomic::Ordering::Relaxed) {
+    if FORCE_STAMP_FALLBACK.get() {
         return Err(EnumError::AccessDenied(code::ACCESS_DENIED));
     }
     let handle = open_dir_handle(dir)?;
@@ -495,17 +467,19 @@ fn probe_stamp_by_attributes(dir: &Path) -> Result<DirStamp, EnumError> {
     Ok(DirStamp::write_only(filetime_to_i64(data.ftLastWriteTime)))
 }
 
-/// A `FILETIME` as the same 100ns-since-1601 integer `FILE_BASIC_INFO` uses,
-/// so the two paths at least share units.
+/// Converts a `FILETIME` to the 100 ns-since-1601 integer `FILE_BASIC_INFO`
+/// uses, so both probe paths share units.
 fn filetime_to_i64(ft: FILETIME) -> i64 {
     ((u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)) as i64
 }
 
-/// Forces the attribute fallback, so the path a hostile share would take can
-/// be exercised on a machine where the handle query works fine.
 #[cfg(test)]
-static FORCE_STAMP_FALLBACK: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// Forces the attribute fallback, so the path a hostile share would take
+    /// can be exercised on a machine where the handle query works. Per thread,
+    /// so it cannot leak into tests running in parallel.
+    static FORCE_STAMP_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 // --- the source ------------------------------------------------------------
 
@@ -555,8 +529,7 @@ impl DirSource for WinDirSource {
             match Self::run(strategy, dir, sink, opts, cancel) {
                 Ok(stats) => return Ok(stats),
                 Err(e) if e.should_try_next_strategy() => {
-                    // Only a genuine "this API cannot work here" advances the
-                    // chain. Everything else is an answer.
+                    // Only "this API cannot work here" advances the chain.
                     last = e;
                     continue;
                 }
@@ -583,15 +556,15 @@ impl DirSource for WinDirSource {
         opts: &ListOpts,
         cancel: &CancelToken,
     ) -> Result<ListStats, EnumError> {
-        // Only FindFirstFileExW accepts a pattern, so this path does not
-        // consult the configured strategy.
+        // Only FindFirstFileExW accepts a pattern, so the configured strategy
+        // is not consulted.
         list_find_first(dir, wildcard, EnumStrategy::FindFirstEx, sink, opts, cancel)
     }
 
     fn prewarm(&self, root: &Path) {
         // The cheapest call that forces SMB session setup, tree connect and
-        // any DFS referral. Deliberately not WNetAddConnection2W, which can
-        // pop a credential prompt - catastrophic underneath a TUI.
+        // any DFS referral. Not WNetAddConnection2W, which can show a
+        // credential prompt.
         let wide = wide_path(root, true);
         // SAFETY: `wide` is NUL-terminated and outlives the call.
         let _ = unsafe { GetFileAttributesW(wide.as_ptr()) };
@@ -614,8 +587,6 @@ mod tests {
         }
         dir
     }
-
-    // --- path conversion (pure) -------------------------------------------
 
     #[test]
     fn find_name_is_bounded_when_the_buffer_is_full() {
@@ -643,9 +614,8 @@ mod tests {
 
     // --- against the real local filesystem --------------------------------
     //
-    // These exercise the unsafe walk on a local NTFS directory. They cannot
-    // reproduce SMB behaviour, but they do prove the record chain is parsed
-    // correctly and that handles are not leaked.
+    // These run the unsafe walk on local NTFS. They cannot reproduce SMB
+    // behaviour but verify record-chain parsing and handle cleanup.
 
     #[test]
     fn handle_enumeration_lists_local_files() {
@@ -752,8 +722,8 @@ mod tests {
         let dir = temp_with(&refs);
 
         let mut sink = VecSink::default();
-        // A deliberately small buffer forces many refills, exercising the
-        // record-chain walk across buffer boundaries.
+        // A small buffer forces many refills, exercising the record-chain
+        // walk across buffer boundaries.
         let opts = ListOpts {
             buffer_bytes: DIR_BUFFER_MIN,
             ..Default::default()
@@ -859,26 +829,24 @@ mod tests {
         assert_eq!(err, EnumError::Empty, "zero matches is an answer");
     }
 
-    /// Restores the fallback switch even if the test panics, so one failure
-    /// cannot silently reroute every other probe in the process.
+    /// Resets the fallback switch on drop, even if the test panics.
     struct ForcedFallback;
 
     impl ForcedFallback {
         fn on() -> Self {
-            FORCE_STAMP_FALLBACK.store(true, std::sync::atomic::Ordering::Relaxed);
+            FORCE_STAMP_FALLBACK.set(true);
             Self
         }
     }
 
     impl Drop for ForcedFallback {
         fn drop(&mut self) {
-            FORCE_STAMP_FALLBACK.store(false, std::sync::atomic::Ordering::Relaxed);
+            FORCE_STAMP_FALLBACK.set(false);
         }
     }
 
-    /// The share that prompted all of this refuses the handle query. Without
-    /// the fallback that means no stamp at all, and no stamp means change
-    /// detection drops from one minute to one hour.
+    /// Some shares refuse the handle query; the attribute fallback must still
+    /// produce a write-only stamp.
     #[test]
     fn probe_stamp_falls_back_to_file_attributes_when_the_handle_query_fails() {
         let dir = temp_with(&["a.txt"]);
@@ -926,9 +894,8 @@ mod tests {
         ));
     }
 
-    /// The handle query is an attribute read, so the handle has to have been
-    /// opened for one. Requesting only `FILE_LIST_DIRECTORY` is what made the
-    /// probe fail on a strict SMB server and never on local NTFS.
+    /// The handle must be opened with `FILE_READ_ATTRIBUTES`, which strict SMB
+    /// servers require for the `FileBasicInfo` query.
     #[test]
     fn the_directory_handle_is_opened_for_attribute_reads() {
         let dir = temp_with(&["a.txt"]);
@@ -948,7 +915,6 @@ mod tests {
 
     #[test]
     fn the_stamp_moves_when_the_directory_changes() {
-        // The freshness mechanism the periodic full rescan is replaced by.
         let dir = temp_with(&["a.txt"]);
         let before = probe_stamp_win(dir.path()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -980,9 +946,8 @@ mod tests {
 
     #[test]
     fn handles_are_not_leaked_across_many_enumerations() {
-        // A leaked find handle would hold a server-side open on a shared
-        // drive. Repeating the operation many times would exhaust the process
-        // handle table if Drop were not doing its job.
+        // A leaked handle would hold a server-side open; enough repetitions
+        // would exhaust the process handle table.
         let dir = temp_with(&["a.txt", "b.txt"]);
         for _ in 0..2000 {
             let mut sink = VecSink::default();

@@ -1,17 +1,12 @@
-//! Two one-liners that three modules had each grown their own copy of.
-//!
-//! Neither is interesting. They live here because a helper duplicated across
-//! modules is a helper that drifts: the moment one copy starts saturating
-//! differently, or reporting a panic payload one more way, the two stop
-//! agreeing and nothing catches it.
+//! Small helpers shared by several modules, kept in one place so copies do
+//! not drift apart.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Nanoseconds since the Unix epoch, or zero.
+/// Returns nanoseconds since the Unix epoch, or zero if the clock is earlier.
 ///
-/// Zero on a clock set before 1970, which is not a case worth an error: every
-/// caller uses this to make a temporary file name unique, where a repeated
-/// value costs one retry and nothing else.
+/// Used only to make temporary file names unique, where a repeat costs one
+/// retry.
 pub fn now_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -19,12 +14,9 @@ pub fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
-/// Turns a caught panic payload into something printable.
+/// Converts a caught panic payload into a message for worker failure reports.
 ///
-/// Every worker in this crate runs its body inside `catch_unwind` and reports
-/// the result rather than dying quietly, so all of them need this. A payload
-/// that is neither of the two usual string types still has to produce
-/// *something* - "unknown panic" beats an empty toast.
+/// Payloads that are not `&str` or `String` yield a generic message.
 pub fn panic_detail(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()

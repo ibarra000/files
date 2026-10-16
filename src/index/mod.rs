@@ -35,15 +35,11 @@ pub use store::{Activity, Health, IndexStore, Origin};
 
 /// How a [`DirStamp`] was obtained.
 ///
-/// Two probe paths exist and they do not populate the same fields: the handle
-/// query returns both timestamps, the attribute fallback only the write time.
-/// Recording which one produced a stamp is what stops a source that
-/// intermittently falls back from looking like a directory that changes on
-/// every probe - the comparison would flip between `(lw, ct)` and `(lw, lw)`
-/// forever, and every flip costs a full enumeration.
-///
-/// A kind change is therefore reported as "changed" exactly once; the
-/// following scan records the new kind and the comparison settles.
+/// The handle query returns both timestamps; the attribute fallback returns
+/// only the write time. Recording the kind keeps a source that intermittently
+/// falls back from comparing `(lw, ct)` against `(lw, lw)` and forcing a full
+/// enumeration on every probe. A kind change reports "changed" once, then the
+/// next scan records the new kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StampKind {
     /// `LastWriteTime` and `ChangeTime`, read from a directory handle.
@@ -63,18 +59,14 @@ impl StampKind {
 
 /// A directory's modification timestamps.
 ///
-/// NTFS updates these whenever an entry is added to or removed from the
-/// directory, which makes a stamp comparison a proxy for "has this listing
-/// changed" that costs about three round trips instead of a full
-/// enumeration - roughly a 700x saving on a million-entry share. An unchanged
-/// stamp also proves the local index is still authoritative, which lets the
-/// server-side verification be skipped entirely.
+/// NTFS updates these when an entry is added or removed, so comparing stamps
+/// detects a changed listing in about three round trips instead of a full
+/// enumeration. An unchanged stamp also means the local index is still
+/// authoritative and server-side verification can be skipped.
 ///
-/// Some NAS firmware does not propagate directory mtime on entry churn, and
-/// some shares will not answer the probe at all. Neither case is allowed to
-/// turn into a per-minute rescan: see [`schedule::StampHealth`] for the
-/// fallback, and `--bench --allow-write` for whether the stamp actually moves
-/// on the real share.
+/// Some NAS firmware does not update directory mtime on entry churn, and some
+/// shares do not answer the probe. See [`schedule::StampHealth`] for the
+/// fallback, and `--bench --allow-write` to test whether a share's stamp moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirStamp {
     pub last_write: i64,
@@ -92,9 +84,8 @@ impl DirStamp {
         }
     }
 
-    /// Write time only, from the attribute fallback. `change_time` carries the
-    /// same value so the struct stays comparable, and `kind` records that the
-    /// second field is not independent.
+    /// Write time only, from the attribute fallback. `change_time` repeats the
+    /// write time and `kind` marks it as not independent.
     pub const fn write_only(last_write: i64) -> Self {
         Self {
             last_write,
@@ -103,10 +94,9 @@ impl DirStamp {
         }
     }
 
-    /// True when the two stamps describe the same directory state.
+    /// Returns true when both stamps describe the same directory state.
     ///
-    /// Stamps of differing kinds are never equal, because their second field
-    /// means different things.
+    /// Stamps of differing kinds are never equal.
     pub fn matches(self, other: Self) -> bool {
         self == other
     }
@@ -124,9 +114,8 @@ mod tests {
         assert_ne!(a, DirStamp::new(100, 201));
     }
 
-    /// The bug this prevents: a source that sometimes answers the handle query
-    /// and sometimes falls back would otherwise look like a directory changing
-    /// on every single probe, costing a full enumeration each time.
+    /// A source that alternates between the handle query and the fallback must
+    /// not look like a directory that changes on every probe.
     #[test]
     fn a_full_stamp_never_equals_a_write_only_stamp_with_the_same_numbers() {
         assert_ne!(DirStamp::new(100, 100), DirStamp::write_only(100));

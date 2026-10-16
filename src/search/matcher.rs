@@ -1,42 +1,29 @@
 //! Substring matching over a [`Snapshot`].
 //!
-//! The previous implementation called `str::find` once per entry. That routes
-//! through `core::str::pattern::StrSearcher`, which is the two-way algorithm
-//! with no SIMD and recomputes its critical factorisation on every call - on
-//! the order of 100-300 ms for a million entries, on the UI thread.
+//! The arena is contiguous, so one `memchr::memmem` sweep covers a whole chunk
+//! of entries at SIMD speed, and byte hits are mapped back to entry indices
+//! afterwards. Per-entry `str::find` is far slower because its two-way
+//! searcher recomputes its factorisation on every call.
 //!
-//! Here the arena is contiguous, so a single `memchr::memmem` sweep covers a
-//! whole chunk of entries at vectorised speed and byte hits are mapped back to
-//! entry indices afterwards. Roughly 1-3 ms across eight cores for a 30 MB
-//! arena, and sub-millisecond once it is warm in L3 - which it will be while
-//! someone is typing.
+//! # Ranking
 //!
-//! # Ranking parity
+//! Earliest match position wins, then the shorter filename, and `matched`
+//! counts entries rather than hits. `tests/matcher_parity.rs` asserts exact
+//! equality, including result order, against a reference ranking.
 //!
-//! Semantics are unchanged from the original: earliest match position wins,
-//! then the shorter filename, and `matched` counts *entries* rather than hits.
-//! `tests/matcher_parity.rs` asserts exact equality against a transcription of
-//! the original `rank_matches`, including result order.
+//! # Hidden files
 //!
-//! # Where the hidden files go
+//! [`crate::config::hidden::Hidden`] drops a candidate when it becomes a hit,
+//! before it enters the selection or is counted in `matched`, so the footer
+//! count and the rows agree. Filtering after selection would be wrong: many
+//! hidden matches could fill every slot and leave an unexplained empty list.
 //!
-//! A candidate is dropped by [`crate::config::hidden::Hidden`] at the moment
-//! it becomes a hit - before it enters the selection and before `matched`
-//! counts it, so the number in the footer and the rows on screen cannot
-//! disagree. That costs one suffix comparison per *match* rather than per
-//! entry: the sweep below is untouched, and a query of three characters or
-//! more leaves few enough survivors for it not to show.
+//! # Hits dedup for free
 //!
-//! The alternative, filtering after the selection, is wrong rather than
-//! slower: three hundred `.db` files matching a code would fill every slot and
-//! leave a list that is empty for no visible reason.
-//!
-//! # Why hits dedup for free
-//!
-//! `memmem` yields hits in strictly increasing byte order. On the first hit
-//! inside an entry the cursor jumps past that entry's terminator, so each
-//! entry contributes at most one candidate and the recorded position is
-//! necessarily the leftmost - exactly what `str::find` returns.
+//! `memmem` yields hits in increasing byte order. On the first hit inside an
+//! entry the cursor jumps past that entry's terminator, so each entry yields
+//! at most one candidate and the recorded position is the leftmost, as with
+//! `str::find`.
 
 use std::sync::Arc;
 
@@ -54,18 +41,16 @@ use crate::util::fold;
 
 /// A displayed result.
 ///
-/// The full path is materialised here, not stored as an index. Holding an
-/// index across a snapshot publish would silently open a *different* file, so
-/// the ~15 allocations this costs buy structural immunity to that bug.
+/// The full path is materialised rather than stored as an index, since an
+/// index held across a snapshot publish would open a different file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hit {
     pub path: Arc<str>,
     pub name: Arc<str>,
     /// Byte offset of the match within the name, for highlighting.
     ///
-    /// `u32::MAX` when the file was pulled in because its *folder* matched:
-    /// there is nothing in its own name to underline, and inventing an offset
-    /// would underline the wrong characters.
+    /// `u32::MAX` when the file was included because its folder matched; there
+    /// is nothing in its own name to underline.
     pub match_pos: u32,
     pub index: u32,
 }
@@ -94,9 +79,8 @@ pub struct SearchOutcome {
 
 /// Why a query was not run at all.
 ///
-/// Defined beside the parser that decides it rather than here, because every
-/// variant is a property of what was typed rather than of any index. Re-exported
-/// so the call sites that have always imported it from the matcher still can.
+/// Defined beside the parser, since every variant is a property of the
+/// input; re-exported here for existing call sites.
 pub use crate::search::query::QueryReject;
 
 /// Runs a query against a snapshot.
@@ -128,9 +112,8 @@ pub fn search(
     };
 
     // A non-ASCII query may have been folded conservatively (see
-    // `util::fold`), so a zero-result fast path might be a false negative
-    // rather than a real absence. Only then is the slow, fully Unicode-correct
-    // comparison worth its cost.
+    // `util::fold`), so an empty fast-path result may be a false negative.
+    // Only then is the slow, fully Unicode-correct comparison run.
     if matched == 0 && !cancelled && fold::needs_unicode_fallback(query.term()) {
         let (top, matched) = unicode_fallback(snap, query, &sieve, cancel);
         return Ok(SearchOutcome {
@@ -153,14 +136,13 @@ pub fn search(
 
 /// Runs a query against a walked tree.
 ///
-/// Two passes per segment, because a job code names a folder at least as often
-/// as it names a file:
+/// Two passes per segment, because a job code often names a folder:
 ///
-/// 1. the filenames, exactly as a flat listing is swept;
-/// 2. the folder names - a far smaller arena - whose matches pull in the files
-///    inside them.
+/// 1. the filenames, swept as a flat listing is;
+/// 2. the folder names, a much smaller arena, whose matches include the
+///    files inside them.
 ///
-/// A file that matched by its own name always outranks one pulled in by its
+/// A file that matched by its own name always outranks one included by its
 /// folder; see [`topk`]'s key layout.
 pub fn search_tree(
     index: &TreeIndex,
@@ -207,38 +189,22 @@ pub fn search_tree(
     })
 }
 
-/// Folds two searches into one ranked list.
-///
-/// Both shares are searched and the results interleave by rank rather than
-/// being grouped: which share a file came from is shown on its row, but a
-/// worse match on the flat share must not outrank a better one on the tree
-/// merely because it was searched first.
-///
-/// Both inputs are already capped at `topk::K`, so this sorts at most `2K`
-/// and truncates - a few hundred comparisons once per keystroke.
 /// Judges a query without consulting any index.
 ///
-/// Both rejections are properties of what was typed, so they are decided once
-/// for the whole search rather than per share. Asking each index would give N
-/// copies of the same answer, and with nothing indexed yet it would give none
-/// at all - a two-character query would come back "no matches" instead of
-/// "type at least 3 characters".
+/// Both rejections are properties of the input, so they are decided once per
+/// search rather than per share; with nothing indexed, per-share checks
+/// would report "no matches" instead of the real reason.
 pub fn check_query(query: &Query) -> Result<(), QueryReject> {
     query.check()
 }
 
 /// Folds every share's results into one ranked list.
 ///
-/// One concat, one sort, one truncate, rather than folding [`merge`] N-1
-/// times. Equivalent because every input is already the [`MAX_RESULTS`]
-/// smallest of its own index under this same comparator, and "take the K
-/// smallest" is associative over multisets - so the intermediate truncations
-/// a fold would perform could never discard a row that belongs in the final
-/// answer. What it buys is one sort of N*K rows instead of N-1 sorts, and one
-/// place where the totals are summed instead of a chain of them.
+/// One concat, sort and truncate instead of folding [`merge`] N-1 times.
+/// Equivalent because each input is already the `MAX_RESULTS` smallest of its
+/// index under the same comparator, and taking the K smallest is associative.
 pub fn merge_all(parts: Vec<SearchOutcome>) -> SearchOutcome {
-    // The overwhelmingly common shapes, and both would otherwise pay for a
-    // re-sort of rows that are already in order.
+    // One or zero parts are already in order and need no re-sort.
     if parts.len() <= 1 {
         return parts.into_iter().next().unwrap_or_default();
     }
@@ -259,9 +225,8 @@ pub fn merge_all(parts: Vec<SearchOutcome>) -> SearchOutcome {
     out
 }
 
-/// The cross-index ranking, restated over the materialised rows because the
-/// packed ordinals are not comparable across indexes - they are positions
-/// within different arenas.
+/// The cross-index ranking, over materialised rows because packed ordinals
+/// are positions within different arenas and are not comparable.
 fn sort_hits(hits: &mut [Hit]) {
     hits.sort_by(|a, b| {
         a.is_inherited()
@@ -272,12 +237,12 @@ fn sort_hits(hits: &mut [Hit]) {
     });
 }
 
+/// Folds two searches into one list ranked by match quality, not by share.
 pub fn merge(flat: SearchOutcome, tree: SearchOutcome) -> SearchOutcome {
     let mut hits = flat.hits;
     hits.extend(tree.hits);
-    // Ranked by the same key the two searches used, restated over the
-    // materialised rows because the packed ordinals are not comparable across
-    // indexes - they are positions within different arenas.
+    // Same ranking as `sort_hits`; packed ordinals are not comparable across
+    // indexes.
     hits.sort_by(|a, b| {
         a.is_inherited()
             .cmp(&b.is_inherited())
@@ -296,9 +261,9 @@ pub fn merge(flat: SearchOutcome, tree: SearchOutcome) -> SearchOutcome {
     }
 }
 
-/// Matches folder names and pulls in the files inside them.
+/// Matches folder names and includes the files inside them.
 ///
-/// Not chunked across rayon: the folder arena is around a fiftieth the size of
+/// Not chunked across rayon: the folder arena is about a fiftieth the size of
 /// the filename arena, so the fan-out would cost more than the scan.
 fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve) -> (TopK, u32) {
     let mut top = TopK::new();
@@ -323,9 +288,8 @@ fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve)
         let end = offsets[dir + 1];
         let name_len = end - start - 1;
 
-        // The mode is judged against the folder, because the folder is what
-        // matched. A folder the mode refuses contributes nothing, and the
-        // cursor still has to move past it below.
+        // The mode is judged against the folder, since the folder matched. A
+        // refused folder contributes nothing, but the cursor still moves past it.
         let Some(pos) = sieve.admits_folder(&arena[start as usize..end as usize - 1], abs - start)
         else {
             cursor = end as usize;
@@ -336,19 +300,13 @@ fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve)
             continue;
         };
 
-        // Every file in the folder, which is what someone typing a job code is
-        // asking for - but bounded, because one enormous folder filling all
-        // three hundred slots would hide every other folder that matched, and
-        // that is the original "files are missing" bug wearing a new hat.
+        // Every file in the folder, bounded so one large folder cannot fill
+        // every slot and hide other matching folders.
         let files = segment.files_of(dir as u32);
         let mut shown = 0u32;
         let mut admitted = 0u32;
-        // The cap counts the files that were *admitted*, not the ones that
-        // were looked at. Capping first would mean a folder holding five
-        // thousand drawings and ten PDFs contributed none of the PDFs under
-        // `ext:pdf`, because the cap would be spent before the tenth one was
-        // reached - the same "files are missing" bug the cap itself exists to
-        // prevent, arriving from the other side.
+        // The cap counts admitted files, not inspected ones. Capping first
+        // would let non-matching files exhaust the cap under `ext:pdf`.
         for i in files.start..files.end {
             if !sieve.admits_inherited(segment.files().name_lower(i)) {
                 continue;
@@ -359,10 +317,8 @@ fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve)
                 shown += 1;
             }
         }
-        // The files in the folders that matched, after the sieve. Counting
-        // the whole folder instead would promise rows a type filter has
-        // already removed, and the footer renders this number as "1-12 of
-        // {matched}" - a count somebody scrolls looking for the rest of.
+        // Files in matching folders that passed the sieve. The footer shows
+        // this as "1-12 of {matched}", so it must not count filtered files.
         matched = matched.saturating_add(admitted);
 
         cursor = end as usize;
@@ -377,11 +333,9 @@ fn sweep_folders(segment: &TreeSegment, needle: &[u8], base: u32, sieve: &Sieve)
 
 /// Turns retained keys into hits, for a tree.
 ///
-/// Re-sorted by path rather than trusting the packed ordinal, because a
-/// parallel walk assigns ordinals in arrival order: the same share walked
-/// twice would otherwise rank tied results differently between runs, quietly
-/// destroying the strict total order `topk` documents. Three hundred short
-/// comparisons, once per search.
+/// Re-sorted by path because a parallel walk assigns ordinals in arrival
+/// order; without this, ties would rank differently between walks and break
+/// the strict total order `topk` documents.
 fn materialise_tree(index: &TreeIndex, keys: &[Key]) -> Vec<Hit> {
     let mut hits: Vec<(Key, Hit)> = keys
         .iter()
@@ -394,8 +348,8 @@ fn materialise_tree(index: &TreeIndex, keys: &[Key]) -> Vec<Hit> {
                 Hit {
                     path: Arc::from(index.full_path(ordinal)?.as_str()),
                     name: Arc::from(segment.files().display_name(local).as_ref()),
-                    // An inherited hit matched in the folder name, not here, so
-                    // there is nothing in this row to underline.
+                    // An inherited hit matched in the folder name, so there is nothing
+                    // in this row to underline.
                     match_pos: if topk::key_is_inherited(k) {
                         u32::MAX
                     } else {
@@ -442,8 +396,7 @@ fn sweep(
         .into_par_iter()
         .map(|c| {
             // One check per chunk. At roughly 160 us of work per chunk this
-            // bounds cancellation latency well below perception, without
-            // putting a branch inside the vectorised scan.
+            // bounds cancellation latency without a branch in the vectorised scan.
             if cancel.is_cancelled() {
                 return (TopK::new(), 0u32, true);
             }
@@ -465,9 +418,8 @@ fn sweep(
 
 /// Sweeps entries `lo..hi`, whose names occupy one contiguous arena range.
 ///
-/// `base` is added to every entry index, so one segment of a tree contributes
-/// global ordinals while a flat listing passes zero and behaves exactly as it
-/// always has.
+/// `base` is added to every entry index, so a tree segment contributes
+/// global ordinals while a flat listing passes zero.
 fn scan_chunk(
     arena: &[u8],
     offsets: &[u32],
@@ -484,8 +436,8 @@ fn scan_chunk(
     }
 
     // Chunk boundaries are snapped to entry boundaries, so this slice holds
-    // entries lo..hi whole. Splitting mid-entry would both destroy a match at
-    // the seam and compute a nonsensical position for the fragment.
+    // entries lo..hi whole. Splitting mid-entry would lose a match at the seam
+    // and compute a wrong position for the fragment.
     let byte_lo = offsets[lo] as usize;
     let byte_hi = offsets[hi] as usize;
     let slice = &arena[byte_lo..byte_hi];
@@ -503,24 +455,20 @@ fn scan_chunk(
         let pos = abs - start;
         let name_len = end - start - 1;
 
-        // Judged on the folded bytes, which is the same answer as the
-        // original name would give - see `Hidden::hides_folded`. Skipping
-        // `matched` as well as the push is what keeps "12 of 400" honest.
+        // Judged on the folded bytes, which gives the same answer as the
+        // original name (see `Hidden::hides_folded`). Skipping `matched` as well
+        // as the push keeps the count consistent with the rows.
         //
-        // A row the sieve refuses never reaches `TopK`, so it never occupies
-        // one of the three hundred slots and never becomes the admission
-        // threshold a better row would have had to beat. Filtering after
-        // selection would answer "the PDFs among the best three hundred",
-        // which for a broad query is a handful of rows presented as the whole
-        // answer.
+        // A refused row never reaches `TopK`, so it never occupies a slot or
+        // raises the admission threshold. Filtering after selection would return
+        // only the survivors among the best K.
         if let Some(at) = sieve.admits(&arena[start as usize..end as usize - 1], pos) {
             top.push(topk::key(at, name_len, base + entry as u32));
             matched += 1;
         }
 
-        // Jump past this entry entirely. This is what makes `matched` count
-        // entries rather than hits, and what guarantees `pos` is the leftmost
-        // occurrence.
+        // Jump past this entry entirely. This makes `matched` count entries
+        // rather than hits and guarantees `pos` is the leftmost occurrence.
         cursor = end as usize - byte_lo;
         entry += 1;
         if cursor >= slice.len() || entry >= hi {
@@ -533,11 +481,9 @@ fn scan_chunk(
 
 /// Maps a byte offset to its entry index, starting from `entry`.
 ///
-/// Both the hit offsets and the entry cursor advance monotonically, so this
-/// gallops forward from where it left off instead of binary searching the
-/// whole offsets array from the root: O(1) when hits are dense, O(log gap)
-/// when they are sparse, and every probe lands in cache lines already being
-/// walked.
+/// Hit offsets and the entry cursor both advance monotonically, so this
+/// gallops forward instead of binary searching from the root: O(1) for dense
+/// hits, O(log gap) for sparse ones.
 #[inline]
 fn advance_to(offsets: &[u32], entry: usize, abs: u32) -> usize {
     if offsets[entry + 1] > abs {
@@ -552,8 +498,8 @@ fn advance_to(offsets: &[u32], entry: usize, abs: u32) -> usize {
     entry + offsets[entry + 1..=hi].partition_point(|&o| o <= abs)
 }
 
-/// Straightforward per-entry search, retained so a field regression in the
-/// SIMD path is a flag flip rather than a rebuild.
+/// Straightforward per-entry search, kept so a regression in the SIMD path
+/// can be bypassed with a configuration flag.
 fn naive(snap: &Snapshot, needle: &[u8], sieve: &Sieve, cancel: &CancelToken) -> (TopK, u32, bool) {
     let mut top = TopK::new();
     let mut matched = 0u32;
@@ -601,9 +547,8 @@ fn unicode_fallback(
 
 /// Turns retained keys into displayable hits.
 ///
-/// Takes the already-sorted keys rather than the selection itself: the heap's
-/// internal order is not display order, so the sort has to happen somewhere,
-/// and doing it once at the boundary keeps `TopK` free of a second copy.
+/// Takes already-sorted keys because the heap's internal order is not display
+/// order.
 fn materialise(snap: &Snapshot, keys: &[Key]) -> Vec<Hit> {
     keys.iter()
         .map(|&k: &Key| {
@@ -681,9 +626,8 @@ mod tests {
         assert_eq!(names(&ask(&s, "0704*")), ["0704.pdf", "0704-plan.pdf"]);
     }
 
-    /// The sweep records only the leftmost occurrence per entry. Judging the
-    /// trailing form against that hit would drop a file whose stem does end in
-    /// the code, and there is nothing on screen to show it happened.
+    /// The sweep records only the leftmost occurrence per entry; the trailing
+    /// form must still admit a stem that ends in the code.
     #[test]
     fn a_leading_star_finds_a_name_whose_first_occurrence_is_not_the_last() {
         let s = snap(&["0704-rev-0704.pdf", "0704-plan.pdf"]);
@@ -698,10 +642,8 @@ mod tests {
         assert_eq!(both.matched, 2);
     }
 
-    /// Build four hundred names the filter refuses that all outrank the ones
-    /// it keeps. Filtering *after* the selection would answer "the PDFs among
-    /// the best three hundred", which for a broad code is a handful of rows
-    /// presented as the whole answer.
+    /// Four hundred refused names outrank the kept ones. The filter must run
+    /// before selection, or only a handful of rows would survive.
     #[test]
     fn a_refused_row_never_occupies_a_slot_in_the_selection() {
         let mut names_in: Vec<String> = (0..400).map(|i| format!("0704-{i:04}.dwg")).collect();
@@ -718,9 +660,8 @@ mod tests {
         );
     }
 
-    /// `view::status::found` renders this as the number in the footer. A
-    /// count taken before the filter would promise rows that do not exist,
-    /// and somebody would scroll looking for them.
+    /// `view::status::found` renders this as the footer count, so it must not
+    /// include filtered rows.
     #[test]
     fn the_match_count_counts_what_survived_the_filter() {
         let s = snap(&["a-0704.pdf", "b-0704.dwg", "c-0704.dwg"]);
@@ -728,8 +669,8 @@ mod tests {
         assert_eq!(ask(&s, "0704 ext:pdf").matched, 1);
     }
 
-    /// The haystack did not get smaller. `view::empty` renders this as
-    /// "Searched N files", which is about the index rather than the query.
+    /// The total is unchanged by the filter. `view::empty` renders it as
+    /// "Searched N files".
     #[test]
     fn the_total_is_the_whole_index_whatever_the_filter() {
         let s = snap(&["a-0704.pdf", "b-0704.dwg", "unrelated.txt"]);
@@ -791,9 +732,7 @@ mod tests {
         );
     }
 
-    /// The count in the footer and the rows on screen have to be the same
-    /// answer. Filtering after the selection would leave "3 matched" over one
-    /// row, which reads as the program having lost two files.
+    /// The footer count and the rows on screen agree.
     #[test]
     fn a_hidden_file_is_not_counted_as_a_match_either() {
         let s = snap(&["11-D-0704.pdf", "11-D-0704.db", "11-D-0704.lnk"]);
@@ -802,9 +741,7 @@ mod tests {
         assert_eq!(o.total, 3, "the index still holds all three");
     }
 
-    /// Filtering after the top-k selection rather than during it would put
-    /// every survivor out of reach: the cap would already be full of files
-    /// nobody may see, and the list would be empty for no visible reason.
+    /// Hidden files are filtered during selection, so they cannot fill the cap.
     #[test]
     fn a_wanted_file_is_found_behind_a_crowd_of_hidden_ones() {
         let mut owned: Vec<String> = (0..500).map(|i| format!("11-D-0704 ({i}).db")).collect();
@@ -817,7 +754,7 @@ mod tests {
         assert_eq!(o.matched, 1);
     }
 
-    /// Case is not a way round the filter, in either direction.
+    /// Case does not bypass the filter, in either direction.
     #[test]
     fn the_filter_ignores_case_the_way_windows_does() {
         let s = snap(&["Thumbs.DB", "THUMBS.db", "thumbs.pdf"]);
@@ -827,9 +764,7 @@ mod tests {
         );
     }
 
-    /// Both matchers are shipped and `--bench` switches between them, so a
-    /// filter applied to one and not the other would be a flag that changes
-    /// which files exist.
+    /// Both matchers apply the filter, since `--bench` switches between them.
     #[test]
     fn both_matchers_hide_the_same_files() {
         let s = snap(&["11-D-0704.pdf", "11-D-0704.db"]);
@@ -854,9 +789,8 @@ mod tests {
         assert_eq!(simd.matched, naive.matched);
     }
 
-    /// The slow path a non-ASCII query falls back to reads the original arena
-    /// rather than the folded one, so it has to be filtered separately - and
-    /// is the one place this could have been forgotten.
+    /// The non-ASCII slow path reads the original arena rather than the folded
+    /// one, so it is filtered separately.
     #[test]
     fn the_unicode_fallback_hides_the_same_files() {
         let s = snap(&["Cafe\u{301}.pdf", "Cafe\u{301}.db"]);
@@ -1026,7 +960,7 @@ mod tests {
 
     #[test]
     fn works_across_many_rayon_chunks() {
-        // Comfortably more than one chunk, so the parallel merge is exercised.
+        // More than one chunk, so the parallel merge is exercised.
         let n = MATCH_CHUNK_ENTRIES * 3 + 17;
         let names_v: Vec<String> = (0..n).map(|i| format!("f{i:07}.dat")).collect();
         let refs: Vec<&str> = names_v.iter().map(|s| s.as_str()).collect();
@@ -1184,11 +1118,8 @@ mod tree_tests {
         .unwrap()
     }
 
-    /// A folder of five thousand drawings and ten PDFs has to contribute all
-    /// ten under `ext:pdf`. Capping before the filter would spend the whole
-    /// allowance on drawings and contribute none of them, which is the
-    /// "files are missing" bug the cap itself exists to prevent, arriving from
-    /// the other side.
+    /// A folder of five thousand drawings and ten PDFs contributes all ten under
+    /// `ext:pdf`, because the cap counts admitted files.
     #[test]
     fn the_folder_cap_counts_the_files_it_admitted_not_the_ones_it_looked_at() {
         let mut files: Vec<String> = (0..MAX_FILES_PER_FOLDER + 20)
@@ -1207,9 +1138,8 @@ mod tree_tests {
         assert_eq!(out.matched, 1);
     }
 
-    /// The file's own name did not match; the folder did. Judging the file
-    /// against the mode would empty the folder that is the whole reason the
-    /// rows are there.
+    /// The file's own name did not match; the folder did. The mode is not
+    /// applied to the file.
     #[test]
     fn a_mode_applies_to_the_folder_that_matched_and_not_to_its_files() {
         let ix = index(&[("0704-job", &["anything at all.pdf"])]);
@@ -1235,7 +1165,6 @@ mod tree_tests {
     }
 
     /// A folder has no extension, so the whole of its name is its stem.
-    /// Splitting `11.5 revisions` on its dot would be nonsense.
     #[test]
     fn a_folder_name_is_never_split_on_its_dots() {
         let ix = index(&[("11.5 revisions", &["plan.pdf"])]);
@@ -1251,10 +1180,8 @@ mod tree_tests {
         );
     }
 
-    /// The second pass matches a *folder* and pulls in everything inside it.
-    /// That is a separate route into the results list, and the one that
-    /// actually returns `Thumbs.db`: nobody types "thumbs", they type the job
-    /// code the folder is named after.
+    /// The folder pass is a separate route into the results and must also hide
+    /// files such as `Thumbs.db`.
     #[test]
     fn a_hidden_file_pulled_in_by_its_folder_is_left_out_too() {
         let ix = index(&[("11-D-0704", &["sheet 1.pdf", "Thumbs.db", "desktop.ini"])]);
@@ -1264,9 +1191,7 @@ mod tree_tests {
         );
     }
 
-    /// A folder is judged by its own name and never by this filter. One called
-    /// `11-D-0704.db` is odd, but hiding the drawings inside it because of how
-    /// somebody named the folder would be worse than odd.
+    /// A folder is judged by its own name, never by the hidden-extension filter.
     #[test]
     fn the_filter_applies_to_files_rather_than_the_folders_holding_them() {
         let ix = index(&[("11-D-0704.db", &["sheet 1.pdf"])]);
@@ -1276,9 +1201,7 @@ mod tree_tests {
         );
     }
 
-    /// The whole point of the rewrite. No routing rule would guess this
-    /// folder, so before the tree index the file was not merely unranked, it
-    /// was unreachable.
+    /// A file is reachable through a folder whose name matches the code.
     #[test]
     fn finds_a_file_in_a_folder_no_rule_would_have_guessed() {
         let ix = index(&[(
@@ -1291,8 +1214,7 @@ mod tree_tests {
         );
     }
 
-    /// A code names a folder far more often than it names a file, so matching
-    /// the folder has to bring its contents with it.
+    /// Matching a folder brings its contents with it.
     #[test]
     fn a_folder_match_brings_in_the_files_inside_it() {
         let ix = index(&[
@@ -1305,8 +1227,7 @@ mod tree_tests {
         assert!(got.contains(&"R:\\11d\\0704\\drawing.pdf".to_string()));
     }
 
-    /// "The file is called 11-D-0704" beats "the file is in a folder called
-    /// 11-D-0704", which is what anyone scanning the list expects.
+    /// A file named after the code beats a file inside a folder named after it.
     #[test]
     fn a_file_named_for_the_code_outranks_the_folder_named_for_it() {
         let ix = index(&[
@@ -1319,8 +1240,7 @@ mod tree_tests {
         );
     }
 
-    /// One enormous folder must not fill every slot and hide the others - that
-    /// is the original bug in a new form.
+    /// One large folder must not fill every slot and hide the others.
     #[test]
     fn one_huge_folder_cannot_crowd_out_every_other_match() {
         let many: Vec<String> = (0..500).map(|i| format!("f{i:04}.pdf")).collect();
@@ -1340,8 +1260,8 @@ mod tree_tests {
         );
     }
 
-    /// `matched` is the truth about how many files the code reaches, even when
-    /// only some of them are retained.
+    /// `matched` counts every file the code reaches, even when only some are
+    /// retained.
     #[test]
     fn the_match_count_is_not_capped_by_what_is_shown() {
         let many: Vec<String> = (0..500).map(|i| format!("f{i:04}.pdf")).collect();
@@ -1362,10 +1282,8 @@ mod tree_tests {
         assert!(got.contains(&"R:\\b\\0704 two.pdf".to_string()));
     }
 
-    /// The same files split across segments differently must rank identically.
-    /// A walk assigns ordinals in arrival order, so without the re-sort in
-    /// `materialise_tree` the same share walked twice would order tied results
-    /// differently between runs.
+    /// The same files split across segments differently rank identically, which
+    /// depends on the re-sort in `materialise_tree`.
     #[test]
     fn ranking_does_not_depend_on_how_the_walk_was_segmented() {
         let whole = index(&[
@@ -1414,9 +1332,7 @@ mod tree_tests {
         assert_eq!(run(&ix, "quote").hits.len(), 1, "the file");
     }
 
-    /// A file pulled in by its folder has nothing in its own name to
-    /// underline, and must not be handed a position that would highlight the
-    /// wrong characters.
+    /// A file included by its folder has no position to underline.
     #[test]
     fn an_inherited_hit_carries_no_highlight() {
         let ix = index(&[("0704", &["quote.pdf"])]);
@@ -1475,8 +1391,8 @@ mod tree_tests {
         assert!(out.cancelled, "a partial answer must not look complete");
     }
 
-    /// The property `merge_all` rests on: taking the K smallest is
-    /// associative, so one concat-and-sort equals folding the pairwise merge.
+    /// Taking the K smallest is associative, so one concat-and-sort equals
+    /// folding the pairwise merge.
     #[test]
     fn merge_all_agrees_with_folding_the_pairwise_merge() {
         let parts = vec![
@@ -1500,8 +1416,7 @@ mod tree_tests {
         assert_eq!(at_once.total, folded.total);
     }
 
-    /// The merged list is capped, however many shares contributed - otherwise
-    /// ten shares would hand the UI ten times what it can show.
+    /// The merged list is capped however many shares contributed.
     #[test]
     fn merge_all_caps_the_merged_list() {
         let big: Vec<(&str, u32)> = vec![("a", 0); crate::config::MAX_RESULTS];
@@ -1520,9 +1435,8 @@ mod tree_tests {
         assert!(check_query(&Query::contains("a")).is_ok());
     }
 
-    /// With nothing indexed yet, asking each share would give no answer at
-    /// all, so a query with nothing in it would read as "no matches" rather
-    /// than as "there is nothing here to look for".
+    /// With nothing indexed, an empty query reports that there is nothing to
+    /// search for rather than "no matches".
     #[test]
     fn an_empty_query_is_rejected_even_with_no_shares_indexed() {
         assert!(check_query(&Query::contains("")).is_err());

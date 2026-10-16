@@ -1,13 +1,9 @@
-//! The quick-search overlay, and the rule about what reaches the recall list.
+//! Tests the overlay's summon and dismiss behaviour and which codes reach the
+//! recall list.
 //!
-//! Two features that have to be tested together, because the interesting
-//! question about the overlay is what it leaves behind when it closes.
-//!
-//! Nothing here touches Windows. The state machine is a pure function of
-//! (event, time), so a summon is `AppEvent::Hotkey(HotkeyMsg::Summoned)` and
-//! the window that would really have moved is somebody else's problem - which
-//! is exactly why the decision about whether the overlay is up is reported by
-//! the thread that owns the window rather than decided here.
+//! The state machine is a pure function of (event, time), so nothing here
+//! touches Windows. Whether the overlay is up is reported by the window thread
+//! as `HotkeyMsg` events rather than decided by the state machine.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,22 +19,19 @@ use files::search::verify::{SkipReason, VerifyOutcome};
 
 const CODE: &str = "11-D-0704";
 
-/// The settings every test here starts from: the defaults, plus the viewer
-/// that used to be built in, configured the way somebody would write it.
+/// The default settings plus one configured viewer, `avwin`.
 fn with_avwin() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     }
 }
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
     let s = AppState::new(with_avwin(), now);
-    // Big enough that the results pane has room, so nothing here is an
-    // accidental test of a one-row terminal.
     (s, now)
 }
 
@@ -98,25 +91,17 @@ fn deliver_hits(s: &mut AppState, hits: Vec<Hit>, now: Instant) {
     );
 }
 
-/// Types a code and lets the typing settle: both deadlines expire, which is
-/// what "the user stopped typing" actually means to the state machine.
+/// Types a code and ticks past both `VERIFY_DEBOUNCE` and `REMEMBER_DEBOUNCE`.
 ///
-/// Two ticks, because there are two clocks and they are deliberately far
-/// apart. `VERIFY_DEBOUNCE` is the one that asks the server; `REMEMBER_DEBOUNCE`
-/// is the one that decides the code was meant. They used to be the same event,
-/// which is how a pause in the middle of a code ended up in the recall list.
-///
-/// Deliberately stops short of delivering a `VerifyMsg`, so every test using
-/// this proves the commit does *not* depend on the server ever answering.
-/// Returns the moment it settled and the response from the tick that settled
-/// it - which is where the write now happens, so a test that cares has to be
-/// able to see it.
+/// No `VerifyMsg` is delivered, so callers show the history commit does not
+/// depend on the server. Returns the settle time and the response of the
+/// final tick, which carries the history write.
 fn settle(s: &mut AppState, code: &str, now: Instant) -> (Instant, Response) {
     type_in(s, code, now);
     quiet(s, now)
 }
 
-/// Lets the typing stop, for a code already on the line.
+/// Ticks past both debounces for a code already typed.
 fn quiet(s: &mut AppState, typed_at: Instant) -> (Instant, Response) {
     s.update(AppEvent::Tick, typed_at + VERIFY_DEBOUNCE);
     let later = typed_at + REMEMBER_DEBOUNCE;
@@ -156,9 +141,8 @@ fn the_hotkey_shrinks_the_program_to_the_overlay() {
     assert!(s.overlay_up);
 }
 
-/// Clearing on summon would throw away both a code somebody may still want and
-/// the results already computed for it. Selecting it means the next character
-/// replaces it anyway, so nothing is lost either way round.
+/// Keeps the code and its results; selecting it lets the next keystroke
+/// replace it.
 #[test]
 fn the_hotkey_keeps_the_code_already_typed_and_selects_it() {
     let (mut s, now) = state();
@@ -177,8 +161,8 @@ fn the_first_keystroke_in_the_overlay_replaces_the_code_that_was_there() {
     assert_eq!(s.input.text(), "P");
 }
 
-/// Summoning the window is not editing the code. Bumping the generation would
-/// re-arm the debounce and spend a server round trip on a code nobody retyped.
+/// Summoning leaves the query epoch unchanged, so no debounce or server check
+/// is re-armed.
 #[test]
 fn summoning_the_overlay_does_not_re_arm_the_server_check() {
     let (mut s, now) = state();
@@ -202,7 +186,6 @@ fn summoning_the_overlay_does_not_re_arm_the_server_check() {
     );
 }
 
-/// Whatever was being browsed last time is not what this summon is about.
 #[test]
 fn summoning_the_overlay_stops_whatever_was_being_browsed() {
     let (mut s, now) = state();
@@ -220,18 +203,18 @@ fn summoning_the_overlay_stops_whatever_was_being_browsed() {
 fn a_second_hotkey_press_asks_for_the_window_back() {
     let (mut s, now) = state();
     summon(&mut s, now);
-    // The thread toggles; from this side a second summon is simply the state
-    // it is already in, and the dismiss arrives as its own report.
+    // The window thread toggles; a repeated summon is a no-op here and the
+    // dismiss arrives as its own message.
     s.update(AppEvent::Hotkey(HotkeyMsg::Summoned), now);
     assert!(s.overlay_up);
     s.update(AppEvent::Hotkey(HotkeyMsg::Dismissed), now);
     assert!(!s.overlay_up);
 }
 
-/// "Escape clears, a second Escape closes" is not merely worse here, it is
-/// broken: clearing runs `on_input_changed`, which drops the debounce deadline
-/// and puts the phase back to `Idle`, so the code and the fact that it had
-/// settled are both gone before the second press could commit it.
+/// Escape closes in one press and keeps the code.
+///
+/// Clearing first would run `on_input_changed`, dropping the debounce and
+/// resetting the phase before the code could be committed.
 #[test]
 fn escape_in_the_overlay_closes_it_in_one_press_and_keeps_the_code() {
     let (mut s, now) = state();
@@ -244,10 +227,7 @@ fn escape_in_the_overlay_closes_it_in_one_press_and_keeps_the_code() {
     assert_eq!(s.input.text(), CODE, "the line was cleared");
 }
 
-/// Escape does not peel in the overlay, and the selection is the reason it
-/// must not: summoning selects the code so the next keystroke replaces it, so
-/// a peeling Escape would spend its first press undoing something the user
-/// never did and appear to ignore the key.
+/// The selection made by summoning does not absorb the first Escape.
 #[test]
 fn escape_in_the_overlay_closes_even_with_a_selection_on_the_line() {
     let (mut s, now) = state();
@@ -260,9 +240,6 @@ fn escape_in_the_overlay_closes_even_with_a_selection_on_the_line() {
     assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
 }
 
-/// A window covering somebody's work has to close without them first working
-/// out which layer they are on. There are no layers left to be on, which is
-/// most of why that is now true.
 #[test]
 fn escape_in_the_overlay_closes_from_the_results_too() {
     let (mut s, now) = state();
@@ -277,16 +254,8 @@ fn escape_in_the_overlay_closes_from_the_results_too() {
     assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
 }
 
-/// ...except out of the recent codes, which peel first.
-///
-/// The exception the drive picker already has, and for the reason `on_escape`
-/// gives for it: a list that cannot be shut without taking the panel with it is
-/// a trap. The status line has always said "Esc to go back"; now something
-/// keeps the promise.
-///
-/// The list only exists because the Up arrow opened it, so leaving it is a
-/// thing the user can mean - which was not true while it was simply what an
-/// empty field showed.
+/// While browsing recent codes, the first Escape leaves the list and the
+/// second closes the overlay, as with the drive picker.
 #[test]
 fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
     let (mut s, now) = state();
@@ -304,7 +273,6 @@ fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
     assert!(!s.history.is_browsing(), "it did not leave the list");
     assert_eq!(s.input.text(), "", "and it did not put the field back");
 
-    // The second one closes, exactly as it does from anywhere else.
     let second = s.update(press(Key::Esc), now);
     assert!(
         has(&second, &Cmd::DismissOverlay),
@@ -313,8 +281,6 @@ fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
     );
 }
 
-/// Enter opens the row the cursor is on, whatever else it does with the
-/// panel afterwards.
 #[test]
 fn opening_a_result_from_the_overlay_opens_it() {
     let (mut s, now) = state();
@@ -331,11 +297,7 @@ fn opening_a_result_from_the_overlay_opens_it() {
     );
 }
 
-/// The code just opened is selected, so the next one replaces it.
-///
-/// The counterpart to the summon behaviour: an overlay that stays up is only
-/// useful for a second search if the first code is not in the way of typing
-/// it.
+/// The opened code is selected so the next keystroke replaces it.
 #[test]
 fn opening_a_result_selects_the_code_it_opened() {
     let (mut s, now) = state();
@@ -352,13 +314,10 @@ fn opening_a_result_selects_the_code_it_opened() {
     );
 }
 
-/// Opening a file puts the panel away, which is what a launcher does.
+/// Opening a file hides the overlay by default.
 ///
-/// This used to be off by default and the test was written the other way
-/// round. The objection to switching it on was that an open is answered on
-/// another thread, so everything the open had to say arrived at a window
-/// that had gone - which is answered rather than overruled: see
-/// `an_open_that_fails_after_the_panel_has_gone_is_still_reported` below.
+/// Failures reported after hiding are covered by
+/// `an_open_that_fails_after_the_panel_has_gone_is_still_reported`.
 #[test]
 fn opening_something_closes_the_overlay() {
     let now = Instant::now();
@@ -372,14 +331,15 @@ fn opening_something_closes_the_overlay() {
     assert!(has(&r, &Cmd::DismissOverlay), "the overlay stayed up");
 }
 
-/// And it can be turned off, which is what it shipped as.
+/// With `hide_after_opening` off, the overlay stays up and the code is
+/// selected.
 #[test]
 fn the_overlay_can_be_told_to_stay_up_after_an_open() {
     let now = Instant::now();
     let mut s = AppState::new(
         Settings {
             hide_after_opening: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -397,8 +357,7 @@ fn the_overlay_can_be_told_to_stay_up_after_an_open() {
     );
 }
 
-/// A copy leaves the panel up, whatever the setting says, because the whole
-/// of what a copy reports is a toast.
+/// Copy actions never hide the panel, because their only feedback is a toast.
 #[test]
 fn copying_leaves_the_panel_up_to_be_read() {
     let now = Instant::now();
@@ -423,13 +382,11 @@ fn copying_leaves_the_panel_up_to_be_read() {
     }
 }
 
-/// Every action that says it hides does, and every one that says it does not
-/// does not.
+/// Each action's `hides` flag matches whether it actually dismisses the
+/// overlay.
 ///
-/// `Action::hides` is a claim the renderer reads and the state machine never
-/// consults - the hiding happens inside `open_selection` and
-/// `reveal_selection`. Two facts in two places is two facts that drift, and
-/// this is the join.
+/// The renderer reads `Action::hides`, while the state machine hides inside
+/// `open_selection` and `reveal_selection`; this keeps the two in sync.
 #[test]
 fn every_hiding_action_hides() {
     use files::view::actions::ActionId;
@@ -451,10 +408,8 @@ fn every_hiding_action_hides() {
         deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
         summon(&mut s, settled);
 
-        // Only what is actually on offer. The menu lists the default open
-        // and the two viewers it is *not*, so one of the three named opens
-        // is always absent - and an action nobody can reach makes no claim
-        // to check.
+        // Skip actions the menu does not offer; one of the three opens is
+        // always omitted because it duplicates the default.
         let Some(claimed) = files::view::actions::actions(&s)
             .into_iter()
             .find(|a| a.id == action)
@@ -471,11 +426,8 @@ fn every_hiding_action_hides() {
     }
 }
 
-/// An open that fails after the panel has gone is still reported.
-///
-/// The whole of what makes hiding safe to ship switched on. A document
-/// quietly missing page seven is the worst outcome this program can produce,
-/// because nothing on screen would ever reveal it.
+/// An open that fails after the panel is hidden is announced, so the failure
+/// is not lost.
 #[test]
 fn an_open_that_fails_after_the_panel_has_gone_is_still_reported() {
     let now = Instant::now();
@@ -496,9 +448,7 @@ fn an_open_that_fails_after_the_panel_has_gone_is_still_reported() {
     );
 }
 
-/// And with the panel up it stays a toast, because there is somewhere to
-/// read one. A modal on top of a window that is already saying it would be
-/// the same news twice, with a button.
+/// With the panel up, an open failure is a toast rather than an announcement.
 #[test]
 fn an_open_that_fails_with_the_panel_up_is_a_toast() {
     let now = Instant::now();
@@ -516,8 +466,6 @@ fn an_open_that_fails_with_the_panel_up_is_a_toast() {
     assert!(s.toast.is_some(), "and nothing was said at all");
 }
 
-/// Clicking on something else puts the panel away, which is what a launcher
-/// does and is the third of Ueli's three.
 #[test]
 fn losing_focus_puts_the_panel_away() {
     let now = Instant::now();
@@ -528,8 +476,8 @@ fn losing_focus_puts_the_panel_away() {
     assert!(has(&r, &Cmd::DismissOverlay), "the panel stayed up");
 }
 
-/// And it can be turned off, and does nothing at all when the panel was
-/// never up in the first place.
+/// Losing focus does not dismiss when `hide_on_blur` is off or the panel is
+/// not up, and gaining focus never dismisses.
 #[test]
 fn losing_focus_does_nothing_when_it_should_not() {
     let now = Instant::now();
@@ -537,7 +485,7 @@ fn losing_focus_does_nothing_when_it_should_not() {
     let mut off = AppState::new(
         Settings {
             hide_on_blur: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -545,28 +493,25 @@ fn losing_focus_does_nothing_when_it_should_not() {
     let r = off.update(AppEvent::WindowFocus(false), now);
     assert!(!has(&r, &Cmd::DismissOverlay), "the setting was ignored");
 
-    // Never summoned: there is no panel to put away, and asking for one to
-    // be dismissed would be the state machine telling the hotkey thread
-    // about a window neither of them has.
+    // Never summoned: there is no overlay to dismiss.
     let (mut down, _) = state();
     let r = down.update(AppEvent::WindowFocus(false), now);
     assert!(!has(&r, &Cmd::DismissOverlay));
 
-    // And gaining focus is nothing either way.
     let (mut up, _) = state();
     summon(&mut up, now);
     let r = up.update(AppEvent::WindowFocus(true), now);
     assert!(!has(&r, &Cmd::DismissOverlay));
 }
 
-/// Escape puts the panel away, and can be told not to.
+/// With `hide_on_escape` off, Escape clears instead of closing.
 #[test]
 fn escape_can_be_told_to_clear_rather_than_close() {
     let now = Instant::now();
     let mut s = AppState::new(
         Settings {
             hide_on_escape: false,
-            ..Settings::default()
+            ..Settings::fixture()
         },
         now,
     );
@@ -581,9 +526,7 @@ fn escape_can_be_told_to_clear_rather_than_close() {
     assert_eq!(s.input.text(), "", "the code was not cleared");
 }
 
-/// Losing the overlay having opened nothing would be bad enough; in compact
-/// the explanatory message shares the hint row, so staying open is also the
-/// only way the user gets to read it.
+/// The overlay stays up so the "nothing to open" message can be read.
 #[test]
 fn enter_with_nothing_to_open_keeps_the_overlay_up() {
     let (mut s, now) = state();
@@ -597,8 +540,6 @@ fn enter_with_nothing_to_open_keeps_the_overlay_up() {
     assert!(s.overlay_up);
 }
 
-/// An overlay command leaking into the ordinary program would minimise the
-/// window of somebody who only pressed Escape to clear the line.
 #[test]
 fn escape_outside_the_overlay_clears_the_line_and_touches_no_window() {
     let (mut s, now) = state();
@@ -621,13 +562,10 @@ fn ctrl_q_still_quits_from_inside_the_overlay() {
 
 // --- what reaches the recall list -------------------------------------
 
-/// The headline case, and the one a phase-only gate gets wrong.
+/// A prefix that has local results but has not settled is not remembered.
 ///
-/// The local matcher waits out `SEARCH_DEBOUNCE`, which is shorter than an
-/// ordinary pause between syllables - so `inv` reaches `QueryPhase::Local`
-/// while somebody is still reading the rest of the code off a drawing. Gating on "a
-/// search resolved" would therefore remember every prefix typed on the way to a
-/// code, which is the entire thing this feature was asked not to do.
+/// `SEARCH_DEBOUNCE` is shorter than a typing pause, so a prefix can reach
+/// `QueryPhase::Local` mid-typing; gating on the phase alone would record it.
 #[test]
 fn a_code_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
     let (mut s, now) = state();
@@ -647,12 +585,11 @@ fn a_code_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
     assert_eq!(saves(&r), 0);
 }
 
-/// And the other half: once the typing has actually stopped, the code is kept.
+/// A settled code is remembered by the quiet period alone, without a keypress
+/// or a server answer.
 ///
-/// Kept by the quiet period itself, with nobody pressing anything and without
-/// the server having answered at all - the second of which matters because
-/// `run_verify` skips the server entirely on the shipped two-share setup, and
-/// the first because the commit used to ride on the verification coming back.
+/// `run_verify` skips the server entirely with two shares configured, so the
+/// commit must not depend on verification.
 #[test]
 fn a_code_that_settled_is_remembered_without_anybody_pressing_anything() {
     let (mut s, now) = state();
@@ -666,12 +603,12 @@ fn a_code_that_settled_is_remembered_without_anybody_pressing_anything() {
     assert_eq!(s.history.entries(), [CODE]);
     assert_eq!(saved(&r).as_deref(), Some(&[CODE.to_string()][..]));
 
-    // And closing over the top of it is a backstop that finds nothing to do.
+    // The commit on close is a backstop and writes nothing more.
     assert_eq!(saves(&s.update(press(Key::Esc), settled)), 0);
 }
 
-/// A code that found nothing is exactly the one worth recalling and
-/// correcting. It used to be thrown away.
+/// A settled code with no results is remembered so it can be recalled and
+/// corrected.
 #[test]
 fn a_code_that_found_nothing_is_remembered_too() {
     let (mut s, now) = state();
@@ -684,7 +621,7 @@ fn a_code_that_found_nothing_is_remembered_too() {
     assert_eq!(s.history.entries(), [CODE]);
     assert_eq!(saved(&r).as_deref(), Some(&[CODE.to_string()][..]));
 
-    // Enter on it still opens nothing, and still writes nothing twice.
+    // Enter opens nothing and writes no second entry.
     let enter = s.update(press(Key::Enter), settled);
     assert!(!enter.cmds.iter().any(|c| matches!(c, Cmd::Open(_))));
     assert_eq!(saves(&enter), 0);
@@ -702,18 +639,18 @@ fn enter_on_a_half_typed_code_with_nothing_to_open_remembers_nothing() {
     assert_eq!(saves(&r), 0);
 }
 
-/// Four commit points, one code, one entry and one write. `History::record`
-/// refuses an entry already at the head of the list, and `remember` turns that
-/// into no command at all, which is what makes the four compose.
+/// Four commit points produce one entry and one write.
+///
+/// `History::record` refuses a duplicate head entry and `remember` then emits
+/// no command.
 #[test]
 fn a_settled_code_is_written_once_however_many_triggers_fire() {
     let (mut s, now) = state();
-    // 1. the quiet period expiring, which is the ordinary way a code is kept.
+    // 1. The quiet period expiring.
     let (settled, quiet) = settle(&mut s, CODE, now);
     deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
 
-    // 2. the verification answering, skipping the server exactly as it does
-    //    with two shares configured. This used to be commit point one.
+    // 2. Verification answering, skipped as with two shares configured.
     let verify = s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
@@ -723,10 +660,10 @@ fn a_settled_code_is_written_once_however_many_triggers_fire() {
         }),
         settled,
     );
-    // 3. opening from the overlay, which also dismisses it.
+    // 3. Opening from the overlay.
     summon(&mut s, settled);
     let enter = s.update(press(Key::Enter), settled);
-    // 4. and the dismiss that went with it.
+    // 4. The resulting dismiss.
     let dismissed = s.update(AppEvent::Hotkey(HotkeyMsg::Dismissed), settled);
 
     let total = saves(&quiet) + saves(&verify) + saves(&enter) + saves(&dismissed);
@@ -734,28 +671,19 @@ fn a_settled_code_is_written_once_however_many_triggers_fire() {
     assert_eq!(s.history.entries(), [CODE]);
 }
 
-/// The bug this whole clock exists for, driven the way a person actually
-/// types.
+/// Typing one code in bursts with real pauses leaves one history entry.
 ///
-/// Every other helper in this repository hands the same `Instant` to every
-/// character, which means no deadline can expire in the middle of a word - so
-/// the bug was structurally unreachable from the tests while being reachable
-/// by anyone who paused to read the next four digits off a drawing. The code
-/// is typed here in three bursts with real gaps between them, one of which is
-/// longer than the whole quiet period.
-///
-/// It used to leave `11`, `11-D` and `11-D-0704` behind. `REMEMBER_DEBOUNCE`
-/// catches the short gaps and `History::record` collapses whatever survives
-/// the long one.
+/// Other helpers use one `Instant` for every character, so no deadline can
+/// expire mid-code. Here the code is typed in three bursts, with gaps longer
+/// than the quiet period. `REMEMBER_DEBOUNCE` absorbs short gaps and
+/// `History::record` collapses a remembered prefix.
 #[test]
 fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
     let (mut s, mut now) = state();
     summon(&mut s, now);
 
     let mut written: Vec<Vec<String>> = Vec::new();
-    // Two hundred milliseconds is an ordinary gap between syllables and used
-    // to be enough; two seconds is somebody looking back at the drawing, and
-    // is longer than the quiet period.
+    // The two-second pauses exceed the quiet period.
     for (burst, pause) in [
         ("11", std::time::Duration::from_millis(700)),
         ("-D", std::time::Duration::from_millis(2_000)),
@@ -766,9 +694,8 @@ fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
             written.extend(saved(&r));
             now += std::time::Duration::from_millis(120);
         }
-        // The frame loop, ticking its way through the pause. A fixed step
-        // rather than `next_deadline`, because several of that function's
-        // terms are anchored on the last frame drawn and this rig draws none.
+        // Ticks through the pause at a fixed step. `next_deadline` is not
+        // used because some of its terms depend on the last drawn frame.
         let until = now + pause;
         while now < until {
             now += std::time::Duration::from_millis(50);
@@ -782,15 +709,8 @@ fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
         "the prefixes typed on the way to it were kept"
     );
 
-    // Two seconds is long enough that `11-D` really had settled - somebody had
-    // stopped typing a valid four-character code for longer than the quiet
-    // period, and there is no way to tell that from being finished. So it was
-    // written, and then superseded when the typing resumed.
-    //
-    // That is the right trade and the reason `History::record` collapses a
-    // prefix at all: the deadline cannot see the future, so the list has to be
-    // able to take the correction. What matters is that no write ever left
-    // more than one entry behind, which is what the old behaviour did.
+    // `11-D` settles during the long pause and is written, then replaced when
+    // typing resumes. Every write must hold exactly one entry.
     assert!(
         written.iter().all(|entries| entries.len() == 1),
         "a write left a prefix behind: {written:?}"
@@ -802,14 +722,13 @@ fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
     );
 }
 
-/// And the codes somebody really did look up are all still there.
 #[test]
 fn three_codes_looked_up_in_turn_are_three_entries() {
     let (mut s, mut now) = state();
     for code in ["11-D-0704", "P12345-001", "22-A-0001"] {
         let (settled, _) = settle(&mut s, code, now);
         now = settled + std::time::Duration::from_secs(1);
-        // Clear the line, the way starting a new search does.
+        // Clear the line before the next code.
         s.update(ctrl(Key::Char('u')), now);
     }
     assert_eq!(
@@ -818,9 +737,10 @@ fn three_codes_looked_up_in_turn_are_three_entries() {
     );
 }
 
-/// Looking at the list must not rewrite it. The commit inside `request_dismiss`
-/// runs before the recall panel is stood down, which is the only reason this
-/// can be detected at all.
+/// Browsing and then closing does not reorder history.
+///
+/// The commit in `request_dismiss` runs before browsing ends, so a recalled
+/// code on the line would otherwise be recorded.
 #[test]
 fn browsing_recall_and_then_closing_the_overlay_does_not_reorder_the_list() {
     let (mut s, now) = state();
@@ -838,15 +758,8 @@ fn browsing_recall_and_then_closing_the_overlay_does_not_reorder_the_list() {
     assert_eq!(saves(&r) + saves(&r2), 0);
 }
 
-/// Two characters is a search now, and still not a code worth recalling
-/// tomorrow.
-///
-/// This used to hold for free: a short query was rejected outright and sat
-/// in a phase `query_settled` does not accept, so the floor on the history
-/// was a side effect of the floor on the search. The search floor is one
-/// now, so the history has a floor of its own - and this is the test that
-/// would have caught the recent-codes list filling with every prefix
-/// anybody typed on the way to a real code.
+/// Queries shorter than `MIN_REMEMBERED_LEN` are searched but never
+/// remembered.
 #[test]
 fn a_query_below_the_remembering_length_is_never_remembered() {
     let (mut s, now) = state();
@@ -862,8 +775,7 @@ fn a_query_below_the_remembering_length_is_never_remembered() {
     assert_eq!(saves(&r), 0);
 }
 
-/// Typed, but nothing anywhere looked for it, so there is no evidence the code
-/// exists and nothing worth recalling.
+/// With no share configured nothing is searched, so nothing is remembered.
 #[test]
 fn a_code_typed_where_no_share_is_configured_is_not_remembered() {
     let (mut s, now) = unconfigured_state();
@@ -879,8 +791,7 @@ fn a_code_typed_where_no_share_is_configured_is_not_remembered() {
     assert_eq!(saves(&r), 0);
 }
 
-/// A reduced feature, not a broken one: the shortcut still switches to the
-/// compact view where the window cannot be found, and says so once.
+/// An unavailable hotkey window is reported as a toast.
 #[test]
 fn an_unreachable_window_is_reported_rather_than_left_mysterious() {
     let (mut s, now) = state();
@@ -894,8 +805,8 @@ fn an_unreachable_window_is_reported_rather_than_left_mysterious() {
     assert!(toast.text.contains("console window"), "{}", toast.text);
 }
 
-/// Guards against the key-event kind filter being bypassed: Windows sends a
-/// release for every press, and acting on both would toggle twice.
+/// Key releases are ignored; Windows sends one per press, and acting on both
+/// would toggle twice.
 #[test]
 fn a_key_release_in_the_overlay_does_nothing() {
     let (mut s, now) = state();
@@ -910,14 +821,7 @@ fn a_key_release_in_the_overlay_does_nothing() {
     assert!(s.overlay_up);
 }
 
-/// The settings are a window of their own, so `Ctrl+,` asks for one rather
-/// than borrowing the panel's body.
-///
-/// The shortcuts window used to work this way too, and before that it was a
-/// panel that had to close itself before the overlay would - a panel that
-/// could not be shut without taking the search box with it would have been a
-/// trap. It is gone entirely now; a real window has a title bar, so none of
-/// that has to be arranged for the one that is left.
+/// `Ctrl+,` requests the separate settings window and leaves the panel up.
 #[test]
 fn ctrl_comma_asks_for_the_settings_without_disturbing_the_panel() {
     let (mut s, now) = state();
@@ -934,8 +838,7 @@ fn ctrl_comma_asks_for_the_settings_without_disturbing_the_panel() {
     );
     assert!(s.overlay_up, "and must not disturb the panel");
 
-    // And Escape still means what it means everywhere else in the overlay,
-    // because there is no longer a layer for it to peel first.
+    // Escape still dismisses the overlay directly.
     let dismissed = s.update(press(Key::Esc), now);
     assert!(
         has(&dismissed, &Cmd::DismissOverlay),

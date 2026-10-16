@@ -1,17 +1,8 @@
-//! Keys and clicks, shuffled together, against the invariants that have to
-//! hold between every pair of them.
+//! Property tests that interleave keys, pointer intents, results and pastes
+//! and check the state invariants after every event.
 //!
-//! The hand-written tests each drive one gesture to completion. What they
-//! cannot cover is the *order*: a drag interrupted by a keystroke, results
-//! landing while recall is open, a resize between the two halves of a
-//! double-click, a right-click menu still open when the list underneath it
-//! empties. Those are where a caret ends up inside a character and a selection
-//! ends up naming a file that is no longer in the list - and neither shows up
-//! until the next frame, somewhere else, as a panic with no obvious cause.
-//!
-//! Coordinates deliberately run past the terminal. An out-of-bounds click is a
-//! real event - a resize that raced the terminal's own report of it - and has
-//! to be a no-op rather than a panic.
+//! Ranks and byte offsets deliberately exceed any real list or text: an
+//! out-of-range intent must be a no-op, not a panic.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,24 +20,14 @@ use proptest::prelude::*;
 enum Step {
     Key(Key, Mods),
     /// A pointer gesture, already resolved against the layout that drew it.
-    ///
-    /// This used to be `Press { x, y }` and five friends, generated over a grid
-    /// of cells and converted back into a row by the state machine. The ranks
-    /// below still range well past any list that exists - which was the case
-    /// the fuzzer was really for - without pretending to aim at anything.
     Point(Intent),
     Results(usize),
     Paste(String),
     Wait(u64),
 }
 
-/// Deliberately not "any `Key`".
-///
-/// The interesting collisions are between the dozen keys that move focus and
-/// the handful of gestures that move it back. A uniform strategy over every key
-/// in the enum would spend its whole budget on keys with no binding. `Ctrl+Q`
-/// is absent because a state machine that has quit has nothing further to say,
-/// and `q` is therefore missing from the character alphabet too.
+/// Generates bound keys only, so the case budget is not spent on keys that do
+/// nothing. `q` is excluded so `Ctrl+Q` cannot end the run early.
 fn a_key() -> impl Strategy<Value = Step> {
     let codes = prop_oneof![
         Just(Key::Up),
@@ -80,9 +61,8 @@ fn a_key() -> impl Strategy<Value = Step> {
 }
 
 fn an_intent() -> impl Strategy<Value = Step> {
-    // Ranks well past any list the steps above can build, and byte offsets past
-    // any code: the point is the out-of-range case, which is the one a renderer
-    // cannot be trusted to have got right.
+    // Ranks and byte offsets range past any list or text to exercise the
+    // out-of-range case.
     prop_oneof![
         3 => (0usize..=400).prop_map(Intent::Select),
         2 => (0usize..=400).prop_map(Intent::Activate),
@@ -130,9 +110,8 @@ fn apply(s: &mut AppState, step: &Step, clock: &mut Instant) -> Response {
     match step {
         Step::Key(code, mods) => s.update(AppEvent::Key(KeyEvent::new(*code, *mods)), now),
         Step::Point(intent) => s.update(AppEvent::Intent(*intent), now),
-        // Through the real message, carrying the real epoch: poking `s.hits`
-        // would build states the program cannot reach, and the epoch is the
-        // mechanism that decides whether a result is still wanted at all.
+        // Sent as a real message with the current epoch; setting `s.hits`
+        // directly could build unreachable states.
         Step::Results(n) => {
             let hits: Vec<Hit> = (0..*n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect();
             s.update(
@@ -153,7 +132,7 @@ fn apply(s: &mut AppState, step: &Step, clock: &mut Instant) -> Response {
         }
         Step::Paste(text) => s.update(AppEvent::Paste(text.clone()), now),
         Step::Wait(ms) => {
-            // The clock only ever moves forward, as a real one does.
+            // The clock is monotonic.
             *clock += Duration::from_millis(*ms);
             s.update(AppEvent::Tick, *clock)
         }
@@ -165,19 +144,15 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
     let _ = r;
     let text = s.input.text().to_string();
 
-    // 1. The caret is on a character boundary, and so are both ends of a
-    //    selection. Everything that draws the line slices at these. A click is
-    //    the one event that can break it, because it arrives as a column and
-    //    has to be converted - and the panic lands on the next frame, not on
-    //    the click.
+    // 1. The caret is on a character boundary; rendering slices the text there.
     prop_assert!(s.input.caret() <= text.len());
     prop_assert!(
         text.is_char_boundary(s.input.caret()),
         "the caret landed inside a character after {step:?}"
     );
 
-    // 2. A selection is ordered, non-empty and inside the text. An empty one
-    //    must report as `None`, or `Ctrl+C` claims to have copied nothing.
+    // 2. A selection is ordered, non-empty, on character boundaries and inside
+    //    the text. An empty selection reports as `None`.
     if let Some((lo, hi)) = s.input.selection() {
         prop_assert!(lo < hi, "an empty selection reported as {lo}..{hi}");
         prop_assert!(hi <= text.len());
@@ -185,8 +160,7 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
         prop_assert!(s.input.selected_text().is_some());
     }
 
-    // 3. `Enter` opens `selected_path`. A path that is not in `hits` is one
-    //    keystroke away from opening a file that is not on screen.
+    // 3. The selected hit is in `hits`, and a non-empty list always has one.
     if let Some(hit) = s.selected_hit() {
         prop_assert!(
             s.hits.iter().any(|h| h.path == hit.path),
@@ -199,33 +173,13 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
         "a non-empty list must always have a selection, and an empty one none"
     );
 
-    // 4. The selected rank is inside the list. A rank past the end is one
-    //    keystroke away from opening a file that does not exist, and an
-    //    `Intent` carrying a rank from a frame that has since been replaced is
-    //    exactly how that would arrive.
+    // 4. The selected rank is inside the list, even after an `Intent` carrying
+    //    a rank from a replaced frame.
     if let Some(row) = s.selected_row() {
         prop_assert!(row < s.hits.len(), "rank {} is past the list", row);
     }
 
-    // 5. There is no window any more, and that is the point.
-    //
-    //    This used to be four assertions about `scroll_top`: that the window
-    //    over the list ran to somewhere inside it, that it was no taller than
-    //    the panel, that it contained the cursor, and that it was full
-    //    wherever the list allowed. The state machine held the offset because
-    //    page-flipping a twelve-row list on the twelfth Down was worse than
-    //    sliding it, and this was the check that replaced the argument for
-    //    deriving it instead - the failure being a cursor on a screen nobody
-    //    can see.
-    //
-    //    The content band is an `egui::ScrollArea` now and owns its own
-    //    offset, so there is no second source of truth left to keep in step.
-    //    What survives of the invariant is assertion 4 above: the selected
-    //    rank is inside the list.
-
-    // 6. Browsing the recent codes has a cursor in it. Browsing without one
-    //    draws a list with nothing highlighted and leaves Up and Down with
-    //    nothing to move.
+    // 5. Browsing recent codes always has a cursor.
     if s.history.is_browsing() {
         prop_assert!(
             s.history.cursor().is_some(),
@@ -233,9 +187,7 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
         );
     }
 
-    // 7. A hover is never a selection. Two highlights that could be confused
-    //    is a file opened by accident, and the pointer can now name a row the
-    //    keyboard has never been near.
+    // 6. A hovered row is inside the list.
     if let (Some(hovered), Some(selected)) = (s.hovered(), s.selected_row()) {
         prop_assert!(
             hovered < s.hits.len(),
@@ -251,7 +203,7 @@ fn fresh() -> (AppState, Instant) {
     fresh_in(1)
 }
 
-/// The same, with the results laid out `columns` to a line.
+/// Like `fresh`, with results laid out `columns` per line.
 fn fresh_in(columns: usize) -> (AppState, Instant) {
     let now = Instant::now();
     let settings = Settings {
@@ -259,7 +211,7 @@ fn fresh_in(columns: usize) -> (AppState, Instant) {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
             files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
         ])),
-        ..Settings::default()
+        ..Settings::fixture()
     };
     let mut s = AppState::new(settings, now);
     s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
@@ -284,21 +236,8 @@ proptest! {
         }
     }
 
-    /// A pointer can name a row that has since stopped existing, and must not
-    /// be believed.
-    ///
-    /// This used to draw a terminal, read the screen back, and check that any
-    /// click which moved the selection had landed on a name that was actually
-    /// on it. That was the right test for a renderer that reported *cells*: the
-    /// hit-test lived in the state machine, so the state machine could be wrong
-    /// about where a row had been.
-    ///
-    /// The renderer resolves its own widgets now, so it can only ever hand over
-    /// a rank it drew. What is left to get wrong is the gap between the frame a
-    /// click was aimed at and the frame that exists when it arrives - results
-    /// land from another thread, and a verification replaces the list wholesale
-    /// - so that is what this generates: ranks from a list that has since
-    /// changed size underneath them.
+    /// Pointer intents carrying ranks from a list that has since changed size
+    /// never select or hover a row past the end.
     #[test]
     fn a_stale_rank_can_never_select_something_that_is_not_there(
         ranks in prop::collection::vec(0usize..400, 1..24),
@@ -311,8 +250,7 @@ proptest! {
 
         let mut counts = counts.into_iter().cycle();
         for rank in ranks {
-            // The list changes size between the aim and the arrival, which is
-            // the whole of what this is about.
+            // Resize the list between the frame a click aimed at and its arrival.
             let count = counts.next().unwrap_or(0);
             let hits: Vec<Hit> = (0..count).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect();
             s.update(

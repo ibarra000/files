@@ -1,28 +1,14 @@
-//! The thread that opens things.
+//! The long-lived thread that performs opens.
 //!
-//! `open_async` used to spawn a thread per keypress. That was tolerable when
-//! the work was a single `spawn` call, and is not once Enter means reading and
-//! merging tens of PDFs off an SMB share. It also contradicted the invariant
-//! `app::actors` opens with: *"The thread population is fixed for the life of
-//! the process ... Nothing is spawned per keystroke, so thread growth is
-//! impossible by construction rather than by discipline."*
+//! One thread for the life of the process, per the fixed thread population
+//! required by `app::actors`.
 //!
-//! # A queue, not a latest-wins slot
+//! Requests go through a bounded FIFO channel rather than
+//! [`crate::util::latest_slot::LatestSlot`]: unlike searches, every open was
+//! explicitly requested and none may be superseded.
 //!
-//! The search, verify and prefetch workers are fed by
-//! [`crate::util::latest_slot::LatestSlot`], which discards a pending request
-//! when a newer one arrives. That is right for a search - only the newest
-//! query matters - and wrong here: every Enter is a thing the user asked for,
-//! and dropping one looks exactly like the program ignoring them. A bounded
-//! channel keeps them all, in order.
-//!
-//! # Panics are reported
-//!
-//! This thread parses documents that came off a share and are not trusted to
-//! be well formed. `panic = "unwind"` is deliberate for this crate, so a
-//! malformed file must not be able to take the worker down silently - it is
-//! caught and surfaced as `ActorDied`, exactly as the search and verify
-//! workers do.
+//! The thread parses untrusted files, so panics are caught and reported as
+//! `ActorDied`, as for the search and verify workers.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,60 +19,38 @@ use super::{OpenContext, OpenRequest};
 use crate::app::event::{AppEvent, Events, OpenMsg};
 use crate::search::worker::Backend;
 
-/// Queued opens.
-///
-/// Deep enough that a leaning-on-Enter burst is never dropped, shallow enough
-/// that it cannot become a queue of work nobody is waiting for any more.
+/// Maximum queued opens: enough to absorb a burst of Enter presses without
+/// building a backlog of stale work.
 const QUEUE_DEPTH: usize = 16;
 
-/// How long a merged document is kept before it is collected.
-///
-/// The file cannot be deleted after it is opened - the viewer is holding it -
-/// so it is swept on a later run. A week means reopening last week's drawing
-/// is still instant, while the directory cannot grow without bound.
+/// How long a merged document is kept before it is collected on a later run.
 pub const CACHE_LIFETIME: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// The open worker.
 pub struct Opener {
     tx: Sender<OpenRequest>,
     handle: Option<std::thread::JoinHandle<()>>,
-    /// What the last `shutdown` concluded, so a second call cannot upgrade an
-    /// abandoned thread to a clean one.
+    /// Result of the last `shutdown`, so a repeat call cannot report an
+    /// abandoned thread as cleanly stopped.
     stopped_cleanly: bool,
 }
 
 impl Opener {
-    /// Queues an open.
-    ///
-    /// Never blocks the UI thread: a full queue means something is badly
-    /// wedged, and dropping the newest request is better than freezing the
-    /// interface behind it.
+    /// Queues an open without blocking; a full queue drops the request and
+    /// reports it.
     pub fn request(&self, request: OpenRequest, events: &Events) {
         let detail = match self.tx.try_send(request) {
             Ok(()) => return,
-            Err(TrySendError::Full(r)) => (r.path, "still opening the last one"),
-            // The worker is gone - it panicked on a malformed document, or the
-            // program is shutting down. Dropping this silently was the exact
-            // failure this module was written to remove: after one crash every
-            // later Enter did nothing at all, with nothing on screen to say so.
+            Err(TrySendError::Full(r)) => (r.path, "still opening the previous file"),
+            // The worker panicked or is shutting down; report it so later
+            // opens do not fail silently.
             Err(TrySendError::Disconnected(r)) => {
                 (r.path, "the opener stopped; restart to open files again")
             }
         };
-        // `try_send`, not `send`, and the distinction is a hang.
-        //
-        // This runs on the interface's own thread, and the interface is the
-        // only thing draining the event channel. A blocking send closes a
-        // cycle: the channel is full, so the send waits; the send is on the
-        // thread that would have drained it, so it waits for ever. It needs a
-        // full opener queue and a full event channel at the same moment, which
-        // is rare - and a wedged program with nothing on screen to explain it,
-        // which is not a thing to leave lying about because it is rare.
-        //
-        // The cost of the other choice is losing this one message when the
-        // channel is already holding two hundred and fifty-six others, at
-        // which point the interface is about to redraw anyway. That is a
-        // report delayed into irrelevance, against a program that stops.
+        // `try_send`: this runs on the UI thread, the only consumer of the
+        // event channel, so a blocking send on a full channel would deadlock.
+        // Losing this report when the channel is full is acceptable.
         let _ = events.try_send(AppEvent::Open(OpenMsg::Failed {
             path: detail.0,
             detail: detail.1.into(),
@@ -95,18 +59,15 @@ impl Opener {
 
     /// Stops the worker, waiting up to `budget`.
     ///
-    /// Returns false when it had to be abandoned - expected when it is blocked
-    /// reading from a share that has stopped answering. Merged documents are
-    /// written temp-then-rename, so nothing is left half-written.
+    /// Returns false if the thread was abandoned, for example while blocked on
+    /// an unresponsive share. Merged documents are written temp-then-rename,
+    /// so nothing is left half-written.
     pub fn shutdown(&mut self, budget: Duration) -> bool {
         let (tx, _) = bounded(0);
         drop(std::mem::replace(&mut self.tx, tx));
 
         let Some(handle) = self.handle.take() else {
-            // Taken already, which only happens after a shutdown that timed
-            // out and abandoned the thread. Reporting `true` here would let a
-            // second call claim a clean stop for a thread still blocked in an
-            // SMB read.
+            // Already shut down; repeat the earlier result.
             return self.stopped_cleanly;
         };
         let deadline = Instant::now() + budget;
@@ -157,12 +118,10 @@ fn run(backend: &Backend, rx: &Receiver<OpenRequest>, events: &Events) {
 }
 
 fn serve(backend: &Backend, request: &OpenRequest) -> OpenMsg {
-    // Only the PDF route needs a listing, and a failure to get one is not a
-    // failure to open: it degrades to the single selected file.
+    // Only the document route needs a listing; without one it falls back to
+    // the selected file.
     let snapshot = match super::route_of(request.viewer, &request.path, &request.viewers) {
         super::Route::Document => backend.snapshot_for(std::path::Path::new(request.path.as_ref())),
-        // Both of these are handed one file, so neither has a use for a
-        // listing.
         super::Route::App(_) | super::Route::Shell => None,
     };
 
@@ -202,9 +161,9 @@ mod tests {
         Arc::new(Backend {
             settings: Settings {
                 persist: false,
-                ..Default::default()
+                ..Settings::fixture()
             },
-            store: Arc::new(IndexStore::default()),
+            store: Arc::new(IndexStore::fixture()),
             source: Arc::new(FakeDirSource::new()),
             live: Vec::new(),
         })
@@ -221,19 +180,8 @@ mod tests {
         }
     }
 
-    /// Reporting a failure must never park the caller.
-    ///
-    /// `request` runs on the interface's own thread, and the interface is the
-    /// only thing draining the event channel. A *blocking* send from here
-    /// closes a cycle: the channel is full, so the send waits; the send is on
-    /// the thread that would have drained it, so it waits forever. It takes a
-    /// full opener queue and a full event channel at the same moment, which is
-    /// rare - and a hang with no message and no way out, which is not a thing
-    /// to leave lying about because it is rare.
-    ///
-    /// Reproduced here with a rendezvous channel nobody is receiving on, which
-    /// is "full" by construction, and a shut-down worker, which is the
-    /// deterministic half of the pair.
+    /// Uses a stopped worker and a zero-capacity event channel with no
+    /// receiver, on which a blocking send would hang.
     #[test]
     fn reporting_a_failure_never_blocks_the_caller() {
         let (tx, _rx) = bounded::<AppEvent>(8);
@@ -241,8 +189,7 @@ mod tests {
         let mut opener = spawn(backend(), tx).expect("the opener starts");
         opener.shutdown(Duration::from_millis(250));
 
-        // Nobody is receiving, and there is no capacity, so `send` would park
-        // here for the life of the process.
+        // No receiver and no capacity: `send` would block forever.
         let (blocked, _held) = bounded::<AppEvent>(0);
         let blocked = Events::headless(blocked);
 
@@ -262,8 +209,6 @@ mod tests {
         panic!("`request` was still blocked a second later; the interface would be wedged");
     }
 
-    /// Silence is the failure this whole module exists to prevent: the user
-    /// pressed a key, so something has to come back.
     #[test]
     fn the_worker_always_reports_back() {
         let (tx, rx) = bounded(8);
@@ -280,7 +225,6 @@ mod tests {
         opener.shutdown(Duration::from_millis(500));
     }
 
-    /// Unlike a search, two opens are two things the user asked for.
     #[test]
     fn every_queued_open_is_serviced_rather_than_superseded() {
         let (tx, rx) = bounded(64);
@@ -304,8 +248,6 @@ mod tests {
         opener.shutdown(Duration::from_millis(500));
     }
 
-    /// After the worker is gone every later Enter used to vanish without a
-    /// trace, which is the precise failure this module was written to remove.
     #[test]
     fn an_open_after_the_worker_has_stopped_is_still_reported() {
         let (tx, rx) = bounded(8);
@@ -328,8 +270,7 @@ ope.pdf",
         }
     }
 
-    /// A shutdown that gave up must keep saying so; the second call has no
-    /// handle left and must not read that as success.
+    /// A repeat shutdown returns the first call's result.
     #[test]
     fn a_second_shutdown_does_not_upgrade_an_abandoned_worker() {
         let (tx, _rx) = bounded(8);

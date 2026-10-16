@@ -1,38 +1,31 @@
-//! On-disk index, memory-mapped at startup.
-//!
-//! Without this, a cold start is unusable until a full network enumeration
-//! finishes - seconds at best, minutes over a VPN. With it, the previous
-//! listing is available in a few milliseconds and the refresh happens behind
-//! the user. In *felt* speed this is plausibly the largest single improvement
-//! in the crate.
+//! On-disk index, memory-mapped at startup so the previous listing is
+//! searchable within milliseconds while the refresh runs in the background.
 //!
 //! # Layout
 //!
-//! Little-endian throughout (Windows is little-endian only; the assumption is
-//! asserted at compile time). A 96-byte header, then four 64-byte-aligned
-//! sections:
+//! Little-endian throughout (asserted at compile time). A 128-byte header,
+//! then four 64-byte-aligned sections:
 //!
 //! ```text
 //! header | prefix | offsets [u32; n+1] | lower [u8] | orig [u8]
 //! ```
 //!
-//! # Two Windows-specific traps, designed out
+//! A tree index appends directory offsets, directory arenas and a run table;
+//! see `TreeSections`.
 //!
-//! **Renaming over a mapped file fails.** `fs::rename` onto a destination
-//! that any process currently has memory-mapped returns
-//! `ERROR_SHARING_VIOLATION`. That bug appears on the *second* run and is
-//! invisible on a Linux CI machine. Avoided entirely by never rewriting an
-//! index in place: each write goes to a fresh versioned filename, and a tiny
-//! `latest` pointer file - which is never mapped - is what gets replaced.
+//! # Windows constraints
 //!
-//! **A mapped file can change underneath you.** `Mmap::map` is `unsafe`
-//! precisely because the OS makes no promise the bytes stay fixed. This is
-//! mitigated three ways: the file is opened with a share mode that denies
-//! other writers, it lives in a per-user directory, and - most importantly -
-//! **no slice bound ever depends on live mapped bytes**. The offsets table is
-//! validated and copied into owned memory at load time, so even under
-//! adversarial mutation the worst outcome is garbled filenames, never
-//! out-of-bounds access. Names are also always decoded lossily, never with
+//! **Renaming over a mapped file fails** with `ERROR_SHARING_VIOLATION`. An
+//! index is never rewritten in place: each write goes to a new versioned
+//! filename, and only a small, never-mapped `latest` pointer file is replaced.
+//!
+//! **A mapped file can change underneath the reader**, which is why
+//! `Mmap::map` is `unsafe`. Mitigations: the file is opened with a share mode
+//! that denies other writers, it lives in a per-user directory, and **no slice
+//! bound ever depends on live mapped bytes**. The offsets table is validated
+//! and copied into owned memory at load time, so even under adversarial
+//! mutation the worst outcome is garbled filenames, never out-of-bounds
+//! access. Names are always decoded lossily, never with
 //! `from_utf8_unchecked`.
 
 use std::fs::{File, OpenOptions};
@@ -55,66 +48,46 @@ const _: () = assert!(
 
 pub const MAGIC: [u8; 8] = *b"FILESIDX";
 
-/// Bumped to 2 when cache files became per-directory; to 3 when the directory
-/// stamp came under the checksum and gained a kind; to 4 when a whole walked
-/// tree became something this format can hold; to 5 when a tree could hold
-/// directories nobody had enumerated.
+/// The on-disk format version. Any change rejects every existing index once,
+/// costing one cold start.
 ///
-/// A v1 index was named only by volume serial, so two directories on the same
-/// volume produced colliding names and a single shared `latest` pointer. A v2
-/// index left the stamp outside the hash, so a single flipped bit there was
-/// undetectable and presented as "the directory changed" - a full
-/// re-enumeration of a million-entry share, on every load, with no symptom.
-///
-/// Each bump discards every pre-existing index once, cleanly, rather than
-/// relying on the new validation to reject them one at a time. That costs one
-/// cold start.
+/// v2: per-directory cache files. v3: the directory stamp is under the
+/// checksum and has a kind. v4: walked trees. v5: observed (unwalked) trees.
 pub const FORMAT_VERSION: u16 = 5;
-/// 128 rather than 96, and that costs nothing: `align_up(96)` is already 128,
-/// so v3 wrote exactly 32 bytes of padding here. Every section offset of a
-/// flat index is byte-identical across the change.
+/// Header size in bytes. `align_up(96)` is already 128, so growing the header
+/// from 96 bytes moved no flat-index section.
 pub const HEADER_SIZE: usize = 128;
 const ALIGN: usize = 64;
 
 /// Bit 0: entries are NUL-separated. Bit 1: the listing was truncated.
+/// Bit 2: a directory stamp is present.
 const FLAG_NUL_SEPARATED: u32 = 1 << 0;
 const FLAG_TRUNCATED: u32 = 1 << 1;
 const FLAG_HAS_STAMP: u32 = 1 << 2;
 /// Bit 3: the stamp came from the attribute fallback, so `change_time` is a
-/// copy of `last_write` rather than an independent value. Recorded because
-/// comparing stamps of different kinds is meaningless - see
-/// [`crate::index::StampKind`].
+/// copy of `last_write`. See [`crate::index::StampKind`].
 const FLAG_STAMP_WRITE_ONLY: u32 = 1 << 3;
-/// Bit 4: this file holds a walked tree, not a single directory listing, so
-/// the sections after the flat ones are present and must be read.
+/// Bit 4: this file holds a walked tree, so the tree sections are present.
 ///
-/// Checked in both directions. Without that a tree actor pointed at a flat
-/// cache would decode the file happily - same magic, same version - and
-/// publish one directory as if it were the whole share.
+/// Checked in both directions, since flat and tree files share magic and
+/// version; otherwise one directory could be served as a whole share.
 const FLAG_TREE: u32 = 1 << 4;
-/// Bit 5: the walk that produced the tree reached the end of it. A partial
-/// index is still worth caching, but the difference has to survive the round
-/// trip: results missing because a subtree was unreadable look exactly like
-/// results that do not exist.
+/// Bit 5: the walk that produced the tree reached the end of it, so a cached
+/// partial index still reports itself as partial.
 const FLAG_TREE_COMPLETE: u32 = 1 << 5;
-/// Bit 6: every directory in the tree was seen through a *search* rather than
+/// Bit 6: every directory in the tree was seen through a search rather than
 /// read, which only a `kind = "live"` share produces.
 ///
-/// A stronger claim than the absence of [`FLAG_TREE_COMPLETE`], and kept apart
-/// from it for that reason: an incomplete walk still read every folder it
-/// reached, whereas this says no pass covered any of them. Losing the
-/// distinction across a restart would let a handful of remembered names load
-/// back as if they were a listing, and "no matches" would start meaning
-/// something it has never been allowed to mean here.
+/// Stronger than the absence of [`FLAG_TREE_COMPLETE`]: no pass covered any
+/// of these folders. Losing it across a restart would let remembered names
+/// load back as a listing.
 const FLAG_TREE_OBSERVED: u32 = 1 << 6;
 
 /// Stable cache identity for one indexed directory.
 ///
-/// Derived from the directory, deliberately *not* from a mapping's name or
-/// its position in the config: a rename or a reorder must not orphan a
-/// perfectly good index, and — more importantly — repointing a mapping at a
-/// different directory *must* change the key, so it cannot find the previous
-/// share's file.
+/// Derived from the directory, not from a mapping's name or position, so a
+/// rename or reorder keeps its index while repointing a mapping changes the
+/// key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MappingKey(u64);
 
@@ -134,8 +107,7 @@ pub struct Expect<'a> {
     /// The directory the caller believes the index describes.
     pub dir: &'a Path,
     /// `None` means unknown, and the volume check is skipped. The directory
-    /// check below still runs, which is what makes an unknown serial
-    /// survivable rather than a hole.
+    /// check still runs.
     pub volume_serial: Option<u32>,
 }
 
@@ -156,26 +128,23 @@ pub enum LoadError {
         found: u16,
     },
     /// The drive letter now points at a different volume, so the listing
-    /// belongs to somebody else's share.
+    /// belongs to another share.
     VolumeMismatch {
         found: u32,
         expected: u32,
     },
     /// The stored listing describes a different directory than the mapping
-    /// now points at. Serving it would return another share's file list.
+    /// now points at.
     ///
-    /// Backstops the per-directory cache key: the key already makes a
-    /// repointed mapping look elsewhere, so reaching this means either a
-    /// 64-bit collision or a hand-edited pointer. One string compare per cold
-    /// start, against a failure whose symptom is "results from the wrong
-    /// share".
+    /// Backstops the per-directory cache key; reaching it means a 64-bit key
+    /// collision or a hand-edited pointer.
     PrefixMismatch {
         found: String,
         expected: String,
     },
     Truncated,
     ChecksumMismatch,
-    /// Older than [`MAX_INDEX_AGE`].
+    /// Older than [`crate::config::MAX_INDEX_AGE`].
     TooOld,
     /// A structural invariant failed.
     Invalid(&'static str),
@@ -218,10 +187,9 @@ fn align_up(v: usize) -> usize {
 
 /// Copies a little-endian `u32` table out of the file bytes.
 ///
-/// `try_cast_slice`, never the panicking `cast_slice`: a panic while loading a
-/// corrupt cache file would be a crash at startup. The unaligned fallback is
-/// not theoretical either - a mapped file is page aligned, but an owned read
-/// lands wherever the allocator put it.
+/// Uses `try_cast_slice`, never the panicking `cast_slice`, so a corrupt file
+/// cannot crash startup. The unaligned fallback is needed for owned reads,
+/// which are not page aligned.
 fn read_u32s(bytes: &[u8]) -> Box<[u32]> {
     match bytemuck::try_cast_slice::<u8, u32>(bytes) {
         Ok(slice) => slice.to_vec().into_boxed_slice(),
@@ -233,13 +201,10 @@ fn read_u32s(bytes: &[u8]) -> Box<[u32]> {
     }
 }
 
-/// FNV-1a, in streaming form.
+/// Streaming FNV-1a.
 ///
-/// Streaming rather than "concatenate then hash" because a tree's covered
-/// bytes run to about 24 MB across four separate tables, and building a
-/// throwaway copy of them to feed a one-shot hash would double the peak
-/// memory of a save for no benefit. Hashing the parts in order is
-/// bit-identical to hashing their concatenation.
+/// Hashing the tables in order equals hashing their concatenation, without
+/// building a copy of a tree's tables (about 24 MB) during a save.
 struct Fnv1a(u64);
 
 impl Fnv1a {
@@ -259,8 +224,8 @@ impl Fnv1a {
     }
 }
 
-/// FNV-1a over one slice. Only the tests hash a single buffer; every caller
-/// in the program streams its tables through [`checksum`].
+/// FNV-1a over one slice. Test-only; the program streams through
+/// [`checksum`].
 #[cfg(test)]
 fn hash64(bytes: &[u8]) -> u64 {
     let mut h = Fnv1a::new();
@@ -269,20 +234,15 @@ fn hash64(bytes: &[u8]) -> u64 {
 }
 
 /// The checksum over the whole header except the checksum field itself,
-/// followed by each index table in file order.
+/// followed by each table in file order.
 ///
-/// One function, used by both the writer and the reader, so the two cannot
-/// disagree about the coverage - which is how the stamp came to sit outside
-/// it in v2.
+/// Shared by writer and reader so their coverage cannot diverge.
 ///
-/// `tables` is every table whose corruption could be *silent*: the offsets,
-/// and for a tree the directory offsets and the run table too. The name
-/// arenas are deliberately excluded, and the asymmetry is the point. Bounds
-/// safety already comes from `check_invariants`, which is strictly stronger
-/// than a checksum; a corrupt arena byte can only garble a displayed name,
-/// whereas a corrupt run would file a real file under a path it is not at -
-/// a wrong answer with no symptom. Excluding the arenas is also what
-/// preserves lazy mapping, so a load does not fault in 300 MB.
+/// `tables` holds the tables whose corruption would be silent: the offsets
+/// and, for a tree, the directory offsets and run table. The name arenas are
+/// excluded: bounds safety comes from `check_invariants`, a corrupt arena byte
+/// only garbles a displayed name, and hashing the arenas would fault in every
+/// page and defeat lazy mapping.
 fn checksum(header: &[u8], tables: &[&[u8]]) -> u64 {
     let mut h = Fnv1a::new();
     h.write(&header[0..48]);
@@ -322,11 +282,9 @@ fn sections(prefix_len: usize, entry_count: usize, arena_len: usize) -> Sections
 
 /// Byte offsets of a tree index's sections.
 ///
-/// The flat sections come first and unchanged, so the file opens with exactly
-/// the layout a flat index has; the directory listing, its offsets and the run
-/// table follow. That ordering is deliberate: the tables the checksum covers
-/// are the small ones, and keeping the two 150 MB arenas contiguous in the
-/// middle is what lets them stay unread until a query touches them.
+/// The flat sections come first with the same layout as a flat index, then the
+/// directory listing, its offsets and the run table. The two large name
+/// arenas stay contiguous so they remain unread until a query touches them.
 #[derive(Debug, Clone, Copy)]
 struct TreeSections {
     root: usize,
@@ -372,11 +330,6 @@ fn tree_sections(
 // --- writing ---------------------------------------------------------------
 
 /// Writes sections at fixed offsets, padding the gaps.
-///
-/// Extracted from `save` when the tree format arrived: eight sections written
-/// by hand is eight chances to pad to the wrong place, and a section that
-/// starts one byte early is a corruption the checksum reports but cannot
-/// explain.
 struct SectionWriter<'a> {
     f: &'a mut File,
     written: usize,
@@ -409,10 +362,8 @@ impl SectionWriter<'_> {
 /// Writes a file to a unique temporary, renames it into place, repoints this
 /// mapping and collects what it superseded.
 ///
-/// The atomic-rename dance is identical for a flat listing and for a tree, and
-/// getting it subtly different in two places is how a half-written cache comes
-/// to be pointed at. `body` returns the total size it meant to write, which is
-/// checked against what it did.
+/// Shared by flat and tree saves. `body` returns the total size it meant to
+/// write, which is checked against what it wrote.
 fn commit<F>(
     dir: &Path,
     key: MappingKey,
@@ -424,25 +375,18 @@ where
     F: FnOnce(&mut SectionWriter<'_>) -> std::io::Result<usize>,
 {
     // A unique temp name in the same directory, so the rename is atomic and
-    // never lands on an existing (possibly mapped) file.
-    //
-    // The temp name carries the mapping key too, and that is not cosmetic:
-    // `gc` sweeps stale temporaries, so with one index actor per mapping an
-    // unscoped sweep would delete a sibling mapping's temp file mid-write.
+    // never lands on an existing (possibly mapped) file. It includes the
+    // mapping key because `gc` sweeps this mapping's temporaries, and other
+    // mappings' actors write concurrently.
     let tmp = dir.join(format!(
         "{}{:x}.tmp",
         temp_prefix(key),
         crate::util::once::now_nanos()
     ));
-    // The write time, not just the capture time, so every save is a distinct
-    // file.
-    //
-    // A patched index deliberately keeps the capture time of the walk it grew
-    // from - it really is that old, a few folders excepted - so naming the
-    // file after the capture time alone meant a re-save landed on the name the
-    // running process already had mapped. Renaming over a mapped file is the
-    // `ERROR_SHARING_VIOLATION` this module's header is about, and it would
-    // have bitten only on the second save of a session.
+    // Includes the write time, not just the capture time, so every save gets
+    // a distinct name. A patched index keeps its original capture time, and
+    // re-saving under the same name would rename over the file this process
+    // already has mapped (`ERROR_SHARING_VIOLATION`).
     let final_name = format!(
         "{}-{:08x}-{:016x}-{:016x}.idx",
         key.hex(),
@@ -462,7 +406,7 @@ where
             let total = body(&mut w)?;
             debug_assert_eq!(w.written, total);
             // Required: without it a power loss can leave a renamed but
-            // zero-length file, which the next start would have to reject.
+            // zero-length file.
             f.sync_all()
         })()
         .map_err(|e| {
@@ -483,8 +427,8 @@ where
 
 /// Writes a snapshot to `dir`, returning the file written.
 ///
-/// Every step is best-effort from the caller's point of view: a persistence
-/// failure must never affect the running program.
+/// Callers treat failure as non-fatal; persistence must never affect the
+/// running program.
 pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf, LoadError> {
     std::fs::create_dir_all(dir).map_err(|e| LoadError::Io(e.to_string()))?;
 
@@ -517,7 +461,7 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
         .map(|n| n.saturating_sub(1) as u32)
         .unwrap_or(0);
 
-    // Offsets as raw bytes, so the header hash can cover them.
+    // Offsets as raw bytes, so the checksum can cover them.
     let mut offsets_bytes = Vec::with_capacity((entry_count + 1) * 4);
     for &o in snapshot.offsets() {
         offsets_bytes.extend_from_slice(&o.to_le_bytes());
@@ -539,14 +483,10 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
     header[56..64].copy_from_slice(&stamp.last_write.to_le_bytes());
     header[64..72].copy_from_slice(&stamp.change_time.to_le_bytes());
 
-    // The hash deliberately covers the whole header and the offsets table,
-    // but not the arenas. Hashing 60 MB of arenas would force every page
-    // resident and defeat the lazy mapping this format exists for; a corrupt
-    // *arena* can only produce wrong text, never an out-of-bounds read,
-    // because all indexing goes through the validated offsets.
-    //
-    // v2 stopped at byte 48 and so left the stamp unprotected, which is the
-    // one field whose corruption is both silent and expensive.
+    // The hash covers the whole header (including the stamp) and the offsets
+    // table, not the arenas. Hashing the arenas would force every page
+    // resident; a corrupt arena can only produce wrong text, never an
+    // out-of-bounds read, because all indexing goes through validated offsets.
     let checksum = checksum(&header, &[&offsets_bytes]);
     header[48..56].copy_from_slice(&checksum.to_le_bytes());
 
@@ -564,18 +504,12 @@ pub fn save(dir: &Path, key: MappingKey, snapshot: &Snapshot) -> Result<PathBuf,
 ///
 /// # One segment on disk
 ///
-/// The index in memory is a list of segments because a walk has to publish
-/// results while it is still running, and rebuilding a five-million-entry
-/// snapshot on every publish would be quadratic. None of that applies to a
-/// file: it is written once and read whole. So the segments are *concatenated*
-/// into a single compacted segment as they are written.
-///
-/// Concatenation is all it takes, and that is a property of the arena layout
-/// rather than a coincidence. Each arena is a run of NUL-terminated names, so
-/// laying them end to end produces exactly the arena a single builder would
-/// have produced; only the offset and run tables need shifting by the running
-/// base. Nothing is copied, and the peak memory of a save is the 24 MB of
-/// tables, not a second copy of the 300 MB of names.
+/// In memory the index is segmented so a walk can publish while running. On
+/// disk the segments are concatenated into one: each arena is a run of
+/// NUL-terminated names, so concatenating them yields what a single builder
+/// would have produced, and only the offset and run tables need shifting by
+/// the running base. Peak memory is the tables (about 24 MB), not a second
+/// copy of the names.
 pub fn save_tree(
     dir: &Path,
     key: MappingKey,
@@ -591,11 +525,9 @@ pub fn save_tree(
     let dir_count = index.dir_count();
     let run_count: usize = segments.iter().map(|s| s.runs().len()).sum();
 
-    // The format addresses entries and arena bytes with `u32`. At the share
-    // this was built for - 5M files, ~150 MB of names - there is an order of
-    // magnitude of headroom, but refusing to write a file whose offsets would
-    // wrap is the difference between "no cache this run" and a cache that
-    // decodes into confident nonsense.
+    // The format addresses entries and arena bytes with `u32`. Refuse to write
+    // a file whose offsets would wrap, rather than produce a cache that
+    // decodes into nonsense.
     let (offsets_bytes, arena_len) = flatten_offsets(segments.iter().map(|s| s.files()))?;
     let (dir_offsets_bytes, dir_arena_len) = flatten_offsets(segments.iter().map(|s| s.dirs()))?;
     if file_count > u32::MAX as usize || dir_count > u32::MAX as usize {
@@ -665,23 +597,14 @@ pub fn save_tree(
     header[40..44].copy_from_slice(&max_name_len.to_le_bytes());
     header[44..48].copy_from_slice(&avg_name_len.to_le_bytes());
     // 48..56 is the hash. 56..72 is the directory stamp, which a tree never
-    // has: no single timestamp can stand for a whole share, and pretending
-    // otherwise is what would make the scheduler claim the index was proven
-    // fresh while a thousand files had been added underneath it.
+    // has: no single timestamp covers a whole share.
     header[72..76].copy_from_slice(&(dir_count as u32).to_le_bytes());
     header[76..80].copy_from_slice(&(dir_arena_len as u32).to_le_bytes());
     header[80..84].copy_from_slice(&(run_count as u32).to_le_bytes());
     header[84..88].copy_from_slice(&max_dir_len.to_le_bytes());
-    // What the walk could not reach, carried across the restart.
-    //
-    // Without these four numbers a share with an unreadable subtree would
-    // come back from its cache looking perfectly healthy: the index is a
-    // faithful copy of a partial walk, and nothing in it says so. The status
-    // line would then be silent about exactly the failure this whole rewrite
-    // exists to make visible, until the next re-walk half an hour later.
-    //
-    // The example paths are not persisted. They are a debugging aid, they
-    // would need a section of their own, and the re-walk restores them.
+    // Walk coverage, so a cached partial walk still reports its unreadable
+    // folders after a restart. Example paths are not persisted; the next
+    // re-walk restores them.
     header[88..92].copy_from_slice(&coverage.map_or(0, |c| c.holes).to_le_bytes());
     header[92..96].copy_from_slice(&coverage.map_or(0, |c| c.vanished).to_le_bytes());
     header[96..100].copy_from_slice(&coverage.map_or(0, |c| c.skipped_junctions).to_le_bytes());
@@ -725,9 +648,8 @@ pub fn save_tree(
 /// Concatenates several snapshots' offset tables into one, shifting each by
 /// the arena bytes before it.
 ///
-/// Returns the table and the total arena length, which must agree with what
-/// writing the arenas back to back produces - so they are computed by the same
-/// loop rather than separately.
+/// Returns the table and the total arena length, computed in the same loop so
+/// they agree with the arenas written back to back.
 fn flatten_offsets<'a>(
     snapshots: impl Iterator<Item = &'a Snapshot>,
 ) -> Result<(Vec<u8>, usize), LoadError> {
@@ -735,9 +657,9 @@ fn flatten_offsets<'a>(
     let mut base: u64 = 0;
     for snap in snapshots {
         let offsets = snap.offsets();
-        // The final entry is this snapshot's arena length, and it is the next
-        // snapshot's first offset - so it is dropped here and re-emitted once,
-        // at the end, as the table's terminator.
+        // The final entry is this snapshot's arena length and the next
+        // snapshot's first offset, so it is dropped here and emitted once at
+        // the end as the terminator.
         let (last, rest) = offsets
             .split_last()
             .expect("a snapshot always has its initial zero");
@@ -753,14 +675,11 @@ fn flatten_offsets<'a>(
     Ok((out, base as usize))
 }
 
-/// Replaces this mapping's pointer atomically.
+/// Replaces this mapping's pointer file atomically.
 ///
-/// One pointer per mapping, not one per cache directory: several indexed
-/// directories share the cache, and a single `latest` would mean each save
-/// hid the others.
-///
-/// The file is deliberately tiny and never mapped, so renaming over it can
-/// never hit a sharing violation.
+/// One pointer per mapping, since several directories share the cache. The
+/// file is tiny and never mapped, so renaming over it cannot hit a sharing
+/// violation.
 fn write_pointer(dir: &Path, key: MappingKey, name: &str) -> Result<(), LoadError> {
     let tmp = dir.join(format!(
         "ptr-{}-{:x}.tmp",
@@ -785,17 +704,13 @@ fn pointer_path(dir: &Path, key: MappingKey) -> PathBuf {
 
 /// Removes this mapping's superseded files, best effort.
 ///
-/// Scoped to `key`. An unscoped sweep would delete other mappings' indexes
-/// and, worse, their in-flight temporaries: index actors run one per mapping
-/// and share this directory.
+/// Scoped to `key`, since actors for other mappings share this directory.
+/// A file still mapped by another process cannot be deleted; the next run
+/// collects it.
 ///
-/// A file another process still has mapped cannot be deleted; that is
-/// expected, not an error, and the next run will collect it.
-///
-/// Temporaries belonging to *other processes* are left alone. Two instances of
-/// the app index the same directory under the same key, so an unqualified
-/// sweep would delete the other one's file between its rename and its pointer
-/// write - leaving a pointer aimed at nothing, and a guaranteed cold start.
+/// Temporaries from other processes are left alone: two instances may index
+/// the same directory under the same key, and deleting the other's file
+/// between its rename and pointer write would leave a dangling pointer.
 fn gc(dir: &Path, key: MappingKey, keep: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -822,16 +737,10 @@ fn temp_prefix(key: MappingKey) -> String {
 }
 
 /// Removes cache files belonging to directories that are no longer
-/// configured.
-///
-/// Without this the cache grows forever as mappings are edited: `gc` only
-/// ever sweeps keys that are still in use. Best effort, called once at
-/// startup.
+/// configured. Best effort, called once at startup.
 pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
-    // An empty live set would mean "collect every cache file there is", which
-    // is never what a caller means. It means the configuration could not be
-    // resolved - no enabled mapping, an unreadable config - and doing nothing
-    // is the only safe reading of that.
+    // An empty live set means the configuration could not be resolved; doing
+    // nothing is the only safe reading.
     if live.is_empty() {
         return;
     }
@@ -850,7 +759,7 @@ pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
         if owned_by_live {
             continue;
         }
-        // Also collect the v1 layout, whose names carried no key at all.
+        // Also collect the v1 layout, whose names carried no key.
         let looks_like_ours = name.ends_with(".idx")
             || name.ends_with(".tmp")
             || name == "latest"
@@ -865,19 +774,17 @@ pub fn gc_orphans(dir: &Path, live: &[MappingKey]) {
 
 /// Loads this mapping's most recent index from `dir`.
 ///
-/// Three independent checks stop one share's listing being served for
-/// another: the pointer is per-mapping, the recorded volume serial is
-/// compared when known, and the directory the index describes is compared
-/// against the one the caller expects.
+/// Three checks stop one share's listing being served for another: the
+/// pointer is per-mapping, the volume serial is compared when known, and the
+/// described directory is compared with the expected one.
 pub fn load(dir: &Path, key: MappingKey, expect: Expect<'_>) -> Result<Snapshot, LoadError> {
     load_file(&dir.join(read_pointer(dir, key)?), expect)
 }
 
-/// This mapping's current index file name.
+/// Returns this mapping's current index file name.
 ///
-/// The separator check is not paranoia about a hostile file: the pointer is
-/// joined onto the cache directory, so a name containing one would read an
-/// arbitrary path chosen by whatever wrote it.
+/// Rejects path separators, since the name is joined onto the cache
+/// directory.
 fn read_pointer(dir: &Path, key: MappingKey) -> Result<String, LoadError> {
     let pointer =
         std::fs::read_to_string(pointer_path(dir, key)).map_err(|_| LoadError::Missing)?;
@@ -892,9 +799,8 @@ fn read_pointer(dir: &Path, key: MappingKey) -> Result<String, LoadError> {
 pub fn load_file(path: &Path, expect: Expect<'_>) -> Result<Snapshot, LoadError> {
     let file = open_shared_read(path)?;
 
-    // Try the mapped path, then an owned read. A 66 MB `fs::read` is roughly
-    // 30-60 ms warm, which is a perfectly acceptable fallback and still two
-    // orders of magnitude better than a network enumeration.
+    // Try the mapped path, then an owned read. A ~66 MB `fs::read` takes about
+    // 30-60 ms warm, still far faster than a network enumeration.
     // SAFETY: see the module docs. The mapping is read-only, opened with a
     // share mode denying other writers, and no slice bound derived later
     // depends on the mapped bytes staying constant.
@@ -983,15 +889,9 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Hea
 
     let flags = u32at(12);
     let volume_serial = u32at(16);
-    // Zero means "unknown", and it has to mean that symmetrically.
-    //
-    // The writer records `0` when the serial could not be resolved - which
-    // happens when the startup query races the SMB session warm-up - and the
-    // reader used to reject exactly that as a volume mismatch. The result was
-    // a cache written by one run and thrown away by the next, at random,
-    // depending on how quickly the redirector woke up. The directory check
-    // below still runs either way, which is what makes an unknown serial
-    // survivable rather than a hole.
+    // Zero means "unknown" on both sides. The writer records 0 when the
+    // serial query races SMB session warm-up, so 0 must not be read as a
+    // mismatch. The directory check still runs either way.
     if let Some(expected) = expect.volume_serial
         && expected != 0
         && volume_serial != 0
@@ -1009,9 +909,8 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Hea
     } else {
         UNIX_EPOCH + Duration::from_nanos(captured_nanos as u64)
     };
-    // Deliberately not rejected for age. See `MAX_INDEX_AGE`: an old index is
-    // reported as stale and served, because discarding it leaves nothing to
-    // serve and starts the very full pass the on-demand policy avoids.
+    // Not rejected for age (see `MAX_INDEX_AGE`): an old index is served and
+    // reported as stale, since discarding it would force a full pass.
 
     let stamp = if flags & FLAG_HAS_STAMP == 0 {
         None
@@ -1021,11 +920,8 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Hea
         Some(DirStamp::new(i64at(56), i64at(64)))
     };
 
-    // Both directions. A flat actor reading a tree cache would decode one
-    // segment's filenames with no directory table and serve them as if they
-    // were a single folder; a tree actor reading a flat cache would publish
-    // one directory as the whole share. Same magic, same version, so nothing
-    // else catches it.
+    // Checked in both directions: flat and tree files share magic and
+    // version, and decoding one as the other would serve wrong results.
     if (flags & FLAG_TREE != 0) != want_tree {
         return Err(LoadError::Invalid(if want_tree {
             "cached index is a flat listing, not a tree"
@@ -1057,10 +953,9 @@ fn parse_header(bytes: &[u8], expect: Expect<'_>, want_tree: bool) -> Result<Hea
 
 /// Validates the layout and extracts the offsets table.
 ///
-/// The offsets are copied into owned memory even for a mapped index. That
-/// costs about a millisecond for four megabytes and buys a soundness
-/// property: no later slice bound depends on bytes that could change
-/// underneath the mapping.
+/// The offsets are copied into owned memory even for a mapped index (about a
+/// millisecond for 4 MB), so no later slice bound depends on bytes that could
+/// change underneath the mapping.
 fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError> {
     let h = parse_header(bytes, expect, false)?;
     let s = sections(h.prefix_len, h.entry_count, h.arena_len);
@@ -1087,15 +982,9 @@ fn decode_common(bytes: &[u8], expect: Expect<'_>) -> Result<Decoded, LoadError>
         .into_owned()
         .into_boxed_str();
 
-    // The directory the index claims to describe must be the one the caller
-    // asked for. Checked here, after the header hash has verified and before
-    // any arena byte is touched, so both the mapped and the owned decoder get
-    // it without duplication.
-    //
-    // Without this the crate had no way at all to notice a mapping being
-    // repointed: the volume serial is unchanged when a directory moves within
-    // the same drive, which is exactly what happened when the CustomPro root
-    // became a subdirectory of the volume it already lived on.
+    // The directory the index describes must be the one the caller asked for.
+    // Checked after the hash and before any arena byte is touched. The volume
+    // serial alone cannot detect a mapping repointed within the same drive.
     if !crate::util::winpath::same_dir(Path::new(prefix.as_ref()), expect.dir) {
         return Err(LoadError::PrefixMismatch {
             found: prefix.into_string(),
@@ -1131,9 +1020,8 @@ fn decode_owned(bytes: &[u8], expect: Expect<'_>) -> Result<Snapshot, LoadError>
 
 /// A persisted tree index and the walk report that produced it.
 ///
-/// The two travel together because the index alone cannot say whether it is
-/// complete coverage of the share or a partial view of one with an unreadable
-/// subtree - and those look identical from the inside.
+/// Stored together because the index alone cannot say whether it is complete
+/// or partial.
 #[derive(Debug)]
 pub struct LoadedTree {
     pub index: TreeIndex,
@@ -1173,9 +1061,8 @@ struct DecodedTree {
 /// Validates the layout and extracts the three tables the checksum covers.
 ///
 /// As in the flat decoder, every table is copied into owned memory even for a
-/// mapped index: no later slice bound may depend on bytes that could change
-/// underneath the mapping. That is 24 MB at five million files, against the
-/// 300 MB of arenas which stay mapped and unread.
+/// mapped index, so no later slice bound depends on bytes that could change
+/// underneath the mapping. The arenas stay mapped and unread.
 fn decode_tree_common(bytes: &[u8], expect: Expect<'_>) -> Result<DecodedTree, LoadError> {
     let h = parse_header(bytes, expect, true)?;
     debug_assert!(h.is_tree());
@@ -1218,11 +1105,7 @@ fn decode_tree_common(bytes: &[u8], expect: Expect<'_>) -> Result<DecodedTree, L
         .into_owned()
         .into_boxed_str();
 
-    // The root the index claims to describe must be the one the caller asked
-    // for, for exactly the reason the flat decoder checks its prefix: the
-    // volume serial is unchanged when a mapping is repointed within a drive,
-    // so without this a re-pointed tree mapping would serve the previous
-    // share's five million paths.
+    // The root must match the caller's directory, as in the flat decoder.
     if !crate::util::winpath::same_dir(Path::new(root.as_ref()), expect.dir) {
         return Err(LoadError::PrefixMismatch {
             found: root.into_string(),
@@ -1253,10 +1136,8 @@ fn decode_tree_common(bytes: &[u8], expect: Expect<'_>) -> Result<DecodedTree, L
 
 fn decode_tree(map: Arc<Mmap>, expect: Expect<'_>) -> Result<LoadedTree, LoadError> {
     let d = decode_tree_common(&map, expect)?;
-    // One `Mmap` behind both arenas of both snapshots. Mapping the file four
-    // times would work and would be a waste; more importantly each mapping is
-    // an independent kernel object, so the filenames and the directory names
-    // of one index could then be backed by different views of the same bytes.
+    // One `Mmap` backs all four arenas, so file and directory names come from
+    // the same view of the file.
     let files = Arenas::Mapped {
         map: Arc::clone(&map),
         lower: d.s.lower..d.s.lower + d.h.arena_len,
@@ -1305,10 +1186,8 @@ fn finish_tree(d: DecodedTree, files: Arenas, dirs: Arenas) -> Result<LoadedTree
         ));
     }
 
-    // A segment's snapshots carry placeholders for the timestamps and the
-    // serial, exactly as `SegmentBuilder::seal` leaves them: those belong to
-    // the index as a whole, and storing them twice is storing them
-    // inconsistently.
+    // Segment snapshots carry placeholder timestamps and serial, as
+    // `SegmentBuilder::seal` leaves them; those belong to the whole index.
     let part = |offsets: Box<[u32]>, arenas: Arenas, max: u32| {
         Snapshot::try_from_parts(
             "".into(),
@@ -1325,15 +1204,14 @@ fn finish_tree(d: DecodedTree, files: Arenas, dirs: Arenas) -> Result<LoadedTree
     let files = part(offsets, files, h.max_name_len)?;
     let dirs = part(dir_offsets, dirs, h.max_dir_len)?;
 
-    // Sampled rather than exhaustive, as in the flat decoder: checking every
-    // terminator would touch every page and defeat the lazy mapping.
+    // Sampled rather than exhaustive: checking every terminator would touch
+    // every page and defeat lazy mapping.
     files.sample_separators(1024).map_err(LoadError::Invalid)?;
     dirs.sample_separators(1024).map_err(LoadError::Invalid)?;
 
-    // The run table is checked in full, and that asymmetry is deliberate. A
-    // bad arena byte garbles a name on screen; a run pointing one directory
-    // to the left reports a real file under a path it is not at, which is a
-    // wrong answer nobody can tell is wrong.
+    // The run table is checked in full: a bad run would silently report a
+    // file under the wrong folder, whereas a bad arena byte only garbles a
+    // name.
     let segment = TreeSegment::from_parts(files, dirs, runs).map_err(LoadError::Invalid)?;
 
     let index = TreeIndex::empty(&root)
@@ -1347,8 +1225,7 @@ fn finish_tree(d: DecodedTree, files: Arenas, dirs: Arenas) -> Result<LoadedTree
         files: index.len(),
         holes: h.holes,
         vanished: h.vanished,
-        // Not persisted: a debugging aid that would need a section of its
-        // own, and the next re-walk restores it.
+        // Not persisted; the next re-walk restores it.
         examples: Vec::new(),
         skipped_junctions: h.skipped_junctions,
         elapsed: Duration::from_millis(u64::from(h.elapsed_ms)),
@@ -1381,9 +1258,9 @@ fn finish(
     .map_err(LoadError::Invalid)?;
 
     // Sampled rather than exhaustive: checking every terminator would touch
-    // every page and defeat the lazy mapping. A missing separator can only
-    // yield a wrong result, never unsafety, since all indexing goes through
-    // offsets that have already been proven consistent.
+    // every page and defeat lazy mapping. A missing separator can only yield
+    // a wrong result, never unsafety, since all indexing goes through offsets
+    // already proven consistent.
     snapshot
         .sample_separators(1024)
         .map_err(LoadError::Invalid)?;
@@ -1395,8 +1272,7 @@ mod tests {
     use super::*;
     use crate::index::builder::SnapshotBuilder;
 
-    /// A deep directory, deliberately: the flat root is a subdirectory of its
-    /// volume, and the previous fixtures only ever exercised a drive root.
+    /// A subdirectory of its volume, so tests cover more than a drive root.
     const DIR: &str = r"V:\Documents\custpro";
 
     fn dir_path() -> &'static Path {
@@ -1439,10 +1315,8 @@ mod tests {
         (dir, loaded)
     }
 
-    /// A serial of zero means "unknown", and it has to mean that on both
-    /// sides. The writer records zero when the startup query lost its race
-    /// with the SMB session warm-up; the reader used to call that a volume
-    /// mismatch and throw the cache away, at random, on the next launch.
+    /// A serial of zero means "unknown" on both sides and must not be treated
+    /// as a mismatch.
     #[test]
     fn a_snapshot_written_with_an_unknown_serial_is_still_accepted() {
         let dir = tempfile::tempdir().unwrap();
@@ -1453,8 +1327,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
     }
 
-    /// The other direction still has to be rejected, or a drive letter
-    /// remapped to a different share serves the previous one's file list.
+    /// Two different known serials are still rejected.
     #[test]
     fn two_known_but_different_serials_are_still_a_mismatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -1465,10 +1338,7 @@ mod tests {
         ));
     }
 
-    /// v2 hashed only bytes 0..48, leaving the stamp at 56..72 unprotected.
-    /// A flipped bit there is silent and expensive: it reads as "the
-    /// directory changed", which costs a full enumeration of a million-entry
-    /// share on load, every load.
+    /// The stamp at bytes 56..72 is covered by the checksum.
     #[test]
     fn a_corrupted_stamp_is_caught_by_the_checksum() {
         let dir = tempfile::tempdir().unwrap();
@@ -1500,9 +1370,8 @@ mod tests {
         );
     }
 
-    /// Two instances index the same directory under the same key, so an
-    /// unqualified sweep of `*.tmp` deletes the other one's file between its
-    /// rename and its pointer write.
+    /// Two instances may index the same directory under the same key, so gc
+    /// must not delete another process's temporary.
     #[test]
     fn gc_leaves_another_process_temp_file_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1609,8 +1478,7 @@ mod tests {
         );
     }
 
-    /// The check that stops a remapped drive letter serving another share's
-    /// file list.
+    /// A remapped drive letter must not serve another share's file list.
     #[test]
     fn rejects_an_index_from_a_different_volume() {
         let dir = tempfile::tempdir().unwrap();
@@ -1687,12 +1555,8 @@ mod tests {
         );
     }
 
-    /// An old index is served, not discarded.
-    ///
-    /// This used to reject. Rejecting leaves nothing to serve, which starts a
-    /// full pass - and with every client's cache written on the same rollout
-    /// day, they would all have started one within hours of each other. The
-    /// age is reported instead; see `MAX_INDEX_AGE`.
+    /// An old index is served, not discarded. Rejecting it would force a full
+    /// pass; its age is reported instead (see `MAX_INDEX_AGE`).
     #[test]
     fn an_index_that_is_too_old_is_served_rather_than_discarded() {
         let dir = tempfile::tempdir().unwrap();
@@ -1721,8 +1585,8 @@ mod tests {
         );
     }
 
-    /// Rewriting must never rename over a file that could be mapped: that is
-    /// `ERROR_SHARING_VIOLATION`, and it only shows up on the second run.
+    /// Saving must never rename over a file that could be mapped
+    /// (`ERROR_SHARING_VIOLATION`).
     #[test]
     fn saving_twice_while_the_first_index_is_still_mapped_succeeds() {
         let dir = tempfile::tempdir().unwrap();
@@ -1804,12 +1668,8 @@ mod tests {
         Expect::new(Path::new(OTHER), serial)
     }
 
-    /// The collision the per-directory key exists to prevent.
-    ///
-    /// Both directories live on the same volume, so the volume serial is
-    /// identical and cannot distinguish them - which is exactly the situation
-    /// once the flat root became a subdirectory of a drive that may hold
-    /// others.
+    /// Two directories on the same volume share a serial, so only the
+    /// per-directory key keeps their indexes apart.
     #[test]
     fn two_directories_on_one_volume_keep_separate_indexes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1866,8 +1726,8 @@ mod tests {
         );
     }
 
-    /// The scenario that prompted all of this: the flat root moves from `V:\`
-    /// to `V:\Documents\custpro`. The old index must not be served.
+    /// After a mapping moves from `V:\` to `V:\Documents\custpro`, the old
+    /// index must not be served.
     #[test]
     fn a_repointed_mapping_does_not_find_the_old_directorys_index() {
         let dir = tempfile::tempdir().unwrap();
@@ -1883,8 +1743,8 @@ mod tests {
         );
     }
 
-    /// The backstop, exercised by pointing one mapping's pointer at another's
-    /// file - which is what a key collision would look like.
+    /// The prefix check rejects another mapping's file, as a key collision
+    /// would produce.
     #[test]
     fn an_index_describing_another_directory_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
@@ -1930,7 +1790,7 @@ mod tests {
         );
     }
 
-    /// The previous layout had no key in any filename and one global pointer.
+    /// The v1 layout had no key in any filename and one global pointer.
     #[test]
     fn orphan_collection_removes_the_previous_layout() {
         let dir = tempfile::tempdir().unwrap();
@@ -1962,15 +1822,11 @@ mod tests {
     }
 }
 
-/// The tree layout, which shares a header and an atomic-rename path with the
-/// flat one but almost nothing else.
+/// The tree layout.
 ///
-/// The property under test throughout is that a *segmented* index in memory
-/// becomes a *single compacted* segment on disk and comes back describing the
-/// same files at the same paths. Compaction is done by concatenating arenas
-/// and shifting tables, so if the shift is ever off by one the paths are the
-/// symptom - not a crash, which is exactly why it is checked by path and not
-/// by count.
+/// A segmented index in memory becomes one compacted segment on disk and must
+/// come back with the same files at the same paths. An off-by-one in the
+/// table shift shows up as wrong paths, not a crash, so tests compare paths.
 #[cfg(test)]
 mod tree_tests {
     use super::*;
@@ -1994,11 +1850,8 @@ mod tree_tests {
     /// One segment's worth of directories.
     type Group<'a> = &'a [(&'a str, &'a [&'a str])];
 
-    /// Builds an index whose segments are sealed exactly where `groups` says.
-    ///
-    /// The split points are given explicitly rather than left to the sink's
-    /// size ladder, because the whole point is to exercise more than one
-    /// segment without building a share large enough to trigger a real seal.
+    /// Builds an index whose segments are sealed exactly where `groups` says,
+    /// to exercise several segments without a large fixture.
     fn tree_of(groups: &[Group<'_>]) -> TreeIndex {
         let mut index = TreeIndex::empty(ROOT);
         for group in groups {
@@ -2021,9 +1874,8 @@ mod tree_tests {
             .collect()
     }
 
-    /// Three segments, a directory with no files, a file straight in the root,
-    /// and a nested path - the four shapes whose run and offset arithmetic
-    /// differs.
+    /// Three segments, a directory with no files, a file directly in the root,
+    /// and a nested path: the shapes whose run and offset arithmetic differs.
     fn fixture() -> TreeIndex {
         tree_of(&[
             &[
@@ -2047,10 +1899,7 @@ mod tree_tests {
         dir
     }
 
-    /// FORMAT_VERSION 5 exists for this one bit. Lose it across a restart and
-    /// a handful of remembered names load back as if they were a listing -
-    /// after which "no matches" starts meaning something it has never been
-    /// allowed to mean here.
+    /// The observed flag survives a round trip.
     #[test]
     fn an_observed_tree_is_still_observed_after_a_round_trip() {
         let original = TreeIndex::empty(r"R:\")
@@ -2067,8 +1916,7 @@ mod tree_tests {
         assert_eq!(paths(&loaded.index), paths(&original));
     }
 
-    /// The dual, and the one that would fail silently: a walked tree must not
-    /// come back claiming it was only ever searched.
+    /// A walked tree must not come back marked as observed.
     #[test]
     fn a_walked_tree_is_not_observed_after_a_round_trip() {
         let original = fixture();
@@ -2106,8 +1954,7 @@ mod tree_tests {
         assert!(loaded.index.complete());
     }
 
-    /// The reason the directory dimension is persisted at all: a job code
-    /// usually names a folder, not a file.
+    /// A folder still owns its files after a round trip.
     #[test]
     fn a_folder_still_owns_its_files_after_a_round_trip() {
         let dir = save_fixture(&fixture(), None);
@@ -2134,9 +1981,7 @@ mod tree_tests {
         assert!(!loaded.index.complete());
     }
 
-    /// A partial walk that is cached must still look partial after a restart.
-    /// Otherwise the one restart between a walk and its re-walk is a window in
-    /// which the status line claims coverage the index never had.
+    /// A cached partial walk still reports itself as partial after a restart.
     #[test]
     fn an_incomplete_walks_coverage_survives_the_restart() {
         let index = tree_of(&[&[("11d", &["a.pdf"] as &[&str])]]).with_complete(false);
@@ -2164,8 +2009,7 @@ mod tree_tests {
         );
     }
 
-    /// Same magic, same version, same key length - so nothing but the flag
-    /// stands between a tree actor and one directory served as a whole share.
+    /// Only the tree flag distinguishes a flat file from a tree file.
     #[test]
     fn a_flat_index_is_not_readable_as_a_tree() {
         let dir = tempfile::tempdir().unwrap();
@@ -2204,11 +2048,8 @@ mod tree_tests {
         ));
     }
 
-    /// The run table is last in the file, so the final byte is inside it.
-    ///
-    /// This is the corruption the checksum exists for. A bad arena byte
-    /// garbles a name on screen; a bad run reports a real file under a path it
-    /// is not at, which is a wrong answer nobody can tell is wrong.
+    /// The run table is last in the file, so the final byte is inside it, and
+    /// the checksum must catch its corruption.
     #[test]
     fn a_corrupt_run_table_is_rejected() {
         let dir = save_fixture(&fixture(), None);
@@ -2227,9 +2068,8 @@ mod tree_tests {
         );
     }
 
-    /// A run that survives the checksum but points at a directory that is not
-    /// there must still be refused, because the checksum only proves the bytes
-    /// are the ones that were written - not that they meant anything.
+    /// A run pointing at a nonexistent directory is rejected by the structural
+    /// check even when the checksum is valid.
     #[test]
     fn a_run_naming_a_missing_directory_is_rejected() {
         let index = fixture();
@@ -2243,15 +2083,12 @@ mod tree_tests {
         let run_count: usize = index.segments().iter().map(|s| s.runs().len()).sum();
         let runs_at = total - run_count * 8;
 
-        // The `dir` field of the *last* run, pushed past the end of the
-        // directory listing. The last one specifically, so the run table is
-        // still ascending and it is the range check that rejects it rather
-        // than the ordering check.
+        // Corrupt the `dir` field of the last run so the table stays ascending
+        // and the range check, not the ordering check, rejects it.
         let at = runs_at + (run_count - 1) * 8;
         bytes[at + 4..at + 8].copy_from_slice(&9_999u32.to_le_bytes());
 
-        // Re-checksum, so the structural check is what rejects it rather than
-        // the corruption detector.
+        // Re-checksum, so the structural check is what rejects it.
         let h = parse_header(&bytes, tree_expect(None), true).unwrap();
         let layout = tree_sections(
             h.prefix_len,
@@ -2284,9 +2121,7 @@ mod tree_tests {
         );
     }
 
-    /// A tree file must obey the same alignment rule every section of the flat
-    /// format does, or a mapped `u32` table is read unaligned on the fallback
-    /// path and byte-by-byte on the fast one.
+    /// Tree sections follow the same 64-byte alignment as flat sections.
     #[test]
     fn tree_sections_are_aligned_and_ordered() {
         let s = tree_sections(3, 1_000, 24_000, 90, 1_800, 90);
@@ -2313,9 +2148,8 @@ mod tree_tests {
         assert_eq!(s.total, s.runs + 90 * 8);
     }
 
-    /// Growing the header from 96 to 128 bytes had to be free, and this is the
-    /// arithmetic that makes it so: both round up to the same alignment, so no
-    /// flat section moved.
+    /// Growing the header from 96 to 128 bytes moved no flat section, since
+    /// both round up to the same alignment.
     #[test]
     fn the_larger_header_moved_no_flat_section() {
         assert_eq!(align_up(96), align_up(HEADER_SIZE));

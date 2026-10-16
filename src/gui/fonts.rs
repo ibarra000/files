@@ -1,17 +1,13 @@
-//! The system's own typeface.
+//! Loads the system Segoe UI and icon fonts into egui.
 //!
-//! egui ships with a font, and a panel drawn in it looks like a program that
-//! brought its own furniture. This one draws in Segoe UI, which is what every
-//! other window on this machine is drawn in - loaded from `C:\Windows\Fonts`
-//! rather than bundled, because shipping Segoe UI is a licence violation and a
-//! Windows without it is a Windows that cannot start.
+//! Fonts are read from `C:\Windows\Fonts` rather than bundled, because Segoe UI
+//! may not be redistributed.
 //!
-//! # The families exist whether or not the files do
+//! # Families are always registered
 //!
-//! [`crate::gui::theme::font`] asks for `FontFamily::Name("segoe")`, and egui
-//! panics on a family it has never been given. So both names are always
-//! registered; on a machine with no Segoe UI they simply resolve to egui's own
-//! font, and the panel is plain rather than absent.
+//! [`crate::gui::theme::font`] requests `FontFamily::Name("segoe")` and egui
+//! panics on an unregistered family, so every family is registered even when
+//! its file is missing; it then falls back to whatever else is available.
 
 use std::sync::Arc;
 
@@ -20,41 +16,29 @@ use eframe::egui::{FontData, FontDefinitions, FontFamily};
 use crate::gui::theme::icons::{ICON_FAMILY, ICON_FILES};
 use crate::gui::theme::{FALLBACK_FILES, FONT_FILES, Weight};
 
-/// Which of the fonts this program would like were actually there.
+/// Which of the requested fonts were found, reported in diagnostics.
 ///
-/// Two answers rather than one, because they fail separately and for
-/// different reasons: a machine can have Segoe UI and not have Segoe MDL2
-/// Assets, and the second is a cosmetic loss where the first is not.
-///
-/// Both are kept for the diagnostics report. "The text looks wrong" and "the
-/// icons are missing" are two support calls, and these are the two answers.
+/// Text and icons are tracked separately because they fail independently, and
+/// a missing icon font is only cosmetic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Found {
     pub text: bool,
     pub icons: bool,
 }
 
-/// Installs every family, and says which of them found a file.
+/// Registers every family from the system fonts and reports which were found.
 pub fn install(ctx: &eframe::egui::Context) -> Found {
     install_with(ctx, true)
 }
 
-/// Registers the same two families, bound to a font that is the same
-/// everywhere.
+/// Registers the same families bound to fonts that are identical on every
+/// machine, for tests and snapshots.
 ///
-/// For tests, and for the pictures they compare. [`install`] reads whatever
-/// Segoe UI the machine it is running on happens to have - which is the right
-/// thing for a panel and the wrong thing for a snapshot, because a picture
-/// taken on one machine and compared on another would be comparing two
-/// typefaces and reporting it as a layout change.
-///
-/// "The same everywhere" is `eframe/default_fonts`, which the shipping build
-/// does not have: it is 1.41 MB of TTFs for a fallback the panel now reads off
-/// the system instead. Without `test-fonts` there is nothing bundled to bind
-/// to, and a family bound to nothing lays every string out *zero wide* rather
-/// than failing - so this falls through to the system fonts, which are at
-/// least fonts. Everything that compares pixels is behind `ui-snapshots`,
-/// which implies `test-fonts`, so nothing that measures takes that branch.
+/// Requires the `test-fonts` feature, which enables `eframe/default_fonts`
+/// (1.41 MB, not in the shipping build). Without it there is nothing bundled,
+/// and a family bound to nothing lays out at zero width, so this falls back to
+/// the system fonts. `ui-snapshots` implies `test-fonts`, so pixel comparisons
+/// never take that fallback.
 pub fn install_bundled(ctx: &eframe::egui::Context) {
     install_with(ctx, !cfg!(feature = "test-fonts"));
 }
@@ -62,20 +46,16 @@ pub fn install_bundled(ctx: &eframe::egui::Context) {
 fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
     let mut defs = FontDefinitions::default();
 
-    // Whatever egui was going to use, which in the shipping build is nothing at
-    // all: with `default_fonts` off, `FontDefinitions::default()` is
-    // `::empty()`. Present under `test-fonts`, so a snapshot still has a
-    // typeface that is the same on every machine.
+    // egui's bundled fonts: empty in the shipping build (`default_fonts` off),
+    // present under `test-fonts`.
     let bundled: Vec<String> = defs
         .families
         .get(&FontFamily::Proportional)
         .cloned()
         .unwrap_or_default();
 
-    // The system's own coverage, loaded once and shared by both weights - two
-    // families pointing at the same two entries, not four copies of the
-    // files. This is the tail that makes a character Segoe UI has no glyph for
-    // come out as a character rather than as a box.
+    // System fallback fonts for glyphs Segoe UI lacks, loaded once and shared
+    // by both weights.
     let mut tail = Vec::new();
     if use_system {
         for (name, path) in FALLBACK_FILES {
@@ -91,10 +71,7 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
     let mut found_all = true;
     for (name, path) in FONT_FILES.iter() {
         let mut stack: Vec<String> = Vec::new();
-        // One file per family. There used to be a second list read first,
-        // indexed against this one by position - a landmine that only held
-        // while the two stayed the same length and the same order. See the
-        // note on `FONT_FILES` for why it is gone rather than made safe.
+        // One file per family; see `FONT_FILES`.
         let read = |p: &str| use_system.then(|| std::fs::read(p).ok()).flatten();
         match read(path) {
             Some(bytes) => {
@@ -109,12 +86,9 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
             .insert(FontFamily::Name((*name).into()), stack);
     }
 
-    // The marks, from whichever of the two icon fonts this Windows has.
-    //
-    // Registered with no fallback tail, unlike the two families above, and
-    // `gui::theme::icons` gives the reason: these are Private Use code points,
-    // and a tail would resolve a mark the icon font lacks to an unrelated
-    // glyph from `seguisym` rather than to nothing.
+    // The first icon font present. No fallback tail: icons are Private Use
+    // code points, and a fallback would draw an unrelated glyph from
+    // `seguisym` instead of nothing (see `gui::theme::icons`).
     let mut icons: Vec<String> = Vec::new();
     if use_system {
         for path in ICON_FILES {
@@ -129,20 +103,14 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
         }
     }
     let found_icons = !icons.is_empty();
-    // Inserted whether or not a file was read, for the reason the module note
-    // gives: egui panics on a family it has never been given, and a family
-    // bound to nothing merely lays out to nothing.
+    // Registered even if empty; see the module docs.
     defs.families
         .insert(FontFamily::Name(ICON_FAMILY.into()), icons);
 
-    // egui's own two families, which this panel never asks for and egui itself
-    // does - the debug-on-hover overlay, a tooltip, anything reaching
-    // `Style::text_styles`. With `default_fonts` they arrived populated; with it
-    // gone `FontDefinitions::empty` leaves them *present and empty*, and epaint
-    // only panics on a family it has never been given. An empty one lays out
-    // silently to zero width, so the failure would have been invisible text and
-    // a support call rather than a stack trace. Bound to the regular weight, so
-    // whatever reaches them is drawn in the same typeface as everything else.
+    // egui's own families, used by tooltips, debug overlays and
+    // `Style::text_styles`. Without `default_fonts` they exist but are empty,
+    // which lays text out invisibly at zero width, so bind them to the regular
+    // weight.
     let regular = defs
         .families
         .get(&FontFamily::Name(Weight::Regular.family().into()))
@@ -160,20 +128,12 @@ fn install_with(ctx: &eframe::egui::Context, use_system: bool) -> Found {
     }
 }
 
-/// Turns off the one default that epaint itself warns makes text blurry.
+/// Disables `TextOptions::subpixel_binning`, which epaint documents as making
+/// text blurrier.
 ///
-/// `TextOptions::subpixel_binning` renders each glyph at up to four fractional
-/// horizontal offsets for more even spacing, and its own documentation adds:
-/// *"It also lead to text looking more blurry."* On a panel whose whole content
-/// is short strings of digits and dashes read at a glance, even spacing is
-/// worth nothing and sharpness is worth everything.
-///
-/// Hinting is left on, which is the default: it is what snaps a stem to the
-/// pixel grid, and turning it off would undo this.
+/// Hinting stays on (the default), since it snaps stems to the pixel grid.
 fn sharpen(ctx: &eframe::egui::Context) {
-    // Both themes: egui keeps a `Style` per light/dark and this panel switches
-    // between them at runtime, so setting only the active one would sharpen the
-    // text until somebody changed theme.
+    // Both light and dark styles, since the theme can change at runtime.
     ctx.all_styles_mut(|style| {
         style.visuals.text_options.subpixel_binning = false;
     });
@@ -183,8 +143,6 @@ fn sharpen(ctx: &eframe::egui::Context) {
 mod tests {
     use super::*;
 
-    /// The two weights the panel draws with, and no more. Two weights that
-    /// are drawn the same are one weight and a wasted load.
     #[test]
     fn every_weight_names_a_distinct_family() {
         let mut names: Vec<_> = Weight::ALL.map(|w| w.family()).to_vec();
@@ -193,8 +151,8 @@ mod tests {
         assert_eq!(names.len(), Weight::ALL.len());
     }
 
-    /// `theme::font` asks for these by name, and egui panics on a family it was
-    /// never given. The two lists have to agree.
+    /// `theme::font` requests these by name, and egui panics on an unregistered
+    /// family.
     #[test]
     fn every_family_the_panel_asks_for_is_one_that_gets_registered() {
         for weight in Weight::ALL {
@@ -206,29 +164,20 @@ mod tests {
         }
     }
 
-    /// A machine with no Segoe UI must still get both families, or the
-    /// first label drawn takes the process down.
-    ///
-    /// Two different failures, and this covers both. `epaint` panics on a
-    /// family it was never given, and lays out a family bound to *nothing*
-    /// silently at zero width - so the width assertion below is made only where
-    /// there was something to measure with. Off Windows there never is, and
-    /// that is correct; a machine that found Segoe UI and still measures
-    /// nothing has a family pointing at font data nobody inserted.
+    /// Every family must be registered even without Segoe UI. The width check
+    /// only applies where a font was found, which is never the case off
+    /// Windows.
     #[test]
     fn the_families_are_registered_even_when_the_files_are_missing() {
         let ctx = eframe::egui::Context::default();
         let found = install(&ctx);
 
-        // Inside a pass, because egui has no font atlas at all until the first
-        // one - which is also why `install` is called from the constructor
-        // rather than lazily at the first label.
+        // Inside a pass, because egui has no font atlas until the first one.
         let mut output = ctx.run_ui(Default::default(), |ui| {
             let ctx = ui.ctx();
             for (name, _) in FONT_FILES {
                 let id = eframe::egui::FontId::new(14.0, FontFamily::Name(name.into()));
-                // Laying anything out is the assertion: a family egui was never
-                // given panics inside egui rather than returning an error.
+                // An unregistered family panics here.
                 let width = ctx
                     .fonts_mut(|fonts| {
                         fonts.layout_no_wrap(
@@ -244,10 +193,8 @@ mod tests {
                 }
             }
 
-            // And the marks, which are a third family asked for by name and
-            // are the newest way for this to go wrong. Laid out rather than
-            // asked about, because `has_glyph` answers a question about
-            // coverage and this one is about whether the family exists at all.
+            // The icon family. Laid out rather than queried with `has_glyph`,
+            // which tests coverage, not registration.
             let mark = ctx
                 .fonts_mut(|fonts| {
                     fonts.layout_no_wrap(
@@ -262,9 +209,8 @@ mod tests {
                 assert!(mark > 0.0, "{ICON_FAMILY} laid out to nothing");
             }
 
-            // And egui's own two, which this panel never asks for and egui
-            // does. Laid out rather than read back, because present-and-empty
-            // is the failure being checked for and it reads as present.
+            // egui's built-in families, laid out because present-but-empty
+            // would otherwise read as present.
             for family in [FontFamily::Proportional, FontFamily::Monospace] {
                 let id = eframe::egui::FontId::new(14.0, family);
                 let _ = ctx.fonts_mut(|fonts| {
@@ -273,9 +219,7 @@ mod tests {
             }
         });
 
-        // The atlas the pass built is a texture upload nobody here is going to
-        // perform, and epaint asserts on dropping unapplied ones rather than
-        // letting a real renderer lose a glyph.
+        // epaint asserts if unapplied texture uploads are dropped.
         output.textures_delta.clear();
     }
 }

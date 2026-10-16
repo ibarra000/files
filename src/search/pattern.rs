@@ -1,24 +1,16 @@
-//! Deciding when a query can safely be handed to the file server.
+//! Decides when a query can be evaluated by the file server.
 //!
-//! `FindFirstFileExW("V:\\*p12345*")` evaluates the pattern **on the server**
+//! `FindFirstFileExW("V:\*p12345*")` evaluates the pattern on the server
 //! (MS-SMB2 2.2.33 `QUERY_DIRECTORY` carries a `FileName` field), so a cold
-//! search costs one round trip and a few kilobytes no matter whether the
-//! directory holds a thousand files or ten million. That is two orders of
-//! magnitude better than any client-side buffering trick, and unlike them it
-//! is independent of link bandwidth.
-//!
-//! The catch is that it is only *equivalent* to the local substring match when
-//! the query contains nothing the NT expression evaluator treats specially.
+//! search costs one round trip regardless of directory size or link bandwidth.
+//! This is only equivalent to the local substring match when the query has
+//! nothing the NT expression evaluator treats specially.
 //!
 //! # A whitelist, not escaping
 //!
-//! NT expressions have **no escape mechanism** - `\` cannot escape `*` - so
-//! attempting to sanitise a query is the wrong model. The only sound approach
-//! is to recognise queries that are provably literal and refuse everything
-//! else, falling back to the local index.
-//!
-//! Three ANSI characters are the ones people forget, because they are aliases
-//! for DOS wildcards rather than obvious metacharacters:
+//! NT expressions have no escape mechanism (`\` cannot escape `*`), so queries
+//! are accepted only when provably literal; everything else falls back to the
+//! local index. Three ANSI characters are aliases for DOS wildcards:
 //!
 //! | Char | Acts as |
 //! |------|---------|
@@ -26,18 +18,13 @@
 //! | `<` (0x3C) | `DOS_STAR` |
 //! | `>` (0x3E) | `DOS_QM` |
 //!
-//! # What this deliberately does not try to guarantee
+//! # Superset, not exact
 //!
-//! Win32 matches the pattern against the 8.3 short name as well as the long
-//! name, so the server may return entries whose long name does not contain
-//! the query. Those false positives are harmless and free to remove: the
-//! caller re-ranks the returned long names locally. The server-side filter is
-//! therefore a **superset filter**.
-//!
-//! False *negatives* are the real hazard, and the reason
-//! [`crate::search::verify`] audits every server result against what the
-//! local index would have returned, and disables the whole mechanism after a
-//! few disagreements.
+//! Win32 also matches the 8.3 short name, so the server may return names that
+//! do not contain the query. These false positives are removed locally by
+//! [`confirms`]. False negatives are the real hazard, which is why
+//! [`crate::search::verify`] audits server results against the local index and
+//! disables the mechanism after a few disagreements.
 
 use crate::config::{MAX_SERVER_QUERY_LEN, MIN_SERVER_QUERY_LEN};
 use crate::search::query::{self, MatchMode, Query};
@@ -51,17 +38,15 @@ pub enum PatternReject {
     /// Contains an NT expression metacharacter, a path separator, or another
     /// character with no literal interpretation.
     NotLiteral(char),
-    /// Non-ASCII. The NLS upcase table used by the server does not agree with
-    /// Rust's `to_lowercase` for cases like the Turkish dotless i, so rather
-    /// than reason about the divergence the query falls back to local
-    /// matching.
+    /// Non-ASCII. The server's NLS upcase table disagrees with Rust's
+    /// `to_lowercase` in cases like the Turkish dotless i.
     NonAscii,
-    /// Nothing but punctuation; would match implausibly broadly.
+    /// Only punctuation; would match implausibly broadly.
     NoAlphanumeric,
-    /// Windows path canonicalisation strips these before the pattern reaches
-    /// the kernel, silently changing the query.
+    /// Ends in a space or dot, which Windows path canonicalisation strips before
+    /// the pattern reaches the kernel.
     TrailingSpaceOrDot,
-    /// kernel32 rewrites `*.*` to `*`, i.e. "match everything".
+    /// kernel32 rewrites `*.*` to `*`, which matches everything.
     MatchesEverything,
 }
 
@@ -81,30 +66,22 @@ impl PatternReject {
 
 /// Characters accepted in addition to ASCII alphanumerics.
 ///
-/// Chosen because they occur in real filenames and have no meaning to the NT
-/// expression evaluator. Note the absence of `*`, `?`, `<`, `>`, `"`, `\`,
-/// `/`, `:` and `|`.
+/// They occur in real filenames and have no meaning to the NT expression
+/// evaluator. `*`, `?`, `<`, `>`, `"`, `\`, `/`, `:` and `|` are excluded.
 const EXTRA_LITERAL: &[char] = &['-', '_', ' ', '.', '(', ')', '&', '+', '#', '\''];
 
-/// True when `c` is safe to embed in a search pattern verbatim.
+/// Returns true when `c` is safe to embed in a search pattern verbatim.
 pub fn is_literal_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || EXTRA_LITERAL.contains(&c)
 }
 
-/// Builds the pattern to hand the server, when the query is provably literal.
+/// Builds the pattern to send to the server, when the query is provably literal.
 ///
-/// # A superset, deliberately, and not the tightest form
-///
-/// The obvious table would spell a trailing match `*term.*` and a type filter
-/// on several extensions as alternation. Both are wrong, and the first is
-/// dangerous: NT `*` matches any run *including dots*, so `*report.*` requires
-/// a dot to exist, and a file named plainly `report` - whose stem does end in
-/// `report` - would not come back. That is a false *negative*, which the module
-/// note above identifies as the one thing this may never produce and which
-/// [`crate::search::verify`] reacts to by disabling the whole mechanism.
-///
-/// So each mode emits the tightest pattern that is still a provable superset
-/// of the local answer, and [`confirms`] narrows it back locally:
+/// Each mode emits the tightest pattern that is still a provable superset of
+/// the local answer, and [`confirms`] narrows it back locally. A suffix match
+/// cannot use `*term.*`: NT `*` matches any run including dots, so that
+/// pattern requires a dot and misses a file named plainly `term`, a false
+/// negative.
 ///
 /// | mode | pattern | why it is a superset |
 /// |------|---------|----------------------|
@@ -112,14 +89,14 @@ pub fn is_literal_char(c: char) -> bool {
 /// | prefix | `term*` | exact: a name starts with the term iff it matches |
 /// | suffix | `*term*` | a stem ending in the term contains it |
 ///
-/// A *single* extension is appended, because one extension is exactly
-/// expressible and is the larger saving on the wire. Several cannot be: NT
-/// expressions have no alternation and `FindFirstFileExW` takes one pattern.
+/// A single extension is appended because it is exactly expressible. Several
+/// are not: NT expressions have no alternation and `FindFirstFileExW` takes
+/// one pattern.
 pub fn wildcard_for(query: &Query) -> Result<String, PatternReject> {
     let term = query.term();
     let body = literal_body(term)?;
 
-    // One extension is exact; several are left entirely to the local narrowing.
+    // One extension is exact; several are left to the local narrowing.
     let ext = match query.types().iter().next() {
         Some(e) if query.types().len() == 1 => format!(".{}", e.as_str()),
         _ => String::new(),
@@ -127,7 +104,7 @@ pub fn wildcard_for(query: &Query) -> Result<String, PatternReject> {
 
     let pattern = match query.mode() {
         MatchMode::Prefix => format!("{body}*{ext}"),
-        // A trailing match is deliberately loose. See the note above.
+        // Loose on purpose; see the doc comment above.
         MatchMode::Contains | MatchMode::Suffix => format!("*{body}*{ext}"),
     };
     if pattern.eq_ignore_ascii_case("*.*") {
@@ -136,18 +113,13 @@ pub fn wildcard_for(query: &Query) -> Result<String, PatternReject> {
     Ok(pattern)
 }
 
-/// The same pattern, for an enumeration that wants folders as well as files.
+/// The same pattern, for an enumeration that returns folders as well as files.
 ///
-/// The extension is deliberately **not** pushed down here, and the reason is
-/// worth stating because the omission looks like one: a folder has no
-/// extension, so `*p12345*.pdf` cannot match a folder named `p12345` - and on
-/// a live share a folder match is the common case, since a job code names a
-/// folder at least as often as a file. Appending the extension would quietly
-/// lose exactly the hits the share exists to find.
-///
-/// So the type filter is narrowed locally by [`confirms`] instead. The wire
-/// saving is given up; [`wildcard_for`] keeps it for the files-only
-/// enumeration in [`crate::search::verify`], where no folder is in play.
+/// The extension is not appended: a folder has no extension, so
+/// `*p12345*.pdf` cannot match a folder named `p12345`, and on a share a
+/// folder is the common hit. [`confirms`] applies the type filter locally;
+/// [`wildcard_for`] keeps the extension for the files-only enumeration in
+/// [`crate::search::verify`].
 pub fn wildcard_for_entries(query: &Query) -> Result<String, PatternReject> {
     let body = literal_body(query.term())?;
     let pattern = match query.mode() {
@@ -160,15 +132,13 @@ pub fn wildcard_for_entries(query: &Query) -> Result<String, PatternReject> {
     Ok(pattern)
 }
 
-/// The term itself, once it is proven safe to embed in a pattern verbatim.
+/// Returns the term once it is proven safe to embed in a pattern verbatim.
 fn literal_body(query: &str) -> Result<&str, PatternReject> {
     if !query.is_ascii() {
         return Err(PatternReject::NonAscii);
     }
-    // The server's floor, not the panel's. A one-character filter matches
-    // most of a share, so the round trip costs a full listing and saves
-    // nothing - which is why this stayed at three when the local search
-    // dropped to one.
+    // The server's floor, independent of the panel's. A very short filter
+    // matches most of a share, so the round trip saves nothing.
     if query.len() < MIN_SERVER_QUERY_LEN {
         return Err(PatternReject::TooShort);
     }
@@ -188,19 +158,13 @@ fn literal_body(query: &str) -> Result<&str, PatternReject> {
     Ok(query)
 }
 
-/// Whether a name the server returned is one the local index would return.
+/// Returns whether a name the server returned is one the local index would
+/// return.
 ///
-/// Two jobs, and the second is new. It removes 8.3 short-name false positives,
-/// which it has always done - and it narrows the deliberately loose pattern
-/// [`wildcard_for`] emits for a trailing match, and for a type filter naming
-/// several extensions, back to what was actually asked for.
-///
-/// That second job is not optional. `VerifyOutcome::Server` *replaces* the
-/// list on screen, so without this a filtered search would quietly un-filter
-/// itself a third of a second after it was filtered.
-///
-/// Implemented by calling the matcher's own predicate rather than restating
-/// it: a second opinion here is a second opinion about what the search meant.
+/// Removes 8.3 short-name false positives and narrows the loose patterns from
+/// [`wildcard_for`] (trailing match, several extensions) back to the query.
+/// Required because `VerifyOutcome::Server` replaces the list on screen.
+/// Delegates to the matcher's own predicate so both agree by construction.
 pub fn confirms(name: &str, query: &Query) -> bool {
     let folded = fold::fold_query(name);
     let needle = fold::fold_query(query.term());
@@ -214,8 +178,8 @@ pub fn confirms(name: &str, query: &Query) -> bool {
 mod tests {
     use super::*;
 
-    /// Skips the length check, so the `*.*` special case can be exercised
-    /// directly - `.` on its own is rejected as too short first.
+    /// Skips the length check so the `*.*` case can be exercised directly;
+    /// `.` alone is rejected as too short first.
     fn wildcard_for_unchecked(query: &str) -> Result<String, PatternReject> {
         let pattern = format!("*{query}*");
         if pattern.eq_ignore_ascii_case("*.*") {
@@ -252,7 +216,7 @@ mod tests {
         }
     }
 
-    /// The three that are easy to miss: ANSI aliases for DOS wildcards.
+    /// ANSI aliases for DOS wildcards.
     #[test]
     fn rejects_the_dos_wildcard_aliases() {
         assert_eq!(
@@ -326,8 +290,7 @@ mod tests {
         assert!(wildcard_for(&Query::contains("a".repeat(MAX_SERVER_QUERY_LEN))).is_ok());
     }
 
-    /// Path canonicalisation strips these before the kernel sees them, which
-    /// would silently change what was searched for.
+    /// Path canonicalisation strips these before the kernel sees them.
     #[test]
     fn rejects_a_trailing_space_or_dot() {
         assert_eq!(
@@ -357,10 +320,10 @@ mod tests {
         );
     }
 
-    /// kernel32 special-cases this one pattern into "match everything".
+    /// kernel32 special-cases this pattern into "match everything".
     #[test]
     fn rejects_the_pattern_that_kernel32_rewrites() {
-        // "." on its own is too short, so construct the collision directly.
+        // "." alone is too short, so construct the collision directly.
         assert_eq!(
             wildcard_for(&Query::contains(".")),
             Err(PatternReject::TooShort)
@@ -382,12 +345,8 @@ mod tests {
         assert_eq!(wc("p12345*"), "p12345*");
     }
 
-    /// `*p12345.*` would be the symmetrical spelling and it is unsound: NT `*`
-    /// matches any run including dots, so that pattern requires a dot to
-    /// exist, and a file named plainly `p12345` - whose stem does end in
-    /// `p12345` - would not come back. A false negative is the one thing the
-    /// pushdown may never produce, and three of them switch it off for the
-    /// rest of the process.
+    /// `*p12345.*` is unsound: NT `*` matches dots, so it requires a dot and
+    /// misses a file named plainly `p12345`.
     #[test]
     fn a_trailing_anchor_is_pushed_down_loosely_because_a_dotless_name_has_no_dot() {
         assert_eq!(wc("*p12345"), "*p12345*");
@@ -401,14 +360,7 @@ mod tests {
         assert_eq!(wc("p12345 ext:dwg,pdf"), "*p12345*");
     }
 
-    /// The server answer *replaces* what is on screen, so anything the loose
-    /// pattern over-returned has to be removed here - otherwise a narrowed
-    /// search silently un-narrows itself a third of a second after it ran.
-    /// A folder has no extension, so a pattern carrying one cannot match a
-    /// folder - and on a live share a folder match is the common case, because
-    /// a job code names a folder at least as often as a file. Pushing the
-    /// extension down there would quietly lose the hits the share exists to
-    /// find, which a live test caught.
+    /// A folder has no extension, so a pattern for folders must not carry one.
     #[test]
     fn a_pattern_that_must_match_folders_never_carries_the_extension() {
         let q = Query::parse("p12345 ext:pdf");
@@ -432,9 +384,8 @@ mod tests {
         assert!(!confirms("p12345.txt", &several), "not an asked-for type");
     }
 
-    /// The property the audit rests on: whatever pattern is emitted, the
-    /// server's answer is a superset of the local one. Checked against a glob
-    /// evaluator rather than argued, because only `*` and literals ever appear.
+    /// Whatever pattern is emitted, the server's answer is a superset of the
+    /// local one. Checked against a glob evaluator.
     #[test]
     fn every_pattern_emitted_is_a_superset_of_what_the_index_would_return() {
         let names = [
@@ -468,8 +419,8 @@ mod tests {
         }
     }
 
-    /// Two-cursor glob with backtracking on the last star. Only `*` and
-    /// literals are ever emitted, so nothing else needs handling.
+    /// Two-cursor glob with backtracking on the last star. Only `*` and literals
+    /// are emitted, so nothing else is handled.
     fn glob(pattern: &str, name: &str) -> bool {
         let p: Vec<char> = pattern.to_lowercase().chars().collect();
         let n: Vec<char> = name.to_lowercase().chars().collect();

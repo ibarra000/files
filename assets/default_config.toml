@@ -3,7 +3,7 @@
 # Default template with placeholder values. Replace the example paths with
 # your own, set `enabled = true` on the shares you want, then run:
 #
-#     files --check-config
+#     files-cli --check-config
 #
 # Use literal strings ('...') for paths. Basic strings ("...") process
 # backslash escapes, so "X:\Example" is a parse error.
@@ -83,7 +83,7 @@ enabled = false
 # Advanced.
 # enum_strategy = "handle-dirinfo"   # handle-dirinfo | findfirstex | std
 # matcher       = "simd"             # simd | naive
-# server_filter = false              # enable only after `files --bench` passes
+# server_filter = false              # enable only after `files-cli --bench` passes
 # persist       = true               # keep the on-disk index between runs
 # live_updates  = true               # re-read changed folders as they change
 # history       = true               # remember codes between sessions

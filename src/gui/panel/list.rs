@@ -1,39 +1,12 @@
-//! The content band: a caption, a list, and the only scrollbar on the panel.
+//! The content band: a caption over one of the results, recent codes, aliases
+//! or drive picker, in the panel's only [`ScrollArea`]; or a centred empty-state
+//! message.
 //!
-//! Ueli's content area is one element with `padding: 10`, `overflow-y: auto`
-//! and a `gap` of ten between groups, where a group is a caption over a list.
-//! This is that, with four kinds of list rather than two - the results, the
-//! codes used before, the drive picker, and a reason there are none.
-//!
-//! # Why the wheel works now
-//!
-//! It did not before, and the note in `gui::input` said why: the panel drew a
-//! twelve-row window over `hits` that the *state machine* owned, so the only
-//! thing a wheel event could have moved was the selection - and a hand resting
-//! on a mouse walked somebody's cursor through their own search results. So it
-//! was dropped.
-//!
-//! A [`ScrollArea`] moves the viewport instead and touches nothing else, which
-//! is what a wheel is for. The selection is a separate thing that the arrows
-//! move, and it is brought back into view only when it has left it.
-//!
-//! # `block: "nearest"`
-//!
-//! Ueli scrolls the selected row into view with `scrollIntoView({ block:
-//! "nearest" })`, which moves by the least it can and does nothing at all when
-//! the row is already on screen. egui spells the same policy `align: None`.
-//!
-//! It is asked for only on the frames the selection actually *changed*, which
-//! is the part that is easy to get wrong: requested every frame, the view
-//! would snap back to the selection the instant somebody wheeled away from it,
-//! and the scrollbar would be decoration.
-//!
-//! And it lands in one frame, because the scroller is built with
-//! `animated(false)`. egui's default is to ease a scroll target over a couple
-//! of hundred milliseconds, which for a held Down key means the view chasing a
-//! cursor it never catches; `scrollIntoView` with no `behavior` does not do
-//! that either, and neither does anything else on this panel. See
-//! [`crate::gui::anim`].
+//! The mouse wheel scrolls the viewport only; the selection moves with the
+//! arrow keys. The selected row is scrolled into view by the minimum amount
+//! (`align: None`), and only on frames where the selection changed, otherwise
+//! the view would snap back after every wheel scroll. Scrolling is not
+//! animated (see [`crate::gui::anim`]).
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align, Align2, Id, Layout, Rect, ScrollArea, Sense, Ui, UiBuilder, pos2, vec2};
@@ -46,11 +19,10 @@ use crate::gui::anim::Content;
 use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::{self, Emphasis, Run};
 
-/// A caption's left inset, which is five points less than a row's so that the
-/// heading reads as a label *over* the list rather than as an item in it.
+/// A caption's left inset, smaller than a row's so it reads as a heading.
 const HEADING_PAD_X: f32 = 5.0;
 
-/// Draws whichever body is on screen, and reports what the pointer did to it.
+/// Draws the current body and returns the pointer intents it produced.
 pub fn show(
     ui: &mut Ui,
     state: &AppState,
@@ -59,10 +31,8 @@ pub fn show(
     content: Content,
     wall: SystemTime,
 ) -> Vec<Intent> {
-    // The empty state is a message rather than a list: it is at most five
-    // lines, it can never overflow the band, and Ueli centres its equivalent
-    // on both axes. So it is drawn straight onto the band with no scroller to
-    // put a bar down the side of something that does not scroll.
+    // The empty state is a short message that cannot overflow, so it is drawn
+    // directly on the band without a scroller.
     if content == Content::Empty {
         if let Some(block) = view::empty::view(&super::empty_reason(state), state.input.text()) {
             centred_block(ui, theme, band, &block);
@@ -71,13 +41,9 @@ pub fn show(
     }
 
     let mut intents = Vec::new();
-    // Named, and this is load-bearing rather than tidiness. A `Ui` built
-    // without an `id_salt` takes an automatic one derived from how many ids
-    // its parent has handed out so far - and the header and the footer hand
-    // out a different number every frame, because the hint chips that fit
-    // change with the phase. So the scroller underneath it was a *different*
-    // scroller each frame, its remembered offset was thrown away every time,
-    // and a list that had been scrolled snapped back before anybody saw it.
+    // The explicit `id_salt` is required. An automatic id depends on how many
+    // ids the parent has issued, which can vary between frames; the scroller
+    // would then lose its offset.
     let mut child = ui.new_child(
         UiBuilder::new()
             .id_salt("files-list")
@@ -85,46 +51,29 @@ pub fn show(
             .layout(Layout::top_down(Align::Min)),
     );
 
-    // The scrollbar, set here rather than taken from `theme::style`. That
-    // one dresses the settings window, where four points of inner margin
-    // hold the bar off a column of prose; the results band has padding of
-    // its own and the two together would be a ten-point gutter down a
-    // six-hundred-point window. Ueli's is six points of layout, hard against
-    // the edge, and never floating.
-    //
-    // Set on the child rather than on the context, so it is scoped to this
-    // scroller and cannot leak into a window that wants the other one.
+    // Scrollbar style for this scroller only: flush to the edge with no
+    // margins, unlike the settings window's style from `theme::style`. Set on
+    // the child so it does not leak into the context.
     {
         let scroll = &mut child.spacing_mut().scroll;
         scroll.bar_width = theme::SCROLL_W;
         scroll.bar_inner_margin = 0.0;
         scroll.bar_outer_margin = 0.0;
-        // Always there, never over the content. A floating bar appears while
-        // the wheel is moving and fades once it stops, which is to say it
-        // says how far down the list you are at exactly the moments nobody
-        // is looking.
+        // Always visible and never overlaid on content.
         scroll.floating = false;
     }
 
     ScrollArea::vertical()
-        // One offset per body, so stepping into the drive picker from halfway
-        // down three hundred results does not open the picker scrolled past
-        // its last drive.
+        // One scroll offset per body.
         .id_salt(("files-list", discriminant(content)))
-        // Both axes: the band is a fixed height whether or not there is
-        // anything in it, and a scroller that shrank to its content would
-        // leave the rows floating in the middle of it.
+        // The band has a fixed size regardless of content.
         .auto_shrink([false, false])
-        // Instant, like everything else on this panel. egui's default is to
-        // ease a `scroll_to` target over a couple of hundred milliseconds,
-        // which for a held Down key is a view chasing a cursor it never
-        // catches; `scrollIntoView` with no `behavior` does not do that
-        // either. See [`crate::gui::anim`] for why nothing here moves.
+        // Instant scrolling, so a held arrow key does not outrun an eased
+        // scroll. See [`crate::gui::anim`].
         .animated(false)
         .show(&mut child, |ui| {
-            // The band's padding goes on the inside, so the scrollbar rides
-            // the panel's edge rather than sitting ten points in from it -
-            // which is where `overflow-y: auto` puts it, padding and all.
+            // Padding goes inside the scroller so the scrollbar sits on the
+            // panel edge.
             let inner = ui.max_rect().shrink2(vec2(theme::BAND_PAD, 0.0));
             let mut body = ui.new_child(
                 UiBuilder::new()
@@ -132,18 +81,11 @@ pub fn show(
                     .max_rect(inner)
                     .layout(Layout::top_down(Align::Min)),
             );
-            // The air between rows is allocated between them rather than
-            // left to the toolkit, because `gap` means *between*: egui's
-            // `item_spacing` would also put five points under the caption,
-            // which already carries its own, and five under the last row on
-            // top of the band's padding.
+            // Row gaps are allocated explicitly; `item_spacing` would also add
+            // space after the caption and the last row.
             body.spacing_mut().item_spacing.y = 0.0;
 
-            // Allocated rather than `add_space`d, both ends: a space only
-            // moves the cursor, and what the scroller measures is the
-            // rectangle everything was allocated in. The bottom pad would
-            // have been the difference between a last row clear of the rule
-            // and one touching it.
+            // Allocated padding at both ends; see `space`.
             space(&mut body, theme::BAND_PAD);
             if let Some(text) = heading_of(content) {
                 heading(&mut body, theme, text);
@@ -167,20 +109,15 @@ pub fn show(
     intents
 }
 
-/// Air in the list, allocated rather than skipped over.
+/// Allocates vertical space in the list.
 ///
-/// `Ui::add_space` only moves the cursor, and what the scroller measures is
-/// the rectangle everything was *allocated* in - so a space at the foot of
-/// the list would be the difference between a last row clear of the rule and
-/// one touching it.
+/// `Ui::add_space` only moves the cursor, but the scroller measures allocated
+/// rects, so trailing padding must be allocated to count.
 fn space(ui: &mut Ui, amount: f32) {
     ui.allocate_exact_size(vec2(ui.available_width(), amount), Sense::hover());
 }
 
-/// The caption over a group.
-///
-/// Ueli's is a twelve-point caption in the dimmest foreground the theme has,
-/// five points in from the left and five points clear of the list under it.
+/// Draws the caption over a group.
 fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
     let (rect, _) =
         ui.allocate_exact_size(vec2(ui.available_width(), theme::HEADING_H), Sense::hover());
@@ -192,22 +129,14 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
         Align2::LEFT_TOP,
         text,
         theme::font(theme::SIZE_CAPTION, Weight::Semibold),
-        // Ueli's group caption is `NeutralForeground4` at weight 500, which
-        // Windows resolves to Semibold because Segoe UI ships no Medium.
+        // `NeutralForeground4` at weight 500, which resolves to Semibold
+        // because Segoe UI has no Medium.
         theme.caption,
     );
     super::announce(ui, rect, ("heading", text), text);
 }
 
-/// What the group above each list is called.
-///
-/// Two of Ueli's groups, renamed for what this program has: its `favorites`
-/// and `searchResults` are an installed application and a fuzzy match over
-/// one, and ours are a code somebody typed and the drawings it found.
-///
-/// There is no heading over the empty state. A caption saying "Results" over
-/// a sentence explaining that there are none would be the panel arguing with
-/// itself.
+/// Returns the caption for a body; the empty state has none.
 const fn heading_of(content: Content) -> Option<&'static str> {
     match content {
         Content::Results => Some("Results"),
@@ -218,11 +147,7 @@ const fn heading_of(content: Content) -> Option<&'static str> {
     }
 }
 
-/// A stable number per body, so each keeps its own scroll offset.
-///
-/// Without it every body shares one, and stepping into the drive picker from
-/// halfway down three hundred results would open the picker scrolled past its
-/// last drive.
+/// Returns a stable number per body, so each keeps its own scroll offset.
 const fn discriminant(content: Content) -> u8 {
     match content {
         Content::Results => 0,
@@ -242,20 +167,18 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         theme,
         layout: state.settings.result_layout,
         routes: &state.settings.routes,
-        // Once, rather than once per row: the answer goes through the font
-        // atlas and is the same for all three hundred of them.
+        // Checked once per frame, not per row.
         icons: theme::has_icon(ui.ctx(), Icon::File),
-        // The term, not the line: `report ext:pdf` is fourteen bytes and the
-        // match is six. `view::row::highlight` answers an out-of-range length
-        // by returning a plain name, so the symptom would be an underline
-        // quietly never appearing rather than anything louder.
+        // The search term's length, not the whole input's (`report ext:pdf`
+        // matches on six bytes). `view::row::highlight` silently skips an
+        // out-of-range length.
         query_len: state.query().term().len(),
     };
     let selected = state.selected_row();
     let follow = selection_changed(ui, "results", selected);
     let mut hovered = None;
 
-    // What the pointer did to one result, whichever way it was laid out.
+    // Handles pointer interaction for one result, in either layout.
     let mut note = |ui: &Ui, rank: usize, response: eframe::egui::Response| {
         if selected == Some(rank) && follow {
             bring_into_view(ui, response.rect);
@@ -280,15 +203,9 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             note(ui, rank, response);
         }
     } else {
-        // Row-major, the order `app::state::grid` moves in: the best match
-        // top left and the next beside it. Each line is allocated whole and
-        // cut into cells, and each cell is drawn by the same `row::show` in a
-        // child `Ui` the width of the cell - so a row still knows only about
-        // itself, and still hit-tests itself, and nothing here has to map a
-        // pointer to a rank.
-        //
-        // The gap between columns is the gap between lines, so the grid has
-        // one rhythm rather than two.
+        // Row-major, matching `app::state::grid` navigation. Each line is cut
+        // into cells, each drawn by `row::show` in its own child `Ui`, so rows
+        // hit-test themselves. Column and line gaps are equal.
         let row_h = theme::row_h(style.layout);
         let gap = theme::ROW_GAP;
         for (line, chunk) in state.hits.chunks(columns).enumerate() {
@@ -318,11 +235,10 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     intents
 }
 
-/// The codes used before, which is what the Up arrow shows.
+/// Draws the recent-codes list shown by the Up arrow.
 ///
-/// Drawn deliberately unlike a result - no folder column, no extension, and
-/// the accent colour a code is typed in - so that "Enter takes the row you are
-/// on" needs no explanation of which kind of row this is.
+/// Styled unlike a result (accent weight, no folder or extension) so the two
+/// kinds of row are distinguishable.
 fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let mut intents = Vec::new();
     let cursor = state.history.cursor();
@@ -345,9 +261,7 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         });
 
         let painter = ui.painter();
-        // The band, drawn before the text so the text sits on it. The same
-        // treatment a result gets, because it is the same thing: the row the
-        // field came from.
+        // Selection band, drawn before the text, as for a result.
         if cursor == Some(rank) {
             painter.rect_filled(rect, theme::radius(theme::RADIUS_MEDIUM), theme.selection);
             row::marker(ui, theme, rect);
@@ -365,9 +279,7 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
             theme::font(theme::SIZE_BODY, theme.weight(Emphasis::Accent)),
             theme.text,
         );
-        // By rank. This used to push `Hint(Action::Recall)`, which is the Up
-        // arrow with the rank thrown away - so clicking the fifth code stepped
-        // one entry older.
+        // Recall by rank, so a click picks the clicked entry.
         if response.clicked() {
             intents.push(Intent::Recall(rank));
         }
@@ -375,12 +287,10 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     intents
 }
 
-/// The shortcuts somebody configured, which is what an empty box shows.
+/// Draws the configured aliases, shown when the box is empty.
 ///
-/// Drawn like the recent codes and not like a result: the accent colour a
-/// code is typed in, because that is what taking one of these puts in the
-/// box. What is on the right is the code it stands for, dimmed - so the list
-/// reads as `pw \u{2192} 11-D-0704` and is its own documentation.
+/// Styled like the recent codes, with the alias name on the left and its
+/// code dimmed on the right.
 fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let mut intents = Vec::new();
     let cursor = state.alias_cursor();
@@ -398,9 +308,7 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
         if !ui.is_rect_visible(rect) && cursor != Some(rank) {
             continue;
         }
-        // The note as well, where there is one: it is what the person who
-        // wrote the list put there to remind themselves a year later, and a
-        // reader has no column width to be elided to.
+        // The accessible name includes the alias's note, if any.
         let spoken = match &alias.note {
             Some(note) => format!("{} \u{b7} {note}", alias.describe()),
             None => alias.describe(),
@@ -449,13 +357,10 @@ fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     intents
 }
 
-/// Which drive to re-read.
+/// Draws the drive picker that `F5` opens to choose which share to re-read.
 ///
-/// `F5` used to re-read every share at once. Almost every press wanted one of
-/// them, and across a few hundred people the difference is between a handful
-/// of passes over a share of three hundred thousand folders and several
-/// hundred simultaneous ones. So the key asks - and asking is a list, which is
-/// the one reason anything still borrows the body.
+/// Re-reading one share instead of all limits simultaneous passes over large
+/// shares across many users.
 fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
     let font = theme::font(theme::SIZE_BODY, Weight::Regular);
     let small = theme::font(theme::SIZE_CAPTION, Weight::Regular);
@@ -488,10 +393,8 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
         let block = view::shares::row(&share, wall);
         super::announce(ui, rect, ("share", rank), &view::plain(&block));
 
-        // The name on the left and everything else on the right. Three runs
-        // come back - the name, the age, and only sometimes a reason - so the
-        // tail is laid out from the right edge backwards rather than at fixed
-        // positions, and a row with no reason simply has a shorter tail.
+        // Name on the left. The remaining runs (age, optional reason) are laid
+        // out from the right edge backwards.
         let painter = ui.painter().clone();
         let mut runs = block.iter();
         if let Some(name) = runs.next() {
@@ -524,15 +427,9 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
 
 // -- the empty state --------------------------------------------------------
 
-/// The reason there is nothing, in the middle of the band.
+/// Draws the empty-state message centred on both axes of the band.
 ///
-/// Centred on both axes, which is Ueli's shape for the same screen and is the
-/// one arrangement that does not read as a list that failed to load. It used
-/// to be left-aligned at the top of a twelve-row box, which is a grey sentence
-/// in the corner of three hundred points of nothing.
-///
-/// `view::empty` is deliberately silent about this: where a block sits is
-/// layout, and the module note there says so.
+/// Placement lives here; `view::empty` supplies only the text.
 fn centred_block(ui: &Ui, theme: &Theme, band: Rect, block: &view::Block) {
     let painter = ui.painter().clone();
     let mut job = LayoutJob::default();
@@ -561,44 +458,29 @@ fn centred_block(ui: &Ui, theme: &Theme, band: Rect, block: &view::Block) {
     painter.galley(at, galley, theme.text);
 }
 
-/// The weight the theme asks for a run, at the one size a block is set in.
+/// Returns the body-size font with the theme's weight for a run's emphasis.
 ///
-/// There used to be a second size here: `Emphasis::Strong` was drawn at a
-/// seventeen-point headline. Fluent carries strength with weight and not with
-/// scale - `body1` against `body1Strong` is 400 against 600 at the same 14 -
-/// and Ueli's own empty state is one body-sized line. So the size is no
-/// longer a property of the run, and emphasis is the theme's business alone.
+/// Emphasis is carried by weight only, as in Fluent (`body1` 400 vs
+/// `body1Strong` 600, both at 14).
 fn weight_of(theme: &Theme, run: &Run) -> eframe::egui::FontId {
     theme::font(theme::SIZE_BODY, theme.weight(run.emphasis))
 }
 
 // -- following the selection ------------------------------------------------
 
-/// Moves the view by the least it takes to put `rect` on screen.
+/// Scrolls the minimum distance needed to put `rect` on screen.
 ///
-/// `align: None` is `block: "nearest"` exactly: scroll down if the row is
-/// below the band, up if it is above, and not at all if it is already on it.
-/// Any other alignment would yank the selected row to the middle of the list
-/// on every arrow press.
-///
-/// It lands in one frame because the scroller was built with `animated(false)`
-/// - see [`show`].
+/// `align: None` does nothing if `rect` is already visible. The scroll is
+/// instant because the scroller uses `animated(false)`; see [`show`].
 fn bring_into_view(ui: &Ui, rect: Rect) {
     ui.scroll_to_rect(rect, None);
 }
 
-/// Whether the selection moved since the last frame this body was drawn.
+/// Returns whether the selection changed since this body was last drawn.
 ///
-/// The whole of `block: "nearest"` is in *when* it is asked for. egui's
-/// `scroll_to_rect` is a request the scroller honours on the frame it is made,
-/// and a request made on every frame is a view pinned to the selection: the
-/// wheel would move the list and the next frame would put it straight back.
-///
-/// So the last rank is kept in egui's own per-frame store, keyed by the body
-/// it belongs to, and the request is made only when the two differ. The first
-/// frame after a summon has nothing stored and therefore follows, which is
-/// right - a panel that opens with the fourth row selected should open showing
-/// it.
+/// Scroll requests are made only on change; a request every frame would pin
+/// the view to the selection and defeat the mouse wheel. The last value is
+/// kept in egui temp data per body; the first frame has none and so follows.
 fn selection_changed(ui: &Ui, what: &'static str, selected: Option<usize>) -> bool {
     let id = Id::new(("files-follow", what));
     ui.data_mut(|data| {
@@ -612,8 +494,6 @@ fn selection_changed(ui: &Ui, what: &'static str, selected: Option<usize>) -> bo
 mod tests {
     use super::*;
 
-    /// Every body keeps its own scroll offset, which needs every body to have
-    /// its own number.
     #[test]
     fn every_body_scrolls_separately() {
         let mut seen: Vec<u8> = [
@@ -631,8 +511,6 @@ mod tests {
         assert_eq!(seen.len(), 5, "two bodies share a scroll offset");
     }
 
-    /// The two bodies that are lists of somebody's own things get a caption;
-    /// the one that is a sentence does not.
     #[test]
     fn only_a_list_gets_a_caption() {
         assert!(heading_of(Content::Results).is_some());

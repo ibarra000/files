@@ -1,38 +1,17 @@
-//! A walked directory tree, as something searchable.
+//! A walked directory tree as a searchable index: which files are under a
+//! root, and which folder holds each one.
 //!
-//! The flat index answers "which files are in this one directory". A tree has
-//! to answer "which files are anywhere under this root, and which folder is
-//! each one in" - for five million files across three hundred thousand
-//! folders, on a machine that also has to stay responsive while someone types.
+//! # Design
 //!
-//! # Why this wraps [`Snapshot`] instead of changing it
+//! A segment wraps two ordinary [`Snapshot`]s (file names and relative folder
+//! paths) plus a run table joining them, so `search::matcher` and its parity
+//! tests (`tests/matcher_parity.rs`) are unchanged and folder names are
+//! matched by the same code with the same fold rules.
 //!
-//! [`Snapshot`] is an arena of NUL-separated names with one offsets table,
-//! and `search::matcher` sweeps it with a single vectorised pass. That is the
-//! part of this program that has to stay fast, and it is proven against a
-//! frozen copy of the original implementation in `tests/matcher_parity.rs`.
-//! So the directory dimension is added *around* it: a segment holds two
-//! ordinary snapshots and a small table joining them. Nothing the matcher
-//! touches changes, and a flat mapping keeps exactly the code path it has now.
-//!
-//! # Why the folder names are a `Snapshot` too
-//!
-//! A job code names a folder far more often than it names a file, so "does
-//! this code match a directory" is a question that has to be answered on every
-//! keystroke - and it is the *same* substring question, over a different
-//! arena. Storing the folders as their own snapshot means it is answered by
-//! the same matcher, with the same fold rules and the same NUL guarantees,
-//! rather than by a second implementation written to a lower standard because
-//! it is "only for folders". At three hundred thousand directories against
-//! five million files it is a 2% pass on top of the one already being made.
-//!
-//! # Why runs rather than an owner per file
-//!
-//! The walk hands over one whole directory at a time, so a segment's files
-//! arrive grouped and a directory's files are always contiguous. Recording
-//! `(first_file, dir)` once per directory is therefore exact, and costs 2.4 MB
-//! at this scale where a `u32` owner per file would cost 20 MB - for a lookup
-//! that only ever happens for the few hundred rows actually on screen.
+//! A walk delivers one whole directory at a time, so each directory's files
+//! are contiguous. One `(first_file, dir)` run per directory is therefore
+//! exact and far smaller than a per-file owner index; it is only consulted
+//! for displayed rows.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -69,30 +48,23 @@ impl Run {
 
 /// A contiguous slice of a walked tree.
 ///
-/// Sealed and published as the walk proceeds, so results appear about a second
-/// in rather than after the whole share has been read.
+/// Sealed and published as the walk proceeds, so results appear before the
+/// whole share has been read.
 #[derive(Debug)]
 pub struct TreeSegment {
-    /// File names. Its prefix is empty: a file's path is composed from the
-    /// root and the owning directory, not carried per entry.
+    /// File names. The prefix is empty: paths are composed from the root and
+    /// the owning directory.
     files: Snapshot,
-    /// The relative directory paths this segment covers, `\`-separated, with
-    /// the root itself spelled as the empty string.
+    /// Relative directory paths, `\`-separated, with the root as `""`.
     dirs: Snapshot,
-    /// Ascending by both fields. Only directories that hold at least one file
-    /// appear; an empty folder is still in `dirs`, so it can be matched by
-    /// name, but it owns no files to point at.
+    /// Ascending by both fields. Only directories with at least one file
+    /// appear; an empty folder is in `dirs` but owns no files.
     runs: Box<[Run]>,
 }
 
 impl TreeSegment {
-    /// Assembles a segment from parts that came from somewhere other than a
-    /// walk - which today means the persisted index.
-    ///
-    /// Validating here rather than at the call site is what keeps
-    /// [`Self::check_invariants`] the single definition of a well-formed
-    /// segment: a decoder cannot accidentally accept a run table the builder
-    /// could never have produced.
+    /// Assembles a segment from decoded parts (the persisted index),
+    /// validating with [`Self::check_invariants`].
     pub(crate) fn from_parts(
         files: Snapshot,
         dirs: Snapshot,
@@ -103,9 +75,8 @@ impl TreeSegment {
         Ok(seg)
     }
 
-    /// The run table, for the persistence layer. Not public: a run is
-    /// meaningless without the segment it indexes into, and every in-crate
-    /// reader goes through [`Self::dir_of`] or [`Self::files_of`].
+    /// The run table, for the persistence layer. Other readers use
+    /// [`Self::dir_of`] or [`Self::files_of`].
     pub(crate) fn runs(&self) -> &[Run] {
         &self.runs
     }
@@ -126,24 +97,21 @@ impl TreeSegment {
         self.dirs.len() as u32
     }
 
-    /// Which directory file `i` belongs to.
+    /// Returns the directory that file `i` belongs to.
     ///
-    /// `None` only when `i` is out of range, which `check_invariants` makes
-    /// unreachable for a segment that was built rather than decoded.
+    /// `None` only when `i` is out of range.
     pub fn dir_of(&self, i: u32) -> Option<u32> {
         if i >= self.file_count() {
             return None;
         }
-        // The last run that starts at or before `i`. Runs are ascending, so
-        // this is the directory whose range contains it.
+        // The last run starting at or before `i` is the owning directory.
         let at = self.runs.partition_point(|r| r.first_file <= i);
         self.runs.get(at.checked_sub(1)?).map(|r| r.dir)
     }
 
-    /// The half-open range of file indices owned by directory `d`.
+    /// Returns the half-open range of file indices owned by directory `d`.
     ///
-    /// Empty when the directory holds no files, which is what makes a folder
-    /// match expand to nothing rather than to someone else's files.
+    /// Empty when the directory holds no files.
     pub fn files_of(&self, d: u32) -> std::ops::Range<u32> {
         let Ok(at) = self.runs.binary_search_by_key(&d, |r| r.dir) else {
             return 0..0;
@@ -156,7 +124,7 @@ impl TreeSegment {
         start..end
     }
 
-    /// The directory path of `d`, relative to the root.
+    /// Returns the directory path of `d`, relative to the root.
     pub fn dir_path(&self, d: u32) -> std::borrow::Cow<'_, str> {
         self.dirs.display_name(d)
     }
@@ -165,13 +133,10 @@ impl TreeSegment {
         self.files.memory_bytes() + self.dirs.memory_bytes() + std::mem::size_of_val(&*self.runs)
     }
 
-    /// Checks the structural promises this type makes about itself.
+    /// Checks the segment's structural invariants.
     ///
-    /// Cheap and O(directories), so it runs on every sealed segment rather
-    /// than only on decoded ones. A run pointing at the wrong directory does
-    /// not crash: it reports a real file under a path it is not at, which is
-    /// a wrong answer nobody can tell is wrong - the exact class of bug this
-    /// index exists to remove.
+    /// O(directories), so it runs on every sealed segment. A wrong run would
+    /// not crash but would silently report files under the wrong folder.
     pub fn check_invariants(&self) -> Result<(), &'static str> {
         self.files.check_invariants()?;
         self.dirs.check_invariants()?;
@@ -210,40 +175,29 @@ impl TreeSegment {
 
 /// One mapping's whole index, as an ordered list of sealed segments.
 ///
-/// Cheap to clone: publishing one more segment copies a vector of refcounts,
-/// not a byte of the hundreds of megabytes behind them. That is what lets a
-/// walk publish as it goes without the cost growing with what it has already
-/// found.
+/// Cheap to clone: publishing one more segment copies a vector of `Arc`s, not
+/// the data, so publishing during a walk stays cheap.
 #[derive(Debug, Clone)]
 pub struct TreeIndex {
     root: Arc<str>,
     segments: Vec<Arc<TreeSegment>>,
-    /// Prefix sums of segment file counts, `segments.len() + 1` long. Turns a
-    /// global ordinal into `(segment, local)` with one `partition_point` over
-    /// a couple of dozen `u32`s - one cache line - which is what lets the
-    /// ranking key keep its 32-bit index field unchanged.
+    /// Prefix sums of segment file counts, `segments.len() + 1` long. Maps a
+    /// global ordinal to `(segment, local)` with one `partition_point`, so
+    /// the ranking key keeps its 32-bit index field.
     bases: Vec<u32>,
     dirs: usize,
     captured_at: SystemTime,
     volume_serial: u32,
-    /// The walk that produced this reached the end of the tree. A partial
-    /// index is still worth serving, but the difference has to be visible:
-    /// results missing because a subtree was unreadable look exactly like
-    /// results that do not exist.
+    /// The walk reached the end of the tree. A partial index is still served,
+    /// but the UI must say it is partial.
     complete: bool,
-    /// Every directory here was seen through a *search* rather than read.
+    /// Every directory here was seen through a search rather than read.
     ///
     /// True only for a share configured `kind = "live"`, which is never
-    /// walked: what it holds is whatever somebody has looked for, so a name
-    /// absent from it says nothing at all about the share. That is a stronger
-    /// claim than [`Self::complete`] makes - an incomplete walk still read
-    /// every folder it reached - and the two are kept apart because the
-    /// sentence each one licenses on screen is different.
-    ///
-    /// A share is never both. A live mapping gets no walk, and a walked one is
-    /// never asked per query, so this is a property of the whole index rather
-    /// than of any segment in it - which is what keeps it a single bit in the
-    /// header rather than something the persistence layer has to interleave.
+    /// walked, so an absent name says nothing about the share. Stronger than
+    /// not [`Self::complete`], and shown differently. Live shares are never
+    /// walked and walked shares are never queried live, so this is one bit for
+    /// the whole index.
     observed: bool,
 }
 
@@ -261,11 +215,10 @@ impl TreeIndex {
         }
     }
 
-    /// This index plus one more segment.
+    /// Returns this index plus one more segment.
     ///
-    /// Returns a new value rather than mutating, because publication is an
-    /// `ArcSwap` of an immutable whole: a reader holding the previous one must
-    /// keep seeing exactly what it had.
+    /// Does not mutate, because publication swaps an immutable whole via
+    /// `ArcSwap` and existing readers must keep their view.
     pub fn appended(&self, segment: Arc<TreeSegment>) -> Self {
         let mut next = self.clone();
         let base = next.bases.last().copied().unwrap_or(0);
@@ -291,17 +244,15 @@ impl TreeIndex {
         self
     }
 
-    /// True when this index holds only what searches have found.
+    /// Returns true when this index holds only what searches have found.
     pub fn observed(&self) -> bool {
         self.observed
     }
 
-    /// Whether this index already holds `file` in `rel`.
+    /// Returns whether this index already holds `file` in `rel`.
     ///
-    /// Linear in the directory count, and called once per directory a search
-    /// touched rather than once per file on the share - a few dozen
-    /// comparisons against an index that only ever holds what has been looked
-    /// for.
+    /// Linear in the directory count; called once per directory a search
+    /// touched, on an index that holds only searched-for names.
     pub fn holds(&self, rel: &str, file: &str) -> bool {
         self.segments.iter().any(|seg| {
             (0..seg.dir_count()).any(|d| {
@@ -313,23 +264,15 @@ impl TreeIndex {
         })
     }
 
-    /// This index plus files a search saw, leaving out anything already held.
+    /// Returns this index plus files a search saw, skipping those already
+    /// held.
     ///
-    /// Appends and never replaces, which is the opposite of
-    /// [`Self::with_subtrees_replaced`] and deliberately so. A change
-    /// notification names folders that were *re-read*, so replacing them is
-    /// exact. A search result names the files that *matched*, and says nothing
-    /// whatever about the files that did not - so the only sound merge is the
-    /// one that adds. Replacing here would turn a partial answer into a
-    /// confident, wrong, complete one, which is the silent disappearance this
-    /// index exists to prevent arriving by the front door.
+    /// Appends and never replaces, unlike [`Self::with_subtrees_replaced`]: a
+    /// search result names only the files that matched, so replacing a folder
+    /// would drop the files that did not.
     ///
-    /// `None` when every observation was already held, so repeating a search
-    /// costs no publication and no reader a re-read.
-    ///
-    /// `captured_at` is left alone, for the reason `confirm_fresh` leaves
-    /// `built_at` alone: the index is exactly as old as it was, and a handful
-    /// of names in it are newer.
+    /// `None` when nothing was new, so a repeated search causes no
+    /// publication. `captured_at` is unchanged, as in `confirm_fresh`.
     pub fn with_observed_files(&self, seen: &[(String, Vec<String>)]) -> Option<Self> {
         let mut builder = SegmentBuilder::new();
         let mut added = false;
@@ -379,7 +322,7 @@ impl TreeIndex {
         &self.segments
     }
 
-    /// Files across every segment.
+    /// Returns the number of files across every segment.
     pub fn len(&self) -> usize {
         self.bases.last().copied().unwrap_or(0) as usize
     }
@@ -404,7 +347,7 @@ impl TreeIndex {
         self.complete
     }
 
-    /// First global ordinal of a segment.
+    /// Returns the first global ordinal of a segment.
     pub fn base(&self, segment: usize) -> u32 {
         self.bases.get(segment).copied().unwrap_or(0)
     }
@@ -415,8 +358,8 @@ impl TreeIndex {
         if ordinal >= self.len() as u32 {
             return None;
         }
-        // `bases` is ascending and starts at zero, so the segment is the last
-        // base at or below the ordinal.
+        // `bases` is ascending from zero, so the segment is the last base at
+        // or below the ordinal.
         let at = self
             .bases
             .partition_point(|&b| b <= ordinal)
@@ -424,11 +367,10 @@ impl TreeIndex {
         Some((at, ordinal - self.bases[at]))
     }
 
-    /// The full path of a file, by global ordinal.
+    /// Returns the full path of a file, by global ordinal.
     ///
-    /// The only place a tree path is assembled, so the separator rules live in
-    /// exactly one function. An entry directly in the root has an empty
-    /// directory component and must not gain a doubled separator from it.
+    /// The only place a tree path is assembled. A file directly in the root
+    /// has an empty directory component and must not get a doubled separator.
     pub fn full_path(&self, ordinal: u32) -> Option<String> {
         let (s, local) = self.locate(ordinal)?;
         let segment = &self.segments[s];
@@ -460,9 +402,7 @@ impl TreeIndex {
 
 /// Accumulates one segment's worth of a walk.
 ///
-/// Deliberately not `Send`-shared: the sink that owns it serialises access, so
-/// this stays a plain single-threaded builder and the locking question has one
-/// answer in one place.
+/// Single-threaded; the owning sink serialises access.
 pub struct SegmentBuilder {
     files: SnapshotBuilder,
     dirs: SnapshotBuilder,
@@ -478,9 +418,8 @@ impl Default for SegmentBuilder {
 impl SegmentBuilder {
     pub fn new() -> Self {
         Self {
-            // Empty prefixes: a tree composes paths from the root and the
-            // owning directory, so a per-snapshot prefix would be a second,
-            // redundant copy of the root on every segment.
+            // Empty prefixes: tree paths are composed from the root and the
+            // owning directory.
             files: SnapshotBuilder::new(""),
             dirs: SnapshotBuilder::new(""),
             runs: Vec::new(),
@@ -499,20 +438,17 @@ impl SegmentBuilder {
         self.dirs.len() == 0
     }
 
-    /// Bytes held so far, for deciding when to seal.
+    /// Returns the bytes held so far, for deciding when to seal.
     pub fn arena_bytes(&self) -> usize {
         self.files.arena_bytes() + self.dirs.arena_bytes()
     }
 
     /// Adds one completed directory and its files.
     ///
-    /// Returns false when an arena is full, which the walk reports as the
-    /// index being unable to take more. `first_file` is read *before* any name
-    /// is added, which is the ordering promise the run table makes, but the
-    /// run is only pushed once a file has actually landed: a run recorded
-    /// ahead of a push that then failed would name a range starting past the
-    /// end of the segment, and `dir_of` would attribute the next directory's
-    /// files to this one.
+    /// Returns false when an arena is full. `first_file` is read before any
+    /// name is added, but the run is pushed only once a file has landed: a run
+    /// recorded before a failed push would start past the end of the segment,
+    /// and `dir_of` would attribute the next directory's files to this one.
     pub fn push_dir(&mut self, rel: &str, files: &[String]) -> bool {
         let dir = self.dirs.len() as u32;
         if !self.dirs.push_str(rel) {
@@ -534,12 +470,10 @@ impl SegmentBuilder {
         !full
     }
 
-    /// Copies one directory and every file in it verbatim from `seg`.
+    /// Copies one directory and its files verbatim from `seg`.
     ///
-    /// Raw byte copies rather than re-folding. Re-deriving the folded form on
-    /// a rebuild would make a name that had been indexed under one fold
-    /// reappear under another, so the matcher would find it before the update
-    /// and not after - a file disappearing because its folder was refreshed.
+    /// Copies raw bytes instead of re-folding, so a rebuild cannot change how
+    /// an existing name is folded and make it unmatchable.
     pub(crate) fn push_dir_raw(&mut self, seg: &TreeSegment, d: u32) -> bool {
         let dir = self.dirs.len() as u32;
         if !self
@@ -572,8 +506,8 @@ impl SegmentBuilder {
         let files = std::mem::replace(&mut self.files, SnapshotBuilder::new(""));
         let dirs = std::mem::replace(&mut self.dirs, SnapshotBuilder::new(""));
         TreeSegment {
-            // The timestamps and serial belong to the index as a whole, not to
-            // a slice of it; a segment carries placeholders.
+            // Timestamps and serial belong to the whole index; a segment
+            // carries placeholders.
             files: files.finish(SystemTime::UNIX_EPOCH, 0, None),
             dirs: dirs.finish(SystemTime::UNIX_EPOCH, 0, None),
             runs: std::mem::take(&mut self.runs).into_boxed_slice(),
@@ -581,38 +515,27 @@ impl SegmentBuilder {
     }
 }
 
-/// The directory part of a relative path, as the walk and the watcher both
-/// spell it.
+/// Returns the directory part of a relative path.
 ///
-/// `ReadDirectoryChangesW` reports the *file* that changed, and the unit this
-/// index stores is a directory listing - so the two have to agree on exactly
-/// one string format, and it is defined here rather than twice.
+/// `ReadDirectoryChangesW` reports the changed file, while the index stores
+/// directory listings; the walk and the watcher both use this function so
+/// they agree on one string format.
 pub fn parent_rel(rel: &str) -> &str {
     rel.rsplit_once('\\').map_or("", |(parent, _)| parent)
 }
 
 /// Builds a [`TreeIndex`] from a walk, sealing segments as it goes.
 ///
-/// # Why everything mutable is behind one lock
+/// # Locking
 ///
-/// `TreeSink::push_dir` takes `&self` and is called from every walk worker at
-/// once. The store's rule is that the index actor thread is the only writer,
-/// and a walk appears to break it - so it is worth being exact about why it
-/// does not.
+/// `TreeSink::push_dir` takes `&self` and is called from every walk worker.
+/// This does not break the store's single-writer rule because `walk_tree`
+/// uses `std::thread::scope`: the actor thread is blocked inside one step
+/// until every worker joins, and one mutex serialises the workers. The walk
+/// must therefore run on the actor's own thread, not be supervised from it.
 ///
-/// `walk_tree` is built on `std::thread::scope`: it does not return until
-/// every worker has joined. For the whole of a walk the actor thread is
-/// therefore *inside* one step, mutating nothing, and the workers are a scoped
-/// sub-computation of it. One mutex serialises them against each other, so
-/// there is still exactly one writer at any instant and it is still causally
-/// the actor. That is also why the walk runs on the actor's own thread rather
-/// than being supervised from it: under a supervising actor the argument
-/// evaporates, and two writers would race a load-modify-store.
-///
-/// Contention is not a concern, and the arithmetic says why: appending
-/// seventeen names to a vector is well under a microsecond, while the
-/// directory read that produced them cost a millisecond or so of SMB. Eight
-/// workers contend for about a thousandth of their time.
+/// Contention is negligible: appending a directory's names takes well under a
+/// microsecond, against about a millisecond of SMB to read it.
 pub struct SegmentSink {
     staging: Mutex<Staging>,
     root: Box<str>,
@@ -621,8 +544,8 @@ pub struct SegmentSink {
 struct Staging {
     builder: SegmentBuilder,
     sealed: Vec<Arc<TreeSegment>>,
-    /// Arena bytes that seal the segment being built. Doubles each time, so
-    /// the first results arrive quickly and the segment count stays bounded.
+    /// Arena bytes at which the current segment is sealed. Doubles each time,
+    /// so first results arrive quickly and the segment count stays bounded.
     target: usize,
     full: bool,
 }
@@ -640,16 +563,13 @@ impl SegmentSink {
         }
     }
 
-    /// The index built so far, including whatever is still unsealed.
+    /// Returns the index built so far, including the unsealed remainder.
     ///
-    /// Callable mid-walk, which is what lets a partially walked share be
-    /// searched: a snapshot of progress rather than a promise of completeness.
+    /// Callable mid-walk, so a partially walked share can be searched.
     pub fn index(&self) -> TreeIndex {
         let mut s = self.staging.lock();
-        // Sealing the remainder rather than reading round it: a segment is the
-        // only searchable form, and leaving the tail in the builder would make
-        // the most recently walked folders - the ones someone watching the
-        // progress line is waiting for - the ones that never appear.
+        // Seal the remainder: only segments are searchable, and the most
+        // recently walked folders would otherwise never appear.
         let tail = (!s.builder.is_empty()).then(|| Arc::new(s.builder.seal()));
         if let Some(tail) = tail {
             s.sealed.push(tail);
@@ -661,7 +581,7 @@ impl SegmentSink {
             })
     }
 
-    /// Segments sealed so far. Test and diagnostic use.
+    /// Returns the number of segments sealed so far. Test and diagnostic use.
     pub fn segment_count(&self) -> usize {
         self.staging.lock().sealed.len()
     }
@@ -674,9 +594,8 @@ impl TreeSink for SegmentSink {
             return false;
         }
         if !s.builder.push_dir(rel, files) {
-            // An arena ceiling. Reported back so the walk stops here rather
-            // than spending another two minutes reading directories that
-            // cannot be stored.
+            // Arena ceiling reached. Stop the walk rather than read
+            // directories that cannot be stored.
             s.full = true;
             return false;
         }
@@ -697,25 +616,21 @@ enum Retained {
     All,
     /// Everything was dropped.
     None,
-    /// Boxed only to keep the enum small: a `TreeSegment` is a quarter of a
-    /// kilobyte of headers, and every `Retained::All` - the common answer, one
-    /// per untouched segment - would otherwise be returned in a value that
-    /// size.
+    /// Boxed to keep the enum small, since `All` is the common case.
     Some(Box<TreeSegment>),
 }
 
 impl TreeSegment {
-    /// Bytes in this segment's arenas, on the same basis
+    /// Returns the bytes in this segment's arenas, counted as
     /// [`SegmentBuilder::arena_bytes`] counts them.
     pub fn arena_bytes(&self) -> usize {
         self.files.lower().len() + self.dirs.lower().len()
     }
 
-    /// This segment without the directories `drop` selects.
+    /// Returns this segment without the directories `drop` selects.
     ///
-    /// Returns [`Retained::All`] rather than a copy when nothing matched,
-    /// which is the case that matters: a change to one folder must not cost a
-    /// rebuild of the twenty segments it is not in.
+    /// Returns [`Retained::All`] rather than a copy when nothing matched, so a
+    /// change to one folder does not rebuild unrelated segments.
     fn retaining(&self, drop: &dyn Fn(&str) -> bool) -> Retained {
         let dropped = (0..self.dir_count())
             .filter(|d| drop(&self.dir_path(*d)))
@@ -733,11 +648,9 @@ impl TreeSegment {
                 continue;
             }
             if !b.push_dir_raw(self, d) {
-                // The arena ceiling, reached while *shrinking* a segment that
-                // already fitted. Not reachable in practice, but "not
-                // reachable" is not a reason to publish a half-copied segment:
-                // keeping the original loses nothing but the deletion, which
-                // the next full walk collects.
+                // Arena ceiling while shrinking a segment that already fit.
+                // Not expected; keep the original rather than publish a partial
+                // copy. The next full walk collects the deletion.
                 return Retained::All;
             }
         }
@@ -768,19 +681,15 @@ impl TreeIndex {
         }
     }
 
-    /// This index with the subtrees named by `replaced` rebuilt from `fresh`.
+    /// Returns this index with the subtrees named by `replaced` rebuilt from
+    /// `fresh`.
     ///
-    /// Every directory that is one of `replaced` or sits beneath one is
-    /// dropped, and everything `fresh` holds is appended. That is deliberately
-    /// coarser than "update these directories": a new job folder arrives as a
-    /// single notification on its *parent*, so anything that only refreshed
-    /// the directories it was told about would index the parent and miss every
-    /// file in the folder that was actually created.
+    /// Drops every directory that is in `replaced` or beneath one, then
+    /// appends everything in `fresh`. Whole subtrees are replaced because a
+    /// new folder arrives as one notification on its parent.
     ///
-    /// `captured_at` is left alone. The index really is as old as it was; a
-    /// handful of its folders are newer. Moving the timestamp forward would be
-    /// the index claiming to have been proven current everywhere, which is
-    /// exactly the false confidence a tree is not allowed to express.
+    /// `captured_at` is unchanged: only some folders are newer, and advancing
+    /// it would claim the whole index was verified current.
     pub fn with_subtrees_replaced(&self, replaced: &[String], fresh: &TreeIndex) -> Self {
         let covered = |rel: &str| {
             replaced
@@ -805,17 +714,13 @@ impl TreeIndex {
     }
 }
 
-/// Merges adjacent segments that fit together inside one segment's budget.
+/// Merges adjacent segments that fit together within one segment's budget.
 ///
-/// Without this, every update appends a segment and the count grows without
-/// bound between full walks - a few hundred of them by the time the floor
-/// comes round, each one a separate sweep per keystroke.
-///
-/// One rule does the whole job, and the shape of the data is why. Update
-/// segments are tiny and land at the end, so consecutive ones merge into a
-/// single growing tail; full-size segments never pair, because two of them
-/// exceed the budget by construction. So the work per update is bounded by one
-/// segment's worth of copying, and only where there was headroom for it.
+/// Without this, every update appends a segment and the count grows between
+/// full walks, each segment adding a sweep per keystroke. Update segments are
+/// small and land at the end, so they merge into one growing tail;
+/// full-size segments never pair. Work per update is bounded by one segment's
+/// worth of copying.
 fn coalesce(segments: Vec<Arc<TreeSegment>>) -> Vec<Arc<TreeSegment>> {
     let mut out: Vec<Arc<TreeSegment>> = Vec::with_capacity(segments.len());
     for seg in segments {
@@ -912,8 +817,7 @@ mod tests {
         assert_eq!(files_in(&next, "p12345"), ["a.pdf", "b.dwg"]);
     }
 
-    /// The common case for a code somebody searches twice. Publishing anyway
-    /// would cost every reader a re-read for nothing.
+    /// A repeated search must not publish a new index.
     #[test]
     fn a_search_that_found_only_what_was_already_held_changes_nothing() {
         let ix = TreeIndex::empty("V:\\archive")
@@ -937,11 +841,8 @@ mod tests {
         assert_eq!(next.len(), 2, "a.pdf was stored twice");
     }
 
-    /// A search result names the files that *matched*, and says nothing
-    /// whatever about the files that did not. Replacing the directory would
-    /// turn a partial answer into a confident, wrong, complete one - the
-    /// silent disappearance this index exists to prevent, arriving by the
-    /// front door.
+    /// A search result says nothing about files that did not match, so a
+    /// second search must not drop what the first found.
     #[test]
     fn remembering_a_second_search_never_drops_what_the_first_one_found() {
         let ix = TreeIndex::empty("V:\\archive")
@@ -962,8 +863,7 @@ mod tests {
         assert!(!ix.holds("other", "a.pdf"), "the folder has to match too");
     }
 
-    /// Every pass appends, so without coalescing the segment count would grow
-    /// without bound and each one is a separate sweep per keystroke.
+    /// Coalescing keeps the segment count bounded across many observations.
     #[test]
     fn many_small_observations_do_not_grow_the_segment_count_without_bound() {
         let mut ix = TreeIndex::empty("V:\\archive");
@@ -1045,8 +945,7 @@ mod tests {
         assert_eq!(index.full_path(5), None);
     }
 
-    /// A root that does not already end in a separator must gain exactly one,
-    /// and a root that does must not gain a second.
+    /// A root without a trailing separator gains exactly one.
     #[test]
     fn a_root_without_a_trailing_separator_still_composes_cleanly() {
         let index = TreeIndex::empty("R:\\Jobs").appended(Arc::new(sample()));
@@ -1068,8 +967,7 @@ mod tests {
         assert_eq!(index.full_path(2).unwrap(), "R:\\b\\three.pdf");
     }
 
-    /// Appending shares the existing segments rather than copying them, which
-    /// is what makes publishing during a walk affordable.
+    /// Appending shares the existing segments rather than copying them.
     #[test]
     fn appending_leaves_the_previous_index_untouched() {
         let first = TreeIndex::empty("R:\\").appended(Arc::new(seg(&[("a", &["one.pdf"])])));
@@ -1115,8 +1013,7 @@ mod tests {
     }
 }
 
-/// Replacing a subtree in place, which is what turns a change notification
-/// into work proportional to what changed rather than to the share.
+/// Replacing subtrees in place for incremental updates.
 #[cfg(test)]
 mod apply_tests {
     use std::time::Duration;
@@ -1126,8 +1023,8 @@ mod apply_tests {
 
     const ROOT: &str = "R:\\";
 
-    /// One segment per group, so the tests can put a directory in a chosen
-    /// segment rather than hoping the size ladder puts it there.
+    /// Builds one segment per group, so tests control which segment holds a
+    /// directory.
     fn tree_of(groups: &[&[(&str, &[&str])]]) -> TreeIndex {
         let mut index = TreeIndex::empty(ROOT);
         for group in groups {
@@ -1187,10 +1084,8 @@ mod apply_tests {
         );
     }
 
-    /// The reason a whole subtree is replaced rather than a directory. A new
-    /// job folder arrives as one notification on its parent; anything that
-    /// only refreshed the directory it was told about would index the parent
-    /// and miss every file in the folder that was actually created.
+    /// A new folder arrives as one notification on its parent, so replacing
+    /// the parent's subtree must pick it up.
     #[test]
     fn a_folder_created_under_a_dirty_parent_is_picked_up() {
         let fresh = tree_of(&[&[
@@ -1233,7 +1128,7 @@ mod apply_tests {
         assert!(crate::index::walk::is_within("anything", ""));
     }
 
-    /// A dirty root is a full replacement, which is the honest answer.
+    /// A dirty root is a full replacement.
     #[test]
     fn replacing_the_root_replaces_everything() {
         let fresh = tree_of(&[&[("", &["only.txt"] as &[&str])]]);
@@ -1241,8 +1136,7 @@ mod apply_tests {
         assert_eq!(paths(&after), vec!["R:\\only.txt"]);
     }
 
-    /// The cost argument for the whole design: a change to one folder must not
-    /// rebuild the segments it is not in.
+    /// A change to one folder must not rebuild the segments it is not in.
     #[test]
     fn untouched_segments_are_shared_rather_than_copied() {
         let before = base();
@@ -1259,8 +1153,7 @@ mod apply_tests {
         );
     }
 
-    /// The metadata says what it says for a reason: a handful of refreshed
-    /// folders is not the whole share having been proven current.
+    /// Refreshing some folders does not advance the index's metadata.
     #[test]
     fn an_incremental_update_does_not_claim_the_index_is_newer() {
         let before = base();
@@ -1281,8 +1174,7 @@ mod apply_tests {
         assert_eq!(after.dir_count(), 3, "`11d` and `11d\\0704` both left");
     }
 
-    /// Every update appends a segment. Left alone the count would run to
-    /// hundreds between full walks, each one a separate sweep per keystroke.
+    /// Repeated updates do not grow the segment count without bound.
     #[test]
     fn repeated_updates_do_not_grow_the_segment_count_without_bound() {
         let mut index = base();
@@ -1323,8 +1215,8 @@ mod apply_tests {
         assert!(paths(&after).contains(&"R:\\11d\\0704\\drawing.dwg".to_string()));
     }
 
-    /// Replacing nothing is a no-op, which matters because the actor reaches
-    /// this path whenever a batch turns out to name only unreadable folders.
+    /// Replacing nothing is a no-op. The actor reaches this when a batch names
+    /// only unreadable folders.
     #[test]
     fn replacing_nothing_changes_nothing() {
         let before = base();
@@ -1333,9 +1225,8 @@ mod apply_tests {
         assert_eq!(after.dir_count(), before.dir_count());
     }
 
-    /// A run recorded before a push that then failed would name a range
-    /// starting past the end of the segment, and `dir_of` would hand this
-    /// directory's files to the next one.
+    /// A run recorded before a failed push would start past the end of the
+    /// segment and misattribute files in `dir_of`.
     #[test]
     fn a_directory_whose_files_did_not_fit_leaves_a_sound_segment() {
         let mut b = SegmentBuilder::new();

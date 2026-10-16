@@ -1,45 +1,27 @@
-//! Which files are never shown, however well they match.
+//! The blocklist of files excluded from results, such as `Thumbs.db`,
+//! `desktop.ini` and shortcuts.
 //!
-//! A drawing share is not only drawings. Alongside them sit the files Windows
-//! and its programs leave behind - `Thumbs.db`, `desktop.ini`, shortcuts,
-//! installer leftovers - and a search for a job code returns those as readily
-//! as it returns the drawing, because the index holds every name the share
-//! does. What the person asked for is a drawing.
+//! A blocklist keeps unusual but legitimate file types searchable; a missing
+//! entry costs only noise.
 //!
-//! So this is a blocklist rather than an allowlist, and that is the cautious
-//! direction: an unusual but legitimate file type keeps working, and the cost
-//! of a missing entry is noise rather than a file somebody cannot find.
+//! # Where each half is applied
 //!
-//! # Two halves, applied in two places, and why they cannot be one
-//!
-//! * **Extensions** are filtered at *search* time, in [`crate::search::matcher`].
-//! * **The hidden and system attributes** are filtered at *index* time, in
+//! * **Extensions** are filtered at search time, in [`crate::search::matcher`].
+//! * **Hidden and system attributes** are filtered at index time, in
 //!   [`crate::index::enumerate`].
 //!
-//! That is forced rather than chosen. An extension is part of the name, and
-//! the snapshot keeps every name; an attribute is not kept anywhere, because
-//! [`crate::index::builder`] stores two arenas of bytes and nothing else. So
-//! the attribute can only be acted on while the directory entry is still in
-//! hand, which means a share shows its hidden files until it is next scanned.
-//!
-//! Filtering extensions at index time too would look tidier and would be a
-//! trap: the on-disk cache already holds names written before this existed,
-//! and the drawing tree is `refresh = "manual"`. A warm start would restore
-//! the unfiltered index and keep showing `Thumbs.db` indefinitely, with no way
-//! to find out why short of deleting the cache. Filtering as the results are
-//! chosen is correct against every index that already exists.
+//! Attributes are not stored in the snapshot ([`crate::index::builder`] keeps
+//! only name arenas), so they can only be checked during enumeration; a share
+//! shows its hidden files until it is next scanned. Extensions must stay a
+//! search-time filter: a cached index, or a `refresh = "manual"` tree, may hold
+//! names written before the filter applied and would otherwise never be
+//! cleaned.
 
-/// What a fresh install hides.
+/// The extensions a fresh install hides.
 ///
-/// Databases and scripts because they are never a drawing; `lnk` and `url`
-/// because a shortcut is a pointer at the thing somebody actually wanted;
-/// `ini`, `tmp` and `bak` because they are bookkeeping. `exe`, `dll` and the
-/// shells are here for the same reason and one more: a share that has picked
-/// up an executable named after a job code is not something to offer somebody
-/// one keystroke away from opening.
-///
-/// `Thumbs.db` and `desktop.ini`, the two that prompted this, are covered by
-/// `db` and `ini` without needing to be named.
+/// Covers databases, scripts, shortcuts (`lnk`, `url`), bookkeeping files
+/// (`ini`, `tmp`, `bak`) and executables, which should not be one keystroke
+/// from opening. `db` and `ini` cover `Thumbs.db` and `desktop.ini`.
 pub const DEFAULT_HIDE_EXTENSIONS: &[&str] = &[
     "db", "js", "lnk", "ini", "tmp", "bak", "url", "exe", "dll", "bat", "cmd", "ps1", "vbs",
 ];
@@ -47,14 +29,13 @@ pub const DEFAULT_HIDE_EXTENSIONS: &[&str] = &[
 /// Whether a fresh install also hides what Windows marks hidden or system.
 pub const DEFAULT_HIDE_SYSTEM_FILES: bool = true;
 
-/// The files this configuration will not show.
+/// The configured set of files excluded from results.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Hidden {
-    /// Lowercased and dotted - `"db"` in the file becomes `".db"` here.
+    /// Lowercase suffixes with a leading dot (`"db"` becomes `".db"`).
     ///
-    /// Stored that way so the test is one `ends_with` rather than a split on
-    /// the last dot: `Drawing.Final.db` has to be caught, and a file called
-    /// plain `db` has to not be.
+    /// The dot makes a single `ends_with` correct: `Drawing.Final.db` matches
+    /// and a file named plain `db` does not.
     suffixes: Box<[Box<str>]>,
     system: bool,
 }
@@ -64,19 +45,14 @@ impl Hidden {
         let mut suffixes: Vec<Box<str>> = extensions
             .iter()
             .map(|e| e.as_ref().trim().trim_start_matches('.'))
-            // ASCII-only, and dropped rather than kept, because a non-ASCII
-            // extension is one this type cannot answer consistently: `hides`
-            // folds ASCII case on the original name while `hides_folded`
-            // byte-compares against an arena `util::fold` has already folded
-            // *including* Latin-1 and Cyrillic, so `.dÉ` would match one way
-            // and not the other. The configuration file rejects these with a
-            // message; this is the backstop for the environment variable,
-            // which has nowhere to report to.
+            // Non-ASCII extensions are dropped: `hides` folds only ASCII case,
+            // while `util::fold` also folds Latin-1 and Cyrillic, so the two
+            // checks would disagree. The config file rejects these with an
+            // error; this is the backstop for the environment variable.
             .filter(|e| !e.is_empty() && e.is_ascii())
             .map(|e| format!(".{}", e.to_ascii_lowercase()).into_boxed_str())
             .collect();
-        // A duplicate costs a comparison per candidate for nothing, and a
-        // hand-edited list is exactly where one turns up.
+        // Duplicates would add a wasted comparison per candidate.
         suffixes.sort_unstable();
         suffixes.dedup();
         Self {
@@ -85,8 +61,7 @@ impl Hidden {
         }
     }
 
-    /// Hides nothing. For benchmarks and for the parity tests, which compare
-    /// two matchers rather than two configurations.
+    /// Returns a set that hides nothing, for benchmarks and parity tests.
     pub fn none() -> Self {
         Self::default()
     }
@@ -95,7 +70,7 @@ impl Hidden {
         self.suffixes.is_empty()
     }
 
-    /// Whether the hidden and system attributes are to be honoured.
+    /// Whether files with the hidden or system attribute are excluded.
     pub fn hides_system(&self) -> bool {
         self.system
     }
@@ -105,7 +80,7 @@ impl Hidden {
         self.suffixes.iter().map(|s| s.as_ref())
     }
 
-    /// Whether a file with this name should be kept out of the results.
+    /// Whether a file with this name is excluded from results.
     pub fn hides(&self, name: &str) -> bool {
         let bytes = name.as_bytes();
         self.suffixes.iter().any(|suffix| {
@@ -117,16 +92,11 @@ impl Hidden {
         })
     }
 
-    /// The same question asked of the matcher's folded arena.
+    /// Like [`Self::hides`], but on a name from the matcher's folded arena.
     ///
-    /// Exact rather than an approximation, and that rests on two things: the
-    /// contract [`crate::util::fold`] states in its module note - folding is
-    /// byte-length preserving and lowercases ASCII - and the fact that every
-    /// suffix here *is* ASCII, which [`Self::new`] enforces rather than
-    /// assumes. Given both, comparing an already-lowercased suffix against
-    /// already-folded bytes gives the same answer as [`Self::hides`] would on
-    /// the original name, without the second arena lookup that would cost, per
-    /// candidate, in the hot loop.
+    /// Gives the same answer as `hides` because [`crate::util::fold`] preserves
+    /// byte length and lowercases ASCII, and [`Self::new`] keeps only ASCII
+    /// suffixes. Avoids a second arena lookup per candidate in the hot loop.
     pub fn hides_folded(&self, name: &[u8]) -> bool {
         self.suffixes
             .iter()
@@ -164,8 +134,6 @@ mod tests {
         }
     }
 
-    /// Windows filenames are not case sensitive and neither is this. A share
-    /// that writes `THUMBS.DB` is the same share.
     #[test]
     fn the_test_ignores_case_in_both_directions() {
         let h = Hidden::new(&["DB", ".LnK"], false);
@@ -174,8 +142,6 @@ mod tests {
         assert!(h.hides("a.lnk"));
     }
 
-    /// The extension is the end of the name, not a substring of it. A folder
-    /// of `db`-prefixed drawings would otherwise vanish.
     #[test]
     fn a_name_that_merely_contains_the_extension_is_kept() {
         let h = shipped();
@@ -184,7 +150,6 @@ mod tests {
         }
     }
 
-    /// The last extension wins, not the first.
     #[test]
     fn only_the_final_extension_counts() {
         let h = shipped();
@@ -201,9 +166,7 @@ mod tests {
         assert!(!h.hides_system());
     }
 
-    /// The two answers have to agree, because one decides what the user sees
-    /// and the other is what actually runs. The folded form is the name as
-    /// `util::fold` would have written it into the arena.
+    /// `hides_folded` on the folded name agrees with `hides` on the original.
     #[test]
     fn the_folded_test_agrees_with_the_plain_one() {
         let h = shipped();
@@ -213,8 +176,8 @@ mod tests {
             "11-D-0704.pdf",
             "db.pdf",
             "Drawing.pdf.bak",
-            // Non-ASCII names still have to be judged the same way by both,
-            // even though a non-ASCII *extension* can never be configured.
+            // Non-ASCII names must agree too, though non-ASCII extensions are
+            // never configured.
             "Caf\u{e9}.db",
             "CAF\u{c9}.pdf",
             "x",
@@ -229,8 +192,7 @@ mod tests {
         }
     }
 
-    /// Whitespace and a leading dot are both things a hand-edited config will
-    /// contain, and neither should change what is hidden.
+    /// Whitespace, leading dots, blanks and duplicates are normalised away.
     #[test]
     fn the_list_is_normalised_however_it_was_written() {
         let h = Hidden::new(&[" .DB ", "db", "", "  ", ".lnk"], false);
@@ -243,12 +205,6 @@ mod tests {
         assert!(h.hides("Thumbs.db"));
     }
 
-    /// Dropped rather than kept, because this type cannot answer for one
-    /// consistently: `hides` folds ASCII case on the original name while
-    /// `hides_folded` compares against an arena `util::fold` has already
-    /// folded including Latin-1, so the two would disagree. The configuration
-    /// file refuses these outright; this is what the environment variable,
-    /// which has nowhere to report to, falls back on.
     #[test]
     fn a_non_ascii_extension_is_dropped_rather_than_half_working() {
         let h = Hidden::new(&["d\u{e9}", "db"], false);

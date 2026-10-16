@@ -1,23 +1,10 @@
-//! One copy at a time.
+//! Single-instance guard: a second launch summons the running copy and exits.
 //!
-//! A program that lives in the notification area is one people launch again
-//! without meaning to - from the Start menu, from a pinned shortcut, from the
-//! installer's "run now" checkbox. A second copy is not merely redundant: it
-//! would fail to register the global hotkey (the first copy owns it), put a
-//! second icon in the tray, and start a second index walk over the same shares.
-//!
-//! So the second launch does what the person launching it actually wanted, and
-//! then gets out of the way: it summons the copy already running and exits.
-//!
-//! # Why a named event and not a window message
-//!
-//! The obvious way is `RegisterWindowMessageW` plus a broadcast, and it is the
-//! wrong way here for a specific reason: this program's window belongs to a
-//! toolkit, so there is no `WndProc` of ours for a broadcast to arrive at, and
-//! the thread that *can* act on a summon deliberately owns no window at all
-//! (see [`crate::hotkey`]). A named event needs neither. One thread waits on
-//! it, and a wait is exactly the shape of the thing already used everywhere
-//! else in this program.
+//! A second copy would fail to register the hotkey, add a second tray icon,
+//! and re-index the same shares. Summons use a named event rather than a
+//! broadcast window message because the window belongs to the toolkit (no
+//! `WndProc` of ours) and the summon thread owns no window (see
+//! [`crate::hotkey`]).
 
 #![cfg(windows)]
 
@@ -28,13 +15,8 @@ use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, INFINITE, OpenEventW, SetEvent, WaitForSingleObject,
 };
 
-/// Per-session rather than machine-wide.
-///
-/// `Local\` means one copy per Windows session, which is the right unit: two
-/// people signed in to the same terminal server each get their own, and each
-/// has their own shares mapped and their own history file. A `Global\` name
-/// would let the first of them lock the second out of a program they can see
-/// in their own tray.
+/// Session-scoped names (`Local\`), so each user on a terminal server gets
+/// their own instance.
 const MUTEX_NAME: &str = r"Local\files-single-instance";
 const EVENT_NAME: &str = r"Local\files-summon";
 
@@ -42,12 +24,9 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// A handle that closes itself.
+/// A kernel handle closed on drop. A null handle is ignored.
 ///
-/// Not merely tidiness: the mutex is what says this copy is running, and a
-/// leaked handle would keep saying so for as long as the process lived, which
-/// is the same thing - but a *closed* one at the wrong moment would let a
-/// second copy in.
+/// Closing the mutex handle early would let a second copy start.
 struct Owned(HANDLE);
 
 impl Drop for Owned {
@@ -60,8 +39,8 @@ impl Drop for Owned {
 }
 
 // SAFETY: a Win32 kernel handle is a process-wide token, not a pointer into
-// this process's memory, and every use of it below is a call that takes it by
-// value. The wait thread genuinely needs to own one.
+// this process's memory, and every use below passes it by value. The wait
+// thread needs to own one.
 unsafe impl Send for Owned {}
 unsafe impl Sync for Owned {}
 
@@ -71,31 +50,22 @@ pub struct Instance {
     _event: Arc<Owned>,
 }
 
-/// What happened when this copy tried to claim the name.
+/// The result of trying to become the only instance.
 pub enum Claim {
-    /// This is the only copy. Hold the [`Instance`] for as long as the program
-    /// runs.
+    /// This is the only copy. Hold the [`Instance`] for the program's lifetime.
     Only(Instance),
-    /// Another copy has it, and has been asked to show itself. This one should
-    /// exit quietly - with a success code, because from the user's point of
-    /// view the launch worked.
+    /// Another copy is running and has been summoned. Exit with a success code.
     AlreadyRunning,
 }
 
-/// Claims the name, or hands over to whoever already has it.
+/// Claims single-instance ownership, or summons the copy that already has it.
 ///
-/// `on_summon` is called on a thread of its own, every time another copy is
-/// launched. It is only ever called on the copy that won.
+/// `on_summon` runs on a dedicated thread each time another copy is launched.
 pub fn claim(on_summon: impl Fn() + Send + 'static) -> Claim {
     claim_named(MUTEX_NAME, EVENT_NAME, on_summon)
 }
 
-/// The body of [`claim`], with the names as parameters.
-///
-/// Split only so the tests can each use a name of their own. They share a
-/// process and the runner runs them in parallel, so two tests claiming
-/// one name between them would be one test asserting that the *other* test
-/// is not running.
+/// [`claim`] with explicit object names, so parallel tests can use their own.
 fn claim_named(mutex_name: &str, event_name: &str, on_summon: impl Fn() + Send + 'static) -> Claim {
     let name = wide(mutex_name);
     // SAFETY: a named mutex with default security. The name is a live
@@ -105,10 +75,8 @@ fn claim_named(mutex_name: &str, event_name: &str, on_summon: impl Fn() + Send +
     let existed = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
 
     if mutex.is_null() {
-        // The name could not be claimed at all, which is not a reason to
-        // refuse to run: without the mutex this copy simply does not get the
-        // single-instance behaviour, and a search tool that will not start
-        // because of a naming service is worse than two of it.
+        // Mutex creation failed: run without single-instance protection
+        // rather than refusing to start.
         return Claim::Only(Instance {
             _mutex: Owned(std::ptr::null_mut()),
             _event: Arc::new(Owned(std::ptr::null_mut())),
@@ -131,9 +99,8 @@ fn claim_named(mutex_name: &str, event_name: &str, on_summon: impl Fn() + Send +
 
     if !event.0.is_null() {
         let waiter = Arc::clone(&event);
-        // Detached: the wait is uninterruptible, and there is nothing useful to
-        // do at shutdown but let the process take it down. The handle is kept
-        // alive by the `Arc` for exactly as long as the thread can use it.
+        // Detached: the wait is uninterruptible and ends with the process.
+        // The `Arc` keeps the handle alive while the thread can use it.
         let _ = std::thread::Builder::new()
             .name("files-single".into())
             .spawn(move || {
@@ -142,10 +109,8 @@ fn claim_named(mutex_name: &str, event_name: &str, on_summon: impl Fn() + Send +
                     // an `Arc` to, so it cannot be closed underneath the wait.
                     let woken = unsafe { WaitForSingleObject(waiter.0, INFINITE) };
                     if woken != 0 {
-                        // WAIT_OBJECT_0 is zero; anything else means the handle
-                        // went away, and spinning on a dead one would be a
-                        // thread at a hundred per cent for the life of the
-                        // process.
+                        // WAIT_OBJECT_0 is zero; anything else means the
+                        // handle is invalid, and retrying would spin forever.
                         return;
                     }
                     on_summon();
@@ -159,15 +124,10 @@ fn claim_named(mutex_name: &str, event_name: &str, on_summon: impl Fn() + Send +
     })
 }
 
-/// Tells the copy that is already running to show itself.
-///
-/// Best effort throughout. Every failure here means the second copy exits
-/// without the first one coming forward, which is a shortcut that did nothing -
-/// annoying, and much better than two copies fighting over one hotkey.
+/// Signals the running copy to show itself. Best effort; failures are ignored.
 fn summon_the_other(event_name: &str) {
     let name = wide(event_name);
-    // EVENT_MODIFY_STATE (0x0002) is all that is needed to signal it, and is
-    // the least this can ask for.
+    // EVENT_MODIFY_STATE (0x0002) is the minimum access needed to signal.
     // SAFETY: opens an existing named event; a name nothing owns returns null,
     // which is checked.
     unsafe {
@@ -185,9 +145,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    /// The first copy wins and the second is turned away. Anything else is two
-    /// index walks over the same share.
-    /// A name nothing else in the suite uses.
+    /// Returns mutex and event names unique to one test.
     fn names(tag: &str) -> (String, String) {
         (
             format!(r"Local\files-test-{tag}-mutex"),
@@ -207,8 +165,7 @@ mod tests {
             "two copies both believed they were the only one"
         );
 
-        // ...and once the first lets go, the name is available again, or a
-        // crash would lock the user out until they signed out.
+        // Releasing the instance frees the name.
         drop(first);
         drop(second);
         let third = claim_named(&m, &e, || {});
@@ -218,8 +175,6 @@ mod tests {
         );
     }
 
-    /// The point of the exercise: launching it again brings the copy that is
-    /// running to the front, rather than doing nothing at all.
     #[test]
     fn launching_a_second_copy_summons_the_first() {
         static SUMMONS: AtomicUsize = AtomicUsize::new(0);
@@ -231,9 +186,7 @@ mod tests {
         });
         assert!(matches!(claim_named(&m, &e, || {}), Claim::AlreadyRunning));
 
-        // The wait is on another thread, so this is a poll rather than an
-        // assertion on the next line - but a bounded one, because a test that
-        // waits forever for a thing that never happens is not a test.
+        // The summon arrives on another thread; poll with a deadline.
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline && SUMMONS.load(Ordering::SeqCst) == 0 {
             std::thread::sleep(Duration::from_millis(5));

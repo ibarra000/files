@@ -1,17 +1,13 @@
 //! Streaming construction of a [`Snapshot`].
 //!
-//! Entries arrive from the enumerator as raw UTF-16 and are written straight
-//! into the arenas: no `String` per entry, no `PathBuf` per entry, and no
-//! separate lowercase copy. The previous implementation made four heap
-//! allocations for every file, which at a million files is four million
-//! allocations per refresh.
+//! Entries arrive as raw UTF-16 and are written directly into the arenas,
+//! with no per-entry `String`, `PathBuf` or lowercase copy.
 //!
 //! # The offsets invariant
 //!
-//! `offsets` is seeded with `[0]` and every push appends the *end* offset.
-//! That means `offsets.last() == arena.len()` holds continuously, the
-//! terminal offset falls out for free, and the classic off-by-one at
-//! `finish()` is structurally impossible.
+//! `offsets` is seeded with `[0]` and every push appends the entry's end
+//! offset, so `offsets.last() == arena.len()` always holds and the terminal
+//! offset needs no special case in `finish()`.
 
 use std::time::SystemTime;
 
@@ -23,8 +19,8 @@ use crate::util::fold;
 pub const MAX_ARENA_BYTES: usize = u32::MAX as usize;
 
 /// Names longer than this cannot be represented in the packed ranking key.
-/// A Windows path component tops out at 255 UTF-16 units (<= 1020 UTF-8
-/// bytes), so this is unreachable in practice and exists as a guard.
+/// A Windows path component is at most 255 UTF-16 units (<= 1020 UTF-8
+/// bytes), so this is a guard only.
 pub const MAX_NAME_BYTES: usize = u16::MAX as usize;
 
 /// Builds a snapshot incrementally.
@@ -35,8 +31,7 @@ pub struct SnapshotBuilder {
     offsets: Vec<u32>,
     max_name_len: u32,
     truncated: bool,
-    /// Reused across entries so the non-ASCII path allocates once, not once
-    /// per filename.
+    /// Reused across entries so the non-ASCII path allocates once.
     scratch: String,
 }
 
@@ -45,11 +40,10 @@ impl SnapshotBuilder {
         Self::with_capacity(prefix, 0, 0)
     }
 
-    /// Pre-sizes the arenas.
+    /// Creates a builder with pre-sized arenas.
     ///
-    /// The hints come from the previous run's persisted header, so from the
-    /// second run onward the reservation is essentially exact and the arenas
-    /// never grow.
+    /// The hints come from the previous run's persisted header, so the
+    /// reservation is usually exact.
     pub fn with_capacity(prefix: &str, hint_entries: usize, hint_avg_name: usize) -> Self {
         let arena_hint = hint_entries.saturating_mul(hint_avg_name.saturating_add(1));
         let arena_hint = arena_hint.min(MAX_ARENA_BYTES);
@@ -81,21 +75,19 @@ impl SnapshotBuilder {
         self.orig.len()
     }
 
-    /// True once a push has been refused for want of arena space.
+    /// Returns true once a push has been refused for lack of arena space.
     #[inline]
     pub fn truncated(&self) -> bool {
         self.truncated
     }
 
-    /// Appends a name given as UTF-16, as delivered by the Windows
-    /// enumerators.
+    /// Appends a name given as UTF-16.
     ///
-    /// Returns `false` when the entry does not fit, in which case the caller
-    /// should stop enumerating; the snapshot will report itself truncated.
+    /// Returns `false` when the entry does not fit; the caller should stop
+    /// enumerating, and the snapshot reports itself truncated.
     pub fn push_wide(&mut self, wide: &[u16]) -> bool {
-        // Fast path: every unit is ASCII, so UTF-8 length equals unit count
-        // and both arenas can be written in one pass with no intermediate
-        // buffer. This is essentially every real filename.
+        // Fast path for all-ASCII names: UTF-8 length equals the unit count,
+        // so both arenas are written in one pass.
         if wide.iter().all(|&u| u < 0x80) {
             if !self.reserve_for(wide.len()) {
                 return false;
@@ -109,14 +101,12 @@ impl SnapshotBuilder {
             return true;
         }
 
-        // General path: decode UTF-16 to UTF-8 exactly once, then fold that
-        // UTF-8. Folding the UTF-16 separately is how the two arenas drift
-        // apart, so it is deliberately not an option here.
+        // General path: decode UTF-16 to UTF-8 once, then fold the UTF-8.
+        // Folding the UTF-16 separately would let the two arenas drift apart.
         self.scratch.clear();
         for r in char::decode_utf16(wide.iter().copied()) {
             // Unpaired surrogates are legal in Windows filenames. U+FFFD is
-            // three bytes and identical in both arenas, so the equal-length
-            // invariant survives.
+            // three bytes in both arenas, so their lengths stay equal.
             self.scratch.push(r.unwrap_or(char::REPLACEMENT_CHARACTER));
         }
         let n = self.scratch.len();
@@ -143,10 +133,8 @@ impl SnapshotBuilder {
         true
     }
 
-    /// Copies an already-folded entry verbatim from another snapshot.
-    ///
-    /// Two memcpys and no re-folding, so a rebuild cannot introduce fold
-    /// drift between the source and the copy.
+    /// Copies an already-folded entry verbatim from another snapshot, without
+    /// re-folding.
     pub fn push_raw(&mut self, orig: &[u8], lower: &[u8]) -> bool {
         debug_assert_eq!(orig.len(), lower.len(), "arenas must stay in lockstep");
         let n = orig.len();
@@ -159,8 +147,7 @@ impl SnapshotBuilder {
         true
     }
 
-    /// Test-only escape hatch for constructing entries whose bytes are not
-    /// valid UTF-8, to prove the display path degrades rather than panics.
+    /// Pushes entries whose bytes may be invalid UTF-8, for display-path tests.
     #[cfg(test)]
     pub fn push_raw_for_test(&mut self, orig: &[u8], lower: &[u8]) -> bool {
         self.push_raw(orig, lower)
@@ -169,7 +156,7 @@ impl SnapshotBuilder {
     /// Checks that a name of `n` bytes plus its separator still fits.
     fn reserve_for(&mut self, n: usize) -> bool {
         if n > MAX_NAME_BYTES {
-            // Skipping one absurd name is better than truncating the listing.
+            // Skip the one oversized name rather than truncate the listing.
             return false;
         }
         let needed = self.orig.len().saturating_add(n).saturating_add(1);
@@ -215,8 +202,8 @@ impl SnapshotBuilder {
         )
     }
 
-    /// Consumes the builder and returns the raw sections, for the persistence
-    /// writer, which streams them straight to disk.
+    /// Consumes the builder and returns the raw sections for the persistence
+    /// writer.
     pub fn into_sections(self) -> (Box<str>, Vec<u32>, Vec<u8>, Vec<u8>, u32, bool) {
         (
             self.prefix,

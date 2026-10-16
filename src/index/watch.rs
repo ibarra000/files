@@ -1,37 +1,26 @@
-//! Live change notification, minus the operating system.
+//! Platform-independent change-notification policy.
 //!
-//! Over SMB, `ReadDirectoryChangesW` with `bWatchSubtree` becomes a single
-//! `SMB2 CHANGE_NOTIFY` covering a whole share - the only mechanism that
-//! scales to three hundred thousand directories, since one watch per
-//! directory would be three hundred thousand outstanding requests.
+//! Over SMB, `ReadDirectoryChangesW` with `bWatchSubtree` becomes one
+//! `SMB2 CHANGE_NOTIFY` for the whole share, which scales where one watch per
+//! directory would not. The decision logic lives here behind the
+//! [`ChangeWatcher`] trait and a scripted fake, so only the OS call in
+//! `win_watch` is untested.
 //!
-//! None of that can be exercised on the machine this is written on, so the
-//! split follows [`crate::index::win_enum`]'s precedent: everything that
-//! decides *what to do* lives here, behind a [`ChangeWatcher`] trait and a
-//! scripted fake, and only the call itself goes untested.
+//! # Failure modes
 //!
-//! # The three failure modes, and why each is designed for
+//! * **Overflow.** The remote buffer is limited to 64 KB, so a bulk change
+//!   overruns it. The API completes with zero bytes, the lost events cannot
+//!   be recovered, and only a full re-walk restores correctness.
+//! * **Unavailable.** The call fails or the watch dies. The rescan floor is
+//!   then the only freshness guarantee, and the status line must say so.
+//! * **Silent.** The server accepts the request but never fires. This is why
+//!   the periodic full re-walk is mandatory and nothing here may extend it.
 //!
-//! * **Overflow.** The remote buffer cannot exceed 64 KB, so a bulk change -
-//!   a job folder being copied in - overruns it. The API signals that by
-//!   completing with *zero bytes* rather than by failing, and nothing about
-//!   what was lost can be recovered. Only a full re-walk restores the truth.
-//! * **Unavailable.** The call fails outright, or the watch dies. The rescan
-//!   floor becomes the whole freshness guarantee, and the status line has to
-//!   say so, because believing you are live when you are not is worse than
-//!   knowing you are not.
-//! * **Silent.** The server accepts the request and then never fires. There is
-//!   no symptom at all. This is why the periodic full re-walk is not optional
-//!   and why nothing here is allowed to extend the floor.
+//! # Debounce from the first event
 //!
-//! # Debounce from the first event, not the last
-//!
-//! A folder being written to continuously - an upload in progress, a CAD
-//! package saving thirty files - produces a steady stream of events. Debouncing
-//! from the *last* one postpones the update for as long as the stream lasts,
-//! which is precisely the period during which someone is most likely to be
-//! looking for the file. Debouncing from the first bounds the delay at exactly
-//! one debounce interval no matter how long the burst runs.
+//! A continuous stream of events (an upload, an application saving many
+//! files) would postpone a trailing debounce indefinitely. Debouncing from the
+//! first event bounds the delay to one interval.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -46,9 +35,9 @@ use crate::util::cancel::CancelToken;
 pub enum WatchEvent {
     /// These directories, relative to the watched root, may have changed.
     ///
-    /// "May", not "did": the notification names a *file*, and a rename inside
-    /// one folder reports two. Re-reading a directory that turns out to be
-    /// unchanged costs three round trips and is not worth avoiding.
+    /// Notifications name files, and a rename reports two. Re-reading an
+    /// unchanged directory costs about three round trips, so false positives
+    /// are acceptable.
     Changed(Vec<String>),
     /// Events were lost and cannot be recovered.
     Overflow,
@@ -58,48 +47,43 @@ pub enum WatchEvent {
 
 /// A source of [`WatchEvent`]s.
 ///
-/// `Sync` as well as `Send` because the watcher is shared with the thread that
-/// cancels it: stopping a blocked `ReadDirectoryChangesW` means calling
-/// `CancelIoEx` from somewhere else, which cannot be done through a `&mut`.
+/// `Sync` because stopping a blocked `ReadDirectoryChangesW` requires calling
+/// `CancelIoEx` from another thread through a shared reference.
 pub trait ChangeWatcher: Send + Sync {
     /// Blocks until the next event arrives, the watcher stops, or `cancel`
     /// fires.
     ///
-    /// `None` means this watcher is finished and will produce nothing further;
-    /// the pump exits rather than spinning on it.
+    /// `None` means the watcher is finished; the pump exits.
     fn next_event(&self, cancel: &CancelToken) -> Option<WatchEvent>;
 
     /// Unblocks a call to [`Self::next_event`] from another thread.
     ///
-    /// Separate from the cancel token because the token can only be *polled*,
-    /// and a thread parked in a blocking syscall never gets to poll anything.
+    /// Needed in addition to the cancel token because a thread blocked in a
+    /// syscall cannot poll the token.
     fn stop(&self);
 }
 
-/// What the index actor should act on.
+/// A batch of changes for the index actor to apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchBatch {
     /// Directories to re-read, sorted and deduplicated. Empty when `full` is
     /// set.
     pub dirs: Vec<String>,
-    /// The dirty set is not trustworthy - it overflowed, or grew past the
-    /// point where re-reading it one directory at a time would cost more than
-    /// walking the share. Only a full re-walk restores the truth.
+    /// The dirty set overflowed or exceeded the cap, so only a full re-walk
+    /// restores correctness.
     pub full: bool,
 }
 
 /// The pending change set, shared between the watcher thread and the actor.
 ///
-/// A set rather than a channel of events, and that is the whole point: if the
-/// actor misses a wake-up, or is busy for a minute inside a walk, nothing is
-/// lost. The set is already populated and the next look at it sees everything.
-/// A channel would make a dropped message a permanently invisible file.
+/// A set rather than a channel of events: if the actor misses a wake-up or is
+/// busy in a walk, nothing is lost, because the next read sees every change.
 #[derive(Debug)]
 pub struct WatchQueue {
     inner: Mutex<Pending>,
     debounce: Duration,
-    /// Dirty directories past which a full re-walk is cheaper than re-reading
-    /// them individually.
+    /// Dirty-directory count above which a full re-walk is cheaper than
+    /// re-reading them individually.
     cap: usize,
 }
 
@@ -107,8 +91,7 @@ pub struct WatchQueue {
 struct Pending {
     dirs: BTreeSet<String>,
     full: bool,
-    /// When the oldest still-pending event arrived. The debounce runs from
-    /// here; see the module docs for why not from the newest.
+    /// When the oldest pending event arrived. The debounce runs from here.
     since: Option<Instant>,
     unavailable: Option<String>,
 }
@@ -130,17 +113,13 @@ impl WatchQueue {
 
     /// Folds an event into the pending set.
     ///
-    /// Returns whether the actor needs waking. Only the *first* event of a
-    /// burst does: the rest land in a set the actor will read anyway when the
-    /// debounce it already scheduled expires, so waking it again would just
-    /// pay for a round trip through the channel to learn nothing new.
+    /// Returns whether the actor needs waking. Only the first event of a burst
+    /// does; the rest are picked up when the scheduled debounce expires.
     pub fn record(&self, event: WatchEvent, now: Instant) -> bool {
         let mut p = self.inner.lock();
         match event {
             WatchEvent::Changed(dirs) => {
-                // A pending full re-walk already supersedes any individual
-                // directory, so accumulating them would only grow a set that
-                // is about to be discarded.
+                // A pending full re-walk supersedes individual directories.
                 if !p.full {
                     p.dirs.extend(dirs);
                     if p.dirs.len() > self.cap {
@@ -154,13 +133,10 @@ impl WatchQueue {
                 p.full = true;
             }
             WatchEvent::Unavailable(why) => {
-                // Deliberately *not* a reason to re-walk. Either the watch
-                // never worked, in which case the walk that just ran already
-                // covered everything, or it died, in which case the floor
-                // catches what was missed within half an hour. Forcing a walk
-                // here would mean every launch against a share that does not
-                // support change notification paid for a second full walk it
-                // was never going to learn anything from.
+                // Not a reason to re-walk: if the watch never worked, the
+                // preceding walk already covered everything; if it died, the
+                // floor catches up. Forcing a walk would double the startup
+                // cost on shares without change notification.
                 let first = p.unavailable.is_none();
                 p.unavailable = Some(why);
                 return first;
@@ -171,7 +147,7 @@ impl WatchQueue {
         first
     }
 
-    /// When the pending set becomes actionable, if anything is pending.
+    /// Returns when the pending set becomes actionable, if anything is pending.
     pub fn due_at(&self) -> Option<Instant> {
         let p = self.inner.lock();
         p.since.map(|since| since + self.debounce)
@@ -188,10 +164,8 @@ impl WatchQueue {
 
     /// Takes the pending set regardless of its debounce.
     ///
-    /// Used when a scan is about to run anyway - an F5, or the floor coming
-    /// due. Leaving the set in place would mean the change that arrived a
-    /// moment ago triggered a second pass over a share the first pass had
-    /// already covered.
+    /// Used when a scan is about to run anyway (F5 or the floor), so the
+    /// pending changes do not trigger a redundant second pass.
     pub fn take(&self) -> Option<WatchBatch> {
         let mut p = self.inner.lock();
         p.since?;
@@ -206,18 +180,18 @@ impl WatchQueue {
         }
     }
 
-    /// Whether a batch is actionable now, and whether it needs a full re-walk.
+    /// Returns whether a batch is actionable now, and whether it needs a full
+    /// re-walk.
     ///
-    /// A peek, not a take. The scheduler may decide the update has to wait for
-    /// its spacing floor, and a set consumed before that decision would be a
-    /// set of changes nobody ever applies.
+    /// Does not consume the set: the scheduler may defer the update to its
+    /// spacing floor, and a consumed set would then be lost.
     pub fn due(&self, now: Instant) -> Option<bool> {
         let p = self.inner.lock();
         let since = p.since?;
         (now >= since + self.debounce).then_some(p.full)
     }
 
-    /// Why live updates are not running here, if they are not.
+    /// Returns why live updates are not running, if they are not.
     pub fn unavailable(&self) -> Option<String> {
         self.inner.lock().unavailable.clone()
     }
@@ -234,8 +208,8 @@ impl WatchQueue {
 
 /// Drains a watcher into a queue until it stops.
 ///
-/// Split out from the thread that runs it so the policy above can be driven by
-/// a scripted fake in a test without a thread being involved at all.
+/// Separate from the thread that runs it so tests can drive it with a scripted
+/// fake.
 pub fn pump(
     watcher: &dyn ChangeWatcher,
     queue: &WatchQueue,
@@ -252,11 +226,10 @@ pub fn pump(
     }
 }
 
-/// A watcher driven by a script rather than by an operating system.
+/// A watcher driven by a script rather than the operating system.
 ///
-/// Public, not test-gated, for the same reason [`crate::index::fake_source`]
-/// is: the integration tests that matter here live outside this crate's unit
-/// tests, and the alternative is a second copy of the fake that drifts.
+/// Public, like [`crate::index::fake_source`], so integration tests outside
+/// this crate's unit tests share one fake.
 pub mod fake {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -306,10 +279,9 @@ pub mod fake {
     impl ChangeWatcher for ScriptedWatcher {
         fn next_event(&self, cancel: &CancelToken) -> Option<WatchEvent> {
             loop {
-                // Scripted events first, so a test can queue a burst and then
-                // stop the watcher in one breath without racing itself. A real
-                // watcher behaves the same way: `CancelIoEx` does not discard a
-                // completion that has already landed.
+                // Return queued events before honouring stop, so a test can
+                // queue a burst and stop without racing. `CancelIoEx` likewise
+                // does not discard a completion that has already landed.
                 if let Ok(event) = self.rx.try_recv() {
                     return Some(event);
                 }
@@ -357,8 +329,8 @@ mod tests {
         );
     }
 
-    /// The property the module exists to get right. A burst that runs for ten
-    /// debounce intervals must still be applied one interval after it started.
+    /// A burst lasting ten debounce intervals is applied one interval after
+    /// it started.
     #[test]
     fn a_continuous_burst_is_applied_one_debounce_after_its_first_event() {
         let q = WatchQueue::new(DEBOUNCE, 100);
@@ -407,8 +379,7 @@ mod tests {
         );
     }
 
-    /// After an overflow the individual directories mean nothing, so
-    /// accumulating them would only grow a set about to be thrown away.
+    /// After an overflow, individual directories are no longer accumulated.
     #[test]
     fn changes_after_an_overflow_do_not_reopen_the_set() {
         let q = queue();
@@ -421,8 +392,6 @@ mod tests {
         assert!(batch.dirs.is_empty());
     }
 
-    /// Past the cap, re-reading one directory at a time costs more than
-    /// walking the share - so it stops pretending otherwise.
     #[test]
     fn too_many_dirty_directories_becomes_a_full_rewalk() {
         let q = WatchQueue::new(DEBOUNCE, 3);
@@ -452,8 +421,6 @@ mod tests {
         assert_eq!(q.take_due(t0 + DEBOUNCE * 2), None);
     }
 
-    /// A scan that is about to run anyway covers whatever is pending, so
-    /// leaving it queued would buy a second pass over the same share.
     #[test]
     fn a_forced_take_ignores_the_debounce() {
         let q = queue();
@@ -468,8 +435,7 @@ mod tests {
         assert_eq!(queue().take(), None);
     }
 
-    /// Believing you are live when you are not is worse than knowing you are
-    /// not - so it is recorded, and it wakes the actor to say so.
+    /// Unavailability is recorded and wakes the actor once.
     #[test]
     fn unavailability_is_recorded_and_reported_once() {
         let q = queue();
@@ -479,8 +445,7 @@ mod tests {
         assert_eq!(q.unavailable().as_deref(), Some("still none"));
     }
 
-    /// A share that cannot be watched must not pay for a second full walk it
-    /// has nothing to learn from.
+    /// Unavailability alone schedules no work.
     #[test]
     fn unavailability_alone_does_not_schedule_any_work() {
         let q = queue();

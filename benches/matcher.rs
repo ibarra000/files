@@ -1,11 +1,5 @@
-//! Matcher benchmarks.
-//!
-//! The performance claim behind this rewrite is that matching a
-//! million-entry listing should cost single-digit milliseconds rather than
-//! the hundreds the previous per-entry `str::find` needed. That claim is
-//! measurable here, on synthetic data, with no network drives involved -
-//! which is the only part of the speed story that *can* be measured on this
-//! machine.
+//! Matcher benchmarks on synthetic data. The target is single-digit
+//! milliseconds for a million-entry listing.
 //!
 //! Run with `cargo bench`. Useful comparisons:
 //!
@@ -44,7 +38,7 @@ fn arena_bytes(snap: &Snapshot) -> u64 {
     snap.lower().len() as u64
 }
 
-/// How the two implementations compare at a realistic size.
+/// Compares the two implementations at a realistic size.
 fn simd_versus_naive(c: &mut Criterion) {
     let snap = synthetic(200_000);
     let mut group = c.benchmark_group("simd_vs_naive");
@@ -67,8 +61,8 @@ fn simd_versus_naive(c: &mut Criterion) {
     group.finish();
 }
 
-/// Latency against listing size. The interesting number is 1M: the flat root
-/// is expected to hold between half a million and several million entries.
+/// Latency against listing size. 1M is the key size: the flat root holds
+/// between half a million and several million entries.
 fn scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("scaling");
     group.sample_size(20);
@@ -102,13 +96,9 @@ fn query_shape(c: &mut Criterion) {
 
     // rare: nothing matches. common: matches roughly one entry in a thousand.
     // dense: matches nearly everything.
-    // `one_char` is the worst case the search floor allows, and it only
-    // became reachable when that floor went from three to one. A single
-    // character matches nearly every name, so the prefilter fires on almost
-    // every position and `topk` ranks the whole arena rather than a handful
-    // of candidates. If anything here is going to be slow it is this, and
-    // the fix if it is would be an early-out in `topk` rather than a floor
-    // put back.
+    // one_char: the worst case the one-character search floor allows. It
+    // matches nearly every name, so `topk` ranks the whole arena. If it is
+    // slow, the fix is an early-out in `topk`, not a higher floor.
     for (label, query) in [
         ("one_char", "j"),
         ("rare_zzz", "zzzzzz"),
@@ -136,7 +126,7 @@ fn query_shape(c: &mut Criterion) {
 ///
 /// The matcher checks for cancellation once per rayon chunk rather than per
 /// entry, to keep the branch out of the vectorised inner loop. This measures
-/// what that trade actually costs in responsiveness.
+/// the cost in responsiveness.
 fn cancellation_latency(c: &mut Criterion) {
     let snap = synthetic(1_000_000);
     c.bench_function("cancellation_latency", |b| {
@@ -145,8 +135,8 @@ fn cancellation_latency(c: &mut Criterion) {
             for _ in 0..iters {
                 let epoch = Epoch::new();
                 let token = epoch.token(epoch.current());
-                // Superseded before the sweep begins, so this measures the
-                // fixed cost of noticing.
+                // Cancelled before the sweep begins: measures the fixed cost
+                // of noticing.
                 epoch.bump();
                 let started = Instant::now();
                 let _ = matcher::search(
@@ -164,30 +154,25 @@ fn cancellation_latency(c: &mut Criterion) {
     });
 }
 
-/// Building the index from names, which is the CPU half of a refresh.
-///
-/// Expected to be a rounding error next to the network I/O it accompanies -
-/// this exists to confirm that assumption rather than assume it.
 /// Gathering a code's pages, which runs once per Enter against the flat index.
 ///
-/// Worth measuring because the sweep is uncapped and visits every entry: the
-/// claim it rests on is that the O(1) name-length pre-filter rejects almost
-/// everything before the arena is touched, so this should stay close to a
-/// linear pass over the offsets array rather than over the names.
+/// The sweep is uncapped, so this relies on the O(1) name-length prefilter
+/// rejecting almost every entry before the arena is touched.
 fn page_collection(c: &mut Criterion) {
     let mut group = c.benchmark_group("page_collection");
     for n in [100_000usize, 1_000_000] {
         let snap = synthetic(n);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
-            // The common shape: a code with no page set in this listing, so
-            // every entry has to be rejected.
+            // Common case: no page set for the code, so every entry is rejected.
             b.iter(|| pages::collect(&snap, "11-D-0704", &CancelToken::never()));
         });
     }
     group.finish();
 }
 
+/// Building the index from names, the CPU half of a refresh. Expected to be
+/// negligible next to the network I/O.
 fn snapshot_build(c: &mut Criterion) {
     let names: Vec<String> = (0..200_000)
         .map(|i| format!("job_{i:07}_{}_report.pdf", i % 997))
@@ -211,8 +196,8 @@ fn snapshot_build(c: &mut Criterion) {
 /// A walked tree shaped like the real share: `dirs` folders, `per_dir` files
 /// in each.
 ///
-/// Segments are sealed on the same arena budget the sink uses, so the segment
-/// count a query actually sweeps is the one the application would have.
+/// Segments are sealed on the sink's arena budget, so the segment count matches
+/// the application's.
 fn synthetic_tree(dirs: usize, per_dir: usize) -> TreeIndex {
     let mut index = TreeIndex::empty("R:\\");
     let mut b = SegmentBuilder::new();
@@ -235,23 +220,17 @@ fn synthetic_tree(dirs: usize, per_dir: usize) -> TreeIndex {
     index
 }
 
-/// The gate the whole design was sized against: a query against the real
-/// share, which is about 300,000 folders and 5,000,000 files.
+/// A query at the scale of the real share: about 300,000 folders and 5,000,000
+/// files. The expected cost is 5-16 ms; above roughly 15 ms a per-segment
+/// n-gram prefilter is needed.
 ///
-/// The matcher's own documentation claims 1-3 ms for a 30 MB arena, which
-/// extrapolates to 5-16 ms here - fine on a worker thread that never blocks
-/// the UI, but close enough to the edge to measure rather than assume. Past
-/// roughly 15 ms a per-segment n-gram prefilter goes in.
-///
-/// Two sweeps per query, not one: the small directory arena for folders whose
-/// name matches, then the large filename arena. The folder sweep is what makes
-/// a job code that names a folder return that folder's files, which is the
-/// behaviour the rewrite exists to provide, so it belongs inside the number.
+/// Each query sweeps the directory arena (folder matches) and then the filename
+/// arena, and both are included in the measurement.
 fn tree_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("tree_scaling");
     group.sample_size(10);
 
-    // 17 files per folder, which is what the real share measured.
+    // 17 files per folder, as measured on the real share.
     for (dirs, per_dir) in [(30_000usize, 17usize), (300_000, 17)] {
         let index = synthetic_tree(dirs, per_dir);
         let bytes: u64 = index
@@ -275,9 +254,8 @@ fn tree_scaling(c: &mut Criterion) {
                 });
             },
         );
-        // A query that names a *folder*, so the hits come through the
-        // directory table and its per-folder expansion rather than from the
-        // filename sweep.
+        // A query naming a folder, so hits come through the directory table
+        // and its per-folder expansion.
         group.bench_with_input(
             BenchmarkId::new("folder", index.len()),
             &index,

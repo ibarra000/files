@@ -1,35 +1,14 @@
-//! Where the user put the panel.
+//! Persists the panel's dragged position in `%APPDATA%\files\window.txt`.
 //!
-//! The panel is summoned and dismissed dozens of times an hour, and until now
-//! it landed in the same computed spot every time: centred horizontally, top
-//! edge twelve per cent down the work area. That is the right *default* and the
-//! wrong *rule* - the one place a search panel must not cover is the drawing
-//! somebody summoned it to look for, and only they know where that is.
+//! Kept out of `config.toml` because the config rejects unknown keys and
+//! `Settings` is cloned into every worker, so it must not change at run time.
+//! Like [`crate::history`], this is a best-effort, atomically rewritten file
+//! with its own coalescing writer thread.
 //!
-//! So a drag moves it, and this module is the half that makes the move outlive
-//! the process.
-//!
-//! # Why this is not in the configuration file
-//!
-//! `config::file` treats an unknown key as a hard startup error, which is the
-//! right policy for a file somebody hand-edits and the wrong one for a value a
-//! mouse writes sixty times a second. More to the point, `Settings` is cloned
-//! into every worker, and its own module note says so: a field that changes at
-//! run time would be one truth with several stale copies of it.
-//!
-//! This is the same shape as [`crate::history`] instead - a small, best-effort,
-//! atomically-rewritten runtime file beside the config rather than in it, with
-//! its own error type and its own coalescing writer thread.
-//!
-//! # Why `%APPDATA%` and not `%LOCALAPPDATA%`
-//!
-//! A position is arguably machine-specific, because a monitor layout is. But
-//! `%LOCALAPPDATA%\files` is `cache_dir`, which the user may redirect and which
-//! `index::persist::gc_orphans` sweeps, and neither of those should be able to
-//! reach this. Roaming it is safe because nothing here is trusted on the way
-//! back in: [`crate::hotkey::geometry::place_at`] clamps a restored point into
-//! the work area of whatever monitor it lands nearest, so the worst a position
-//! from another machine can do is put the panel against an edge.
+//! Stored under `%APPDATA%` rather than `%LOCALAPPDATA%\files`, which is the
+//! cache directory that `index::persist::gc_orphans` sweeps. A roamed position
+//! is safe because [`crate::hotkey::geometry::place_at`] clamps it into the
+//! nearest monitor's work area.
 
 use std::fs::File;
 use std::io::Write;
@@ -39,17 +18,14 @@ use std::thread::JoinHandle;
 
 use crate::util::latest_slot::LatestSlot;
 
-/// Longest line this will read before deciding the file is not one of ours.
-///
-/// Two signed integers and a space is nineteen characters at the very most.
-/// Anything longer is a damaged file or a different file, and either way the
-/// honest answer is the default placement.
+/// Maximum accepted line length. Two `i32`s and a space need at most 22
+/// characters; anything longer is treated as a foreign or damaged file.
 const MAX_LEN: usize = 64;
 
-/// Why a position could not be stored.
+/// An error storing or removing the position file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlacementError {
-    /// No `%APPDATA%`, so there is nowhere to put it.
+    /// The path has no parent directory.
     NoLocation,
     Io(String),
 }
@@ -71,11 +47,10 @@ impl std::fmt::Display for PlacementError {
 
 impl std::error::Error for PlacementError {}
 
-/// `%APPDATA%\files\window.txt`.
+/// Returns `%APPDATA%\files\window.txt`, or `None` if `APPDATA` is unset.
 ///
-/// Derived the same way as the config path rather than shared with it, for the
-/// reason [`crate::history::default_path`] gives: the two must not become
-/// silently coupled if either moves.
+/// Derived independently of the config path, as in
+/// [`crate::history::default_path`].
 pub fn default_path() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
     let dir = PathBuf::from(appdata);
@@ -85,12 +60,10 @@ pub fn default_path() -> Option<PathBuf> {
     Some(dir.join("files").join("window.txt"))
 }
 
-/// Reads the remembered top-left corner, in device pixels.
+/// Reads the saved top-left corner, in device pixels.
 ///
-/// Never fails. A missing file is the ordinary case - it means nobody has moved
-/// the panel yet - and a damaged one is treated the same way, because the cost
-/// of being wrong is a panel in the default place and the cost of reporting it
-/// is a message about a file the user has never heard of.
+/// Returns `None` for a missing or malformed file; the panel then uses its
+/// default placement.
 pub fn load(path: &Path) -> Option<(i32, i32)> {
     let text = std::fs::read_to_string(path).ok()?;
     let line = text.lines().next()?.trim();
@@ -100,15 +73,12 @@ pub fn load(path: &Path) -> Option<(i32, i32)> {
     parse(line)
 }
 
-/// One line, two integers. Separate from [`load`] so the parsing is testable
-/// without a filesystem.
+/// Parses `"<left> <top>"`.
 fn parse(line: &str) -> Option<(i32, i32)> {
     let mut parts = line.split_ascii_whitespace();
     let left = parts.next()?.parse::<i32>().ok()?;
     let top = parts.next()?.parse::<i32>().ok()?;
-    // A third field means this is not the file this program writes, and
-    // guessing at what the first two meant is how a panel ends up somewhere
-    // nobody asked for.
+    // Reject extra fields rather than guess at their meaning.
     if parts.next().is_some() {
         return None;
     }
@@ -117,8 +87,8 @@ fn parse(line: &str) -> Option<(i32, i32)> {
 
 /// Writes the top-left corner, in device pixels.
 ///
-/// Temp file, `sync_all`, then rename over the destination - the same shape as
-/// [`crate::history::save`] and for the same reasons.
+/// Writes a temp file, syncs it, then renames it over `path`, as
+/// [`crate::history::save`] does.
 pub fn save(path: &Path, at: (i32, i32)) -> Result<(), PlacementError> {
     let parent = path.parent().ok_or(PlacementError::NoLocation)?;
     std::fs::create_dir_all(parent).map_err(|e| PlacementError::Io(e.to_string()))?;
@@ -133,8 +103,7 @@ pub fn save(path: &Path, at: (i32, i32)) -> Result<(), PlacementError> {
         let mut file = File::create(&tmp).map_err(|e| PlacementError::Io(e.to_string()))?;
         (|| -> std::io::Result<()> {
             writeln!(file, "{} {}", at.0, at.1)?;
-            // Without this a power loss can leave a renamed but empty file,
-            // which reads back as "never moved" rather than as a failure.
+            // Without this a power loss can leave a renamed but empty file.
             file.sync_all()
         })()
         .map_err(|e| {
@@ -149,10 +118,7 @@ pub fn save(path: &Path, at: (i32, i32)) -> Result<(), PlacementError> {
     })
 }
 
-/// Removes the remembered position, so the panel goes back to being placed.
-///
-/// A missing file is success: the caller asked for there to be no remembered
-/// position, and there is none.
+/// Deletes the saved position. A missing file is success.
 pub fn forget(path: &Path) -> Result<(), PlacementError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -161,25 +127,18 @@ pub fn forget(path: &Path) -> Result<(), PlacementError> {
     }
 }
 
-/// What the writer thread is being asked to do.
-///
-/// An enum rather than an `Option<(i32, i32)>` because the two are not the same
-/// instruction: `None` would have to mean either "forget it" or "nothing to
-/// say", and a writer that cannot tell them apart deletes the file every time
-/// the queue is empty.
+/// A request to the writer thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Job {
     At(i32, i32),
     Forget,
 }
 
-/// The thread that owns the position file.
+/// Handle to the thread that owns the position file.
 ///
-/// Fed through a [`LatestSlot`] because a drag produces one position per frame
-/// and the only one worth a round trip to `%APPDATA%` - which often roams to an
-/// SMB path - is the last one. Coalescing is what makes it safe to call
-/// [`Writer::store`] from the drawing thread on every frame of a drag rather
-/// than having the caller debounce.
+/// Requests go through a [`LatestSlot`], so only the newest is written. This
+/// makes [`Writer::store`] cheap enough to call on every frame of a drag,
+/// even when `%APPDATA%` is on a network share.
 pub struct Writer {
     slot: Arc<LatestSlot<Job>>,
     handle: Option<JoinHandle<()>>,
@@ -196,11 +155,8 @@ impl Writer {
         self.slot.put(Job::Forget);
     }
 
-    /// Stops the thread, waiting for a write in progress.
-    ///
-    /// The wait is unbounded, exactly as [`crate::history::Writer::shutdown`]
-    /// is: this is one short line to a local disk, and the alternative is
-    /// losing the move the user just made.
+    /// Stops the thread, waiting without a timeout for any pending write, as
+    /// [`crate::history::Writer::shutdown`] does.
     pub fn shutdown(&mut self) {
         self.slot.close();
         if let Some(handle) = self.handle.take() {
@@ -223,9 +179,7 @@ pub fn spawn_writer(path: PathBuf) -> std::io::Result<Writer> {
         .name("files-placement".into())
         .spawn(move || {
             while let Some(job) = worker.take_blocking() {
-                // Best effort, like the index cache and the history: a profile
-                // that cannot be written to costs the panel its position next
-                // session and nothing else.
+                // Best effort: a failed write only loses the position.
                 let _ = match job {
                     Job::At(left, top) => save(&path, (left, top)),
                     Job::Forget => forget(&path),
@@ -254,9 +208,7 @@ mod tests {
         assert_eq!(load(&path), Some((1234, -56)));
     }
 
-    /// Negative coordinates are the ordinary case for a second monitor placed
-    /// to the left of the primary one, which is exactly the layout a remembered
-    /// position exists to serve.
+    /// Monitors left of the primary have negative coordinates.
     #[test]
     fn a_position_on_a_monitor_left_of_the_primary_one_survives() {
         let dir = temp();
@@ -271,9 +223,6 @@ mod tests {
         assert_eq!(load(&dir.path().join("window.txt")), None);
     }
 
-    /// Everything a damaged or foreign file can look like. Each of these must
-    /// read as "no remembered position", because the alternative is a panel
-    /// placed from a number that meant something else.
     #[test]
     fn a_file_that_is_not_ours_is_no_position() {
         for bad in [
@@ -308,7 +257,6 @@ mod tests {
         );
     }
 
-    /// Writing twice must leave the second position, not append to the first.
     #[test]
     fn a_second_save_replaces_the_first() {
         let dir = temp();
@@ -329,8 +277,7 @@ mod tests {
         assert_eq!(load(&path), None);
     }
 
-    /// The writer coalesces, so the file holds the last position rather than
-    /// one of the sixty a drag produced.
+    /// The writer coalesces queued positions and writes the last one.
     #[test]
     fn the_writer_stores_the_last_position_it_was_given() {
         let dir = temp();

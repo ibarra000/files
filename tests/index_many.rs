@@ -1,11 +1,5 @@
-//! Many shares at once.
-//!
-//! The index used to hold exactly two slots - one flat, one tree - while the
-//! configuration layer accepted a list. A second flat mapping was refused
-//! outright; a second tree mapping parsed, was listed by `--doctor`, and was
-//! then silently never walked. These tests pin the shape that replaced it: one
-//! slot and one actor per configured mapping, and a cap on how many of them
-//! walk at once.
+//! Indexing many shares: one slot and one actor per configured mapping, with a
+//! cap on how many walk at once.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,7 +37,7 @@ fn settings(n: u16, cap: usize) -> Settings {
     }
 }
 
-/// Trees big enough, and slow enough, that several walks genuinely overlap.
+/// Trees large and slow enough that several walks overlap.
 fn source(n: u16) -> Arc<dyn DirSource> {
     let mut src = FakeDirSource::new();
     for i in 0..n {
@@ -58,7 +52,7 @@ fn source(n: u16) -> Arc<dyn DirSource> {
     Arc::new(src)
 }
 
-/// What the shares were collectively doing, sampled until they go quiet.
+/// Aggregate share activity, sampled until all shares are idle.
 struct Observed {
     peak_walking: usize,
     saw_queued: bool,
@@ -104,7 +98,6 @@ fn observe(actors: &Actors, budget: Duration) -> Observed {
     }
 }
 
-/// The headline: ten mappings used to mean two indexes.
 #[test]
 fn every_configured_share_is_walked_and_searchable() {
     let (mut actors, _rx) = Actors::start(
@@ -121,7 +114,7 @@ fn every_configured_share_is_walked_and_searchable() {
     actors.shutdown();
 }
 
-/// And each keeps its own slot, rather than overwriting one shared pair.
+/// Each share keeps its own slot.
 #[test]
 fn each_share_keeps_its_own_index_and_status() {
     let (mut actors, _rx) = Actors::start(
@@ -149,8 +142,8 @@ fn each_share_keeps_its_own_index_and_status() {
     actors.shutdown();
 }
 
-/// The cap holds. One walk already keeps eight directory reads in flight, so
-/// without this five shares would open forty at once against one server.
+/// Each walk keeps eight directory reads in flight, so the cap bounds the load
+/// on a single server.
 #[test]
 fn no_more_shares_walk_at_once_than_the_cap_allows() {
     let cap = 2;
@@ -179,8 +172,7 @@ fn no_more_shares_walk_at_once_than_the_cap_allows() {
     actors.shutdown();
 }
 
-/// A share waiting its turn must not be indistinguishable from an idle one:
-/// that is the unexplained wait the activity states exist to prevent.
+/// A share waiting for a permit reports as queued, not idle.
 #[test]
 fn a_queued_share_is_reported_rather_than_looking_idle() {
     let (mut actors, _rx) = Actors::start(
@@ -195,7 +187,6 @@ fn a_queued_share_is_reported_rather_than_looking_idle() {
     actors.shutdown();
 }
 
-/// Shutting down while shares are still queued must not wait them out.
 #[test]
 fn shutdown_is_prompt_while_shares_are_queued_for_a_permit() {
     let (mut actors, _rx) = Actors::start(
@@ -204,8 +195,8 @@ fn shutdown_is_prompt_while_shares_are_queued_for_a_permit() {
         std::sync::Arc::new(|| {}),
     )
     .unwrap();
-    // Far enough in that the queue has certainly formed, and nowhere near
-    // enough for five serialised walks to have finished.
+    // Long enough for the queue to form, far too short for five serialised
+    // walks to finish.
     std::thread::sleep(Duration::from_millis(60));
 
     let started = Instant::now();

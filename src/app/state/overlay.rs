@@ -1,8 +1,7 @@
-//! The quick-search overlay, and the rule about what gets remembered.
+//! The quick-search overlay and the rule for which queries are remembered.
 //!
-//! A child module rather than a free-standing one so it can still reach the
-//! private fields the gate below depends on - `verify_due_at` in particular -
-//! exactly as `mouse` reaches `dragging` and `last_click`.
+//! A child module of `state` so the gate below can read private fields such
+//! as `remember_due_at`.
 
 use std::time::Instant;
 
@@ -22,30 +21,21 @@ impl AppState {
             }
             HotkeyMsg::Unavailable { reason } => {
                 self.hotkey_claim = Some(Err(reason.clone()));
-                // Said once, by the thread, and shown as a warning rather than
-                // an error: the shortcut still switches to the compact layout,
-                // so this is a reduced feature and not a broken one.
+                // A warning, not an error: the shortcut still switches to the
+                // compact layout.
                 self.set_toast(reason, Severity::Warn, now);
                 Response::redraw()
             }
         }
     }
 
-    /// The window has been snapped: shrink to match it.
+    /// Switches to the compact overlay after the window was snapped.
     ///
-    /// The code already on the line is kept, and selected. Clearing would throw
-    /// away both a code somebody may still want and the results already
-    /// computed for it; keeping it unselected would mean the next keystroke
-    /// appended to a stale code. Selected is both at once - the first character
-    /// typed replaces it, while the arrows and Ctrl+C still recover it.
-    ///
-    /// Deliberately does *not* call `on_input_changed`. Summoning the window is
-    /// not editing the code: doing so would bump the query generation, re-arm
-    /// the server check and spend a round trip on a code nobody retyped.
+    /// The current line is kept and selected, so typing replaces it while the
+    /// arrows and Ctrl+C still reach it. Does not call `on_input_changed`,
+    /// which would bump the query generation and re-arm the server check.
     fn enter_overlay(&mut self) -> Response {
-        // Whatever was being browsed last time is not what this summon is
-        // about, and the drive picker least of all: it must not be the first
-        // thing somebody sees when they ask for a search box.
+        // A fresh summon starts with no history browsing and no drive picker.
         self.leave_history();
         self.picking_share = false;
         self.input.select_all();
@@ -61,16 +51,12 @@ impl AppState {
         Response::redraw()
     }
 
-    /// Asks for the overlay to be put away, and remembers the code first.
+    /// Requests that the overlay be dismissed, remembering the query first.
     ///
-    /// The order matters. The gate refuses while recall is open, and
-    /// `leave_history` destroys that fact, so the commit has to happen before
-    /// the mode is unwound - otherwise browsing previous codes and then
-    /// dismissing would silently reorder the list being browsed.
-    ///
-    /// `mode` is *not* changed here. The hotkey thread owns whether the window
-    /// is small and reports back as [`HotkeyMsg::Dismissed`]; one thread hop of
-    /// latency buys the impossibility of the two disagreeing.
+    /// The remember must run before `leave_history`: the gate refuses while
+    /// browsing, and leaving history clears that state. The overlay flag is
+    /// not changed here; the hotkey thread owns it and reports
+    /// [`HotkeyMsg::Dismissed`].
     pub(super) fn request_dismiss(&mut self) -> Response {
         let mut response = Response {
             redraw: Redraw::Yes,
@@ -83,51 +69,26 @@ impl AppState {
         response
     }
 
-    /// Whether the code on the line has settled enough to be worth keeping.
+    /// Whether the query on the line has settled enough to remember.
     ///
-    /// This is the filter that keeps the prefixes typed on the way to a code
-    /// out of the recall list, and it is deliberately **not** "a search came
-    /// back". The local match waits out [`crate::config::SEARCH_DEBOUNCE`],
-    /// which is 300ms - an ordinary pause between syllables - so `inv` reaches
-    /// [`QueryPhase::Local`] while somebody is still reading the rest of the
-    /// code off a drawing. Gating on a resolved search would remember every
-    /// prefix, which is precisely the bug this exists to prevent. That clock is
-    /// five times shorter than [`crate::config::REMEMBER_DEBOUNCE`], and the
-    /// gap between them is the whole of what separates a prefix from a code.
+    /// Keeps prefixes typed on the way to a query out of history. A completed
+    /// search is not enough: [`crate::config::SEARCH_DEBOUNCE`] is much shorter
+    /// than [`crate::config::REMEMBER_DEBOUNCE`], so a pause mid-typing already
+    /// reaches [`QueryPhase::Local`]. `Local` cannot be excluded either, since
+    /// `on_verify` maps a skipped server check back to it.
     ///
-    /// Nor can `Local` simply be excluded. `run_verify` skips the server
-    /// entirely when there is no single flat share to ask - the shipped
-    /// configuration has two shares, so that is the ordinary case - and
-    /// `on_verify` maps that skip back to `Local`. A fully settled code ends up
-    /// there too, so excluding it would break the common path rather than the
-    /// rare one.
-    ///
-    /// What actually separates a finished code from a half-typed one is that
-    /// the typing stopped, and `remember_due_at` is exactly that value: armed
-    /// on every keystroke that reaches a real query, cleared only when the tick
-    /// finds [`crate::config::REMEMBER_DEBOUNCE`] expired. An empty deadline
-    /// means the quiet period has passed with nothing typed since.
-    ///
-    /// It used to be `verify_due_at`, which is the same shape with a clock five
-    /// times shorter - short enough that a pause in the middle of a code read
-    /// off a drawing counted as the end of one.
+    /// The signal is `remember_due_at`: armed on every keystroke that reaches a
+    /// real query and cleared once `REMEMBER_DEBOUNCE` expires.
     pub(super) fn query_settled(&self) -> bool {
-        // Browsing is looking, not searching. The code on the line was put
-        // there by an arrow key, and recalling a code must not rewrite the list
-        // it was recalled from.
+        // A recalled entry must not reorder the list it came from.
         if self.history.is_browsing() {
             return false;
         }
         if self.remember_due_at.is_some() {
             return false;
         }
-        // Long enough to be worth recalling tomorrow. This used to be
-        // enforced by accident: a query under three characters was rejected
-        // outright and sat in a phase the match below does not accept, so
-        // the floor on the history was a side effect of the floor on the
-        // search. The search floor is one now, and without this line the
-        // recent-codes list would fill with every one- and two-character
-        // prefix anybody typed on the way to a real code.
+        // Searches start at one character; history needs a longer floor so
+        // short prefixes are not remembered.
         if self.query.term().chars().count() < crate::config::MIN_REMEMBERED_LEN {
             return false;
         }
@@ -140,10 +101,9 @@ impl AppState {
         )
     }
 
-    /// Remembers the code on the line, if it has settled.
+    /// Remembers the query on the line if it has settled.
     ///
-    /// The clock-gated commit: the quiet-period tick, and the overlay being
-    /// dismissed.
+    /// Called from the quiet-period tick and on overlay dismissal.
     pub(super) fn remember_if_settled(&mut self) -> Option<Cmd> {
         if !self.query_settled() {
             return None;
@@ -151,15 +111,10 @@ impl AppState {
         self.remember_now()
     }
 
-    /// Remembers the code on the line whatever the clock says.
+    /// Remembers the query on the line regardless of the debounce.
     ///
-    /// Pressing Enter *is* the settle signal. Somebody who types a code and
-    /// opens a file from it half a second later has said what they meant far
-    /// more emphatically than a timer ever could, and making them wait out a
-    /// debounce first would lose exactly the codes that matter most.
-    ///
-    /// The browsing guard stays: recalling a code must not reorder the list it
-    /// was recalled from, and that is true however deliberate the keystroke.
+    /// Used on Enter, which is itself the settle signal. Still refuses while
+    /// browsing history, so a recalled entry does not reorder the list.
     pub(super) fn remember_now(&mut self) -> Option<Cmd> {
         if self.history.is_browsing() {
             return None;

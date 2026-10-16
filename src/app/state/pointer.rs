@@ -1,37 +1,14 @@
-//! What the pointer meant, rather than where it was.
+//! Pointer input, already resolved to intent by the toolkit.
 //!
-//! The terminal build had to do its own hit-testing: a click arrived as a cell
-//! coordinate, and 470 lines of [`mouse`](super::mouse) turned it back into a
-//! row, a caret position or a key hint by re-deriving the layout the frame had
-//! just been drawn with. A window toolkit hit-tests its own widgets, so what
-//! crosses this boundary is the decision and never the pixel.
+//! The toolkit hit-tests its own widgets, so [`Intent`] carries decisions and
+//! no coordinates. Policies kept here:
 //!
-//! That is not only less code. It is the difference between a state machine
-//! that can be wrong about where a row was and one that cannot: [`Intent`] has
-//! no coordinates in it to disagree about.
-//!
-//! # What survived the move
-//!
-//! Roughly half of `mouse.rs` was policy rather than arithmetic, and policy
-//! does not stop being true because the renderer changed:
-//!
-//! * **Select before opening.** What opens is the row that was drawn under the
-//!   pointer, not whatever the arrows had last left selected.
-//! * **A hover is never a selection.** Enter opens the selection; a highlight
-//!   that could be mistaken for it is a highlight that gets a file opened by
-//!   accident.
+//! * **Select before opening.** What opens is the row drawn under the pointer,
+//!   not whatever the arrows last selected.
+//! * **A hover is never a selection.** Enter opens the selection, so a hover
+//!   must not be mistakable for one.
 //! * **A control does exactly what its key does**, by going through the key
-//!   handler rather than by reimplementing it. The chips this was written
-//!   about are gone; the actions menu is what keeps the rule.
-//!
-//! Two things genuinely improve. The old `hovered` field carried this comment:
-//! *"a terminal reports no 'the pointer left the window' event, and a hover
-//! that outlives the pointer is a lie"* - `Hover(None)` is now reachable, so
-//! the lie is impossible rather than merely mitigated. And this program's own
-//! click counting is gone: a terminal reports presses, so `mouse.rs` had to
-//! time them itself and rule that a third click inside the window was a hand
-//! that had not lifted. A toolkit reports double-clicks, and
-//! [`Intent::Activate`] is simply what one is.
+//!   handler rather than reimplementing it.
 
 use std::time::Instant;
 
@@ -48,43 +25,30 @@ pub enum Intent {
     Hover(Option<usize>),
     /// One click on a row: move the selection there.
     Select(usize),
-    /// A double-click, or a single one on a remembered code: take the row.
+    /// A double-click on a row: select and open it.
     Activate(usize),
     /// A click in the search field, at this byte offset into the text.
     Caret { byte: usize, extend: bool },
-    /// A remembered code was clicked: take that one.
+    /// A remembered query was clicked: use that entry.
     ///
-    /// Its own variant rather than a reuse of [`Intent::Activate`], which
-    /// indexes the result list. Making that one mean two things depending on
-    /// which body is up would put a "which body is on screen" decision back
-    /// inside the state machine, which is what `Intent` exists to keep out.
-    ///
-    /// The rank is the thing that matters and the thing a click on the old
-    /// recall *chip* threw away - it was the Up arrow with the rank dropped,
-    /// so clicking the fifth code stepped one entry older.
+    /// Separate from [`Intent::Activate`], which indexes the result list, so
+    /// the state machine never has to know which body is on screen.
     Recall(usize),
-    /// A configured shortcut was clicked: put it in the box.
+    /// A configured alias was clicked: put it in the box.
     ///
-    /// Its own variant rather than a reuse of [`Intent::Recall`] for the
-    /// reason that one is not a reuse of [`Intent::Activate`]: they index
-    /// three different lists, and one variant meaning three things
-    /// depending on which body is up would put a "which body is on screen"
-    /// decision back inside the state machine.
+    /// Separate from [`Intent::Recall`] for the same reason: each indexes a
+    /// different list.
     UseAlias(usize),
     /// A row of the actions menu, or the button that names the default one.
     ///
-    /// Named by what it *is* rather than by the key it happens to share,
-    /// because two of these have no key at all and one - copying the path -
-    /// has a key that means something else while there is a text selection.
-    /// See [`crate::view::actions`].
+    /// Named by action rather than key: two actions have no key, and Ctrl+C
+    /// copies the text selection when there is one. See
+    /// [`crate::view::actions`].
     Act(crate::view::actions::ActionId),
-    /// The `⋮` button, or a press anywhere the open menu is not.
+    /// The `⋮` button, or a press outside the open menu.
     ///
-    /// Carries the state it is asking for rather than saying "toggle",
-    /// because the two callers know different things: the button knows it is
-    /// a toggle, and a press outside knows only that the menu should be shut.
-    /// A toggle from the second would reopen the menu the first had just
-    /// closed, on the same press.
+    /// Carries the target state rather than "toggle", so a press outside cannot
+    /// reopen a menu the button just closed on the same press.
     ShowActions(bool),
 }
 
@@ -94,11 +58,8 @@ impl AppState {
             Intent::Hover(row) => self.hover(row),
             Intent::Select(row) => self.select_row(row),
             Intent::Activate(row) => {
-                // Selection first, and unconditionally: what opens is the row
-                // drawn under the pointer *now*. Results can land between the
-                // two clicks - a verification replaces the list wholesale - so
-                // opening whatever the first click chose would open something
-                // that is no longer on screen.
+                // Select first: the list can be replaced between the two
+                // clicks, and what opens must be the row under the pointer now.
                 if row >= self.hits.len() {
                     return Response::none();
                 }
@@ -123,14 +84,9 @@ impl AppState {
         }
     }
 
-    /// One click on a remembered code uses it, exactly as Enter on it does.
+    /// Uses a remembered query on a single click, as Enter does.
     ///
-    /// One click and not two: a remembered code is a shortcut, and asking for a
-    /// double-click to use a shortcut defeats the point of having one.
-    ///
-    /// A rank past the end is not an error worth reporting, for the reason
-    /// [`Self::select_row`] gives: the list can be replaced between the frame
-    /// that was clicked and the event arriving.
+    /// A rank past the end is ignored; see [`Self::select_row`].
     fn recall_row(&mut self, rank: usize, now: Instant) -> Response {
         let Some(entry) = self.history.select(rank).map(str::to_string) else {
             return Response::none();
@@ -141,22 +97,13 @@ impl AppState {
 
     /// Runs one entry of the actions menu.
     ///
-    /// Through the real key where the action has one, so that a control and
-    /// its shortcut cannot come to mean different things. That invariant is
-    /// the reason this dispatches rather than each caller building its own
-    /// `Cmd`: a menu row that assembled a command by hand would be a second
-    /// copy of what the key does, and the two would part company the first
-    /// time one of them was corrected.
-    ///
-    /// Three are direct, and each for a reason rather than for convenience.
-    /// Copying the path has a key, `Ctrl+C`, whose meaning depends on whether
-    /// there is a text selection - so a synthetic press would copy the
-    /// selection and not the path, which is not what the row says. Copying
-    /// the name and opening with Windows have no key at all.
+    /// Goes through the real key where the action has one, so a control and
+    /// its shortcut cannot diverge. Copy path, copy name and open with Windows
+    /// are direct: the last two have no key, and Ctrl+C copies the text
+    /// selection when there is one.
     pub(super) fn run_action(&mut self, action: ActionId, now: Instant) -> Response {
-        // Whatever it was, the menu has served its purpose. Before the action
-        // runs, so a `Cmd::DismissOverlay` cannot leave a menu open behind a
-        // hidden panel.
+        // Close the menu before the action runs, so a
+        // `Cmd::DismissOverlay` cannot leave it open behind a hidden panel.
         let closing = std::mem::replace(&mut self.actions_open, false);
         let mut response = match action {
             ActionId::Open => self.on_key(KeyEvent::new(Key::Enter, Mods::NONE), now),
@@ -175,12 +122,10 @@ impl AppState {
         response
     }
 
-    /// Moves the highlight to a row the pointer named.
+    /// Moves the highlight to the row the pointer named.
     ///
-    /// A rank past the end of the list is not an error worth reporting: the
-    /// results can be replaced between the frame that was clicked and the
-    /// event arriving, and the honest answer to "select row 9 of 4" is to do
-    /// nothing.
+    /// A rank past the end is ignored: the results can be replaced between the
+    /// clicked frame and the event arriving.
     fn select_row(&mut self, row: usize) -> Response {
         if row >= self.hits.len() {
             return Response::none();
@@ -206,7 +151,7 @@ mod tests {
     use std::sync::Arc;
 
     fn state_with_hits(n: usize) -> AppState {
-        let mut state = AppState::new(Settings::default(), Instant::now());
+        let mut state = AppState::new(Settings::fixture(), Instant::now());
         state.hits = (0..n)
             .map(|i| Hit {
                 path: Arc::from(format!(r"R:\jobs\11-D-070{i}.pdf").as_str()),
@@ -227,8 +172,6 @@ mod tests {
         assert_eq!(state.selected_row(), Some(2));
     }
 
-    /// The results can be replaced between the frame that was drawn and the
-    /// click arriving. Opening row nine of four is not a thing to do.
     #[test]
     fn a_click_past_the_end_of_the_list_does_nothing() {
         let mut state = state_with_hits(4);
@@ -250,8 +193,6 @@ mod tests {
         );
     }
 
-    /// What opens is the row under the pointer *now*, not whatever the arrows
-    /// had last left selected.
     #[test]
     fn activating_a_row_selects_it_before_opening_it() {
         let mut state = state_with_hits(4);
@@ -265,8 +206,6 @@ mod tests {
         );
     }
 
-    /// Enter opens the selection. A hover that could be mistaken for one is a
-    /// hover that gets a file opened by accident.
     #[test]
     fn hovering_a_row_never_selects_it() {
         let mut state = state_with_hits(4);
@@ -276,8 +215,6 @@ mod tests {
         assert_eq!(state.selected_row(), None, "a hover became a selection");
     }
 
-    /// The terminal could not report this and the old code said so. A window
-    /// can, so a hover no longer outlives the pointer.
     #[test]
     fn the_pointer_leaving_clears_the_hover() {
         let mut state = state_with_hits(4);
@@ -288,9 +225,7 @@ mod tests {
         assert_eq!(state.hovered(), None);
     }
 
-    /// Every frame reports where the pointer is, whether or not it moved. A
-    /// redraw for each of them is sixty repaints a second for a mouse that is
-    /// sitting still.
+    /// The toolkit reports the pointer every frame; only changes redraw.
     #[test]
     fn a_hover_that_changes_nothing_asks_for_no_frame() {
         let mut state = state_with_hits(4);
@@ -305,8 +240,6 @@ mod tests {
         assert!(!still_none.redraw.is_yes());
     }
 
-    /// A hover of a row that no longer exists is the same lie as a hover that
-    /// outlived the pointer.
     #[test]
     fn a_hover_past_the_end_of_the_list_is_no_hover_at_all() {
         let mut state = state_with_hits(2);
@@ -339,12 +272,7 @@ mod tests {
         assert_eq!(state.input.selection(), Some((3, 7)));
     }
 
-    /// A menu row and the key it names must do the same thing, or the menu
-    /// is lying about the keyboard.
-    ///
-    /// Through the whole list rather than one entry: every action that
-    /// advertises a shortcut is a claim, and a claim that only holds for the
-    /// one somebody remembered to test is not an invariant.
+    /// Every menu action that advertises a shortcut does what that key does.
     #[test]
     fn every_advertised_action_does_what_its_key_does() {
         let now = Instant::now();
@@ -369,11 +297,10 @@ mod tests {
         }
     }
 
-    /// The key a shortcut string names, for the test above.
+    /// The key a shortcut string names.
     ///
-    /// Written out rather than parsed, and deliberately a second list: its
-    /// only purpose is to disagree with `view::actions` when a shortcut is
-    /// changed there and nowhere else.
+    /// Kept as a separate hand-written list so it disagrees with
+    /// `view::actions` when a shortcut changes there only.
     fn key_of(shortcut: &str) -> Option<KeyEvent> {
         Some(match shortcut {
             "Enter" => KeyEvent::new(Key::Enter, Mods::NONE),
@@ -382,17 +309,14 @@ mod tests {
             "Ctrl+E" => KeyEvent::new(Key::Char('e'), Mods::CTRL),
             "Ctrl+O" => KeyEvent::new(Key::Char('o'), Mods::CTRL),
             "Ctrl+," => KeyEvent::new(Key::Char(','), Mods::CTRL),
-            // Copies the text selection when there is one, so the menu row
-            // deliberately does *not* go through it. `view::actions` stops
-            // advertising the key in that case, which is the claim
-            // `the_copy_key_is_advertised_only_when_it_copies_the_path`
-            // makes over there.
+            // Ctrl+C copies the text selection when there is one, so the menu
+            // row does not go through it. `view::actions` hides the shortcut
+            // then; see `the_copy_key_is_advertised_only_when_it_copies_the_path`.
             "Ctrl+C" => return None,
             other => panic!("no key written down for {other:?}; add one"),
         })
     }
 
-    /// The menu shuts when something on it is chosen, whatever that was.
     #[test]
     fn running_an_action_puts_the_menu_away() {
         let now = Instant::now();
@@ -402,15 +326,10 @@ mod tests {
         assert!(!state.actions_open, "the menu stayed up");
     }
 
-    /// A click takes the code that was clicked, not the one next to it.
-    ///
-    /// This used to push a hint-chip intent, which is the Up arrow with the
-    /// rank thrown away - so clicking the fifth remembered code stepped one
-    /// entry older than wherever the cursor already was.
     #[test]
     fn clicking_a_remembered_code_takes_that_one() {
         let now = Instant::now();
-        let mut state = AppState::new(Settings::default(), now);
+        let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into(), "b".into(), "c".into()]);
         state.on_key(crate::app::key::KeyEvent::new(Key::Up, Mods::NONE), now);
         assert_eq!(state.input.text(), "a", "the fixture is not browsing");
@@ -423,12 +342,10 @@ mod tests {
         );
     }
 
-    /// A rank past the end of a list that has been replaced underneath the
-    /// click does nothing, rather than indexing past it.
     #[test]
     fn clicking_a_remembered_code_that_is_gone_does_nothing() {
         let now = Instant::now();
-        let mut state = AppState::new(Settings::default(), now);
+        let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into()]);
         assert!(state.on_intent(Intent::Recall(9), now).cmds.is_empty());
         assert_eq!(state.input.text(), "");

@@ -1,23 +1,16 @@
 //! Shared, lock-free access to the current index.
 //!
-//! Readers only ever clone an `Arc`. The previous implementation deep-copied
-//! the entire listing out of a mutex on every search - two million string
-//! allocations and about 144 MB of memcpy, on the UI thread - which was
-//! plausibly the single largest contributor to the perceived slowness.
+//! Readers only clone an `Arc`; nothing is copied out of a lock on the search
+//! path.
 //!
-//! # Why the snapshot and the health are separate fields
-//!
-//! Modelling "healthy" and "has data" as one value is what made an
-//! unreachable drive render as `0 files`: an error replaced the listing.
-//! Here [`IndexStatus::health`] and the snapshot are orthogonal, so
-//! **losing the last-known-good listing by entering an error state is not
-//! representable**. A failed refresh changes the health and leaves the data
-//! alone.
+//! [`IndexStatus::health`] and the snapshot are separate, so entering an error
+//! state cannot discard the last-known-good listing. A failed refresh changes
+//! the health and leaves the data alone.
 //!
 //! # Single writer
 //!
-//! All mutation happens on the index actor thread. `publish_*` is the only
-//! cross-thread write, which removes writer-writer races by construction.
+//! Each mapping's slot is written only by that mapping's index actor, so there
+//! are no writer-writer races.
 
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -63,22 +56,15 @@ impl Origin {
 pub enum Activity {
     #[default]
     Idle,
-    /// Waiting for a walk permit, because other shares are already walking.
-    ///
-    /// Its own state rather than `Idle`: a share sitting behind two walks for
-    /// three minutes while reporting nothing is exactly the unexplained wait
-    /// the other variants here exist to replace.
+    /// Waiting for a walk permit because other shares are already walking.
+    /// Separate from `Idle` so the wait is explained in the status line.
     Queued,
     LoadingDisk,
     Scanning {
         seen: usize,
     },
-    /// A recursive walk.
-    ///
-    /// Reports folders rather than only files, because "8,402 folders, 1,204
-    /// queued" says both that it is moving and roughly how much is left,
-    /// which a climbing file count does not. On a three-minute walk that is
-    /// the difference between progress and an unexplained wait.
+    /// A recursive walk. Reports folders done and queued as well as files, so
+    /// the status line shows both progress and remaining work.
     Walking {
         dirs: usize,
         queued: usize,
@@ -105,32 +91,22 @@ pub enum DegradeReason {
     /// The listing hit the arena ceiling.
     Truncated,
     /// Part of the tree could not be read, so a file that exists may not be
-    /// findable.
-    ///
-    /// This is the same failure the routing rules produced - a silently
-    /// absent file - and it is surfaced for the same reason. Someone told
-    /// "3 folders unreadable" goes and looks at them; someone told nothing
-    /// concludes the file is not there, and is wrong, and has no way to find
-    /// that out.
+    /// findable. Surfaced so the user knows to check those folders.
     PartiallyUnreadable,
     /// The walk stopped before the end of the tree: a limit, a cancellation,
     /// or the share going away part way through.
     IncompleteWalk,
-    /// The share will not report changes, so freshness rests entirely on the
-    /// periodic re-walk.
+    /// The share does not report changes, so freshness rests on the periodic
+    /// re-walk.
     ///
-    /// Distinct from [`Self::StampUnreliable`], which says the cheap *probe*
-    /// is unavailable. A tree never had one, so reporting a healthy tree as
-    /// "change detection unavailable" would be true in a way that sends
-    /// someone to check the wrong thing.
+    /// Distinct from [`Self::StampUnreliable`], which is about the stamp
+    /// probe; a tree never has one.
     LiveUpdatesUnavailable,
-    /// What is searchable here was never read - it was seen through a search
-    /// and remembered.
+    /// The index holds only what searches have found; no pass read these
+    /// folders.
     ///
-    /// Distinct from [`Self::IncompleteWalk`], which says a pass ran and
-    /// stopped short. This says no pass covered these folders at all, so what
-    /// is held of them is whatever somebody happened to type. A file nobody
-    /// has searched for is not merely stale here, it is absent.
+    /// Distinct from [`Self::IncompleteWalk`]: a file nobody has searched for
+    /// is absent, not merely stale.
     PartiallyObserved,
 }
 
@@ -150,49 +126,38 @@ impl DegradeReason {
 
 /// What the last walk reached, and what it could not.
 ///
-/// Separate from [`Health`] because that is a single label and this is a list
-/// someone is expected to act on. Behind an `Arc` because [`IndexStatus`] is
-/// cloned on every status update, and a progress tick every hundred
-/// milliseconds must not deep-copy sixty-four paths.
+/// Separate from [`Health`] because it is an actionable list. Behind an `Arc`
+/// because [`IndexStatus`] is cloned on every status update.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TreeCoverage {
     pub dirs: usize,
     pub files: usize,
-    /// Folders that could not be read, so their files are absent from the
-    /// index without being absent from the share. This is the number that
-    /// matters.
+    /// Folders that could not be read, so their files are missing from the
+    /// index but not from the share.
     pub holes: u32,
-    /// Folders that were gone by the time the walk reached them.
+    /// Folders deleted between being queued and being read.
     ///
-    /// Counted apart from `holes` and deliberately not a reason to degrade:
-    /// on a share people are working on, folders are deleted between being
-    /// queued and being read all day, and calling that a fault would train
-    /// the reader to ignore the warnings that matter.
+    /// Not a reason to degrade: this is normal churn on a busy share.
     pub vanished: u32,
-    /// A few unreadable folders verbatim, so they can be gone and looked at.
+    /// A few unreadable folders verbatim, so they can be inspected.
     pub examples: Vec<String>,
     pub skipped_junctions: u32,
     pub elapsed: Duration,
 }
 
-/// Why a share's index may no longer describe what is on the drive.
+/// Why a share's index may no longer match the drive.
 ///
-/// Distinct from [`Health`], which is about whether the share can be *reached*.
-/// A stale index is one that was read successfully and has since been
-/// overtaken: everything in it may still be right, and nothing in it can be
-/// trusted to be complete.
+/// Distinct from [`Health`], which is about reachability: a stale index was
+/// read successfully but may since have been overtaken.
 ///
-/// Named per share rather than reported as a single flag, because the answer
-/// is always "refresh that one" and a user asked to refresh everything will
-/// either refresh everything - which is the load this exists to avoid - or
-/// nothing.
+/// Reported per share, so the user refreshes that share rather than all of
+/// them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleReason {
     /// The watcher lost events.
     ///
-    /// A bulk copy overruns the remote 64 KB buffer, and the API reports that
-    /// by completing with zero bytes: nothing about what was lost can be
-    /// recovered. Only a full pass can say what the share now holds.
+    /// A bulk copy overruns the remote 64 KB buffer and the lost events cannot
+    /// be recovered. Only a full pass can say what the share now holds.
     EventsLost,
     /// Live updates are not running here, so nothing is arriving at all.
     NoLiveUpdates,
@@ -245,18 +210,15 @@ impl Health {
     }
 }
 
-/// Everything the UI needs to describe the flat index honestly.
+/// Everything the UI needs to describe the flat index accurately.
 #[derive(Debug, Clone)]
 pub struct IndexStatus {
     pub origin: Option<Origin>,
     /// When the listing being served was actually captured.
     pub built_at: Option<SystemTime>,
-    /// When the listing was last *proven* still current by a stamp probe.
+    /// When the listing was last proven current by a stamp probe.
     ///
-    /// Separate from `built_at` on purpose. The previous implementation moved
-    /// `built_at` forward on every successful probe, so a listing an hour old
-    /// rendered as "0s" - the one number a user checks before trusting a
-    /// result was the only one guaranteed to be wrong.
+    /// Kept separate from `built_at` so a probe never makes old data look new.
     pub confirmed_at: Option<SystemTime>,
     pub entries: u32,
     pub truncated: bool,
@@ -267,20 +229,19 @@ pub struct IndexStatus {
     pub last_scan_reason: Option<ScanReason>,
     /// Whether change detection works against this share at all.
     pub stamp_health: StampHealth,
-    /// Session totals, so "it keeps rebuilding" has a number.
+    /// Session totals for scans, probes and failures.
     pub counters: Counters,
-    /// Why the persisted index was not usable at startup, if it was not.
     /// What the last walk reached. `None` for a flat index, which has no
-    /// notion of partial coverage: a single listing either worked or did not.
+    /// notion of partial coverage.
     pub coverage: Option<Arc<TreeCoverage>>,
+    /// Why the persisted index was not usable at startup, if it was not.
     pub cache_rejected: Option<String>,
     /// Set when the last refresh failed, even though the previous snapshot is
     /// still being served.
     pub last_error: Option<EnumError>,
     /// Why this share's index may be behind the drive, if it is.
     ///
-    /// Cleared by a completed full pass, which is the only thing that can
-    /// answer the question.
+    /// Cleared only by a completed full pass.
     pub stale: Option<StaleReason>,
 }
 
@@ -307,7 +268,7 @@ impl Default for IndexStatus {
 }
 
 impl IndexStatus {
-    /// Wall-clock age of the current listing, clamped at zero.
+    /// Returns the wall-clock age of the current listing, clamped at zero.
     ///
     /// Clamped because `built_at` is a `SystemTime`: an NTP correction or a
     /// DST shift must not render as a negative age.
@@ -316,65 +277,47 @@ impl IndexStatus {
         Some(now.duration_since(built).unwrap_or(Duration::ZERO))
     }
 
-    /// How long ago the listing was last proven current, clamped as above.
+    /// Returns how long ago the listing was last proven current, clamped as
+    /// above.
     pub fn confirmed_age(&self, now: SystemTime) -> Option<Duration> {
         let at = self.confirmed_at?;
         Some(now.duration_since(at).unwrap_or(Duration::ZERO))
     }
 }
 
-/// One status line's worth of truth about every configured index.
+/// A summary of every configured index for the status line.
 ///
-/// Totals, because somebody searching four shares is searching one corpus and
-/// wants one number. Names, because a share that is down is one they have to
-/// go and fix, and "something is unreachable" sends nobody anywhere.
-///
-/// This exists because there used to be a single `IndexStatus` on the app
-/// state and one actor per index writing into it. With two actors the line
-/// already described whichever share published last; with ten it would be a
-/// flicker.
+/// Totals, since several shares are searched as one corpus, and names, so a
+/// problem share can be identified.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct IndexOverview {
-    /// Summed over every mapping holding data. `u64` because a share's own
-    /// count is a `u32` and ten of them is not obviously one.
+    /// Summed over every mapping holding data. `u64` because the per-share
+    /// counts are `u32`.
     pub entries: u64,
-    /// The mapping whose listing is *oldest*, and that mapping's timestamps.
+    /// The mapping whose listing is oldest, and that mapping's timestamps.
     ///
-    /// Oldest rather than newest: the newest lets one freshly rebuilt share
-    /// vouch for nine stale ones. All three fields come from that same
-    /// mapping, because the status line compares `built_at` against
-    /// `confirmed_at`, and two minima drawn from different shares would make
-    /// that comparison meaningless.
+    /// Oldest, so one fresh share cannot vouch for stale ones. All three
+    /// fields come from the same mapping because the status line compares
+    /// `built_at` against `confirmed_at`.
     pub oldest: Option<MappingId>,
     pub built_at: Option<SystemTime>,
     pub confirmed_at: Option<SystemTime>,
     pub origin: Option<Origin>,
-    /// Any mapping truncated. A truncated share means a file that exists is
-    /// not findable, which is the one thing this program refuses to hide, so
-    /// one of them outweighs nine clean ones.
+    /// Any mapping truncated. A truncated share hides files that exist, so it
+    /// always takes precedence.
     pub truncated: bool,
     /// The worst health, and whose. `Unreachable` beats `Degraded` beats
-    /// `Ok`; ties go to the lowest id, which is configuration order - the
-    /// order the user thinks in.
+    /// `Ok`; ties go to the lowest id (configuration order).
     pub worst: Option<(MappingId, Health)>,
-    /// The most significant thing any share is doing, and how many are doing
-    /// something. Averaging three shares' folder counts would be fiction, and
-    /// three sets of counters do not fit on one line.
+    /// The most significant activity across shares, and how many are busy.
     pub activity: Activity,
     pub busy: usize,
-    /// Set when exactly one share is busy, so the common case can read
-    /// "walking jobs..." rather than "walking 1 share...".
+    /// Set when exactly one share is busy, so the status line can name it.
     pub busy_only: Option<MappingId>,
-    /// Shares holding a listing, out of those configured to be searched - so
-    /// "3 of 10 shares indexed" can be said rather than implied by a total
-    /// that is quietly short.
+    /// Shares holding a listing, out of those configured to be indexed.
     pub ready: usize,
     pub configured: usize,
     /// The share with the strongest reason to be refreshed, and why.
-    ///
-    /// Named, because the answer is always "refresh that one" - and a user
-    /// told only that something is stale will refresh everything, which is the
-    /// load this whole arrangement exists to avoid.
     pub stalest: Option<(MappingId, StaleReason)>,
     /// How many shares are reporting themselves stale.
     pub stale_count: usize,
@@ -383,8 +326,8 @@ pub struct IndexOverview {
 impl IndexOverview {
     /// Folds every mapping's status into one.
     ///
-    /// `statuses` is indexed by [`MappingId`], the same way the store's slots
-    /// are, so a disabled mapping occupies a position and contributes nothing.
+    /// `statuses` is indexed by [`MappingId`], like the store's slots, so a
+    /// disabled mapping occupies a position and contributes nothing.
     pub fn of(routes: &Routes, statuses: &[Arc<IndexStatus>]) -> Self {
         let mut out = Self::default();
         for m in routes.all() {
@@ -436,13 +379,13 @@ impl IndexOverview {
         out
     }
 
-    /// Wall-clock age of the oldest listing, clamped at zero.
+    /// Returns the wall-clock age of the oldest listing, clamped at zero.
     pub fn age(&self, now: SystemTime) -> Option<Duration> {
         let built = self.built_at?;
         Some(now.duration_since(built).unwrap_or(Duration::ZERO))
     }
 
-    /// How long ago that same listing was last proven current.
+    /// Returns how long ago that same listing was last proven current.
     pub fn confirmed_age(&self, now: SystemTime) -> Option<Duration> {
         let at = self.confirmed_at?;
         Some(now.duration_since(at).unwrap_or(Duration::ZERO))
@@ -452,16 +395,11 @@ impl IndexOverview {
         self.busy > 0
     }
 
-    /// The share most in need of a refresh, and why.
+    /// Returns the share most in need of a refresh, and why.
     ///
-    /// Age is judged here rather than stored, because it is the one reason
-    /// that becomes true while nothing happens - an actor for an on-demand
-    /// share may not wake for hours, and a flag it never got round to setting
-    /// would be a promise the status line could not keep.
-    ///
-    /// A reported reason always wins over age: "changes were missed" says the
-    /// index is *incomplete*, which is worth acting on however recently it was
-    /// built.
+    /// Age is evaluated here rather than stored, because it becomes true
+    /// without any event; an on-demand share's actor may not wake for hours.
+    /// A reported reason always takes precedence over age.
     pub fn stale_at(&self, now: SystemTime) -> Option<(MappingId, StaleReason)> {
         if let Some(found) = self.stalest {
             return Some(found);
@@ -470,7 +408,7 @@ impl IndexOverview {
         old.then(|| self.oldest.map(|id| (id, StaleReason::Age)))?
     }
 
-    /// The unreachable share, when the worst thing happening is one.
+    /// Returns the unreachable share, when that is the worst status.
     pub fn unreachable(&self) -> Option<(MappingId, &Health)> {
         match &self.worst {
             Some((id, h @ Health::Unreachable { .. })) => Some((*id, h)),
@@ -478,7 +416,8 @@ impl IndexOverview {
         }
     }
 
-    /// The degraded share and its reason, when nothing worse is happening.
+    /// Returns the degraded share and its reason, when nothing worse is
+    /// happening.
     pub fn degraded(&self) -> Option<(MappingId, DegradeReason)> {
         match &self.worst {
             Some((id, Health::Degraded { reason, .. })) => Some((*id, *reason)),
@@ -496,12 +435,10 @@ fn health_rank(h: &Health) -> u8 {
     }
 }
 
-/// Which verb wins when several shares are busy at once.
+/// Ranks activities for the summary when several shares are busy.
 ///
-/// The slowest work wins, because it is the one the user is waiting on.
-/// `Persisting` loses to everything: it is seconds where a walk is minutes.
-/// `Queued` loses to real work, so "two walking, three queued" reads as
-/// walking - which is what is actually happening to the machine.
+/// Slower work ranks higher. `Persisting` ranks lowest; `Queued` ranks below
+/// real work.
 fn activity_rank(a: &Activity) -> u8 {
     match a {
         Activity::Idle => 0,
@@ -520,7 +457,7 @@ enum JobSlot {
         snapshot: Arc<Snapshot>,
         fetched_at: Instant,
     },
-    /// Remembering a miss stops a partially-typed code from re-probing a
+    /// A remembered miss, so a partially typed code does not re-probe a
     /// nonexistent folder on every keystroke.
     Missing { err: EnumError, fetched_at: Instant },
 }
@@ -543,13 +480,7 @@ pub enum Cached {
     Absent,
 }
 
-/// What a slot holds.
-///
-/// One field rather than a `Snapshot` slot beside a `TreeIndex` slot: a
-/// mapping is one shape or the other, and two `Option`s where exactly one is
-/// ever populated makes "both at once" representable and then relies on every
-/// call site to remember that it cannot happen. The enum *is* the dispatch a
-/// search needs, so the check and the branch are one line.
+/// What a slot holds: a flat listing or a walked tree, never both.
 #[derive(Debug)]
 pub enum SlotIndex {
     Flat(Arc<Snapshot>),
@@ -571,16 +502,11 @@ impl SlotIndex {
 
 /// One mapping's index and its health.
 ///
-/// Exactly one writer thread - the actor that owns this mapping - which is
-/// what the single-writer rule above actually requires. The previous shape
-/// was one flat slot beside one tree slot, which satisfied that rule only
-/// because there happened to be at most one actor of each kind.
+/// Written only by the actor that owns this mapping.
 pub struct MappingSlot {
     id: MappingId,
     kind: MappingKind,
-    /// Copied from the routing table rather than looked up through it, so a
-    /// reader never needs `Routes` in hand and an actor cannot write one
-    /// mapping's state while reading another's.
+    /// Copied from the routing table so readers do not need `Routes`.
     name: Box<str>,
     dir: PathBuf,
     enabled: bool,
@@ -627,25 +553,24 @@ impl MappingSlot {
         self.kind == MappingKind::Tree
     }
 
-    /// Whether a background actor should read this mapping and hold it.
+    /// Returns whether a background actor should read and hold this mapping.
     ///
-    /// The empty path is checked rather than assumed away. An empty `PathBuf`
-    /// standing in for "absent" is exactly what pinned a permanent
-    /// `os error 3` on an actor spawned for a mapping nobody configured.
+    /// The empty path is checked explicitly so an unconfigured mapping never
+    /// gets an actor.
     pub fn is_indexed(&self) -> bool {
         self.enabled && self.kind.is_indexed() && !self.dir.as_os_str().is_empty()
     }
 
-    /// Whether a search visits this mapping at all, by either route.
+    /// Returns whether a search visits this mapping by either route.
     ///
-    /// Split from [`Self::is_indexed`] because a live share is searched and
-    /// never read: one predicate answering both questions meant every caller
-    /// got whichever answer it was named after.
+    /// Differs from [`Self::is_indexed`] because a live share is searched but
+    /// never read.
     pub fn is_searchable(&self) -> bool {
         self.enabled && self.kind.is_searched() && !self.dir.as_os_str().is_empty()
     }
 
-    /// Whether a search asks the file server about this mapping directly.
+    /// Returns whether a search queries the file server for this mapping
+    /// directly.
     pub fn is_live(&self) -> bool {
         self.enabled && self.kind.is_live() && !self.dir.as_os_str().is_empty()
     }
@@ -656,7 +581,7 @@ impl MappingSlot {
         self.index.load_full()
     }
 
-    /// This slot's listing, when it holds a flat one.
+    /// Returns this slot's listing, when it holds a flat one.
     pub fn as_flat(&self) -> Option<Arc<Snapshot>> {
         match &*self.index.load_full()? {
             SlotIndex::Flat(s) => Some(Arc::clone(s)),
@@ -664,7 +589,7 @@ impl MappingSlot {
         }
     }
 
-    /// This slot's walked tree, when it holds one.
+    /// Returns this slot's walked tree, when it holds one.
     pub fn as_tree(&self) -> Option<Arc<TreeIndex>> {
         match &*self.index.load_full()? {
             SlotIndex::Tree(t) => Some(Arc::clone(t)),
@@ -692,15 +617,13 @@ impl MappingSlot {
         self.update_status(|s| {
             s.origin = Some(origin);
             s.built_at = Some(built_at);
-            // The listing *is* the confirmation now.
+            // The new listing is its own confirmation.
             s.confirmed_at = Some(built_at);
             s.entries = entries;
             s.truncated = truncated;
             s.stamp = stamp;
             s.last_error = None;
-            // A completed pass is the only thing that can answer "is this
-            // still what the share holds", so it is the only thing that
-            // clears the question.
+            // Only a completed pass clears staleness.
             s.stale = None;
             s.health = if truncated {
                 Health::Degraded {
@@ -715,10 +638,9 @@ impl MappingSlot {
 
     /// Installs a tree index.
     ///
-    /// Called repeatedly during a walk, each time with one more segment, so
-    /// the share becomes searchable about a second in rather than after
-    /// minutes. `coverage` says what the walk could not reach; `None` while
-    /// one is still running, since a partial view is not yet a verdict.
+    /// Called repeatedly during a walk with one more segment each time, so the
+    /// share is searchable early. `coverage` reports what the walk could not
+    /// reach and is `None` until the walk finishes.
     pub fn publish_tree(
         &self,
         index: Arc<TreeIndex>,
@@ -735,17 +657,15 @@ impl MappingSlot {
             s.confirmed_at = Some(built_at);
             s.entries = entries;
             s.last_error = None;
-            // Only once the walk has finished: a mid-walk publish has not yet
-            // established anything about the share as a whole.
+            // Only a finished walk clears staleness.
             if coverage.is_some() {
                 s.stale = None;
             }
             if let Some(coverage) = &coverage {
                 s.coverage = Some(Arc::clone(coverage));
             }
-            // Health is only settled once the walk has finished. Judging a
-            // half-finished walk would flag every one of them as incomplete
-            // for the minutes it is running.
+            // Health is settled only once the walk has finished, so a running
+            // walk is not flagged as incomplete.
             s.health = match coverage.as_deref() {
                 None => s.health.clone(),
                 Some(c) if c.holes > 0 => Health::Degraded {
@@ -763,17 +683,9 @@ impl MappingSlot {
 
     /// Installs an index assembled from what searches have found.
     ///
-    /// Separate from [`Self::publish_tree`] because almost every claim that one
-    /// makes would be false here. A walk establishes when the share was read;
-    /// nothing read this share. So `built_at` and `confirmed_at` are left
-    /// exactly where they were - an observation proves those files exist and
-    /// proves nothing whatever about the rest - and the health is degraded for
-    /// as long as the index is the only thing standing in for a listing.
-    ///
-    /// This is where [`Origin::ServerObserved`] is finally constructed. It had
-    /// sat unused since it was written, which is the shape of the gap this
-    /// fills: there was a word for data that came back from a query, and
-    /// nowhere that kept any.
+    /// Unlike [`Self::publish_tree`], nothing read the share, so `built_at`
+    /// and `confirmed_at` are unchanged and health is degraded while this is
+    /// the only index. Uses [`Origin::ServerObserved`].
     pub fn publish_observed(&self, index: Arc<TreeIndex>) {
         let entries = index.len() as u32;
         self.index.store(Some(Arc::new(SlotIndex::Tree(index))));
@@ -781,9 +693,8 @@ impl MappingSlot {
             s.origin = Some(Origin::ServerObserved);
             s.entries = entries;
             s.last_error = None;
-            // Only when nothing worse is already being reported: a share that
-            // is unreachable has a more urgent thing to say than a share that
-            // is partial, and this runs on every settled keystroke.
+            // Only if nothing worse is reported: unreachability is more
+            // urgent than partial coverage, and this runs on every keystroke.
             if s.health.is_ok() {
                 s.health = Health::Degraded {
                     reason: DegradeReason::PartiallyObserved,
@@ -795,13 +706,9 @@ impl MappingSlot {
 
     /// Records a failed refresh.
     ///
-    /// Deliberately does not touch the index: stale data plus an honest label
-    /// beats an empty list.
-    ///
-    /// `since` survives a retry, so "unreachable for six minutes" stays true
-    /// instead of resetting on every attempt. `activity` is cleared, because a
-    /// walk that failed is not still walking - the tree half of this used to
-    /// do that and the flat half did not, and the tree half was right.
+    /// Leaves the index alone, so stale data stays searchable with an accurate
+    /// label. `since` survives retries so the onset time is preserved, and
+    /// `activity` is cleared because a failed walk is no longer walking.
     pub fn record_failure(&self, err: EnumError, attempt: u32, next_retry_at: Instant) {
         self.update_status(|s| {
             let since = match s.health {
@@ -822,9 +729,7 @@ impl MappingSlot {
     /// Records that the listing is still current as of `at`, without having
     /// rebuilt it. Used when the directory stamp proves nothing changed.
     ///
-    /// Deliberately does not touch `built_at`: the data is exactly as old as
-    /// it was a moment ago, and claiming otherwise is how a stale index came
-    /// to render as a fresh one.
+    /// Leaves `built_at` alone: the data is as old as it was.
     pub fn confirm_fresh(&self, stamp: Option<DirStamp>, at: SystemTime) {
         self.update_status(|s| {
             s.confirmed_at = Some(at);
@@ -840,10 +745,8 @@ impl MappingSlot {
 
     /// Records that this share's index may be behind the drive.
     ///
-    /// Keeps the strongest reason: "changes were missed" is a statement about
-    /// completeness, while "not refreshed recently" is only about age, and
-    /// letting the second overwrite the first would soften the message that
-    /// actually needs acting on.
+    /// Keeps the strongest reason, so "changes were missed" (completeness) is
+    /// not overwritten by "not refreshed recently" (age).
     pub fn note_stale(&self, reason: StaleReason) {
         self.update_status(|s| {
             if s.stale.is_none_or(|held| reason.rank() >= held.rank()) {
@@ -856,11 +759,9 @@ impl MappingSlot {
         self.update_status(|s| s.activity = activity);
     }
 
-    /// Marks the index degraded, unless something worse is already reported.
+    /// Marks the index degraded, unless it is already unreachable.
     ///
-    /// The guard is the point: an unreachable share is a stronger statement
-    /// than a degraded one, and letting a refused probe overwrite it would
-    /// replace "this drive is gone" with "change detection unavailable".
+    /// Unreachability is the stronger statement and must not be overwritten.
     pub fn set_degraded(&self, reason: DegradeReason) {
         self.update_status(|s| {
             if !matches!(s.health, Health::Unreachable { .. }) {
@@ -874,15 +775,11 @@ impl MappingSlot {
 
     /// Records that live change notification is not running here.
     ///
-    /// Only when nothing worse is already being reported. A subtree the walk
-    /// could not read is a hole in what can be found at all, while a dead
-    /// watch only means new files take until the floor to appear - and
-    /// replacing the first message with the second would hide the one somebody
-    /// has to act on.
+    /// Only when health is otherwise `Ok`: an unreadable subtree is more
+    /// important to report than a dead watch.
     ///
-    /// Set from the actor on every wake rather than once, because a
-    /// *successful walk* publishes a fresh verdict on the tree's health, and a
-    /// walk succeeding is not evidence that the watch came back.
+    /// Called on every actor wake, because a successful walk publishes a fresh
+    /// health verdict that would otherwise clear this.
     pub fn note_live_updates_unavailable(&self) {
         self.update_status(|s| {
             if s.health == Health::Ok {
@@ -894,8 +791,8 @@ impl MappingSlot {
         });
     }
 
-    /// Notes why the enumeration about to start is happening, so the status
-    /// line can say so rather than leaving the user to guess.
+    /// Records why the enumeration about to start is happening, for the
+    /// status line.
     pub fn note_scan_started(&self, reason: ScanReason) {
         self.update_status(|s| s.last_scan_reason = Some(reason));
     }
@@ -908,12 +805,8 @@ impl MappingSlot {
         });
     }
 
-    /// Records why the persisted index could not be used.
-    ///
-    /// The previous implementation discarded this entirely, which made a
-    /// rejected cache indistinguishable from a missing one - so a drive letter
-    /// remapped to a different volume looked exactly like a first run, every
-    /// single launch.
+    /// Records why the persisted index could not be used, so a rejected cache
+    /// is distinguishable from a missing one.
     pub fn note_cache_rejected(&self, why: String) {
         self.update_status(|s| s.cache_rejected = Some(why));
     }
@@ -930,31 +823,32 @@ pub struct IndexStore {
     /// One slot per configured mapping, indexed by [`MappingId`].
     ///
     /// Dense and allocated once, including disabled mappings, because
-    /// `MappingId` *is* a position in the configured list - which
-    /// [`Routes::get`] already relies on. A map keyed by id would cost a hash
-    /// on every slot lookup on the search path and, worse, would make the
-    /// container itself mutable, which quietly dissolves the single-writer
-    /// rule: a fixed slice means every `&MappingSlot` is stable for the life
-    /// of the process and each actor owns exactly one by construction.
+    /// `MappingId` is a position in the configured list (as [`Routes::get`]
+    /// assumes). A fixed slice keeps every `&MappingSlot` stable for the life
+    /// of the process, so each actor owns exactly one slot.
     slots: Box<[MappingSlot]>,
     jobs: Mutex<LruCache<PathBuf, JobSlot>>,
 }
 
 impl Default for IndexStore {
-    /// A store over the shipped routing table, which is one flat mapping and
-    /// one tree. Used by tests; the running program builds from the
-    /// configuration that was actually loaded.
+    /// A store over the shipped routing table (one flat mapping and one
+    /// tree). Used by tests.
     fn default() -> Self {
         Self::for_routes(&crate::config::default_routes(), JOB_CACHE_CAPACITY)
     }
 }
 
 impl IndexStore {
+    /// A store over [`crate::config::fixture_routes`]. Test fixture only.
+    #[doc(hidden)]
+    pub fn fixture() -> Self {
+        Self::for_routes(&crate::config::fixture_routes(), JOB_CACHE_CAPACITY)
+    }
+
     /// Builds a slot for every configured mapping, enabled or not.
     ///
-    /// Disabled mappings get a slot and no actor. Keeping them means
-    /// `MappingId::index()` stays a direct index, so an out-of-range id is
-    /// unreachable except through a construction bug.
+    /// Disabled mappings get a slot but no actor, so `MappingId::index()`
+    /// stays a direct index.
     pub fn for_routes(routes: &Routes, job_capacity: usize) -> Self {
         let slots = routes
             .all()
@@ -966,7 +860,7 @@ impl IndexStore {
     }
 
     /// A store with no mappings and a bounded job cache, for the job-cache
-    /// tests, which are about the LRU rather than about any share.
+    /// tests.
     pub fn with_job_capacity(job_capacity: usize) -> Self {
         Self::from_slots(Box::new([]), job_capacity)
     }
@@ -995,11 +889,8 @@ impl IndexStore {
 
     /// Every mapping a background actor reads, in configuration order.
     ///
-    /// What gets an actor, a persisted index and a refresh schedule. **Not**
-    /// what a search visits - see [`Self::searchable`]. The distinction is
-    /// load-bearing: a live share reaching this iterator would be handed an
-    /// index actor, whose first wake is a full walk of the share somebody
-    /// configured precisely so it would never be walked.
+    /// Not the same as [`Self::searchable`]: a live share must never get an
+    /// index actor, whose first wake would walk the whole share.
     pub fn indexed(&self) -> impl Iterator<Item = &MappingSlot> {
         self.slots.iter().filter(|s| s.is_indexed())
     }
@@ -1009,8 +900,8 @@ impl IndexStore {
         self.slots.iter().filter(|s| s.is_searchable())
     }
 
-    /// Every mapping a search asks the file server about, in configuration
-    /// order.
+    /// Every mapping a search queries the file server for directly, in
+    /// configuration order.
     pub fn live(&self) -> impl Iterator<Item = &MappingSlot> {
         self.slots.iter().filter(|s| s.is_live())
     }
@@ -1025,10 +916,8 @@ impl IndexStore {
 
     // --- first-match convenience -------------------------------------------
     //
-    // Named `first_*` deliberately. An implicit first-match hiding behind an
-    // innocent name is the exact mechanism that produced the two derived
-    // `Settings` paths and the bug this module was re-keyed to remove, so
-    // these say what they do and nothing in the running program calls them.
+    // Named `first_*` so the implicit first-match is explicit. Only tests and
+    // diagnostics call these.
 
     /// The first enabled flat mapping's slot, for tests and diagnostics.
     pub fn first_flat_slot(&self) -> &MappingSlot {
@@ -1076,12 +965,10 @@ impl IndexStore {
 
     /// Remembers that a folder could not be listed.
     ///
-    /// Only *definite* answers about the folder itself are cached, and the
-    /// set is a whitelist rather than a blacklist. Anything else - a network
-    /// blip, a cancelled search, a malformed buffer - says nothing about
-    /// whether the folder exists, and remembering it would pin a wrong answer
-    /// for the whole TTL. That is the trap the previous implementation fell
-    /// into by storing an empty listing after a failed read.
+    /// Only definite answers about the folder itself are cached (a
+    /// whitelist). A network blip, cancellation or malformed buffer says
+    /// nothing about whether the folder exists, and caching it would pin a
+    /// wrong answer for the whole TTL.
     pub fn publish_job_miss(&self, dir: PathBuf, err: EnumError) {
         let definite = matches!(
             err,
@@ -1127,7 +1014,7 @@ mod tests {
 
     #[test]
     fn starts_with_no_snapshot_and_a_clean_status() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(s.first_flat_slot().as_flat().is_none());
         let st = s.first_flat_slot().status();
         assert!(st.health.is_ok());
@@ -1137,7 +1024,7 @@ mod tests {
 
     #[test]
     fn publishing_makes_the_snapshot_and_its_metadata_visible() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a", "b"], SystemTime::UNIX_EPOCH), Origin::Network);
         assert_eq!(s.first_flat_slot().as_flat().unwrap().len(), 2);
@@ -1147,10 +1034,10 @@ mod tests {
         assert!(st.health.is_ok());
     }
 
-    /// The modelling fix: an error must never cost us the data we already had.
+    /// An error must never discard the data already held.
     #[test]
     fn a_failed_refresh_keeps_the_last_known_good_snapshot() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot().publish_flat(
             snap(&["a", "b", "c"], SystemTime::UNIX_EPOCH),
             Origin::Network,
@@ -1172,7 +1059,7 @@ mod tests {
 
     #[test]
     fn repeated_failures_keep_the_original_onset_time() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .record_failure(EnumError::Transient(53), 1, Instant::now());
         let status = s.first_flat_slot().status();
@@ -1195,7 +1082,7 @@ mod tests {
 
     #[test]
     fn a_successful_publish_clears_the_error() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .record_failure(EnumError::Transient(53), 3, Instant::now());
         s.first_flat_slot()
@@ -1207,7 +1094,7 @@ mod tests {
 
     #[test]
     fn a_truncated_snapshot_is_reported_as_degraded() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let mut b = SnapshotBuilder::new("V:\\");
         b.push_str("a");
         let mut snapshot = b.finish(SystemTime::UNIX_EPOCH, 0, None);
@@ -1238,7 +1125,7 @@ mod tests {
 
     #[test]
     fn confirming_freshness_recovers_from_unreachable() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         s.first_flat_slot()
@@ -1254,7 +1141,7 @@ mod tests {
     fn age_is_clamped_rather_than_going_negative() {
         // A clock correction can put built_at in the future.
         let future = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], future), Origin::Network);
         let age = s
@@ -1267,7 +1154,7 @@ mod tests {
 
     #[test]
     fn job_lookups_honour_the_ttl() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job(dir.clone(), snap(&["f.txt"], SystemTime::UNIX_EPOCH));
 
@@ -1280,7 +1167,7 @@ mod tests {
 
     #[test]
     fn an_unknown_job_folder_is_absent() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(matches!(
             s.job(Path::new("R:\\nope"), Duration::from_secs(60)),
             Cached::Absent
@@ -1289,7 +1176,7 @@ mod tests {
 
     #[test]
     fn definite_misses_are_cached_so_typing_does_not_reprobe() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\nope");
         s.publish_job_miss(dir.clone(), EnumError::PathNotFound(3));
         assert!(matches!(
@@ -1298,11 +1185,11 @@ mod tests {
         ));
     }
 
-    /// The bug the previous implementation had: a transient failure must not
-    /// be remembered, or one network blip pins an empty answer for the TTL.
+    /// A transient failure must not be cached, or one network blip pins an
+    /// empty answer for the TTL.
     #[test]
     fn transient_failures_are_never_cached() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job_miss(dir.clone(), EnumError::Transient(53));
         assert!(
@@ -1311,12 +1198,11 @@ mod tests {
         );
     }
 
-    /// Only answers about the folder itself may be remembered. Caching a
-    /// cancellation would make a superseded keystroke suppress the results of
-    /// the keystroke that replaced it.
+    /// Caching a cancellation would let a superseded keystroke suppress the
+    /// results of the one that replaced it.
     #[test]
     fn only_definite_answers_about_the_folder_are_cached() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
 
         for definite in [
             EnumError::PathNotFound(3),
@@ -1371,7 +1257,7 @@ mod tests {
 
     #[test]
     fn invalidating_a_job_forces_a_refetch() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
         s.publish_job(dir.clone(), snap(&["f"], SystemTime::UNIX_EPOCH));
         s.invalidate_job(&dir);
@@ -1381,12 +1267,10 @@ mod tests {
         ));
     }
 
-    /// The number a user checks before trusting a result is the index age.
-    /// Moving it forward on every probe made a listing an hour old render as
-    /// "0s" - honest about the check, dishonest about the data.
+    /// A freshness confirmation must not advance the data's age.
     #[test]
     fn confirming_freshness_does_not_pretend_the_data_is_new() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         let built = SystemTime::UNIX_EPOCH;
         s.first_flat_slot()
             .publish_flat(snap(&["a"], built), Origin::Network);
@@ -1404,7 +1288,7 @@ mod tests {
 
     #[test]
     fn a_fresh_listing_is_its_own_confirmation() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         let st = s.first_flat_slot().status();
@@ -1413,7 +1297,7 @@ mod tests {
 
     #[test]
     fn the_scan_reason_is_visible_to_the_ui() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         assert!(s.first_flat_slot().status().last_scan_reason.is_none());
         s.first_flat_slot()
             .note_scan_started(ScanReason::StampMoved);
@@ -1433,7 +1317,7 @@ mod tests {
 
     #[test]
     fn the_session_totals_reach_the_ui() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot().note_schedule(
             Counters {
                 full_scans: 3,
@@ -1447,11 +1331,10 @@ mod tests {
         assert!(st.stamp_health.is_blind());
     }
 
-    /// A rejected cache used to be swallowed, so "the drive letter now points
-    /// somewhere else" looked identical to "first run".
+    /// A rejected cache is recorded so it is distinguishable from a first run.
     #[test]
     fn a_rejected_cache_is_recorded_rather_than_discarded() {
-        let s = IndexStore::default();
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .note_cache_rejected("cached index belongs to volume 00000000".into());
         assert!(
@@ -1466,9 +1349,8 @@ mod tests {
 
     #[test]
     fn readers_never_block_the_writer() {
-        // Holding a snapshot must not prevent a publish - that is the whole
-        // reason for the arc-swap.
-        let s = IndexStore::default();
+        // Holding a snapshot must not prevent a publish.
+        let s = IndexStore::fixture();
         s.first_flat_slot()
             .publish_flat(snap(&["a"], SystemTime::UNIX_EPOCH), Origin::Network);
         let held = s.first_flat_slot().as_flat().unwrap();

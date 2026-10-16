@@ -1,56 +1,40 @@
 //! Moving the panel with the pointer.
 //!
-//! Pure arithmetic, deliberately separated from the toolkit for the same reason
-//! [`crate::hotkey::geometry`] is separated from the Windows calls beneath it:
-//! a window cannot be dragged inside a test, so the part that decides *where it
-//! goes* has to live somewhere a test can reach.
+//! Pure arithmetic, separate from the toolkit so it can be tested, as
+//! [`crate::hotkey::geometry`] is.
 //!
-//! # Why the position is accumulated rather than read back
+//! # Accumulated position
 //!
-//! The obvious implementation asks the toolkit where the window is each frame
-//! and adds the pointer's movement to it. `ViewportInfo::outer_rect` is a frame
-//! behind - it describes the window as it was when the last frame's input was
-//! gathered, not as it is after the position this frame commanded - so adding a
-//! delta to it double-counts, and the panel judders away from the pointer.
-//!
-//! What is stored instead is the position this module last *asked for*. The
-//! pointer arrives in window-local coordinates, so "where the pointer is on the
-//! desktop" is `outer + pointer`, which does not change when the window moves.
-//! Holding that still under the grab point gives
+//! `ViewportInfo::outer_rect` lags one frame behind the commanded position, so
+//! adding the pointer delta to it double-counts and the panel judders. Instead
+//! this stores the position it last commanded. The pointer is window-local, so
+//! `outer + pointer` is its desktop position and holding that fixed gives
 //!
 //! ```text
 //! outer' = outer + (pointer - grab)
 //! ```
 //!
-//! which settles exactly: once the window has caught up, `pointer == grab` and
-//! the position stops changing; when the pointer moves by `d`, the window moves
-//! by `d` and no more.
+//! which settles exactly: once the window catches up, `pointer == grab`.
 //!
-//! # Why not `ViewportCommand::StartDrag`
+//! # Not `ViewportCommand::StartDrag`
 //!
-//! It is five lines and it hands the whole gesture to Windows, which is
-//! genuinely tempting. It also enters the modal `WM_NCLBUTTONDOWN` move loop,
-//! which blocks the event loop the panel's own animation is advanced from, and
-//! leaves nothing behind that a test can hold this program to. The panel is the
-//! window here - `gui::panel::show` paints into `ui.max_rect()` - so a frozen
-//! event loop is a frozen panel.
+//! `StartDrag` enters the modal `WM_NCLBUTTONDOWN` move loop, which blocks the
+//! event loop that draws the panel, and is not testable.
 
 use eframe::egui::{Pos2, Vec2};
 
-/// How far the pointer must travel before this is a move rather than a click.
+/// Distance in points the pointer must travel before a press becomes a move.
 ///
-/// Without it, a click that lands on empty chrome and wobbles by half a point
-/// counts as a drag, writes a position to `%APPDATA%` and stops the panel ever
-/// being placed again. Two points is below what a hand does by accident and far
-/// below what one does on purpose.
+/// Prevents a slightly wobbling click from being saved to `%APPDATA%` as a
+/// custom position, which would stop automatic placement.
 pub const SLOP: f32 = 2.0;
 
 /// Where the gesture started.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anchor {
-    /// Where in the window the pointer took hold, in points.
+    /// The pointer's position within the window at the press, in points.
     grab: Pos2,
-    /// The outer position last asked for, in points. See the module note.
+    /// The last commanded outer position, in points. See the module docs.
     outer: Pos2,
 }
 
@@ -58,7 +42,7 @@ struct Anchor {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Drag {
     anchor: Option<Anchor>,
-    /// Whether the pointer has travelled far enough for this to count.
+    /// Whether the pointer has passed [`SLOP`].
     moved: bool,
 }
 
@@ -70,22 +54,20 @@ impl Drag {
         }
     }
 
-    /// Takes hold of the panel.
+    /// Starts a gesture.
     ///
-    /// `outer` is where the window is now; `grab` is where in it the pointer
-    /// is. Both in points, because that is the unit egui reports and the unit
-    /// `ViewportCommand::OuterPosition` expects - converting once at the
-    /// boundary beats converting per field.
+    /// `outer` is the window's current position and `grab` the pointer's
+    /// position within it, both in points (egui's unit and the unit
+    /// `ViewportCommand::OuterPosition` expects).
     pub fn begin(&mut self, grab: Pos2, outer: Pos2) {
         self.anchor = Some(Anchor { grab, outer });
         self.moved = false;
     }
 
-    /// The position to command this frame.
+    /// Returns the position to command this frame.
     ///
-    /// `None` when nothing is in flight, and also while the pointer is still
-    /// inside [`SLOP`]: a window that shifts a point under a click is a window
-    /// that feels loose.
+    /// `None` when no gesture is active or the pointer is still within
+    /// [`SLOP`].
     pub fn update(&mut self, pointer: Pos2) -> Option<Pos2> {
         let anchor = self.anchor.as_mut()?;
         let delta: Vec2 = pointer - anchor.grab;
@@ -99,10 +81,9 @@ impl Drag {
         Some(anchor.outer)
     }
 
-    /// Lets go, and reports where the panel ended up.
+    /// Ends the gesture and returns the final position.
     ///
-    /// `None` when the gesture never became a move, which is the case a stray
-    /// click has to fall into.
+    /// `None` when the gesture never passed [`SLOP`].
     pub fn end(&mut self) -> Option<Pos2> {
         let anchor = self.anchor.take()?;
         let moved = self.moved;
@@ -110,10 +91,9 @@ impl Drag {
         moved.then_some(anchor.outer)
     }
 
-    /// Whether the panel is being moved right now.
+    /// Whether a drag is active and has passed [`SLOP`].
     ///
-    /// True only once the gesture has passed [`SLOP`], so a caller can use this
-    /// to suppress a hover highlight without suppressing it under every click.
+    /// Lets callers suppress hover highlights during a drag but not a click.
     pub fn is_dragging(&self) -> bool {
         self.anchor.is_some() && self.moved
     }
@@ -124,7 +104,6 @@ mod tests {
     use super::*;
     use eframe::egui::pos2;
 
-    /// The pointer moves by ten; so does the window, and not by twenty.
     #[test]
     fn the_window_follows_the_pointer_exactly() {
         let mut drag = Drag::new();
@@ -134,9 +113,8 @@ mod tests {
         assert_eq!(at, pos2(510.0, 300.0));
     }
 
-    /// The frame after the window has caught up reports the pointer back at the
-    /// grab point, and the position must then stand still. This is the whole
-    /// reason the commanded position is accumulated rather than read back.
+    /// Once the window catches up the pointer is back at the grab point and the
+    /// position must stay put.
     #[test]
     fn a_window_that_has_caught_up_stops_moving() {
         let mut drag = Drag::new();
@@ -155,7 +133,6 @@ mod tests {
         assert_eq!(drag.update(pos2(100.0, 20.0)), Some(pos2(540.0, 300.0)));
     }
 
-    /// Three separate pushes add up to the sum of them, with no drift.
     #[test]
     fn successive_movements_accumulate() {
         let mut drag = Drag::new();
@@ -167,8 +144,6 @@ mod tests {
         assert_eq!(at, Some(pos2(10.0, 10.0)));
     }
 
-    /// A click that wobbles is a click. Without this the panel would write a
-    /// position on every press and never be placed by `geometry::place` again.
     #[test]
     fn a_press_that_barely_moves_is_not_a_drag() {
         let mut drag = Drag::new();
@@ -179,8 +154,6 @@ mod tests {
         assert_eq!(drag.end(), None, "a wobble was reported as a move");
     }
 
-    /// And once it is a drag it stays one, even if the pointer comes back
-    /// through the grab point.
     #[test]
     fn a_drag_that_returns_to_where_it_started_is_still_a_drag() {
         let mut drag = Drag::new();
@@ -205,8 +178,6 @@ mod tests {
         assert!(!drag.is_dragging());
     }
 
-    /// Letting go and taking hold again starts a fresh gesture rather than
-    /// resuming the last one.
     #[test]
     fn letting_go_clears_the_gesture() {
         let mut drag = Drag::new();

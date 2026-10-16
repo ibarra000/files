@@ -1,37 +1,26 @@
-//! A keyboard shortcut, drawn the way Ueli draws one.
+//! Keyboard shortcut chips.
 //!
-//! `Ctrl+D` is not one chip reading "Ctrl+D". It is two chips, `^` and `D`,
-//! two points apart, with no plus drawn between them - because that is what
-//! the keyboard looks like, and because a chip wide enough to hold `Ctrl+Shift`
-//! is a chip that pushes the label it belongs to off the row.
-//!
-//! The substitutions are the two that matter on this panel: `Ctrl` is `^` and
-//! `Enter` is `↵`. Everything else is drawn as it is written, which is why
-//! [`crate::view::actions`] writes shortcuts the way somebody would say them
-//! rather than in any symbolic form of its own.
+//! `Ctrl+D` is drawn as two chips, `^` and `D`, with no plus between them.
+//! Only `Ctrl` (`^`) and `Enter` (`↵`) are substituted; other parts are drawn as
+//! written, so [`crate::view::actions`] spells shortcuts in plain words.
 
 use eframe::egui::{Align2, Painter, Pos2, Rect, pos2, vec2};
 
 use crate::gui::theme::{self, Theme, Weight};
 
-/// The gap between two parts of one shortcut.
+/// Gap between the chips of one shortcut.
 const PART_GAP: f32 = 2.0;
 
-/// The air inside a chip, left and right of its glyph.
+/// Horizontal padding inside a chip.
 const PAD_X: f32 = 5.0;
 
-/// How tall a chip is.
+/// Chip height: the line box of a caption (16 points).
 ///
-/// Sixteen. Fluent's `<kbd>` sets a font size and horizontal padding and
-/// nothing else, so the height is the line box: a twelve-point caption at
-/// `line_h` is sixteen, and the five points of padding are all horizontal.
+/// Fluent's `<kbd>` sets only font size and horizontal padding, so the height
+/// is the line height.
 pub const HEIGHT: f32 = theme::line_h(theme::SIZE_CAPTION);
 
-/// What one part of a shortcut is drawn as.
-///
-/// `Ctrl` and `Enter` have marks everybody on this operating system already
-/// reads; nothing else on this panel's keys does, so nothing else is
-/// substituted. A vocabulary of two is one nobody has to be taught.
+/// Returns the glyph drawn for one part of a shortcut.
 fn glyph(part: &str) -> &str {
     match part {
         "Ctrl" => "\u{5E}",
@@ -40,7 +29,7 @@ fn glyph(part: &str) -> &str {
     }
 }
 
-/// How wide `shortcut` will be.
+/// Returns the drawn width of `shortcut`.
 pub fn width(painter: &Painter, shortcut: &str) -> f32 {
     let font = theme::font(theme::SIZE_CAPTION, Weight::Regular);
     let mut total = 0.0;
@@ -81,10 +70,10 @@ pub fn draw(painter: &Painter, theme: &Theme, shortcut: &str, at: Pos2) {
     }
 }
 
-/// How a shortcut is read out, for the accessibility tree.
+/// Returns the shortcut as text for the accessibility tree.
 ///
-/// Spelled rather than drawn: `^ D` is a pair of pictures, and a screen
-/// reader handed those would say "circumflex D".
+/// Uses key names rather than glyphs, which a screen reader would read as
+/// "circumflex D".
 pub fn spoken(shortcut: &str) -> String {
     shortcut.replace('+', " ")
 }
@@ -99,8 +88,6 @@ mod tests {
         assert_eq!(glyph("Enter"), "\u{21B5}");
     }
 
-    /// Everything else is drawn as written, because nothing else on this
-    /// panel's keys has a mark anybody reads without being told.
     #[test]
     fn everything_else_is_left_alone() {
         for part in ["D", "E", "O", "K", "F5", ",", "Shift"] {
@@ -108,7 +95,6 @@ mod tests {
         }
     }
 
-    /// A reader gets the words, not the pictures.
     #[test]
     fn a_shortcut_is_read_out_in_words() {
         assert_eq!(spoken("Ctrl+D"), "Ctrl D");

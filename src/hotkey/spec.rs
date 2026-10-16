@@ -1,21 +1,16 @@
-//! `"ctrl+shift+space"` - the pair `RegisterHotKey` wants.
+//! Parses chords such as `"ctrl+shift+space"` into `RegisterHotKey` arguments.
 //!
-//! Pure, and deliberately holding its own copy of the Win32 modifier bits and
-//! virtual-key codes so it compiles and is tested on machines that have no
-//! Win32 at all - which is most of the machines this crate's tests run on. The
-//! copies are proved equal to the real ones at compile time under
-//! `cfg(windows)`, so a table that drifts from the platform is a build failure
-//! rather than a hotkey that quietly fires on the wrong key.
+//! Holds its own copies of the Win32 modifier bits and virtual-key codes so it
+//! builds and tests without Win32; the `abi` module asserts at compile time
+//! under `cfg(windows)` that they match the platform values.
 
-/// `HOT_KEY_MODIFIERS` bits. Fixed ABI; proved against the real ones below.
+/// `HOT_KEY_MODIFIERS` bits. Fixed ABI; checked in the `abi` module.
 pub const MOD_ALT: u32 = 0x0001;
 pub const MOD_CONTROL: u32 = 0x0002;
 pub const MOD_SHIFT: u32 = 0x0004;
 pub const MOD_WIN: u32 = 0x0008;
-/// Without this, holding the chord down repeats it at the keyboard's autorepeat
-/// rate and the window is summoned and dismissed thirty times a second. The
-/// parser adds it unconditionally rather than letting configuration decide,
-/// because there is no reading of "hold the key down" that anyone wants.
+/// Suppresses autorepeat, so holding the chord does not toggle the window
+/// repeatedly. The parser always adds it.
 pub const MOD_NOREPEAT: u32 = 0x4000;
 
 const VK_BACK: u16 = 0x08;
@@ -36,7 +31,7 @@ const VK_DELETE: u16 = 0x2E;
 const VK_F1: u16 = 0x70;
 const VK_OEM_3: u16 = 0xC0;
 
-/// The shipped default. Unclaimed by Windows itself, and reachable one-handed.
+/// The default chord; not reserved by Windows.
 pub const DEFAULT: &str = "ctrl+shift+space";
 
 /// The largest function key `RegisterHotKey` knows about.
@@ -50,7 +45,7 @@ pub struct Hotkey {
     pub vk: u16,
 }
 
-/// What the configuration asked for.
+/// The configured hotkey.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeySpec {
     /// The literal `"off"`. No thread is started and no key is claimed.
@@ -68,11 +63,10 @@ impl HotkeySpec {
 }
 
 impl Default for HotkeySpec {
-    /// The default as a literal rather than a parse.
+    /// Returns [`DEFAULT`] as a literal, so startup needs no fallible parse.
     ///
-    /// Startup must not depend on a fallible call whose only failure mode is a
-    /// typo in this file. `the_default_literal_agrees_with_the_default_text`
-    /// is what keeps the two in step.
+    /// `the_default_literal_agrees_with_the_default_text` keeps the two in
+    /// sync.
     fn default() -> Self {
         Self::Bound(Hotkey {
             mods: MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT,
@@ -93,18 +87,17 @@ pub enum HotkeyParseError {
         first: String,
         second: String,
     },
-    /// A key with no modifier at all.
+    /// A key with no modifier.
     ///
-    /// Refused rather than accepted: `RegisterHotKey` claims a bare key
-    /// system-wide, so `hotkey = "f9"` would make F9 dead in every other
-    /// program on the desktop for as long as this one is running.
+    /// Refused because `RegisterHotKey` would claim the bare key system-wide,
+    /// disabling it in every other program.
     NoModifier(String),
 }
 
 impl HotkeyParseError {
     pub fn detail(&self) -> String {
         match self {
-            Self::Empty => "a hotkey cannot be empty (use \"off\" to claim no key)".into(),
+            Self::Empty => "a hotkey cannot be empty (use \"off\" to disable it)".into(),
             Self::UnknownToken(t) => format!("unknown key or modifier {t:?}"),
             Self::NoKey => "a hotkey needs a key, not only modifiers".into(),
             Self::TwoKeys { first, second } => {
@@ -183,8 +176,7 @@ fn modifier_of(token: &str) -> Option<u32> {
 }
 
 fn key_of(token: &str) -> Option<u16> {
-    // f1 - f24 before the single-character cases: "f" alone is the letter, and
-    // testing length first would leave "f1" matching nothing at all.
+    // Check f1-f24 before single characters; a lone "f" is the letter.
     if let Some(digits) = token.strip_prefix('f')
         && !digits.is_empty()
         && digits.bytes().all(|b| b.is_ascii_digit())
@@ -227,7 +219,7 @@ fn key_of(token: &str) -> Option<u16> {
     })
 }
 
-/// The canonical spelling, for `--doctor` and for the toast that names a clash.
+/// Returns the canonical display form, as used by `--doctor` and clash toasts.
 pub fn describe(hk: Hotkey) -> String {
     let mut out = String::new();
     // Fixed order, so two spellings of the same chord read identically.
@@ -274,10 +266,7 @@ fn name_of_vk(vk: u16) -> String {
     }
 }
 
-/// Proof that the copies above are the platform's own values.
-///
-/// A constant that drifted would register a chord nobody asked for, and the
-/// only symptom would be a key that does nothing.
+/// Compile-time checks that the constants above match `windows-sys`.
 #[cfg(windows)]
 mod abi {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse as km;
@@ -318,8 +307,6 @@ mod tests {
         }
     }
 
-    /// The shipped default has to parse, or the program starts with no hotkey
-    /// and nothing says why.
     #[test]
     fn the_default_literal_agrees_with_the_default_text() {
         assert_eq!(parse(DEFAULT).unwrap(), HotkeySpec::default());
@@ -335,8 +322,6 @@ mod tests {
         assert_eq!(hk.vk, VK_SPACE);
     }
 
-    /// Holding the chord must not summon and dismiss the window at the
-    /// keyboard's autorepeat rate, so this bit is not the caller's to forget.
     #[test]
     fn every_chord_refuses_to_autorepeat() {
         for text in ["ctrl+space", "alt+f4", "win+shift+f23", "ctrl+alt+delete"] {
@@ -358,8 +343,7 @@ mod tests {
         assert_eq!(bound("win+a"), bound("cmd+a"));
     }
 
-    /// The physical Copilot key on current keyboards sends this chord, so the
-    /// grammar has to cover it for the feature to live up to its name.
+    /// The Copilot key sends Shift+Win+F23.
     #[test]
     fn the_copilot_key_itself_is_expressible() {
         let hk = bound("shift+win+f23");
@@ -382,8 +366,6 @@ mod tests {
         ));
     }
 
-    /// "f" is the letter and "f5" is the function key; reading the length
-    /// first would make one of the two unreachable.
     #[test]
     fn a_lone_f_is_the_letter_not_a_function_key() {
         assert_eq!(bound("ctrl+f").vk, b'F' as u16);
@@ -406,8 +388,6 @@ mod tests {
         assert!(HotkeySpec::Off.bound().is_none());
     }
 
-    /// A bare key would be claimed system-wide, making it dead in every other
-    /// program on the desktop. Refused loudly rather than honoured.
     #[test]
     fn a_key_with_no_modifier_is_refused_with_a_reason() {
         let err = parse("f9").unwrap_err();
@@ -441,9 +421,6 @@ mod tests {
         assert_eq!(parse("ctrl+"), Err(HotkeyParseError::Empty));
     }
 
-    /// An unknown name is reported rather than dropped: a typo that silently
-    /// fell back to the default would look exactly like a working hotkey right
-    /// up until the user pressed the combination they chose.
     #[test]
     fn an_unknown_key_name_is_reported_rather_than_ignored() {
         match parse("ctrl+shift+spcae") {

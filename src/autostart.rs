@@ -1,56 +1,39 @@
-//! Whether files starts when somebody signs in.
+//! Start-at-sign-in, stored as the `files` value under
+//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 //!
-//! The answer is one value under
-//! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, named `files` and
-//! holding the quoted path of the executable - the same value the installer's
-//! "Start with Windows" feature writes (see `wix/files.wxs`, `RunAtLogin`).
-//! Sharing the name is the point: the switch in the settings window and the
-//! box in the installer are two ways of setting one thing, so neither can
-//! disagree with the other about whether it is on.
-//!
-//! # Why the registry is the truth and `config.toml` is not
-//!
-//! A `start_with_windows = true` in the configuration would be a second copy
-//! of a fact Windows already keeps, and the two would drift the first time
-//! somebody unticked the installer box, or turned the entry off in Task
-//! Manager's Startup tab - which edits this value and knows nothing about our
-//! file. So nothing is stored here. The switch reads the value, and flipping
-//! it writes or deletes the value.
-//!
-//! Starting hidden needs nothing from this module: the panel is built
-//! invisible and stays that way until it is summoned (`gui::mod`), so a
-//! sign-in launch is a tray icon and nothing else.
+//! The installer's "Start with Windows" feature writes the same value (see
+//! `wix/files.wxs`, `RunAtLogin`), so keep the names in sync. The registry is
+//! the only source of truth; nothing is stored in `config.toml`, because Task
+//! Manager's Startup tab and the installer both edit this value directly.
 
 use std::io;
 use std::path::Path;
 
-/// The value's name, and the installer's.
+/// The Run value name. Must match the installer's.
 const VALUE: &str = "files";
 
-/// Whether files is set to start at sign-in.
+/// Returns whether the Run value exists.
 ///
-/// Whatever the value says rather than whether it names *this* executable. A
-/// development build asking about an installed copy's entry should see the
-/// switch on, because signing in will start something called files.
+/// Does not check which executable it names, so a development build reports
+/// an installed copy's entry as on.
 pub fn is_on() -> io::Result<bool> {
     imp::exists(VALUE)
 }
 
-/// Starts files at sign-in, from wherever this executable is.
+/// Registers the current executable to start at sign-in.
 pub fn enable() -> io::Result<()> {
     let exe = std::env::current_exe()?;
     imp::write(VALUE, &command_line(&exe))
 }
 
-/// Stops files starting at sign-in. Already off is not an error.
+/// Removes the Run value. Succeeds if it is already absent.
 pub fn disable() -> io::Result<()> {
     imp::delete(VALUE)
 }
 
-/// The command the shell runs at sign-in.
+/// Returns the quoted command line for the Run value.
 ///
-/// Quoted, because `C:\Program Files\files\files.exe` has a space in it and an
-/// unquoted Run value with a space is one Windows guesses at.
+/// Quoted because an unquoted path containing spaces is ambiguous to Windows.
 fn command_line(exe: &Path) -> String {
     format!("\"{}\"", exe.display())
 }
@@ -83,9 +66,8 @@ mod imp {
 
     pub fn exists(name: &str) -> io::Result<bool> {
         let (key, name) = (wide(RUN), wide(name));
-        // SAFETY: both strings are NUL-terminated and outlive the call. A null
-        // data pointer asks only whether the value is there and how big it
-        // is, which is all this wants.
+        // SAFETY: both strings are NUL-terminated and outlive the call. Null
+        // output pointers query only existence and size.
         let status = unsafe {
             RegGetValueW(
                 HKEY_CURRENT_USER,
@@ -109,9 +91,8 @@ mod imp {
         let data = wide(data);
         let mut key: HKEY = ptr::null_mut();
         // SAFETY: `path` is NUL-terminated; `key` is written on success and
-        // closed below on every path that opened it. `Run` exists on every
-        // Windows, but create-or-open costs nothing over open and survives a
-        // profile that has had it pruned.
+        // closed below on every path that opened it. Create-or-open handles a
+        // profile where the `Run` key is missing.
         check(unsafe {
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
@@ -182,9 +163,8 @@ mod imp {
 mod tests {
     use super::*;
 
-    // Names nothing else uses, so a test run never touches the real entry -
-    // on a developer's machine that entry is the installed copy's. One per
-    // test, because the tests run in parallel and share the key.
+    // Each test uses its own value name so it never touches the real entry
+    // and parallel tests do not interfere.
 
     #[test]
     fn a_value_that_is_written_is_there_and_one_that_is_deleted_is_not() {

@@ -1,35 +1,29 @@
-//! The desktop shell.
+//! The desktop shell: a window that drives a [`crate::app::App`], feeding it
+//! events and pumping it once per turn.
 //!
-//! The same engine as the terminal build, drawn in a window of its own. What
-//! crosses the boundary is unchanged and was unchanged before this existed:
-//! a [`crate::app::App`] holding the state machine and the workers, fed events
-//! and pumped once a turn.
+//! # Hidden turns
 //!
-//! # Two halves, and why eframe's shape suits this
-//!
-//! [`eframe::App`] splits a turn into [`eframe::App::logic`] and
-//! [`eframe::App::ui`], and - crucially - runs `logic` *even while the window
-//! is hidden*, with no egui pass at all. A search tool that lives in the
-//! notification area is hidden almost all of the time, so that split is worth
-//! having: the index keeps working, a walk that finishes is still recorded,
-//! and none of it costs a frame.
+//! eframe runs [`eframe::App::logic`] even while the window is hidden, with no
+//! egui pass. The panel is hidden most of the time, so index work continues
+//! there at no frame cost; drawing happens only in [`eframe::App::ui`].
 //!
 //! # Waking
 //!
-//! The terminal loop blocked on the event channel, so posting an event woke it
-//! by construction. Here the toolkit owns the loop and sleeps, so the workers
-//! are given an [`crate::app::event::Events`] whose wake is
-//! `Context::request_repaint`. Without that, a walk finishing while the window
-//! is idle would sit in a channel nobody was waiting on.
+//! The toolkit owns the event loop and sleeps, so workers are given an
+//! [`crate::app::event::Events`] whose wake calls `Context::request_repaint`.
+//! Without it, a worker event posted while idle would not be processed.
 
 pub mod anim;
 pub mod drag;
 pub mod fonts;
 pub mod frame;
+pub mod icon;
 pub mod input;
 pub mod link;
 pub mod panel;
 pub mod settings;
+#[cfg(windows)]
+pub mod taskbar;
 pub mod text;
 pub mod theme;
 #[cfg(windows)]
@@ -50,25 +44,14 @@ use crate::view::settings::PageId;
 
 pub use theme::{PANEL_H, PANEL_W};
 
-// The panel used to ask for nothing and paint its own translucent surface,
-// and there was a good reason: `DWMWA_SYSTEMBACKDROP_TYPE` describes a
-// *region* that does not follow a window as it resizes, and the panel grew
-// and shrank with its result count. On this machine a panel that went from
-// two rows to eight kept the compositor's acrylic over the old rectangle and
-// had none over the rest - two backgrounds meeting along a line through the
-// middle of the list.
-//
-// The window is a fixed six hundred by four hundred now. There is no resize
-// for the region to fall behind, so the material is a setting, it defaults to
-// real acrylic, and the painted fill is what `Material::None` and an old
-// Windows get. See `window::Material`.
+// `DWMWA_SYSTEMBACKDROP_TYPE` applies to a region that does not follow a
+// resizing window, so the backdrop relies on the panel's fixed size. See
+// `window::Material`.
 
-/// Something outside the frame loop asking for the program's attention.
+/// A request from outside the frame loop.
 ///
-/// The tray icon and a second launch both happen on threads of their own, at
-/// moments when a hidden panel has asked for no frames at all. So they post
-/// here and then wake the loop - which is [`crate::app::event::Events`] again,
-/// for exactly the reason that type exists.
+/// The tray icon and a second launch run on their own threads while a hidden
+/// panel requests no frames, so they post here and then wake the loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
     Show,
@@ -76,6 +59,8 @@ pub enum Request {
     Diagnostics,
     InstallUpdate,
     Quit,
+    /// The taskbar may have switched between light and dark.
+    TaskbarTheme,
 }
 
 /// Runs the application until the user quits.
@@ -84,74 +69,61 @@ pub fn run(
     choice: crate::config::ConfigChoice,
     source: Arc<dyn DirSource>,
 ) -> eframe::Result<()> {
-    // Built here rather than taken from the creation context, because the
-    // workers need something to wake *before* there is a window to draw in -
-    // and `run_native_ext` exists precisely so the context can outlive that
-    // ordering problem.
+    // Created here rather than taken from the creation context, because the
+    // workers need a context to wake before the window exists.
     let ctx = egui::Context::default();
 
     let options = eframe::NativeOptions {
-        // Said out loud rather than left to `Renderer::default()`, even though
-        // `glow` is now the only backend compiled in and the default would pick
-        // it anyway. The panel's transparency depends on presenting through the
-        // window DC - see the note in `Cargo.toml` - and a line that says which
-        // renderer that is cannot be changed by accident.
+        // Explicit, although `glow` is the only backend compiled in: window
+        // transparency depends on it. See the note in `Cargo.toml`.
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("files")
             .with_app_id("files")
-            // Frameless: the panel paints its own edge. A caption bar on a
-            // thing summoned by a hotkey is a thing nobody asked to manage.
+            .with_icon(icon::window_icon(false))
+            // Frameless: the panel paints its own edge.
             .with_decorations(false)
-            // Per-pixel alpha, and load-bearing: this is what makes winit
-            // call `DwmEnableBlurBehindWindow`, which is the whole of how a
-            // window on Windows becomes transparent. See `Cargo.toml`.
+            // Required: makes winit call `DwmEnableBlurBehindWindow`, which is
+            // how the window becomes transparent. See `Cargo.toml`.
             .with_transparent(true)
             .with_resizable(false)
             .with_always_on_top()
-            // No taskbar button and no Alt-Tab entry. A panel that answers a
-            // global hotkey should not also be somewhere you arrive by
-            // accident.
+            // No taskbar button or Alt-Tab entry.
             .with_taskbar(false)
-            // Hidden until summoned. A tray-resident program that flashes a
-            // panel at sign-in is one nobody keeps - and the taskbar bit below
-            // is read by the shell when a window is *first shown*, so being
-            // hidden here is also what makes `hide_from_taskbar` stick.
+            // Hidden until summoned. The shell reads the taskbar style when a
+            // window is first shown, so this also makes `hide_from_taskbar`
+            // take effect.
             .with_visible(false)
             .with_inner_size([PANEL_W, PANEL_H]),
-        // We place the window ourselves on every summon; restoring the last
-        // session's rectangle would fight that.
+        // The window is positioned on every summon; restoring the last
+        // session's rectangle would conflict with that.
         persist_window: false,
         ..Default::default()
     };
 
-    // Bounded and small: these are user gestures, and a hundred of them queued
-    // behind a wedged frame would be a hundred panels' worth of catching up.
+    // Small bound: these are user gestures, and a long backlog behind a stalled
+    // frame is not worth replaying.
     let (requests_tx, requests_rx) = crossbeam_channel::bounded::<Request>(16);
     let post = {
         let ctx = ctx.clone();
         let tx = requests_tx.clone();
         move |request: Request| {
-            // Dropped if the queue is full, and the wake only happens when the
-            // post did - the same bargain `Events::try_send` makes, and for the
-            // same reason: claiming a frame is owed for an event that was
-            // discarded is how a loop comes to spin.
+            // Wake only if the post succeeded, as `Events::try_send` does;
+            // waking for a dropped event can make the loop spin.
             if tx.try_send(request).is_ok() {
                 ctx.request_repaint();
             }
         }
     };
 
-    // Before the window, and before the workers. A second copy that has already
-    // walked the share and put an icon in the tray has done all of its damage
-    // by the time it finds out it is a second copy.
+    // Claimed before the window and workers start, so a second instance exits
+    // before doing any work.
     #[cfg(windows)]
     let _instance = {
         let post = post.clone();
         match crate::single::claim(move || post(Request::Show)) {
             crate::single::Claim::Only(instance) => instance,
-            // Not an error. From the user's point of view the launch worked:
-            // the panel they wanted is now in front of them.
+            // Not an error: the running instance shows its panel.
             crate::single::Claim::AlreadyRunning => return Ok(()),
         }
     };
@@ -167,13 +139,11 @@ pub fn run(
     eframe::run_native_ext("files", options, Some(ctx), Box::new(build))
 }
 
-/// The window handle, as an integer.
+/// Returns the window handle as an integer.
 ///
-/// Deliberately not an `HWND`: that type is a raw pointer, so it is neither
-/// `Send` nor `Sync`, and keeping the bits rather than the pointer is what
-/// lets this be published to the thread that owns the hotkey later without
-/// anybody writing an `unsafe impl`. Reconstructing a window from it happens
-/// in exactly one module.
+/// `HWND` is a raw pointer and so neither `Send` nor `Sync`; an integer can be
+/// passed to the hotkey thread without an `unsafe impl`. It is converted back
+/// to a window in one module only.
 #[cfg(windows)]
 pub(crate) fn hwnd_of(cc: &eframe::CreationContext<'_>) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -188,50 +158,44 @@ pub(crate) fn hwnd_of(_cc: &eframe::CreationContext<'_>) -> Option<isize> {
     None
 }
 
-/// The window, and everything behind it.
+/// The panel window and the application it drives.
 struct Shell {
     app: App,
-    /// What the compositor agreed to. `None` off Windows, and
-    /// [`window::Backdrop::Painted`] on a Windows too old for acrylic - in
-    /// which case the panel draws its own background instead of asking for one.
+    /// The backdrop the compositor accepted. `None` off Windows, and
+    /// [`window::Backdrop::Painted`] where acrylic is unsupported, in which
+    /// case the panel paints its own background.
     backdrop: Option<window::Backdrop>,
-    /// Kept so the window can be re-dressed when the system theme changes.
+    /// Kept so the window can be restyled when the system theme changes.
     hwnd: Option<isize>,
-    /// Whether the real Segoe UI was found. Kept for the diagnostics panel:
-    /// "the text looks wrong" is a support call, and this is the answer to it.
+    /// Whether Segoe UI was found, for diagnostics.
     #[allow(dead_code)]
     system_fonts: fonts::Found,
-    /// The panel's motion, and the size the window was last asked for.
+    /// The panel's animation state.
     frame: frame::Frame,
     theme: theme::Theme,
-    /// Whether the panel is meant to be up, as of the last frame.
+    /// Whether the panel was meant to be visible as of the last frame.
     up: bool,
-    /// Gestures from outside the frame loop: the tray, and a second launch.
+    /// Requests from the tray and from a second launch.
     requests: crossbeam_channel::Receiver<Request>,
-    /// The settings window, which is a separate process.
+    /// The connection to the settings window, which is a separate process.
     link: link::PanelLink,
-    /// Which configuration file this run is using.
+    /// The configuration file this run uses.
     ///
-    /// Held so that a file the settings window has just rewritten can be
-    /// read again from the same place. `--config` is a flag on this
-    /// process and nothing in `Settings` records which of the three
-    /// choices produced it.
+    /// Needed to re-read the file after the settings window rewrites it;
+    /// `Settings` does not record which choice produced it.
     config: crate::config::ConfigChoice,
-    /// The notification-area icon. Held for the life of the process, because
-    /// dropping it takes the icon out of the tray.
+    /// The notification-area icon. Dropping it removes the icon from the tray.
     #[cfg(windows)]
     tray: Option<tray::Tray>,
     /// Whether the window has already been asked to hide for this dismissal.
     parked: bool,
-    /// The panel being moved with the pointer, if it is.
+    /// The in-progress drag of the panel, if any.
     drag: drag::Drag,
     /// The thread that owns `%APPDATA%\files\window.txt`.
     ///
-    /// Owned here rather than by [`crate::app::actors::Actors`], and that is
-    /// the deliberate half: a window position is a pixel coordinate, and
-    /// `AppState` is the one thing in this program that has no coordinates in
-    /// it. Routing this through a `Cmd` would mean the state machine carrying a
-    /// value it can neither produce nor check. See [`crate::app::state::pointer`].
+    /// Owned here rather than by [`crate::app::actors::Actors`] because a
+    /// window position is a pixel coordinate, and `AppState` holds no
+    /// coordinates. See [`crate::app::state::pointer`].
     placement: Option<placement::Writer>,
 }
 
@@ -245,25 +209,24 @@ impl Shell {
         requests: crossbeam_channel::Receiver<Request>,
         post: impl Fn(Request) + Clone + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // What the configuration asked for, which is usually not what Windows
-        // is doing. `system` is still available and still means this.
+        // The configured theme; `system` follows Windows.
         let dark = settings
             .theme
             .is_dark(cc.egui_ctx.theme() == egui::Theme::Dark);
 
-        // Dressed before anything is drawn, and - for the taskbar bit - before
-        // the window is ever shown, because the shell reads that one once.
+        // Styled before anything is drawn and before the window is first
+        // shown, because the shell reads the taskbar style only once.
         let hwnd = hwnd_of(cc);
         let backdrop = hwnd.map(|hwnd| {
             window::hide_from_taskbar(hwnd);
             window::apply(hwnd, dark, settings.backdrop, !settings.dock.is_docked())
         });
         let system_fonts = fonts::install(&cc.egui_ctx);
-        // After the fonts, because the style names families by the names
-        // `fonts::install` registers them under.
+        // After the fonts: the style refers to the families `fonts::install`
+        // registers.
         theme::apply_style(&cc.egui_ctx, &theme::Theme::of(dark));
 
-        // What the workers call after posting. See the module note.
+        // Called by workers after posting. See the module docs.
         let wake = {
             let ctx = ctx.clone();
             Arc::new(move || ctx.request_repaint())
@@ -271,45 +234,48 @@ impl Shell {
         let placement_path = settings.placement_path.clone();
         let app = App::start(settings, source, wake)?;
 
-        // The hotkey thread has been running since `App::start`, waiting to be
-        // told which window to summon. This is that.
+        // The hotkey thread started in `App::start` and waits for the window
+        // to summon.
         if let Some(hwnd) = hwnd {
             app.actors.panel.publish(hwnd);
         }
 
-        // And where to summon it to, if the last session left an answer.
-        // Published before the first summon can happen rather than lazily,
-        // because the hotkey thread reads this on a keypress it does not
-        // coordinate with: a position that arrives late is a panel that flashes
-        // up in the default place first.
+        // Publish the saved position before the first summon, because the
+        // hotkey thread reads it on a keypress without coordination.
         //
-        // A writer that will not start is not a reason to fail. Dragging still
-        // works for the session; it is only the remembering that is lost, which
-        // is exactly the bargain `history` makes.
+        // A writer that fails to start is not fatal; dragging still works but
+        // the position is not saved.
         let placement = placement_path.and_then(|path| {
             app.actors.panel.remember(placement::load(&path));
             placement::spawn_writer(path).ok()
         });
-        // And the dock, for the same reason: the first summon reads it.
+        // The dock setting, also read by the first summon.
         app.actors.panel.set_dock(app.state.settings.dock);
 
-        // Built on the event loop's own thread, which is where the tray icon's
-        // hidden window has to live for its messages to be pumped at all.
+        // Built on the event loop's thread, where the tray icon's hidden
+        // window must live for its messages to be pumped.
         //
-        // A tray icon the shell refuses is not a reason to fail: the hotkey
-        // still works, and a search tool that will not start because the
-        // notification area is full is a worse tool than one without an icon.
+        // A tray icon the shell refuses is not fatal; the hotkey still works.
         #[cfg(windows)]
-        let tray = tray::Tray::new(move |action| {
-            post(match action {
-                tray::TrayAction::Show => Request::Show,
-                tray::TrayAction::Settings => Request::Settings,
-                tray::TrayAction::Diagnostics => Request::Diagnostics,
-                tray::TrayAction::InstallUpdate => Request::InstallUpdate,
-                tray::TrayAction::Quit => Request::Quit,
-            });
+        let tray = tray::Tray::new({
+            let post = post.clone();
+            move |action| {
+                post(match action {
+                    tray::TrayAction::Show => Request::Show,
+                    tray::TrayAction::Settings => Request::Settings,
+                    tray::TrayAction::Diagnostics => Request::Diagnostics,
+                    tray::TrayAction::InstallUpdate => Request::InstallUpdate,
+                    tray::TrayAction::Quit => Request::Quit,
+                });
+            }
         })
         .ok();
+        #[cfg(windows)]
+        if tray.is_some()
+            && let Err(err) = taskbar::watch(move || post(Request::TaskbarTheme))
+        {
+            log::warn!("the tray icon will not follow the taskbar theme: {err}");
+        }
 
         Ok(Self {
             app,
@@ -333,12 +299,8 @@ impl Shell {
         })
     }
 
-    /// Follows the system between light and dark, window frame included.
-    ///
-    /// Watched rather than read once: somebody who switches at dusk should not
-    /// have to restart the program, and a panel in the wrong theme over a
-    /// desktop in the right one is the most obvious way for a window to look
-    /// like it does not belong here.
+    /// Switches between light and dark when the effective theme changes,
+    /// including the window frame.
     fn follow_theme(&mut self, ctx: &egui::Context) {
         let dark = self
             .app
@@ -350,10 +312,8 @@ impl Shell {
             return;
         }
         self.theme = theme::Theme::of(dark);
-        // The widgets in the settings window take their colours from the
-        // toolkit's own style rather than from `self.theme`, so they need
-        // telling too. Here rather than every frame: a style is a clone of
-        // several hundred bytes and the theme moves about twice a day.
+        // Widgets take colours from egui's style, not `self.theme`. Applied
+        // only on change, because cloning the style every frame is wasteful.
         theme::apply_style(ctx, &self.theme);
         if let Some(hwnd) = self.hwnd {
             let settings = &self.app.state.settings;
@@ -366,37 +326,38 @@ impl Shell {
         }
     }
 
-    /// Does what the tray icon, or a second launch, asked for.
+    /// Handles all pending requests from the tray and a second launch.
     ///
-    /// Drained rather than taken one at a time, for the same reason
-    /// [`crate::app::App::pump`] drains: two clicks that arrived between frames
-    /// are one turn's worth of work, not two frames' worth.
+    /// Drained in one turn, as [`crate::app::App::pump`] drains events.
     fn serve_requests(&mut self, now: Instant) {
         while let Ok(request) = self.requests.try_recv() {
             match request {
-                // Through the hotkey thread, because showing the panel means
-                // taking the foreground and that is the one thread Windows will
-                // accept it from.
+                // Via the hotkey thread: showing the panel takes the
+                // foreground, which Windows allows only from that thread.
                 Request::Show => self.app.actors.summon_overlay(),
-                // A named menu item is a destination; the toggle key is a
-                // resumption. So this always names a page and
-                // `Cmd::ToggleSettings` never does.
+                // A menu item always opens a named page; only
+                // `Cmd::ToggleSettings` resumes the last one.
                 Request::Settings => self.link.open_at(PageId::General, &self.app.state.settings),
                 Request::Diagnostics => self
                     .link
                     .open_at(PageId::Diagnostics, &self.app.state.settings),
                 Request::InstallUpdate => self.install_update(now),
                 Request::Quit => self.app.state.should_quit = true,
+                Request::TaskbarTheme =>
+                {
+                    #[cfg(windows)]
+                    if let Some(tray) = self.tray.as_mut() {
+                        tray.follow_taskbar();
+                    }
+                }
             }
         }
     }
 
-    /// Keeps the tray's install item in step with what the checker found.
+    /// Keeps the tray's install item in step with the update checker.
     ///
-    /// Only an installer that is actually on disk is offered: a menu item
-    /// that answered with "the installer is missing" would be one that should
-    /// not have been there. Every frame, because it compares one version and
-    /// does nothing else unless the answer changed.
+    /// Offered only when the installer is on disk. Called every frame; it is
+    /// cheap unless the result changed.
     #[cfg(windows)]
     fn follow_update(&mut self) {
         let Some(tray) = self.tray.as_mut() else {
@@ -412,14 +373,11 @@ impl Shell {
         }
     }
 
-    /// Starts and finishes the entrance and the exit.
+    /// Starts the entrance or exit animation when visibility changes.
     ///
-    /// The state machine is the authority on whether the panel is up -
-    /// `LayoutMode` is set from [`crate::app::event::HotkeyMsg`], which the
-    /// hotkey thread sends because it is the thread Windows will take a
-    /// foreground change from. This only notices the change and tells the
-    /// animator, which is why a summon and a dismiss cannot get out of step
-    /// with what the rest of the program thinks is happening.
+    /// The state machine owns visibility (`overlay_up`, set from
+    /// [`crate::app::event::HotkeyMsg`]); this only relays the change to the
+    /// animator, so the two cannot disagree.
     fn follow_overlay(&mut self) {
         let up = self.app.state.overlay_up;
         if up == self.up {
@@ -434,19 +392,10 @@ impl Shell {
         }
     }
 
-    /// Asks for the window to be put away, once there is nothing left to see.
+    /// Stages the update, hands it to the helper, and requests a quit.
     ///
-    /// Deferred to the end of the exit transition rather than done when Escape
-    /// was pressed, because a window that vanishes on the keystroke has no exit
-    /// transition however carefully one was written. The hotkey thread does the
-    /// hiding: it also has to hand the keyboard back to whatever the panel took
-    /// it from, and that is a foreground change.
-    /// Stages the update, hands it to the helper, and asks to quit.
-    ///
-    /// Here rather than in the state machine because every step of it is I/O -
-    /// copying an installer, starting a process - and the state machine does
-    /// none. What it does own is the decision to quit, which is why that half
-    /// goes back through the ordinary route.
+    /// Lives here rather than in the state machine because every step is I/O.
+    /// The quit itself goes through the normal route.
     fn install_update(&mut self, now: Instant) {
         let state = &self.app.state;
         let Some(crate::update::Found::Available { manifest, msi, .. }) = &state.update else {
@@ -462,13 +411,11 @@ impl Shell {
 
         match staged {
             Ok(_) => {
-                // Through the ordinary quit, so the workers are stopped and
-                // the index is written exactly as they would be on Ctrl+Q.
-                // The helper is already waiting for this process to go.
+                // The normal quit stops the workers and writes the index, as
+                // Ctrl+Q does. The helper waits for this process to exit.
                 self.app.state.should_quit = true;
             }
-            // Nothing has been installed and nothing has been closed, so the
-            // only thing owed is an explanation.
+            // Nothing was installed or closed; report the failure.
             Err(problem) => self.app.feed(
                 AppEvent::Open(crate::app::event::OpenMsg::SettingSaveFailed {
                     label: "The update",
@@ -479,15 +426,11 @@ impl Shell {
         }
     }
 
-    /// Hides the window once the exit has finished.
+    /// Hides the window once the exit animation has finished.
     ///
-    /// Unconditional, which it was not. There used to be a guard here: the
-    /// settings window was an immediate viewport drawn from `ui`, `ui` only
-    /// runs while the panel is up, and parking would have taken the form
-    /// away mid-edit - so the panel refused to go while a window was open.
-    /// That is why a panel that had been dismissed stayed on screen, in
-    /// front of the settings window it was refusing to leave. The window is
-    /// its own process now and nothing here can take it with us.
+    /// Deferred to the end of the exit so the animation is visible. The hotkey
+    /// thread does the hiding, because returning the keyboard to the previous
+    /// window is a foreground change.
     fn park(&mut self) {
         if !self.frame.motion.is_hidden() || self.parked {
             return;
@@ -496,23 +439,18 @@ impl Shell {
         self.app.actors.dismiss_overlay();
     }
 
-    /// Moves the panel with the pointer, and remembers where it was left.
+    /// Moves the panel with the pointer and saves where it was left.
     ///
-    /// `response` is the interaction over whatever the handle is this frame:
-    /// the header and the footer together, or - with Alt held - the whole
-    /// panel. Which side of [`panel::show`] it was registered on *is* the
-    /// policy, because egui gives a press to the last widget that claimed the
-    /// point: before means "only what nothing else wanted", after means
-    /// "everything". See [`panel::handles`].
+    /// `response` covers this frame's drag handle: the header and footer, or
+    /// the whole panel with Alt held. Whether it was registered before or after
+    /// [`panel::show`] sets precedence, because egui gives a press to the last
+    /// widget registered at that point. See [`panel::handles`].
     ///
-    /// The arithmetic is [`drag::Drag`], and it is there rather than here for
-    /// the reason every other pure decision in this crate is split out: a
-    /// window cannot be dragged inside a test.
+    /// The arithmetic lives in [`drag::Drag`] so it can be tested.
     fn follow_drag(&mut self, ctx: &egui::Context, response: &egui::Response) {
         if response.drag_started() {
-            // `interact_pointer_pos` is where the press landed, which is not
-            // `hover_pos` once the pointer has moved off the panel - and it is
-            // the press that set the grab point.
+            // The press position, not `hover_pos`, which differs once the
+            // pointer leaves the panel.
             let grab = response.interact_pointer_pos();
             let outer = ctx.input(|i| i.viewport().outer_rect.map(|r| r.min));
             if let (Some(grab), Some(outer)) = (grab, outer) {
@@ -534,14 +472,11 @@ impl Shell {
         }
     }
 
-    /// Records where a drag left the panel, in the units the hotkey thread
-    /// works in.
+    /// Records where a drag left the panel, in device pixels.
     ///
-    /// Points on the way in, because that is what egui reports and what
-    /// `OuterPosition` expects; device pixels on the way out, because that is
-    /// what `SetWindowPos` and `GetMonitorInfoW` speak. Converting here means
-    /// one conversion rather than one per consumer - the same argument
-    /// [`crate::hotkey::geometry::RectPx`] makes for itself.
+    /// Takes points (egui's unit) and stores pixels (the unit of
+    /// `SetWindowPos` and `GetMonitorInfoW`), converting once here. See
+    /// [`crate::hotkey::geometry::RectPx`].
     fn moved_to(&mut self, ctx: &egui::Context, at: egui::Pos2) {
         let scale = ctx.pixels_per_point();
         let px = ((at.x * scale).round() as i32, (at.y * scale).round() as i32);
@@ -552,37 +487,22 @@ impl Shell {
         }
     }
 
-    /// Puts the panel back to being placed by the program.
+    /// Re-reads the configuration file after the settings window wrote it.
     ///
-    /// Both halves matter and they are not the same one: the slot is what the
-    /// *next summon* reads, and the file is what the *next session* reads.
-    /// Clearing one without the other is how a position comes back from the
-    /// dead after a restart.
-    /// Re-reads the configuration file, because the settings window wrote
-    /// to it.
-    ///
-    /// The whole file rather than one edit. The window is a separate
-    /// process and the file is the only thing both of them can see, so
-    /// "something changed" is the most either can honestly say - and
-    /// re-reading is cheap next to being wrong about which fields moved.
-    ///
-    /// This replaces `AppState::apply_live`, which took an `Edit` and was
-    /// exhaustive over `SettingKey` so that a key added without a decision
-    /// was a compile error. That guarantee moves to `AppState::adopt`,
-    /// which is exhaustive over the same enum for the same reason.
+    /// The whole file is reloaded, since the file is the only state the two
+    /// processes share. `AppState::adopt` is exhaustive over `SettingKey`, so
+    /// a new key without handling fails to compile.
     fn adopt_config(&mut self, now: Instant) {
         let choice = self.config.clone();
         let Ok(mut fresh) = crate::config::Settings::load(&choice) else {
-            // A file that will not parse is a file the window would have
-            // refused to write, so this is somebody editing it by hand
-            // while the panel is up. Keeping what is loaded is the only
-            // safe answer; the next start will say what is wrong with it.
+            // A file that fails to parse was hand-edited; keep the loaded
+            // settings. The next start reports the error.
             return;
         };
         // Command-line pins belong to this process, not to the file.
         fresh.cli_pinned = self.app.state.settings.cli_pinned;
-        // Probed here, because the state machine does no I/O, and only when
-        // the list changed: otherwise what was found at startup still holds.
+        // Probed here because the state machine does no I/O, and only when
+        // the viewer list changed.
         let probe = (fresh.viewers != self.app.state.settings.viewers)
             .then(|| crate::open::probe_viewers(&fresh.viewers));
         self.app.feed(AppEvent::Adopt(Box::new(fresh)), now);
@@ -591,6 +511,10 @@ impl Shell {
         }
     }
 
+    /// Returns the panel to automatic placement.
+    ///
+    /// Clears both the in-memory slot (read by the next summon) and the file
+    /// (read by the next session).
     fn forget_placement(&mut self) {
         self.app.actors.panel.remember(None);
         if let Some(writer) = &self.placement {
@@ -600,8 +524,7 @@ impl Shell {
 }
 
 impl eframe::App for Shell {
-    /// Fully transparent: the window is a sheet of glass the panel is painted
-    /// on. Anything opaque here and the compositor's backdrop is invisible.
+    /// Fully transparent, so the compositor backdrop shows through.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
@@ -611,33 +534,18 @@ impl eframe::App for Shell {
         let wall = SystemTime::now();
 
         self.follow_theme(ctx);
-        // Every frame, because it is one atomic store and the setting can be
-        // changed from the settings window at any moment. The hotkey thread
-        // acts on it at the next summon.
+        // Every frame: one atomic store, and the settings window can change it
+        // at any time. The hotkey thread applies it on the next summon.
         self.app.actors.panel.set_dock(self.app.state.settings.dock);
 
-        // Keystrokes first, so a character typed this frame is searched for on
-        // this frame rather than on the next one.
-        //
-        // Every event, including a lost focus. There used to be a filter
-        // here: the settings window was a viewport of this one, so opening
-        // it *was* the panel losing focus, and a panel that dismissed
-        // itself over that would have taken away the window somebody had
-        // just clicked into. So `hide_on_blur` was suppressed whenever a
-        // window was open - which is to say the setting stopped meaning
-        // what the form says it means, in exactly the case where somebody
-        // had gone looking for it. Clicking on the settings window now is
-        // clicking on another program, and the panel puts itself away,
-        // which is what the setting promises.
+        // Input first, so a character typed this frame is searched this frame.
+        // All events pass through, including focus loss.
         for event in ctx.input(input::translate) {
             self.app.feed(event, now);
         }
 
-        // Immediate mode: `ui` runs after every `logic` the window is visible
-        // for, so a redraw is already granted rather than requested. While
-        // hidden there is nothing to draw and nothing worth waking for. The
-        // value is still what the state-machine tests assert on; it is only
-        // here that it has already been satisfied.
+        // The returned redraw request is ignored: `ui` runs after every
+        // `logic` while visible, and there is nothing to draw while hidden.
         let _ = self.app.pump(now);
 
         self.serve_requests(now);
@@ -645,40 +553,23 @@ impl eframe::App for Shell {
         self.follow_update();
         self.follow_overlay();
 
-        // Every deadline in `next_deadline` is anchored on the last frame, so a
-        // turn that does not draw still has to say a turn happened - or the age
-        // readout's deadline stays permanently in the past and this becomes a
-        // spin rather than a sleep. While the window is hidden nothing is on
-        // screen for that readout to be wrong about, so calling it here is
-        // honest as well as necessary.
+        // `next_deadline` is anchored on the last frame, so a turn without
+        // drawing must still record one; otherwise the age readout's deadline
+        // stays in the past and the loop spins.
         self.app.state.note_frame(now, wall);
 
         if self.app.should_quit() {
-            // Said before the window goes, so a settings window that is
-            // open finds out by being told rather than by a write failing.
-            // The pipe breaking would say the same thing a moment later;
-            // this is the difference between a form that greys out its
-            // three panel-dependent controls and one that greys them out
-            // after somebody has pressed one.
+            // Notify an open settings window before closing, so it disables
+            // its panel-dependent controls immediately.
             self.link.exiting();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
 
-        // Something owes a frame soon; a deadline owes one later. With neither
-        // there is no request at all, and the process parks until the hotkey or
-        // a worker wakes it - which is the whole of the claim that sitting in
-        // the notification area costs nothing.
-        //
-        // The only thing left that owes a frame on its own account is the gate
-        // that stops the body going empty for one frame, and it owes at most
-        // seven of them. Asking for frames at the compositor's rate was right
-        // when the panel's presence, height, body and selection were all in
-        // flight at once; it is now a deadline like any other.
-        //
-        // Taking the earlier of the two is load-bearing. Capping at
-        // `ANIMATION_TICK` alone would let the panel sleep past a search
-        // falling due and stretch a 300ms pause to 400.
+        // Repaint at the earlier of the animation tick and the next deadline.
+        // With neither, no repaint is requested and the process sleeps until
+        // the hotkey or a worker wakes it. Capping at `ANIMATION_TICK` alone
+        // would let a due search wait up to an extra tick.
         let animating = self
             .frame
             .motion
@@ -689,18 +580,9 @@ impl eframe::App for Shell {
             .next_deadline()
             .map(|due| due.saturating_duration_since(now));
 
-        // The sixty-a-second repaint that used to be here is gone with the
-        // viewport it was for. The settings window was drawn inside this
-        // window's pass, so it only got frames when the panel asked for
-        // them, and it asked for one every sixteen milliseconds for as long
-        // as a form was open - a 940 by 700 page of widgets redrawn
-        // continuously to show something that was not moving. As its own
-        // process it asks for its own frames, and winit gives it one when
-        // something happens to it.
         if let Some(wait) = [animating, deadline].into_iter().flatten().min() {
-            // A floor of a millisecond: `request_repaint_after(ZERO)` means
-            // "again immediately", and a deadline already in the past would pin
-            // a core.
+            // At least 1 ms: `request_repaint_after(ZERO)` repaints
+            // immediately, so a past deadline would pin a core.
             ctx.request_repaint_after(wait.max(Duration::from_millis(1)));
         }
     }
@@ -709,64 +591,42 @@ impl eframe::App for Shell {
         let now = Instant::now();
         let wall = SystemTime::now();
 
-        // Told what the world looks like, then how much time has passed, then
-        // asked what to draw. One order, in one place - and that place is
-        // `frame`, so the tests take the same one.
+        // Advance state, then time, then decide what to draw, in the order
+        // `frame` defines so the tests use the same one.
         let dt = ui.input(|i| i.stable_dt);
         let content = self.frame.advance(&self.app.state, dt);
 
         self.park();
 
-        // What the settings window has asked for. Four messages, and each
-        // of them is a thing only this process can do.
-        //
-        // This used to be three hundred lines of `Windows::show` drawing a
-        // form into a viewport, and the events it produced were dropped on
-        // the floor - `Clicked` carried `changed`, `aliases` and `mappings`
-        // and this function read `actions` and nothing else, so every
-        // control in that window was decorative. The window writes the file
-        // itself now, which is why what arrives here is "the file moved"
-        // rather than an edit to apply.
+        // Messages from the settings window, each needing this process.
         for msg in self.link.poll() {
             match msg {
                 crate::ipc::ToPanel::Changed => self.adopt_config(now),
                 crate::ipc::ToPanel::InstallUpdate => self.install_update(now),
                 crate::ipc::ToPanel::ForgetPlacement => self.forget_placement(),
-                // Nothing to do but notice, and `link.open()` already has.
+                // Already noted by `link.open()`.
                 crate::ipc::ToPanel::Closing => {}
             }
         }
 
-        // The panel writes the configuration file too - F2 moves the
-        // viewer, F5 and the window toggles go through `Cmd::SaveSetting` -
-        // and the settings window is reading the same file. Told once the
-        // write has landed rather than when it was asked for, because a
-        // write that failed is not a change to go and re-read.
+        // The panel also writes the configuration file (F2, F5 and window
+        // toggles via `Cmd::SaveSetting`). The settings window is told only
+        // after a write succeeds.
         if self.app.take_saved() {
             self.link.reload();
         }
 
-        // And the two facts only this process knows, when they move.
+        // Live state that only this process knows.
         self.link.live(
             self.app.actors.panel.remembered(),
             &self.app.state.hotkey_claim,
         );
 
-        // One list rather than a bool and a pair of flags, and in the order
-        // they were pressed: two of these reach outside the window and one
-        // of them restarts the program.
-
-        // The header and the footer, underneath everything that goes in them,
-        // so the search box and the chips take their own presses and the air
-        // around them moves the window. Alt makes the whole panel a handle
-        // instead - registered *after*, so it beats even the rows - because
-        // the air is a thin target and the panel is frameless: there is no
-        // caption bar to reach for.
+        // Drag handles. The header and footer are registered before the panel,
+        // so its controls take their own presses. With Alt held the whole
+        // panel is registered after, so it takes every press.
         //
-        // None of it while docked. A bar pinned to an edge is put there by the
-        // setting, and a drag that moved it would be undone by the next
-        // summon - so there is nothing to grab, and the header and footer are
-        // left to the controls in them.
+        // No dragging while docked: the next summon would undo the move.
         let docked = self.app.state.settings.dock.is_docked();
         let alt = ui.input(|i| i.modifiers.alt);
         let sense = egui::Sense::click_and_drag();
@@ -794,14 +654,11 @@ impl eframe::App for Shell {
             self.follow_drag(&ui.ctx().clone(), &chrome);
         }
 
-        // Fed rather than sent: these were produced on the drawing thread, and
-        // a send would go round the channel to arrive one frame later - which
-        // for a hover is a highlight that trails the pointer.
+        // Fed directly rather than sent through the channel, which would delay
+        // them a frame and make hover lag the pointer.
         //
-        // Dropped entirely while the panel is being moved: the pointer is over
-        // rows the whole way across the desktop, and a drag that left the
-        // selection somewhere else is a drag that opened the wrong drawing the
-        // next time Enter was pressed.
+        // Dropped during a drag, so the pointer crossing rows does not move the
+        // selection.
         for intent in intents {
             if self.drag.is_dragging() {
                 break;
