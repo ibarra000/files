@@ -1,27 +1,11 @@
-//! Getting text into and out of the system clipboard.
+//! System clipboard access, implemented directly over `windows-sys`.
 //!
-//! Hand-rolled over `windows-sys`, which is already a dependency, rather than
-//! pulling in a clipboard crate. That is the same trade the rest of the crate
-//! makes - `util::rng` exists to avoid `rand`, and the config and cache
-//! directories are resolved by hand rather than through `dirs`. The Win32
-//! clipboard is four calls and an allocation; a crate for it would bring more
-//! transitive dependencies than code.
+//! `OpenClipboard` fails while another process holds the clipboard, so opens
+//! are retried and may block. The async entry points therefore run on a
+//! detached thread and report back as an event, keeping the UI thread free.
 //!
-//! # Why it runs off the UI thread
-//!
-//! `OpenClipboard` fails outright while another process holds the clipboard,
-//! and that is not rare: the terminal itself may still be holding it in the
-//! instant after a keystroke. So the open is retried for a moment, which means
-//! it can block - and the UI thread never may. Every entry point here hands
-//! the work to a detached thread and reports the outcome back as an event,
-//! exactly as `open::open_async` does for the viewer.
-//!
-//! # Off Windows
-//!
-//! Copy falls back to OSC 52, an escape sequence the terminal itself
-//! interprets, which also happens to work over SSH. Reading has no equivalent,
-//! because there is no way to ask a terminal what its clipboard holds, so it
-//! reports `Unsupported` rather than pretending.
+//! Off Windows, copying uses the OSC 52 terminal escape sequence and reading
+//! returns `Unsupported`.
 
 use std::fmt;
 use std::sync::Arc;
@@ -30,17 +14,11 @@ use parking_lot::Mutex;
 
 use crate::app::event::{AppEvent, ClipboardMsg, Events};
 
-/// Serialises this process's own use of the clipboard.
+/// Serialises this process's clipboard access.
 ///
-/// The Win32 clipboard is a single global, and `EmptyClipboard` frees every
-/// handle on it - including one another thread is part-way through reading.
-/// Each copy runs on its own thread, so two in quick succession are two
-/// threads, and without this the program can free memory out from under
-/// itself. That is not theoretical: it showed up as a heap corruption crash
-/// the first time two clipboard operations overlapped.
-///
-/// Contention with *other* processes is a different problem, and is handled by
-/// retrying the open.
+/// `EmptyClipboard` frees every handle on the clipboard, including one another
+/// thread may be reading, so overlapping operations corrupt the heap.
+/// Contention with other processes is handled by retrying the open.
 static CLIPBOARD: Mutex<()> = Mutex::new(());
 
 /// Puts text on the clipboard.
@@ -55,10 +33,10 @@ pub fn get_text() -> Result<String, ClipboardError> {
     imp::get_text()
 }
 
-/// Why a clipboard operation did not happen.
+/// A clipboard operation failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardError {
-    /// Another process held the clipboard for longer than we waited.
+    /// Another process held the clipboard past the retry window.
     Busy,
     /// The clipboard holds no text.
     Empty,
@@ -71,8 +49,8 @@ impl ClipboardError {
     pub fn detail(&self) -> String {
         match self {
             Self::Busy => "the clipboard is in use by another program".into(),
-            Self::Empty => "the clipboard holds no text".into(),
-            Self::Unsupported => "this terminal cannot be read from".into(),
+            Self::Empty => "the clipboard has no text".into(),
+            Self::Unsupported => "the clipboard is not available".into(),
             Self::Os(e) => e.clone(),
         }
     }
@@ -136,25 +114,18 @@ mod imp {
 
     use super::ClipboardError;
 
-    /// Declared here rather than pulled from `Win32_System_Ole`, which would
-    /// be a whole feature enabled for one number. The value is fixed ABI, and
-    /// `index::errors` already keeps a hand-written table of Win32 constants
-    /// for the same reason.
+    /// Defined locally to avoid enabling the `Win32_System_Ole` feature for
+    /// one constant. The value is fixed ABI.
     const CF_UNICODETEXT: u32 = 13;
 
-    /// How long to keep trying to open the clipboard.
-    ///
-    /// The terminal itself often still holds it in the moment after the
-    /// keystroke that asked for the copy, and that contention clears in
-    /// milliseconds. Failing on the first refusal would make copying
-    /// intermittent for no reason.
+    /// Open retry policy: about 120 ms in total. Contention from other
+    /// processes usually clears within milliseconds.
     const OPEN_ATTEMPTS: u32 = 12;
     const OPEN_RETRY: Duration = Duration::from_millis(10);
 
     /// An open clipboard, closed on drop.
     ///
-    /// Every path out of the functions below is fallible, and a clipboard left
-    /// open locks it for every other program on the desktop until this process
+    /// A clipboard left open blocks every other program until this process
     /// exits.
     struct OpenClip;
 
@@ -214,10 +185,8 @@ mod imp {
         }
 
         // SAFETY: the clipboard is open and the handle is a valid global block.
-        //
-        // On success the system takes ownership of `handle`; freeing it after
-        // this point would be a double free, which is why the only GlobalFree
-        // calls are on the failure paths.
+        // On success the system takes ownership of `handle`, so it is freed
+        // only on the failure path.
         let set = unsafe { SetClipboardData(CF_UNICODETEXT, handle as HANDLE) };
         if set.is_null() {
             // SAFETY: ownership was not transferred, so this frees once.
@@ -251,9 +220,8 @@ mod imp {
             return Err(ClipboardError::Os("could not lock clipboard memory".into()));
         }
 
-        // The block is sized in bytes and holds UTF-16, so halve it. Reading
-        // is bounded by that length rather than trusting a terminator to be
-        // present - a malformed block must not walk off the end.
+        // The block size is in bytes of UTF-16. Reads are bounded by it rather
+        // than by a terminator, which a malformed block may lack.
         let units = size / 2;
         // SAFETY: `ptr` is readable for `size` bytes, hence `units` u16s, and
         // the data is not mutated while the lock is held.
@@ -279,7 +247,7 @@ mod imp {
 
     use super::ClipboardError;
 
-    /// OSC 52: hand the terminal the text and let it do the copying.
+    /// Copies via the OSC 52 escape sequence, which the terminal handles.
     pub fn set_text(text: &str) -> Result<(), ClipboardError> {
         let payload = super::base64(text.as_bytes());
         let mut out = std::io::stdout();
@@ -288,15 +256,13 @@ mod imp {
             .map_err(|e| ClipboardError::Os(e.to_string()))
     }
 
-    /// There is no way to ask a terminal what its clipboard holds.
+    /// Always `Unsupported`: terminals cannot be queried for clipboard text.
     pub fn get_text() -> Result<String, ClipboardError> {
         Err(ClipboardError::Unsupported)
     }
 }
 
-/// Standard base64, for OSC 52.
-///
-/// Twenty lines rather than a dependency, and used on exactly one code path.
+/// Standard padded base64, for OSC 52.
 #[cfg(any(not(windows), test))]
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -340,8 +306,7 @@ mod tests {
 
     #[test]
     fn base64_matches_the_known_vectors() {
-        // Padding is the part that is easy to get wrong, so all three
-        // remainders are covered.
+        // Covers all three padding remainders.
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");
@@ -349,22 +314,16 @@ mod tests {
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
     }
 
-    /// Serialises the tests that touch the *real* clipboard.
+    /// Serialises tests that use the real system clipboard.
     ///
-    /// Distinct from the module's own `CLIPBOARD` guard, which `set_text` and
-    /// `get_text` take internally - holding that one here would deadlock.
-    /// This exists because `cargo test` runs these two in parallel against the
-    /// single system clipboard, so the round trip below read back whatever the
-    /// async copy had just written and failed for reasons that had nothing to
-    /// do with the code under test.
+    /// Separate from `CLIPBOARD`, which `set_text` and `get_text` take
+    /// internally; holding that one here would deadlock.
     static REAL_CLIPBOARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn the_async_copy_always_reports_back() {
         let _guard = REAL_CLIPBOARD.lock();
-        // Whether the clipboard is available depends on the machine; that a
-        // report arrives at all does not, and a silent failure would leave
-        // the user with no idea whether the copy happened.
+        // Availability depends on the machine, but a report must always arrive.
         let (tx, rx) = bounded(4);
         let tx = Events::headless(tx);
         copy_async("11-D-0704".into(), tx);
@@ -374,9 +333,7 @@ mod tests {
         }
     }
 
-    /// A round trip, skipped when the clipboard cannot be opened - on a busy
-    /// desktop or a headless CI box that is a fact about the machine, not a
-    /// failure of this code.
+    /// Passes without asserting when the clipboard is busy, as on headless CI.
     #[test]
     #[cfg(windows)]
     fn text_written_to_the_clipboard_reads_back_unchanged() {

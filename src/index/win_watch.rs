@@ -1,46 +1,31 @@
-//! `ReadDirectoryChangesW`, the one mechanism that scales to a whole share.
+//! `ReadDirectoryChangesW` watcher for a whole share.
 //!
-//! One outstanding request with `bWatchSubtree` covers every directory
-//! beneath the root. Over SMB it becomes a single `SMB2 CHANGE_NOTIFY`, which
-//! Windows Server and Samba support and cheaper NAS firmware often does not.
-//! One watch per directory would be three hundred thousand handles and three
-//! hundred thousand outstanding requests, so there is no second option.
+//! One outstanding request with `bWatchSubtree` covers every directory under
+//! the root. Over SMB it becomes a single `SMB2 CHANGE_NOTIFY`, which Windows
+//! Server and Samba support and some NAS firmware does not. Policy lives in
+//! [`crate::index::watch`]; this file is only the OS call.
 //!
-//! Everything that *decides* anything lives in [`crate::index::watch`],
-//! behind a trait and a scripted fake. This file is the call, and it cannot be
-//! exercised on the machine it was written on - so it is kept as small as it
-//! can be and every trap it has to avoid is named.
+//! # Constraints
 //!
-//! # The five traps
-//!
-//! 1. **The buffer cannot exceed 64 KB on a network path.** A larger one
-//!    fails outright, and `R:\` is a network path. So 64 KB it is, which is
-//!    also why overflow is a routine event rather than a pathological one.
-//! 2. **Overflow arrives as success, not failure.** When the buffer overruns,
-//!    the call completes with `bytes_returned == 0` and no error at all. Read
-//!    naively that is "nothing changed", which is the worst possible reading:
-//!    a bulk change would be silently dropped. It is also reported as
-//!    `ERROR_NOTIFY_ENUM_DIR`, so both shapes are handled.
-//! 3. **`FileNameLength` is a byte count over UTF-16, and it names the
-//!    *file*.** Not a character count, and not the directory. The unit this
-//!    index stores is a directory listing, so the dirty entry is
-//!    [`crate::index::tree::parent_rel`] of what the record says - and that is
-//!    the one function both sides spell it with.
+//! 1. **The buffer cannot exceed 64 KB on a network path**; a larger one
+//!    fails. Overflow is therefore routine.
+//! 2. **Overflow arrives as success** with `bytes_returned == 0`, or as
+//!    `ERROR_NOTIFY_ENUM_DIR`. Both must be treated as overflow, not as
+//!    "nothing changed".
+//! 3. **`FileNameLength` is a byte count over UTF-16 and names the file**, not
+//!    the directory. The dirty entry is
+//!    [`crate::index::tree::parent_rel`] of the record, the same function the
+//!    walk uses.
 //! 4. **The mask is `FILE_NAME | DIR_NAME` only.** `LAST_WRITE` would fire on
-//!    every save of every file, multiplying the event rate by the share's
-//!    entire working set, to report changes an index of *names* cannot see.
-//! 5. **Cancellation needs `CancelIoEx` from another thread.** A thread parked
-//!    in a synchronous `ReadDirectoryChangesW` never returns to poll a flag,
-//!    so shutdown has to reach into the handle. `CancelIoEx` cancels I/O on a
-//!    handle whichever thread issued it, and the parked call then returns
-//!    `ERROR_OPERATION_ABORTED`.
+//!    every save for changes a name index cannot see.
+//! 5. **Cancellation requires `CancelIoEx` from another thread**, because a
+//!    thread blocked in a synchronous read cannot poll a flag. The blocked
+//!    call then returns `ERROR_OPERATION_ABORTED`.
 //!
-//! The records themselves come from a remote server and are treated as
-//! untrusted input, on exactly the terms [`crate::index::win_enum`] sets out:
-//! every hop is bounds-checked, `FileNameLength` is checked for evenness and
-//! for fitting, `NextEntryOffset` must not stall or point backwards, and a
-//! hard iteration cap backstops a crafted cycle. A violation ends the batch
-//! rather than panicking.
+//! Records come from a remote server and are untrusted, as in
+//! [`crate::index::win_enum`]: every hop is bounds-checked, `FileNameLength`
+//! must be even and fit, `NextEntryOffset` must advance, and an iteration cap
+//! stops a crafted cycle. A violation ends the batch without panicking.
 
 use std::mem::{offset_of, size_of};
 use std::path::Path;
@@ -65,22 +50,19 @@ use crate::util::cancel::CancelToken;
 /// `ERROR_NOTIFY_ENUM_DIR`: too many changes to report, re-enumerate.
 const ERROR_NOTIFY_ENUM_DIR: u32 = 1022;
 
-/// The largest buffer a network path accepts. See trap 1.
+/// The largest buffer a network path accepts. See constraint 1.
 const BUFFER_BYTES: usize = 64 * 1024;
 
-/// Backstop against a crafted or corrupt record chain.
+/// Iteration cap against a crafted or corrupt record chain.
 const MAX_RECORDS: usize = 64 * 1024;
 
-/// A handle that may be used from the watcher thread and cancelled from
-/// another.
+/// A handle used from the watcher thread and cancelled from another.
 ///
-/// `HANDLE` is a raw pointer, so it is neither `Send` nor `Sync` by default.
-/// Both are asserted here, and narrowly: the only operations performed across
-/// threads are `ReadDirectoryChangesW` on one and `CancelIoEx` on the other,
-/// which is precisely the pair the API documents as the way to interrupt a
-/// blocked read. The handle is closed exactly once, when the watcher is
-/// dropped, and neither thread observes it after that because the pump joins
-/// before the watcher does.
+/// `HANDLE` is a raw pointer and so neither `Send` nor `Sync`. Both are
+/// asserted because the only cross-thread operations are
+/// `ReadDirectoryChangesW` on one thread and `CancelIoEx` on the other, the
+/// documented way to interrupt a blocked read. The handle is closed once, on
+/// drop, after the pump thread has been joined.
 struct SharedHandle(OwnedHandle);
 
 // SAFETY: see the type's own documentation.
@@ -91,11 +73,10 @@ unsafe impl Sync for SharedHandle {}
 /// Watches a whole share for name changes.
 pub struct DirectoryWatcher {
     handle: SharedHandle,
-    /// Set by [`ChangeWatcher::stop`] before the cancel, so a read that
-    /// returns for an unrelated reason does not start another one.
+    /// Set by [`ChangeWatcher::stop`] before cancelling, so a read that
+    /// returns for another reason does not start a new one.
     stopped: AtomicBool,
-    /// Set once the watch has failed for good, so the pump is told to finish
-    /// rather than spinning on a handle that will never answer.
+    /// Set once the watch has failed permanently, so the pump finishes.
     finished: AtomicBool,
     root: Box<Path>,
 }
@@ -103,18 +84,12 @@ pub struct DirectoryWatcher {
 impl DirectoryWatcher {
     /// Opens `root` for watching.
     ///
-    /// `Err` carries the reason, which the caller reports as
-    /// [`WatchEvent::Unavailable`] - a share that will not answer is a fact
-    /// the status line has to state, not one to swallow.
+    /// `Err` carries a readable reason, which the caller reports as
+    /// [`WatchEvent::Unavailable`].
     pub fn open(root: &Path) -> Result<Self, String> {
-        // FILE_LIST_DIRECTORY rather than GENERIC_READ, and
-        // FILE_FLAG_BACKUP_SEMANTICS because the target is a directory: the
-        // same two requirements `win_enum` documents, for the same reasons.
-        //
-        // FILE_SHARE_DELETE is included deliberately. Holding a share root
-        // open without it can block other people's operations on it, and a
-        // search tool that interferes with the share it indexes would be
-        // withdrawn within the day.
+        // FILE_LIST_DIRECTORY and FILE_FLAG_BACKUP_SEMANTICS are required to
+        // open a directory, as in `win_enum`. FILE_SHARE_DELETE keeps the open
+        // root from blocking other users' operations on the share.
         let wide = wide_path(root, true);
         // SAFETY: `wide` is NUL-terminated and outlives the call; every other
         // argument is a constant or null.
@@ -130,9 +105,7 @@ impl DirectoryWatcher {
             )
         };
         if raw == INVALID_HANDLE_VALUE || raw.is_null() {
-            // Described rather than numbered. This string reaches the status
-            // line, and "error 53" tells the person reading it nothing they
-            // can act on.
+            // Described rather than numbered, since this reaches the status line.
             let err = EnumError::from_win_open(last_error());
             return Err(err.describe(&root.display().to_string()));
         }
@@ -156,7 +129,7 @@ impl DirectoryWatcher {
                 self.handle.0.0,
                 buf.as_mut_ptr().cast(),
                 buf.len() as u32,
-                1, // bWatchSubtree: the whole point.
+                1, // bWatchSubtree
                 FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
                 &mut returned,
                 std::ptr::null_mut(),
@@ -168,12 +141,11 @@ impl DirectoryWatcher {
             let err = last_error();
             return match err {
                 ERROR_OPERATION_ABORTED => None,
-                // Too many changes to describe. Not a failure: the watch is
-                // alive and the caller has to re-walk.
+                // Too many changes to describe. The watch is still alive and
+                // the caller must re-walk.
                 ERROR_NOTIFY_ENUM_DIR => Some(WatchEvent::Overflow),
-                // The server does not implement CHANGE_NOTIFY at all. Common
-                // on cheaper NAS firmware, and the reason the floor is not
-                // optional.
+                // The server does not implement CHANGE_NOTIFY, as on some NAS
+                // firmware. The rescan floor covers this case.
                 ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED => {
                     self.finished.store(true, Ordering::Relaxed);
                     Some(WatchEvent::Unavailable(format!(
@@ -191,17 +163,14 @@ impl DirectoryWatcher {
             };
         }
 
-        // Trap 2: success with nothing in the buffer *is* the overflow signal.
-        // Reading it as "nothing changed" would drop the whole window.
+        // Constraint 2: success with an empty buffer is the overflow signal.
         if returned == 0 {
             return Some(WatchEvent::Overflow);
         }
 
         let dirs = parse(&buf[..returned as usize]);
-        // A batch that decoded to nothing is not an overflow and not an
-        // error - a rename within one folder can produce records the parser
-        // deliberately collapses. Reporting an empty change set would wake the
-        // actor to do nothing.
+        // A batch can decode to nothing, for example when the parser collapses
+        // records; `next_event` skips it.
         if dirs.is_empty() {
             return Some(WatchEvent::Changed(Vec::new()));
         }
@@ -220,9 +189,8 @@ impl ChangeWatcher for DirectoryWatcher {
                 return None;
             }
             let event = self.read(&mut buf)?;
-            // An empty batch is swallowed here rather than handed up: the
-            // queue would take it as a pending change and schedule an update
-            // over no directories at all.
+            // Swallow empty batches; the queue would otherwise schedule an
+            // update over no directories.
             if matches!(&event, WatchEvent::Changed(dirs) if dirs.is_empty()) {
                 continue;
             }
@@ -232,8 +200,8 @@ impl ChangeWatcher for DirectoryWatcher {
 
     fn stop(&self) {
         self.stopped.store(true, Ordering::Relaxed);
-        // Trap 5. The flag alone reaches nothing: the thread is inside the
-        // call, not between two of them.
+        // Constraint 5: the thread is blocked inside the call, so the flag
+        // alone is not enough.
         //
         // SAFETY: the handle is open for the lifetime of `self`, and the
         // caller outlives the watcher thread by construction - `IndexActor`
@@ -244,12 +212,10 @@ impl ChangeWatcher for DirectoryWatcher {
     }
 }
 
-/// Turns a `FILE_NOTIFY_INFORMATION` chain into the directories it implicates.
+/// Converts a `FILE_NOTIFY_INFORMATION` chain into the directories it names.
 ///
-/// Deduplicated in order: a rename produces a pair of records naming the same
-/// folder, and a folder being written to produces one per file. Handing the
-/// queue forty copies of one name would only make it do the work of removing
-/// them.
+/// Deduplicated in order, since a rename yields two records for one folder and
+/// a busy folder yields one per file.
 fn parse(bytes: &[u8]) -> Vec<String> {
     const HEADER: usize = size_of::<FILE_NOTIFY_INFORMATION>();
     const NAME_AT: usize = offset_of!(FILE_NOTIFY_INFORMATION, FileName);
@@ -262,8 +228,8 @@ fn parse(bytes: &[u8]) -> Vec<String> {
         }
         // SAFETY: the header fits, checked immediately above. Read through a
         // pointer rather than a reference because the buffer has no alignment
-        // guarantee beyond the allocator's, and the fields are read
-        // individually with `read_unaligned`.
+        // guarantee beyond the allocator's; fields are read individually with
+        // `read_unaligned`.
         let record = unsafe { bytes.as_ptr().add(at).cast::<FILE_NOTIFY_INFORMATION>() };
         // SAFETY: as above.
         let (next, name_len) = unsafe {
@@ -273,7 +239,7 @@ fn parse(bytes: &[u8]) -> Vec<String> {
             )
         };
 
-        // Trap 3: a *byte* count over UTF-16, so an odd value is corrupt.
+        // Constraint 3: a byte count over UTF-16, so an odd value is corrupt.
         let name_len = name_len as usize;
         if !name_len.is_multiple_of(2) {
             break;
@@ -290,10 +256,8 @@ fn parse(bytes: &[u8]) -> Vec<String> {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        // The record names the file. The unit this index stores is a
-        // directory listing, so the dirty entry is its parent - spelled by the
-        // same function the walk spells it with, because the two have to agree
-        // on exactly one string format.
+        // The record names a file; the dirty entry is its parent directory,
+        // spelled by `parent_rel` so it matches the walk's format exactly.
         let rel = String::from_utf16_lossy(&units).replace('/', "\\");
         let dir = parent_rel(&rel).to_string();
         if !out.contains(&dir) {
@@ -304,8 +268,7 @@ fn parse(bytes: &[u8]) -> Vec<String> {
             break;
         }
         let next = next as usize;
-        // Must move forward, and by at least a header, or the chain either
-        // stalls or overlaps itself.
+        // Must advance by at least a header, or the chain stalls or overlaps.
         if next < HEADER {
             break;
         }
@@ -321,7 +284,7 @@ fn parse(bytes: &[u8]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Builds one record the way the kernel lays it out.
+    /// Builds one record in the kernel's layout.
     fn record(name: &str, next: u32) -> Vec<u8> {
         const NAME_AT: usize = offset_of!(FILE_NOTIFY_INFORMATION, FileName);
         let units: Vec<u16> = name.encode_utf16().collect();
@@ -335,7 +298,7 @@ mod tests {
         out
     }
 
-    /// A chain, with each record's `NextEntryOffset` filled in.
+    /// Builds a chain with each record's `NextEntryOffset` filled in.
     fn chain(names: &[&str]) -> Vec<u8> {
         let sizes: Vec<usize> = names.iter().map(|n| record(n, 0).len()).collect();
         let mut out = Vec::new();
@@ -372,8 +335,7 @@ mod tests {
         );
     }
 
-    /// Forty records for one folder is what a CAD package saving a job looks
-    /// like, and the queue should not have to do the collapsing.
+    /// Many records for one folder collapse to a single entry.
     #[test]
     fn a_burst_in_one_folder_collapses_to_one_entry() {
         let names: Vec<String> = (0..40).map(|i| format!("11d\\f{i}.pdf")).collect();
@@ -386,8 +348,8 @@ mod tests {
         assert!(parse(&[]).is_empty());
     }
 
-    /// Everything below here is a remote server's bytes being treated as
-    /// untrusted input. None of it may panic or read out of bounds.
+    /// The following tests feed malformed server bytes; none may panic or read
+    /// out of bounds.
     #[test]
     fn a_truncated_header_ends_the_batch() {
         let bytes = chain(&["11d\\a.pdf"]);

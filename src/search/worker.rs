@@ -1,14 +1,8 @@
-//! Long-lived search and verification workers.
+//! Long-lived search, verification and live-search workers.
 //!
-//! The previous implementation called `thread::spawn` once per search, with
-//! no bound and no cancellation, and did the "fast path" inline on the UI
-//! thread - where it deep-copied the entire listing before matching anything.
-//!
-//! Here there is exactly one search thread and one verification thread for
-//! the life of the process, each fed by a [`LatestSlot`] so a burst of
-//! keystrokes collapses to the most recent query. Nothing is spawned per
-//! request, so thread growth and network stampedes are prevented structurally
-//! rather than by discipline.
+//! Each worker is one thread for the life of the process, fed by a
+//! [`LatestSlot`] so a burst of keystrokes collapses to the most recent query.
+//! Nothing is spawned per request, which bounds thread count and network load.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -44,21 +38,16 @@ pub struct Backend {
     pub source: Arc<dyn DirSource>,
     /// Every share searched by asking the file server, in configuration order.
     ///
-    /// Built once, here, rather than per request: each holds the per-share
-    /// query floor and the failure count that switches it off, and both have
-    /// to outlive any one keystroke to mean anything.
+    /// Built once because each holds a per-share query floor and failure count
+    /// that must outlive any single keystroke.
     pub live: Vec<Arc<LiveShare>>,
 }
 
 impl Backend {
     /// The listing of the mapping `path` belongs to, when it has one.
     ///
-    /// Replaces a `flat()` accessor that returned the *first* flat share's
-    /// listing whatever was being opened - so with a second share configured,
-    /// a drawing set's sibling pages were looked for in the wrong share, and
-    /// with none configured it returned an empty listing built around an empty
-    /// path. `None` where the file belongs to a tree, which carries its own
-    /// structure and is not a single directory's listing.
+    /// `None` when the file belongs to a tree, which is not a single directory's
+    /// listing.
     pub fn snapshot_for(&self, path: &Path) -> Option<Arc<Snapshot>> {
         self.store
             .indexed()
@@ -82,9 +71,8 @@ pub struct WorkerHandle<T> {
 
 impl<T> WorkerHandle<T> {
     /// Supersedes any pending request and returns the new generation.
-    /// The generation is bumped and handed to `build` in one step, so a
-    /// caller cannot submit a request stamped with a generation the worker
-    /// will immediately discard as stale.
+    /// The generation is bumped and handed to `build` in one step, so a caller
+    /// cannot submit a request with a generation the worker treats as stale.
     pub fn submit(&self, build: impl FnOnce(u64) -> T) -> u64 {
         let generation = self.epoch.bump();
         self.slot.put(build(generation));
@@ -93,10 +81,8 @@ impl<T> WorkerHandle<T> {
 
     /// Submits a request stamped with a generation the caller already owns.
     ///
-    /// The UI's query counter is the authority for what is current, so the
-    /// worker adopts it rather than keeping a competing one. That is what
-    /// lets a result be matched back to the keystroke that asked for it and
-    /// cancelled by the same number.
+    /// The UI's query counter is authoritative, so a result can be matched to
+    /// the keystroke that requested it and cancelled by the same number.
     pub fn submit_generation(&self, generation: u64, request: T) {
         self.epoch.advance_to(generation);
         self.slot.put(request);
@@ -108,8 +94,8 @@ impl<T> WorkerHandle<T> {
 
     /// Signals the worker to stop and waits up to `budget` for it.
     ///
-    /// Returns false on timeout. A worker blocked inside an SMB syscall
-    /// cannot be woken, so the caller exits rather than waiting for it.
+    /// Returns false on timeout. A worker blocked inside an SMB syscall cannot
+    /// be woken, so the caller exits rather than waiting for it.
     pub fn shutdown(&mut self, budget: std::time::Duration) -> bool {
         self.slot.close();
         let Some(handle) = self.handle.take() else {
@@ -118,9 +104,8 @@ impl<T> WorkerHandle<T> {
         let deadline = Instant::now() + budget;
         while !handle.is_finished() {
             if Instant::now() >= deadline {
-                // Deliberately leaked: the process is about to exit, and the
-                // index is written with temp-then-rename so nothing is left
-                // half-updated.
+                // Leaked on purpose: the process is about to exit, and the index is
+                // written temp-then-rename so nothing is left half-updated.
                 return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -174,25 +159,19 @@ fn run_search(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch
             continue;
         }
 
-        // No network call and no failure path. Every index is already in
-        // memory, so a search is a sweep over bytes this process owns - which
-        // is why the "no such job folder" error this used to have to report
-        // does not exist any more.
+        // No network access: every index is already in memory.
         //
-        // The query is judged once, before any index is consulted. `TooShort`
-        // and `ContainsNul` are properties of what was typed, not of a share,
-        // so asking each one would give N copies of the same answer - and with
-        // nothing indexed yet, no answer at all: a two-character query would
-        // come back "no matches" instead of "type at least 3 characters".
+        // The query is judged once, before any index is consulted. `TooShort` and
+        // `ContainsNul` are properties of the input, and with nothing indexed yet
+        // per-share checks would report "no matches" instead of the real reason.
         let result = match matcher::check_query(&request.query) {
             Err(reject) => Err(reject),
             Ok(()) => {
                 let mut parts = Vec::new();
                 let mut rejected = None;
                 for slot in backend.store.searchable() {
-                    // Checked between shares rather than only within one, so a
-                    // superseded keystroke abandons the shares not yet reached
-                    // instead of paying for all ten.
+                    // Checked between shares so a superseded query skips the shares
+                    // not yet reached.
                     if cancel.is_cancelled() {
                         break;
                     }
@@ -214,18 +193,17 @@ fn run_search(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch
                     };
                     match part {
                         Ok(part) => parts.push(part),
-                        // Unreachable once `check_query` has passed - both
-                        // rejections are properties of the query. Propagated
-                        // rather than unwrapped so that stays true by
-                        // construction if either function grows a third.
+                        // Unreachable once `check_query` has passed, since both
+                        // rejections are properties of the query. Propagated rather
+                        // than unwrapped so this stays safe if a third is added.
                         Err(reject) => {
                             rejected = Some(reject);
                             break;
                         }
                     }
                 }
-                // One merged, ranked list: which share a file came from is
-                // shown on the row, but it must not decide where it sits.
+                // One merged, ranked list: the source share is shown on the row
+                // but does not affect ordering.
                 match rejected {
                     Some(reject) => Err(reject),
                     None => Ok(matcher::merge_all(parts)),
@@ -291,13 +269,9 @@ fn run_verify(
             continue;
         }
 
-        // Only a flat mapping is worth verifying against the server, and a
-        // tree cannot be: `FindFirstFileExW` matches within one folder, so
-        // verifying a tree would mean one round trip per folder the hits came
-        // from - turning the one cheap round trip this exists for into
-        // hundreds. Freshness for a tree comes from the change watcher and the
-        // re-walk floor instead, and saying so is better than implying a check
-        // that did not happen.
+        // Only a flat mapping is verified. `FindFirstFileExW` matches within one
+        // folder, so a tree would need a round trip per folder. Trees rely on the
+        // change watcher and re-walk floor for freshness.
         let outcome = if verifier.is_empty() {
             VerifyOutcome::Skipped(SkipReason::NotApplicable)
         } else if verifier.len() > 1 {
@@ -330,14 +304,11 @@ pub use snapshot::Snapshot as WorkerSnapshot;
 
 /// Spawns the live-search worker.
 ///
-/// A third thread rather than a share of the verifier's, and the reason is
-/// structural rather than tidiness. Each [`WorkerHandle`] is fed by a
-/// `LatestSlot` holding **one** request, so with a flat share and a live share
-/// configured together the verify and the live query fall due on the same
-/// pause and would cancel each other, non-deterministically, depending on
-/// which `put` landed second. They also have opposite budgets: a verification
-/// may take ten seconds because the results are already on screen, whereas a
-/// live answer *is* the results.
+/// A separate thread from the verifier because each [`WorkerHandle`]'s
+/// `LatestSlot` holds one request: with a flat and a live share configured,
+/// verify and live queries fall due together and would cancel each other.
+/// Their budgets also differ: verification may take seconds because results
+/// are already shown, whereas a live answer is the result.
 pub fn spawn_live(
     backend: Arc<Backend>,
     tx: Events,
@@ -372,10 +343,8 @@ pub fn spawn_live(
 }
 
 fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, tx: &Events) {
-    // Before the first keystroke rather than on demand, so a code searched
-    // yesterday is answered from memory by the *local* sweep today - which
-    // runs first and would otherwise see an empty share until the round trip
-    // came back.
+    // Loaded before the first keystroke so the local sweep, which runs
+    // first, can answer previously searched codes from memory.
     restore(backend);
 
     while let Some(request) = slot.take_blocking() {
@@ -383,10 +352,8 @@ fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, 
         if cancel.is_cancelled() {
             continue;
         }
-        // Judged once, before any share is asked, for the reason the local
-        // search judges it once: the rejections are properties of what was
-        // typed, so asking each share would put N identical answers on the
-        // wire.
+        // Judged once before any share is asked: the rejections are properties of
+        // the input.
         if request.query.check().is_err() {
             continue;
         }
@@ -402,15 +369,13 @@ fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, 
                 Instant::now(),
                 &cancel,
             );
-            // Remembered before it is reported, so the next search for the
-            // same code is answered from memory rather than from the wire.
+            // Remembered before it is reported, so a repeat search is answered
+            // from memory.
             if let LiveOutcome::Answered { hits, .. } = &outcome {
                 remember(backend, share, hits);
             }
 
-            // One event per share rather than one for all of them: they answer
-            // at different speeds, and holding the first until the last has
-            // arrived would make two shares slower than one for no reason.
+            // One event per share, since shares answer at different speeds.
             let _ = tx.send(AppEvent::Live(LiveMsg {
                 epoch: request.epoch,
                 query: request.query.clone(),
@@ -422,11 +387,10 @@ fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, 
     }
 }
 
-/// Reads back what earlier sessions of this share remembered.
+/// Reads back what earlier sessions remembered for this share.
 ///
-/// Failure is silent and correct: there may be no cache, the format may have
-/// moved, or the share may be one nobody has searched yet. Every one of those
-/// is "start with nothing", which is what a live share does anyway.
+/// Any failure (no cache, changed format, never searched) yields an empty
+/// listing, which is the normal starting state for a live share.
 fn restore(backend: &Backend) {
     let Some(cache) = backend.settings.cache_dir.as_deref() else {
         return;
@@ -436,11 +400,9 @@ fn restore(backend: &Backend) {
             continue;
         };
         let key = crate::index::persist::MappingKey::of(share.root());
-        // The volume serial is left unknown rather than probed for. Resolving
-        // it costs a round trip to a share that may be down, on the path that
-        // exists so nothing touches it until somebody searches - and the
-        // directory check inside `Expect` is what actually guards against
-        // loading another share's index.
+        // The volume serial is left unknown: probing it costs a round trip to a
+        // share that may be down. The directory check inside `Expect` guards
+        // against loading another share's index.
         let expect = crate::index::persist::Expect::new(share.root(), None);
         if let Ok(loaded) = crate::index::persist::load_tree(cache, key, expect)
             && loaded.index.observed()
@@ -452,17 +414,13 @@ fn restore(backend: &Backend) {
 
 /// Folds what a live pass found into that share's index.
 ///
-/// The whole point of a live share is that nothing reads it in the background,
-/// so the only listing it will ever have is the one searches build. Keeping
-/// what came back means a repeated code is answered from memory in about a
-/// millisecond instead of a round trip - and, because the per-share floor
-/// refuses a second query within the second, it is the difference between a
-/// repeated search being instant and it being *skipped*.
+/// Nothing reads a live share in the background, so search results are its
+/// only listing. Keeping them lets a repeated code be answered from memory;
+/// without it the per-share floor would skip a repeat query within the
+/// second.
 ///
-/// Writes from this thread and no other. The store's single-writer rule is
-/// about one writer per slot rather than about which thread it is, and a live
-/// mapping gets no index actor: this worker is the only thing that will ever
-/// publish here.
+/// Only this worker publishes to a live mapping's slot, which satisfies the
+/// store's one-writer-per-slot rule; live mappings have no index actor.
 fn remember(backend: &Backend, share: &LiveShare, hits: &[Hit]) {
     if hits.is_empty() {
         return;
@@ -471,8 +429,8 @@ fn remember(backend: &Backend, share: &LiveShare, hits: &[Hit]) {
         return;
     };
 
-    // Grouped by the folder each file sits in, because a directory listing is
-    // the unit the index stores.
+    // Grouped by folder, because a directory listing is the unit the index
+    // stores.
     let root = share.root();
     let mut seen: Vec<(String, Vec<String>)> = Vec::new();
     for hit in hits {
@@ -482,8 +440,8 @@ fn remember(backend: &Backend, share: &LiveShare, hits: &[Hit]) {
         };
         let rel = match parent.strip_prefix(root) {
             Ok(r) => r.to_string_lossy().replace('/', "\\"),
-            // A hit from outside the share cannot be placed in its index, and
-            // guessing where it belongs would be worse than dropping it.
+            // A hit from outside the share cannot be placed in its index, so it
+            // is dropped.
             Err(_) => continue,
         };
         let name = hit.name.to_string();
@@ -496,19 +454,15 @@ fn remember(backend: &Backend, share: &LiveShare, hits: &[Hit]) {
     let current = slot
         .as_tree()
         .unwrap_or_else(|| Arc::new(TreeIndex::empty(&root.to_string_lossy())));
-    // `None` when every name was already held, which is the common case for a
-    // code somebody searches twice - and costs no publication and no reader a
-    // re-read.
+    // `None` when every name was already held, the common case for a repeat
+    // search; no publication occurs.
     let Some(next) = current.with_observed_files(&seen) else {
         return;
     };
     slot.publish_observed(Arc::new(next.clone()));
 
-    // Written every time the index actually grew, which the `None` above makes
-    // rare: a code searched twice adds nothing the second time. There is no
-    // spacing guard beyond that because there is nothing to pace - this is a
-    // few kilobytes to a local disk, on a thread that has just spent a round
-    // trip on the network.
+    // Saved whenever the index grew. No further pacing is needed: the write
+    // is a few kilobytes to local disk after a network round trip.
     if backend.settings.persist
         && let Some(cache) = backend.settings.cache_dir.as_deref()
     {
@@ -572,9 +526,8 @@ mod tests {
         }
     }
 
-    /// The payoff, and the reason writeback exists at all: the per-share floor
-    /// refuses a second query within the second, so without a remembered
-    /// listing a repeated code would not merely be slow, it would be *skipped*.
+    /// The per-share floor refuses a second query within the second, so a
+    /// repeated code must be answered from the remembered listing.
     #[test]
     fn a_code_searched_once_is_answered_from_memory_afterwards() {
         let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
@@ -593,7 +546,7 @@ mod tests {
             "the variant that had sat unused since it was written"
         );
 
-        // The local sweep now finds it with the drive not asked at all.
+        // The local sweep now finds it without asking the drive.
         let found = matcher::search_tree(
             &index,
             &crate::search::query::Query::parse("p12345"),
@@ -605,8 +558,8 @@ mod tests {
         assert_eq!(found.hits[0].path.as_ref(), "V:\\archive\\p12345.pdf");
     }
 
-    /// An observation proves those files exist and proves nothing whatever
-    /// about the rest, so it must not move a clock only a pass could set.
+    /// An observation proves only that those files exist, so it must not move a
+    /// clock that only a full pass may set.
     #[test]
     fn remembering_never_claims_the_share_was_read() {
         let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
@@ -639,8 +592,8 @@ mod tests {
         );
     }
 
-    /// A hit from outside the share cannot be placed in its index, and
-    /// guessing where it belongs would be worse than dropping it.
+    /// A hit from outside the share cannot be placed in its index and is
+    /// dropped.
     #[test]
     fn a_hit_from_outside_the_share_is_dropped_rather_than_misfiled() {
         let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
@@ -687,13 +640,6 @@ mod tests {
     }
 
     /// Every configured share is searched, whatever was typed.
-    ///
-    /// This used to be a routing test: a code had to match a pattern before
-    /// anything would look for it, and a string matching none was refused
-    /// outright with "not a recognised job code" on the status line. That is
-    /// the behaviour being removed - an indexed share knows every file it
-    /// holds, so an unusual query returns no matches rather than being
-    /// declined.
     #[test]
     fn every_configured_share_is_a_target_whatever_the_query() {
         let b = backend(FakeDirSource::new());
@@ -745,12 +691,7 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(400));
     }
 
-    /// A search cannot wedge, because it no longer touches the network.
-    ///
-    /// It used to: an unindexed job folder was listed inline on this thread,
-    /// so a hung share hung the search worker and shutdown had to give up on
-    /// it. Both shares are indexed now, so a search is a sweep over bytes this
-    /// process already owns.
+    /// A search never touches the network, so a hung share cannot block it.
     #[test]
     fn a_search_never_reaches_the_share() {
         let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]);

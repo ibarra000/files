@@ -1,17 +1,9 @@
-//! The index decision log.
+//! The index decision log: one line per scheduler decision, with timings and
+//! reasons, for diagnosing unexpected rescans on the affected machine.
 //!
 //! Off by default; enabled with `--index-log <PATH>` or `FILES_INDEX_LOG`.
-//!
-//! It exists because the bug that produced it - the share being re-enumerated
-//! every minute instead of every hour - is invisible from the outside. The
-//! status line shows *that* the index is rebuilding, and by the time anybody
-//! looks it has finished. One line per scheduler decision turns "it reloads at
-//! random" into a sequence with timings and reasons, on the machine that has
-//! the problem, without a debugger or a rebuild.
-//!
-//! Deliberately not a logging framework: a `log`/`tracing` backend would mean
-//! a global initialiser, a dependency, and an output format nobody here
-//! controls, for one writer on one thread.
+//! A plain file writer is used instead of `log`/`tracing` to avoid a global
+//! initialiser and dependency for a single writer.
 
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -24,11 +16,10 @@ use parking_lot::Mutex;
 use super::schedule::{Counters, ScanReason, StampHealth, Step};
 use crate::util::humanize;
 
-/// Past this the log is truncated and starts again, so leaving it enabled for
-/// a week cannot fill the disk.
+/// Size at which the log is truncated, so it cannot grow without bound.
 const MAX_BYTES: u64 = 4 << 20;
 
-/// One decision, as the log wants it.
+/// One scheduler decision.
 #[derive(Debug)]
 pub struct Record<'a> {
     /// What produced this decision: `start`, `timer`, `f5`, or the result
@@ -70,9 +61,8 @@ impl IndexLog {
 
     /// Opens `path` for appending.
     ///
-    /// A log that cannot be opened is not worth stopping for - the
-    /// application's job is finding files - so it degrades to disabled and
-    /// says so through [`IndexLog::is_enabled`], which `--doctor` reports.
+    /// Failure to open degrades to a disabled log, reported through
+    /// [`IndexLog::is_enabled`] (shown by `--doctor`).
     pub fn to_path(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         if let Some(parent) = path.parent()
@@ -88,11 +78,9 @@ impl IndexLog {
         }
     }
 
-    /// Enabled when a path was configured, disabled otherwise.
+    /// Returns an enabled log when a path is given, otherwise a disabled one.
     ///
-    /// Precedence between the flag and `FILES_INDEX_LOG` is resolved in
-    /// [`crate::config`] along with every other setting, rather than a second
-    /// time here.
+    /// Flag and `FILES_INDEX_LOG` precedence is resolved in [`crate::config`].
     pub fn from_option(path: Option<&Path>) -> Self {
         match path {
             Some(p) => Self::to_path(p),
@@ -108,17 +96,15 @@ impl IndexLog {
         self.path.as_deref()
     }
 
-    /// Appends one line. Best effort throughout: a failed write costs a line
-    /// of diagnostics and nothing else.
+    /// Appends one line. Best effort: write failures are ignored.
     pub fn record(&self, record: &Record<'_>) {
         let Some(file) = &self.file else {
             return;
         };
         let line = format_record(self.started.elapsed(), record);
         let mut guard = file.lock();
-        // Truncating rather than rotating: there is one writer, the
-        // interesting part is always the recent part, and a second file to
-        // reason about is not worth it.
+        // Truncate rather than rotate: there is one writer and only the
+        // recent history matters.
         if guard.metadata().map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
             let _ = guard.set_len(0);
             let _ = guard.write_all(b"-- truncated --\n");
@@ -128,11 +114,10 @@ impl IndexLog {
     }
 }
 
-/// Renders one record. Separate and pure so the format can be asserted.
+/// Renders one record.
 ///
-/// Elapsed-since-start rather than a wall clock: the question the log answers
-/// is "how far apart were the rebuilds", and that reads straight off the
-/// left-hand column without any date arithmetic.
+/// Uses elapsed time since start rather than wall-clock time so the interval
+/// between rebuilds reads directly off the first column.
 pub fn format_record(elapsed: Duration, r: &Record<'_>) -> String {
     let mut s = String::with_capacity(192);
     let _ = write!(s, "[+{:>9.3}s] {:<6}", elapsed.as_secs_f64(), r.event);
@@ -276,7 +261,7 @@ mod tests {
     #[test]
     fn a_log_that_cannot_be_opened_degrades_to_disabled() {
         let dir = tempfile::tempdir().unwrap();
-        // A directory is never openable as a file for appending.
+        // A directory cannot be opened as a file for appending.
         let log = IndexLog::to_path(dir.path());
         assert!(!log.is_enabled());
         assert!(log.path().is_some(), "the intent is still reportable");

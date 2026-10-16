@@ -1,23 +1,9 @@
-//! The share list.
+//! The share list, shown in place of the results when `F5` asks what to
+//! update.
 //!
-//! Shown in place of the results when `F5` asks what to update. Deliberately
-//! not an overlay, for the reason [`crate::history`] gives: this program has
-//! no z-order and does not need one for a list.
-//!
-//! # Why this exists at all
-//!
-//! `F5` used to mean "re-read every share, now". With one person that is a
-//! background hum. With a few hundred, all pressing it after the same email
-//! goes round, it is several hundred simultaneous passes over a share of three
-//! hundred thousand folders - and each pass is some nine hundred thousand
-//! round trips. Almost every one of those presses wanted *one* share.
-//!
-//! So the question is asked rather than assumed. The list says how old each
-//! share is and which one has a reason to be updated, and `Enter` updates the
-//! one highlighted. There is no key that updates all of them. There was, and
-//! it is gone: one keystroke able to start that pass on every configured
-//! share - on every machine running this - is the outage the paragraph above
-//! is about, reachable by leaning on a letter.
+//! `Enter` updates only the highlighted share. There is intentionally no
+//! "update all" key: a full pass is hundreds of thousands of network round
+//! trips, and many machines doing it at once overloads the file server.
 
 use std::time::SystemTime;
 
@@ -30,26 +16,20 @@ use crate::view::{Block, Run};
 pub struct Row<'a> {
     pub mapping: &'a Mapping,
     pub status: &'a IndexStatus,
-    /// Why it wants updating, if it does. Age is judged by the caller, which
-    /// is the only place that holds a wall clock.
+    /// Why the share wants updating, if it does. The caller judges age, since
+    /// it holds the wall clock.
     pub stale: Option<StaleReason>,
 }
 
-/// The width the name column is padded to.
-///
-/// Fixed rather than measured: the ages line up across rows, which is what
-/// makes "which of these is out of date" answerable at a glance rather than by
-/// reading every line.
+/// Returns the share's age as text, or `not read yet`.
 pub fn age_of(row: &Row<'_>, now: SystemTime) -> String {
     match row.status.age(now) {
         Some(age) => humanize::age(age),
-        // Not "unknown": the honest reading is that nothing has been read yet,
-        // which is a different thing from an age nobody could work out.
         None => "not read yet".into(),
     }
 }
 
-/// Why this share should not be trusted, if it should not be.
+/// Returns why the share should not be trusted, if anything.
 fn why_not(share: &Row<'_>) -> Option<String> {
     match &share.status.health {
         Health::Unreachable { .. } => Some("unreachable".to_string()),
@@ -58,11 +38,7 @@ fn why_not(share: &Row<'_>) -> Option<String> {
     }
 }
 
-/// One share, as it reads.
-///
-/// Three runs: the name, the age, and - only when there is one - why it is not
-/// to be trusted. Keeping the reason in its own run is what lets a renderer
-/// colour it without re-parsing the sentence.
+/// Returns one share's row: name, age and, if any, a warning-toned reason.
 pub fn row(share: &Row<'_>, now: SystemTime) -> Block {
     let mut out = vec![
         Run::body(share.mapping.name.to_string()),
@@ -73,13 +49,6 @@ pub fn row(share: &Row<'_>, now: SystemTime) -> Block {
     }
     out
 }
-
-// `title` and `empty_message` used to live here. Both described a bordered
-// pane in a terminal: a caption inside the border, padded with a leading and a
-// trailing space, and a message indented by two more. The drive list is drawn
-// into the panel's body now, with no border and no caption - so both had no
-// caller at all, and `empty_message` was two house-style violations (a leading
-// pad and a backtick-quoted command) in a string nothing rendered.
 
 #[cfg(test)]
 mod tests {
@@ -111,7 +80,7 @@ mod tests {
         }
     }
 
-    /// One row as plain text, which is what every assertion here is about.
+    /// Returns one row as plain text.
     fn text(rows: &[Row<'_>], i: usize, now: SystemTime) -> String {
         crate::view::plain(&row(&rows[i], now))
     }
@@ -137,7 +106,6 @@ mod tests {
         assert!(!crate::view::plain(&row(&shares[1], EPOCH)).is_empty());
     }
 
-    /// The number somebody is looking for when deciding what to update.
     #[test]
     fn a_row_shows_how_old_its_share_is() {
         let m = mapping("jobs");
@@ -155,8 +123,6 @@ mod tests {
         );
     }
 
-    /// A share that has never been read says so, rather than reporting an age
-    /// it does not have.
     #[test]
     fn a_share_that_was_never_read_says_so() {
         let m = mapping("jobs");
@@ -169,8 +135,6 @@ mod tests {
         assert!(text(&shares, 0, EPOCH).contains("not read yet"));
     }
 
-    /// The reason replaces the file count: somebody scanning this list is
-    /// looking for what needs doing, not for how big each share is.
     #[test]
     fn a_stale_share_shows_why_rather_than_its_size() {
         let m = mapping("jobs");
@@ -185,11 +149,6 @@ mod tests {
         assert!(!row.contains("1,284,551"), "{row}");
     }
 
-    /// Every row this module can produce, held to the house style.
-    ///
-    /// The drive name and the age come from the configuration and the clock,
-    /// so what is being checked here is the shape of the line around them -
-    /// which is the part this module writes.
     #[test]
     fn every_row_keeps_the_house_style() {
         let (a, b) = (mapping("jobs"), mapping("archive"));
@@ -206,8 +165,7 @@ mod tests {
                 stale: None,
             },
         ];
-        // Each run on its own, not the joined block: these three are drawn
-        // as columns, so there is no one line here to check.
+        // Runs are checked individually because they are drawn as columns.
         let lines: Vec<String> = rows
             .iter()
             .flat_map(|r| row(r, EPOCH + Duration::from_secs(9_000)))

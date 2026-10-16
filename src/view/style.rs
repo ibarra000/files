@@ -1,55 +1,31 @@
-//! The house style, as something a test can run.
+//! A mechanical checker for the house style in [`crate::view`].
 //!
-//! The rules are argued for in [`crate::view`]'s module note. This is the
-//! machine-readable half of them, so that a line breaking one is a red test
-//! rather than a thing somebody notices in a screenshot six months later.
-//!
-//! # Why a checker rather than a list of expected strings
-//!
-//! The exact wording is already pinned, test by test, all over this crate, and
-//! that is the right way to pin wording: a test that says what a line should
-//! say is readable and is worth arguing with. What those tests cannot do is
-//! notice a line that says a perfectly reasonable thing in the wrong shape -
-//! and the shape is what went wrong. Every one of these rules was broken by a
-//! string somebody wrote carefully.
-//!
-//! The checker knows nothing about meaning. It is deliberately mechanical, so
-//! that a new line either passes or names the rule it broke.
+//! Wording is pinned by per-module tests; this catches lines whose shape
+//! breaks a rule, and names the rule.
 
-/// Which slot a line is written for.
+/// The slot a line is written for, which decides the rules it follows.
 ///
-/// Not which module it lives in: toasts are written in
-/// [`crate::app::state`] and rendered in the status line's own 13 pt run, so
-/// they are status text and are held to the status rules.
+/// Toasts are written in [`crate::app::state`] but rendered in the status
+/// line, so they are status text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
-    /// The status line and the toasts that share it. One line, ellipsised
-    /// to whatever the footer's two buttons left, so it is a fragment and
-    /// takes no stop.
+    /// The status line and its toasts: one ellipsised fragment, no full stop.
     Status,
-    /// The results pane, the empty-state blocks and the windows. Room for
-    /// whole sentences, so it has them.
+    /// The results pane, empty-state blocks and windows: whole sentences.
     Body,
 }
 
-/// Which rule a line broke, if it broke one.
-///
-/// A `Vec` rather than the first failure, because a line that breaks two rules
-/// should say so once rather than over two runs of the suite.
+/// Returns every house-style rule the line breaks.
 pub fn violations(text: &str, slot: Slot) -> Vec<String> {
     let mut out = Vec::new();
 
-    // The one that was actually shipped: `src/view/status.rs` carried a line
-    // with twenty literal spaces in the middle of it, which the footer
-    // ellipsised and a screen reader read out in full.
     if text.contains("  ") {
         out.push("a run of two spaces - spacing is the renderer's business".to_string());
     }
     if text.contains("...") {
         out.push("three periods - the ellipsis is \u{2026}".to_string());
     }
-    // Spaced, so the hyphen inside `11-D-0704` and the one inside
-    // `--check-config` are untouched. It is only the connector that is banned.
+    // Spaced, so hyphens in `11-D-0704` and `--check-config` pass.
     if text.contains(" - ") {
         out.push("\" - \" as a connector - independent facts join with \" \u{b7} \"".to_string());
     }
@@ -63,30 +39,23 @@ pub fn violations(text: &str, slot: Slot) -> Vec<String> {
     out
 }
 
-/// Whether a line begins the way a line should.
+/// Returns whether the line does not start with a lowercase letter.
 ///
-/// Separate from [`violations`] because it has an exception the checker cannot
-/// see: a line may legitimately begin with a program, a switch or a drive name
-/// read out of the configuration, and those keep their own spelling. Applied
-/// only where the caller knows the whole corpus is prose.
+/// Kept out of [`violations`] because lines may begin with a program, switch
+/// or drive name; apply it only to corpora known to be prose.
 pub fn starts_capitalised(text: &str) -> bool {
     match text.chars().next() {
         Some(first) => !first.is_lowercase(),
-        // An empty status line is the healthy one, and it starts with nothing.
+        // An empty status line is the healthy state.
         None => true,
     }
 }
 
-/// Asserts a whole corpus at once, naming every line that failed.
+/// Asserts the house style over a corpus, listing every failing line in one
+/// panic.
 ///
-/// One panic listing everything rather than one per run: a case pass touches a
-/// hundred strings, and finding out about them one `cargo test` at a time is
-/// how a rule stops being applied.
-///
-/// Not behind `cfg(test)`, because the toasts are written in
-/// [`crate::app::state`] and driven from `tests/`, which compiles against the
-/// library as an outside caller would. Ten lines in the binary is the price of
-/// the rule being checked where the strings actually are.
+/// Not behind `cfg(test)` because integration tests in `tests/` check the
+/// toasts from [`crate::app::state`] through the library.
 pub fn check_all<'a>(what: &str, lines: impl IntoIterator<Item = &'a str>, slot: Slot) {
     let mut bad = Vec::new();
     for line in lines {
@@ -117,9 +86,6 @@ mod tests {
         assert!(violations("Searching\u{2026}", Slot::Status).is_empty());
     }
 
-    /// The hyphen inside a job code and inside a command-line switch is not a
-    /// connector, and a rule that could not tell them apart would be a rule
-    /// nobody could follow.
     #[test]
     fn only_the_spaced_hyphen_is_a_connector() {
         assert!(violations("Nothing matched 11-D-0704", Slot::Status).is_empty());
@@ -127,7 +93,6 @@ mod tests {
         assert!(!violations("Keep typing - a code needs 3 characters", Slot::Status).is_empty());
     }
 
-    /// The two slots differ in exactly one rule, and it is this one.
     #[test]
     fn the_full_stop_is_the_only_thing_the_two_slots_disagree_about() {
         let line = "Nothing matched.";

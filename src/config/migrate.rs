@@ -1,66 +1,32 @@
-//! Bringing a configuration written by an older version forward.
+//! Upgrades a configuration written by an older version to the current format.
 //!
-//! # Why this exists at all, when the file already says what to do
+//! An automatic update must never leave the program unable to start, so a
+//! stale file is migrated and the user is notified instead of failing.
 //!
-//! A version 1 file is a hard startup failure with a message explaining what
-//! to edit, and for one person at one desk that is a reasonable answer: they
-//! made the file, they can fix it.
+//! # Version 1 to 2
 //!
-//! It stops being reasonable the moment a new version is rolled out to a
-//! fleet. Everybody whose file is stale would find the program refusing to
-//! start, all at once, because of an upgrade they did not ask for and cannot
-//! undo - which is the one failure an automatic update must never cause. So
-//! the file is brought forward instead, and the person is told it happened.
+//! Mapping paths and names are kept. `[[mapping.rules]]`, `case` and `stop`
+//! are removed, along with their comments, since every share is now indexed.
+//! `kind = "job-folder"` becomes `kind = "tree"`; see [`crate::paths`].
 //!
-//! # What is kept, and what is not
+//! # Version 2 to 3
 //!
-//! The paths. They are the part somebody typed, the part that differs between
-//! one installation and the next, and the part no default could guess. A
-//! migration that threw them away and wrote the shipped file would be a
-//! migration that silently repointed every drive.
+//! `avwin` is no longer a built-in viewer. A file with `viewer = "avwin"` is
+//! given an equivalent `[[viewer]]` table so the setting still resolves; other
+//! files gain no viewer.
 //!
-//! Everything else in a version 1 file describes work this program no longer
-//! does. `[[mapping.rules]]` was a list of regular expressions that turned a
-//! code into the one folder it was expected to live in, with `case` and `stop`
-//! to control them; every share is indexed now, so there is nothing left for a
-//! pattern to decide. Those go, and the comments explaining them go with them,
-//! because a comment about a deleted mechanism is worse than no comment.
-//!
-//! `kind = "job-folder"` becomes `kind = "tree"`. That is not a rename: it is
-//! what replaced it. The old kind deduced a folder from the code and looked
-//! only there, and failed silently for every folder the rule did not predict.
-//! A tree is walked whole and searched, which answers the same question by
-//! looking rather than by guessing. See [`crate::paths`].
-//!
-//! # Version 2 to 3: avwin stops being built in
-//!
-//! Version 2 knew one external viewer by name, `avwin.exe`, and offered it to
-//! everybody. Version 3 knows none: a viewer is a `[[viewer]]` table somebody
-//! wrote. A version 2 file that *chose* avwin - `viewer = "avwin"` - would
-//! otherwise name a viewer that no longer exists, which is a hard startup
-//! error, so it is given the table that makes the name mean what it did.
-//! Nobody else is given anything: a viewer they never chose is not something
-//! to start writing into their file.
-//!
-//! # Format-preserving, like every other write to this file
-//!
-//! `toml_edit` again, and for the reason [`super::write`] gives: the file is
-//! meant to be hand-edited, and re-serialising it from a parsed model would
-//! hand it back with every remaining comment gone. What is removed here is
-//! removed deliberately; nothing else is touched.
+//! Edits use `toml_edit`, as in [`super::write`], so the user's remaining
+//! comments and formatting are preserved.
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 use super::file::{CONFIG_VERSION, MAPPING_KEYS, ROOT_KEYS, SETTINGS_KEYS};
 
-/// Why a configuration could not be brought forward.
+/// Why a configuration could not be migrated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     NotToml(String),
-    /// Not a version this knows how to upgrade *from*.
-    ///
-    /// Carries what it said, because "version 4" from a future build is a
-    /// very different thing to explain than "no version at all".
+    /// The file's `version` is missing or outside the upgradable range.
     CannotUpgradeFrom(Option<i64>),
 }
 
@@ -69,29 +35,20 @@ impl Problem {
         match self {
             Self::NotToml(e) => format!("it is not valid TOML: {e}"),
             Self::CannotUpgradeFrom(Some(v)) => {
-                format!("there is no way to bring a version {v} configuration forward")
+                format!("a version {v} configuration cannot be upgraded")
             }
             Self::CannotUpgradeFrom(None) => "it names no version".into(),
         }
     }
 }
 
-/// The oldest version this can upgrade from.
-///
-/// Named so the test below can say what it means. Everything from here up to
-/// [`CONFIG_VERSION`] is brought forward one step at a time.
+/// The oldest version that can be upgraded to [`CONFIG_VERSION`].
 const OLDEST_UPGRADABLE: i64 = 1;
 
 /// Rewrites an older configuration as a current one.
 ///
-/// One step per version, applied in order, so a version 1 file passes
-/// through version 2 on its way to 3 rather than needing a step of its own.
-///
-/// Pure, like [`super::write::apply`], so every shape a real file can be in is
-/// testable without one. Proving the result loads is the caller's job - see
-/// [`super::file::load_migrating`] - for the same reason the writer proves it
-/// there: what matters is not that this produced valid TOML but that the next
-/// start will accept it.
+/// Applies one step per version in order. Pure; the caller
+/// ([`super::file::load_migrating`]) verifies that the result loads.
 pub fn to_current(text: &str) -> Result<String, Problem> {
     let mut doc: DocumentMut = text
         .parse()
@@ -113,21 +70,17 @@ pub fn to_current(text: &str) -> Result<String, Problem> {
     Ok(doc.to_string())
 }
 
-/// Routing was deleted: the rules go, and a job folder becomes a tree.
+/// Removes routing rules and converts job-folder mappings to trees.
 fn v1_to_v2(doc: &mut DocumentMut) {
     if let Some(mappings) = doc
         .get_mut("mapping")
         .and_then(Item::as_array_of_tables_mut)
     {
         for mapping in mappings.iter_mut() {
-            // Before the keys are filtered, because `kind` survives the filter
-            // and has to be the new spelling by the time it does.
             if mapping.get("kind").and_then(Item::as_str) == Some("job-folder") {
                 mapping["kind"] = value("tree");
             }
-            // Named as well as filtered. `rules` is an array of tables rather
-            // than a key, and it is the one thing here whose removal is the
-            // point rather than a consequence.
+            // `rules` is an array of tables; removed explicitly for clarity.
             mapping.remove("rules");
             keep_only(mapping, MAPPING_KEYS);
         }
@@ -137,9 +90,7 @@ fn v1_to_v2(doc: &mut DocumentMut) {
         keep_only(settings, SETTINGS_KEYS);
     }
 
-    // The root, last. A version 1 file should hold nothing else, but an
-    // unknown key here is a hard startup error, and leaving one behind would
-    // mean the migration produced a file that still would not load.
+    // Unknown root keys are a startup error, so strip them too.
     let strays: Vec<String> = doc
         .iter()
         .map(|(key, _)| key.to_string())
@@ -153,11 +104,10 @@ fn v1_to_v2(doc: &mut DocumentMut) {
 /// The spellings version 2 accepted for its built-in avwin.
 const AVWIN_SPELLINGS: &[&str] = &["avwin", "av", "avwin.exe"];
 
-/// avwin stopped being built in: a file that chose it is given a
-/// `[[viewer]]` table that makes the choice mean what it did.
+/// Gives a file that chose avwin an equivalent `[[viewer]]` table.
 ///
-/// Exactly what version 2 did with it: the program looked up on `PATH`, and
-/// drawings sent to it from PDF mode.
+/// The table matches version 2 behaviour: `avwin.exe` on `PATH`, claiming
+/// `dwg` from PDF mode.
 fn v2_to_v3(doc: &mut DocumentMut) {
     let chose_avwin = doc
         .get("settings")
@@ -171,8 +121,8 @@ fn v2_to_v3(doc: &mut DocumentMut) {
     if !chose_avwin {
         return;
     }
-    // The one spelling the table below answers to. Only rewritten when it is
-    // spelled otherwise, because replacing the value drops the comment beside it.
+    // Normalise to the table's name. Rewrite only when needed, because
+    // replacing the value drops its trailing comment.
     let spelled = doc["settings"]["viewer"].as_str().map(str::trim);
     if spelled != Some("avwin") {
         doc["settings"]["viewer"] = value("avwin");
@@ -198,10 +148,9 @@ fn v2_to_v3(doc: &mut DocumentMut) {
     let mut extensions = Array::new();
     extensions.push("dwg");
     table["extensions"] = value(extensions);
-    // A blank line above it, and a note saying where it came from.
-    table.decor_mut().set_prefix(
-        "\n# Added when this file was brought up to date: avwin is no longer built in.\n",
-    );
+    table
+        .decor_mut()
+        .set_prefix("\n# Added during upgrade: avwin is no longer built in.\n");
 
     match doc.get_mut("viewer").and_then(Item::as_array_of_tables_mut) {
         Some(viewers) => viewers.push(table),
@@ -213,11 +162,10 @@ fn v2_to_v3(doc: &mut DocumentMut) {
     }
 }
 
-/// Drops every key the current format does not accept.
+/// Removes every key not in `allowed`.
 ///
-/// Collected first and removed after, because a table cannot be iterated and
-/// mutated at once - and because removing by name is what keeps this readable
-/// against `toml_edit`, where a key is not simply a string.
+/// Keys are collected before removal because the table cannot be mutated
+/// while iterated.
 fn keep_only(table: &mut Table, allowed: &[&str]) {
     let strays: Vec<String> = table
         .iter()
@@ -235,7 +183,7 @@ mod tests {
     use crate::config::file;
     use std::path::Path;
 
-    /// A version 1 file, in the shape the shipped one actually had.
+    /// A version 1 file in the shape of the shipped default.
     const V1: &str = r#"
 version = 1
 
@@ -277,14 +225,12 @@ case    = "lower"
         }
     }
 
-    /// The whole point: what comes out is a file this build will start on.
     #[test]
     fn a_version_one_configuration_becomes_one_that_loads() {
         let parsed = reload(&migrated());
         assert_eq!(parsed.routes.all().len(), 2);
     }
 
-    /// The part somebody typed, and the part no default could guess.
     #[test]
     fn every_configured_path_survives_the_migration() {
         let parsed = reload(&migrated());
@@ -306,8 +252,6 @@ case    = "lower"
         assert!(names.contains(&"jobs"), "{names:?}");
     }
 
-    /// Not a rename. A job folder deduced one directory from the code and
-    /// looked only there; a tree is walked whole and searched.
     #[test]
     fn a_job_folder_becomes_a_tree() {
         let parsed = reload(&migrated());
@@ -332,8 +276,7 @@ case    = "lower"
         assert_eq!(custpro.kind, crate::paths::MappingKind::Flat);
     }
 
-    /// Every one of these is a hard startup error in version 2, so leaving
-    /// any behind would produce a file that still would not load.
+    /// Each of these keys is a startup error in version 2 and later.
     #[test]
     fn nothing_the_rule_engine_needed_is_left_behind() {
         let text = migrated();
@@ -347,8 +290,7 @@ case    = "lower"
         assert!(migrated().contains(&format!("version = {CONFIG_VERSION}")));
     }
 
-    /// A key version 2 does not know is a hard startup error wherever it sits,
-    /// so the migration has to sweep the root and the settings table too.
+    /// Unknown keys are removed from the root and `[settings]` as well.
     #[test]
     fn a_stray_key_anywhere_is_swept_up() {
         let text = format!("{V1}\nnonsense = 1\n\n[settings]\npersist = true\nolder = \"x\"\n");
@@ -360,8 +302,7 @@ case    = "lower"
         reload(&migrated);
     }
 
-    /// The comments on the mappings are the user's own notes about their own
-    /// drives, and they outlive the rule engine.
+    /// User comments on mappings are preserved.
     #[test]
     fn a_comment_that_is_not_about_the_rules_survives() {
         let text = V1.replace(
@@ -375,7 +316,7 @@ case    = "lower"
         );
     }
 
-    /// A version 2 file in the shape the shipped one had, choosing `viewer`.
+    /// A version 2 file in the shape of the shipped default, with `viewer` set.
     fn v2(viewer: &str) -> String {
         format!(
             "version = 2\n\n[[mapping]]\nname = \"jobs\"\npath = 'R:\\'\nkind = \"tree\"\nenabled = true\n\n[settings]\n# Default viewer for Enter.\nviewer = \"{viewer}\"   # auto | pdf | avwin\n"
@@ -397,8 +338,7 @@ case    = "lower"
             .collect()
     }
 
-    /// Somebody who chose avwin keeps it: the same program, and drawings
-    /// still sent to it from PDF mode.
+    /// Any accepted avwin spelling yields the same program claiming `dwg`.
     #[test]
     fn a_version_two_file_that_chose_avwin_keeps_it() {
         for spelling in ["avwin", "AV", "AvWin.exe"] {
@@ -410,19 +350,17 @@ case    = "lower"
             );
             let parsed = reload(&migrated);
             assert_eq!(parsed.settings.viewer.as_deref(), Some("avwin"));
-            // The comment above it is the user's and survives.
             assert!(
                 migrated.contains("# Default viewer for Enter."),
                 "{migrated}"
             );
-            // And the one beside it, where the value did not need rewriting.
+            // The trailing comment survives when the value is not rewritten.
             if spelling == "avwin" {
                 assert!(migrated.contains("# auto | pdf | avwin"), "{migrated}");
             }
         }
     }
 
-    /// Nobody is given a viewer they never chose.
     #[test]
     fn a_version_two_file_that_did_not_choose_avwin_gains_nothing() {
         for viewer in ["auto", "pdf"] {
@@ -435,8 +373,7 @@ case    = "lower"
         assert!(viewers_of(&to_current(no_settings).unwrap()).is_empty());
     }
 
-    /// Run twice, or over a file somebody already fixed by hand, it does not
-    /// add a second avwin - which would be a duplicate name and refused.
+    /// A second avwin would be a duplicate name and fail to load.
     #[test]
     fn an_avwin_viewer_that_is_already_there_is_not_added_again() {
         let text = format!(
@@ -449,7 +386,6 @@ case    = "lower"
         assert_eq!(viewers[0].1, r"C:\tools\avwin.exe");
     }
 
-    /// A version 1 file goes through every step and comes out current.
     #[test]
     fn a_version_one_file_reaches_the_current_version() {
         let text = format!("{V1}\n[settings]\nviewer = \"avwin\"\n");

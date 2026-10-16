@@ -1,55 +1,40 @@
-//! The marks beside a nav entry and inside a small button.
+//! Icon glyphs for nav entries, buttons and result rows.
 //!
-//! Read out of `C:\Windows\Fonts` for exactly the reason the typeface next
-//! door is: these are fonts the machine already has, and shipping a copy would
-//! be both a licence violation and half a megabyte. Segoe Fluent Icons is
-//! Windows 11's set and Segoe MDL2 Assets is Windows 10's; every code point
-//! below is one the two share, so one file is read and which one it was is
-//! nobody's business afterwards.
+//! Loaded from `C:\Windows\Fonts` (Segoe Fluent Icons on Windows 11, Segoe MDL2
+//! Assets on Windows 10) rather than bundled, for licensing and size. Every
+//! code point below exists in both fonts.
 //!
-//! # An icon is never the only carrier
+//! Icons are never the only carrier of meaning: nav entries show a label and
+//! icon buttons carry a tooltip that doubles as the accessible name. Without an
+//! icon font the UI loses decoration only, and [`has_icon`] lets the gutter
+//! collapse.
 //!
-//! The same rule the palette keeps, applied to marks rather than to colour.
-//! Every nav entry has its name beside its icon and every icon button has its
-//! name in a tooltip - which is also its accessible name, because a button
-//! with no text has nothing else to offer a screen reader. So a machine with
-//! no icon font loses decoration and loses nothing else, and [`has_icon`] is
-//! what lets the gutter close up rather than standing empty.
-//!
-//! # Why this family has no fallback tail
-//!
-//! [`super::FALLBACK_FILES`] is appended to both text families so that a
-//! character Segoe UI has not got comes out as a character rather than as a
-//! box. Doing the same here would be actively worse than nothing: these are
-//! Private Use code points, `seguisym` has its own unrelated glyphs at some of
-//! them, and a mark the icon font lacks would resolve to an arbitrary picture
-//! instead of to nothing. With no tail, [`has_icon`] is a true answer.
+//! This family has no [`super::FALLBACK_FILES`] tail. These are Private Use code
+//! points, and a fallback font such as `seguisym` maps unrelated glyphs to some
+//! of them, so a missing icon must resolve to nothing. That also keeps
+//! [`has_icon`] accurate.
 
 use eframe::egui::{FontFamily, FontId};
 
-/// What the family is registered as. Asked for by [`icon_font`], registered by
-/// [`crate::gui::fonts`], and the two have to agree.
+/// The registered family name. Must match the registration in
+/// [`crate::gui::fonts`].
 pub const ICON_FAMILY: &str = "segoe-icons";
 
-/// Tried in order, first one found wins.
+/// Candidate icon fonts, tried in order; the first found is used.
 ///
-/// Windows 11 has both and Windows 10 has only the second. Nothing downstream
-/// knows which it got.
+/// Windows 11 has both; Windows 10 has only the second.
 pub const ICON_FILES: [&str; 2] = [
     r"C:\Windows\Fonts\SegoeIcons.ttf",
     r"C:\Windows\Fonts\segmdl2.ttf",
 ];
 
-/// A mark, by what it means rather than by what it looks like.
+/// An icon named by meaning; [`Icon::ch`] is the only mapping to a code point.
 ///
-/// The same bargain [`crate::view::Emphasis`] makes one level up: a caller
-/// names a meaning and exactly one place turns it into a picture. It matters
-/// more here than it looks, because the alternative is a `char` literal at the
-/// call site - and a Private Use code point written inline is unreadable,
-/// unsearchable and unverifiable.
+/// Keeps unreadable Private Use literals out of call sites, as
+/// [`crate::view::Emphasis`] does for colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Icon {
-    // The nav, in the order the pages are in.
+    // Nav entries, in page order.
     Gear,
     Palette,
     Drive,
@@ -59,20 +44,18 @@ pub enum Icon {
     Info,
     Bug,
 
-    // Inside a button.
+    // Buttons.
     Add,
     Remove,
     Copy,
     Browse,
     Reset,
     External,
-    /// Everything that did not fit: the panel's actions menu.
+    /// The panel's actions menu.
     More,
 
-    // On a result row, chosen by the file's extension. Six marks rather than
-    // one per type: a vocabulary somebody has to learn is worse than no
-    // vocabulary at all, and these are the distinctions that actually matter
-    // to somebody looking for a drawing. See [`crate::gui::panel::icons`].
+    // Result rows, chosen by file extension. Kept to six broad categories. See
+    // [`crate::gui::panel::icons`].
     FilePdf,
     FileDrawing,
     FileImage,
@@ -82,7 +65,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    /// Every one, for the test that proves the machine can draw them.
+    /// Every variant, for tests.
     pub const ALL: [Self; 21] = [
         Self::Gear,
         Self::Palette,
@@ -107,13 +90,10 @@ impl Icon {
         Self::File,
     ];
 
-    /// The code point, with the name Microsoft gives it.
+    /// Returns the code point; the trailing comment is Microsoft's glyph name.
     ///
-    /// Written as an escape rather than as the character, deliberately: these
-    /// are Private Use, so the literal would be a box in every editor that
-    /// opens this file and nobody could review it. The name in the comment is
-    /// what makes a wrong number findable; the test below is what makes a
-    /// wrong number fail.
+    /// Written as escapes because Private Use characters render as boxes in
+    /// editors. The test below verifies each one exists in the installed font.
     pub const fn ch(self) -> char {
         match self {
             Self::Gear => '\u{E713}',     // Setting
@@ -141,32 +121,26 @@ impl Icon {
         }
     }
 
-    /// One character, ready to be laid out.
+    /// Returns the glyph as a one-character string.
     pub fn text(self) -> String {
         self.ch().to_string()
     }
 }
 
-/// Beside a nav entry.
+/// Icon size beside a nav entry.
 pub const ICON_NAV: f32 = 16.0;
-/// Inside a small button on a row.
+/// Icon size inside a small row button.
 pub const ICON_INLINE: f32 = 14.0;
 
 pub fn icon_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(ICON_FAMILY.into()))
 }
 
-/// Whether this machine can actually draw it.
+/// Returns whether the loaded icon font contains this glyph.
 ///
-/// Per glyph rather than per font, because Segoe MDL2 Assets is the smaller of
-/// the two sets and a machine on Windows 10 may have the file without having
-/// the mark.
-///
-/// A family bound to no data lays every string out zero-wide rather than
-/// panicking - see [`crate::gui::fonts`] - so the failure this guards against
-/// is a blank gutter and not a crash. But a blank gutter that something
-/// reserved room for is worse than one that nothing did, which is what asking
-/// first buys.
+/// Checked per glyph because Segoe MDL2 Assets is the smaller set. A family
+/// with no font data lays text out zero-wide rather than panicking (see
+/// [`crate::gui::fonts`]), so this prevents reserving space for a blank icon.
 pub fn has_icon(ctx: &eframe::egui::Context, icon: Icon) -> bool {
     ctx.fonts_mut(|fonts| fonts.has_glyph(&icon_font(ICON_NAV), icon.ch()))
 }
@@ -176,11 +150,6 @@ mod tests {
     use super::*;
     use crate::gui::fonts;
 
-    /// Two entries drawn with the same mark are one mark and a wasted slot.
-    ///
-    /// The same shape as `no_tone_depends_on_colour_alone`, and for the same
-    /// reason: a vocabulary whose members are not distinguishable is not a
-    /// vocabulary.
     #[test]
     fn every_icon_is_a_different_mark() {
         let mut seen: Vec<char> = Icon::ALL.iter().map(|i| i.ch()).collect();
@@ -189,20 +158,11 @@ mod tests {
         assert_eq!(seen.len(), Icon::ALL.len(), "two icons share a code point");
     }
 
-    /// Every code point above is one the installed font actually has.
+    /// Verifies every code point exists in the installed icon font.
     ///
-    /// This is the whole verification. A Private Use code point cannot be
-    /// checked by reading it, the name in the comment beside it is a claim
-    /// rather than a fact, and a wrong number is silent: [`has_icon`] returns
-    /// false and the mark simply is not drawn.
-    ///
-    /// Skipped where there is no icon font to ask - a build agent, or a
-    /// machine older than Windows 10 - which is the same accommodation
-    /// `the_families_are_registered_even_when_the_files_are_missing` makes.
-    ///
-    /// What it cannot prove is that `E8EC` is a *tag* rather than some other
-    /// perfectly real glyph. That needs an eye, and the picture behind
-    /// `ui-snapshots` is where one gets pointed at it.
+    /// Skipped when no icon font is installed (for example on a build agent).
+    /// It cannot verify that a glyph looks right; the `ui-snapshots` images
+    /// cover that.
     #[test]
     fn every_icon_this_program_asks_for_is_one_the_machine_can_draw() {
         let ctx = eframe::egui::Context::default();
@@ -211,8 +171,7 @@ mod tests {
             return;
         }
 
-        // Inside a pass, because egui has no font atlas at all until the
-        // first one.
+        // egui builds its font atlas during the first pass.
         let mut output = ctx.run_ui(Default::default(), |ui| {
             for icon in Icon::ALL {
                 assert!(
@@ -223,20 +182,18 @@ mod tests {
             }
         });
 
-        // The atlas the pass built is a texture upload nobody here is going to
-        // perform, and epaint asserts on dropping unapplied ones.
+        // epaint asserts if unapplied texture uploads are dropped.
         output.textures_delta.clear();
     }
 
-    /// With no icon font the family still has to exist, or the first nav entry
-    /// drawn takes the process down.
+    /// The family must be registered even without an icon font, or the first
+    /// nav entry drawn panics.
     #[test]
     fn asking_about_an_icon_is_safe_on_a_machine_that_has_none() {
         let ctx = eframe::egui::Context::default();
         fonts::install_bundled(&ctx);
         let mut output = ctx.run_ui(Default::default(), |ui| {
-            // The assertion is that this returns at all: egui panics on a
-            // family it was never given.
+            // Passes if this returns: egui panics on an unregistered family.
             let _ = has_icon(ui.ctx(), Icon::Gear);
         });
         output.textures_delta.clear();

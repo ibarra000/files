@@ -3,13 +3,8 @@
     Builds the installer.
 
 .DESCRIPTION
-    Four steps: build the release binaries, read the version out of Cargo.toml,
-    hand both to WiX, and say where the result is.
-
-    WiX 5 rather than 3, and `wix build` rather than `cargo wix`. WiX 3 reached
-    end of life in February 2025 and is what `cargo-wix` drives; WiX 7 requires
-    accepting a paid maintenance-fee licence. WiX 5 is the current version that
-    is free to build with, and it is a dotnet tool rather than an installer:
+    Builds the release binaries, reads the version from Cargo.toml and passes
+    both to WiX 5. Requires the WiX dotnet tool and its UI extension:
 
         dotnet tool install --global wix --version 5.0.2
         wix extension add --global WixToolset.UI.wixext/5.0.2
@@ -20,44 +15,34 @@
 .EXAMPLE
     pwsh tools/make_msi.ps1 -Release
 
-    Builds the installer and the manifest a GitHub release carries, into
-    target\release\dist, and - if the GitHub CLI is installed - publishes them
-    as release v<version>. Every copy of files that checks GitHub is then
-    offered that version within four hours.
+    Builds the installer and its release manifest into target\release\dist
+    and, if the GitHub CLI is installed, publishes them as release v<version>.
 #>
 [CmdletBinding()]
 param(
     # Skip `cargo build --release`, for when the binaries are already current.
     [switch]$NoBuild,
 
-    # Copy the installer to this folder and write the manifest beside it, so
-    # every running copy is offered the version that was just built. Both are
-    # written from the same $version, so the manifest and the installer it
-    # names cannot disagree - which is the whole reason this lives here rather
-    # than in somebody`s notes.
+    # Copy the installer to this folder and write the manifest beside it.
     [string]$Publish,
 
-    # Build the two files a GitHub release carries - the installer and the
-    # latest.toml naming it - into target\release\dist, and publish them as
-    # release v<version> with the GitHub CLI if it is installed. The tag's
-    # `v` matters: `update::github` fetches the installer from
+    # Build the installer and latest.toml into target\release\dist and publish
+    # them as release v<version> with the GitHub CLI, if installed. The tag's
+    # `v` prefix is required: `update::github` downloads from
     # releases/download/v<version>/.
     [switch]$Release
 )
 
 $ErrorActionPreference = 'Stop'
 
-# The manifest every copy of files reads, written beside the installer it
-# names. Both come from the same $Version, so they cannot disagree.
-#
-# UTF-8 without a byte-order mark, whichever PowerShell runs this: Windows
-# PowerShell 5.1's `-Encoding utf8` writes one. The reader copes either way,
-# but a file on a release page should be what it says it is.
+# Writes latest.toml beside the installer it names. Both use the same
+# $Version, so they cannot disagree. Written as UTF-8 without a BOM, which
+# Windows PowerShell 5.1's `-Encoding utf8` would add.
 function Write-Manifest([string]$Folder, [string]$Version, [string]$Msi) {
     $hash = (Get-FileHash -Path (Join-Path $Folder $Msi) -Algorithm SHA256).Hash.ToLowerInvariant()
     $text = "version = `"$Version`"`nmsi     = `"$Msi`"`nsha256  = `"$hash`"`n"
-    # Written to a temporary name and moved into place, so nobody reads a
-    # half-written manifest off a share.
+    # Write to a temporary name and move into place, so readers never see a
+    # partial file.
     $tmp = Join-Path $Folder 'latest.toml.tmp'
     [System.IO.File]::WriteAllText($tmp, $text, (New-Object System.Text.UTF8Encoding $false))
     Move-Item -Path $tmp -Destination (Join-Path $Folder 'latest.toml') -Force
@@ -71,9 +56,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
     }
 
-    # From Cargo.toml, so the installer and the executables can never claim
-    # different versions - which is exactly the sort of thing nobody notices
-    # until an upgrade refuses to install over itself.
+    # Read from Cargo.toml so the installer and executables share one version.
     $manifest = Get-Content 'Cargo.toml' -Raw
     if ($manifest -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
         throw 'could not read the version out of Cargo.toml'
@@ -84,7 +67,17 @@ try {
     $target = Join-Path $root 'target\release'
     $out = Join-Path $target "files-$version-x64.msi"
 
-    wix build `
+    # `dotnet tool install --global` puts wix in ~\.dotnet\tools, which is not
+    # always on PATH.
+    $wix = (Get-Command wix -ErrorAction SilentlyContinue).Source
+    if (-not $wix) {
+        $wix = Join-Path $HOME '.dotnet\tools\wix.exe'
+        if (-not (Test-Path $wix)) {
+            throw 'wix not found on PATH or in ~\.dotnet\tools; see the install steps at the top of this script'
+        }
+    }
+
+    & $wix build `
         -arch x64 `
         -define "Version=$version" `
         -define "TargetDir=$target" `
@@ -99,9 +92,8 @@ try {
         if (-not (Test-Path $Publish)) { throw "no such folder: $Publish" }
 
         $name = Split-Path -Leaf $out
-        # The installer first, and the manifest only once it has landed. The
-        # other order leaves a window in which every client is told about a
-        # version whose installer is not there yet - and they would all try.
+        # Copy the installer before writing the manifest, so clients are never
+        # offered a version whose installer is not there yet.
         Copy-Item -Path $out -Destination (Join-Path $Publish $name) -Force
         Write-Manifest -Folder $Publish -Version $version -Msi $name
 
@@ -117,8 +109,7 @@ try {
         $assets = @((Join-Path $dist $name), (Join-Path $dist 'latest.toml'))
 
         if (Get-Command gh -ErrorAction SilentlyContinue) {
-            # A full release, not a draft or a pre-release: GitHub's "latest"
-            # skips both, so either would be published and offered to nobody.
+            # A full release: GitHub's "latest" skips drafts and pre-releases.
             gh release create "v$version" @assets --title "files $version" --generate-notes
             if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
             Write-Host "released v$version on GitHub"

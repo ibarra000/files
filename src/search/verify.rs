@@ -1,29 +1,21 @@
-//! Authoritative verification of a local result against the file server.
+//! Verifies a local result against the file server.
 //!
-//! Local matching runs against an index that may be minutes old. This module
-//! closes that gap without ever paying for a full enumeration, in two steps:
+//! The local index may be minutes old. Verification avoids a full enumeration:
 //!
-//! 1. **Probe the directory stamp.** Three round trips, a couple of
-//!    milliseconds. If the timestamps have not moved since the snapshot was
-//!    taken, the local index is *provably* still current and there is nothing
-//!    else to do - no query, no server CPU, no wire traffic.
-//! 2. **Only if it has changed**, issue a server-side wildcard query, which
-//!    returns just the matches in a single round trip.
+//! 1. **Probe the directory stamp** (three round trips). If the timestamps have
+//!    not moved since the snapshot, the local index is provably current.
+//! 2. **Only if it changed**, issue a server-side wildcard query, which returns
+//!    just the matches in one round trip.
 //!
-//! # The audit, and why it is not optional
+//! # The audit
 //!
-//! Server-side pattern matching is defined by `FsRtlIsNameInExpression` on a
-//! Microsoft server, but this code will run against whatever the share
-//! actually is. A subtly different matcher could return *fewer* files than a
-//! full enumeration would, which would hide files without any visible symptom.
-//!
-//! So every server result is compared against what the local index would have
-//! returned. The server may legitimately return more (files created since the
-//! snapshot); it must never return less. After
+//! Server-side matching is `FsRtlIsNameInExpression` on a Microsoft server, but
+//! the share may run a different matcher that returns fewer files than an
+//! enumeration would, hiding files silently. Every server result is therefore
+//! compared with the local index: the server may return more (new files) but
+//! never less. After
 //! [`SERVER_FILTER_MISS_LIMIT`](crate::config::SERVER_FILTER_MISS_LIMIT)
-//! disagreements the whole mechanism disables itself for the rest of the
-//! process and says so. That self-disabling property is what makes the
-//! feature acceptable to ship without being able to test it here.
+//! disagreements the mechanism disables itself for the rest of the process.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,20 +48,14 @@ pub enum SkipReason {
     /// Several flat shares are configured, so the server-side check was not
     /// attempted.
     ///
-    /// The check replaces the on-screen result list with what the server
-    /// returned, which across several shares would mean re-merging and
-    /// auditing per share - real machinery for a feature that ships off and
-    /// disables itself on the first miss. Named rather than silent, for the
-    /// same reason as [`Self::NotApplicable`].
+    /// The check replaces the on-screen list with the server's answer, which
+    /// across several shares would require per-share merging and auditing.
     SeveralShares,
     /// There is no single directory to ask about.
     ///
-    /// A walked tree spans hundreds of thousands of folders and the server's
-    /// pattern matching works within one, so the question this check asks
-    /// cannot be put to it. Freshness comes from the change watcher and the
-    /// re-walk instead - which is worth saying rather than leaving the line
-    /// blank, because "not checked" and "checked and fine" must not look
-    /// identical.
+    /// A walked tree spans many folders and server-side matching works within
+    /// one. Freshness comes from the change watcher and re-walk instead. Reported
+    /// so that "not checked" is distinguishable from "checked and fine".
     NotApplicable,
 }
 
@@ -82,7 +68,7 @@ impl SkipReason {
                 format!("server filter disabled after {misses} disagreements")
             }
             Self::Unsupported => "server-side filtering unavailable".into(),
-            Self::SeveralShares => "several shares; not checked against the server".into(),
+            Self::SeveralShares => "several drives; not checked against the server".into(),
             Self::NotApplicable => "kept live by the watcher".into(),
         }
     }
@@ -91,8 +77,8 @@ impl SkipReason {
 /// What verification concluded.
 #[derive(Debug, Clone)]
 pub enum VerifyOutcome {
-    /// The directory has not changed, so the local results are already
-    /// authoritative. The cheapest and by far the most common answer.
+    /// The directory has not changed, so the local results are authoritative.
+    /// This is the most common answer.
     IndexAuthoritative {
         stamp: Option<DirStamp>,
     },
@@ -114,15 +100,14 @@ pub enum AuditVerdict {
     NotChecked,
     /// The server returned everything the local index would have.
     Consistent,
-    /// The server omitted names the local index holds. Each occurrence
-    /// counts against the disable threshold.
+    /// The server omitted names the local index holds. Each occurrence counts
+    /// against the disable threshold.
     ServerUnderReturned { missing: Vec<String> },
 }
 
 /// Compares a server result against the names the local index matched.
 ///
-/// The server is allowed to return *more* - files created since the snapshot.
-/// It is never allowed to return less.
+/// The server may return more (files created since the snapshot), never less.
 pub fn audit(server_names: &[String], local_names: &[String]) -> AuditVerdict {
     if local_names.is_empty() {
         return AuditVerdict::Consistent;
@@ -143,14 +128,11 @@ pub fn audit(server_names: &[String], local_names: &[String]) -> AuditVerdict {
     }
 }
 
-/// Names the local snapshot would return for `query`, for the audit.
+/// Returns the names the local snapshot would return for `query`, for the
+/// audit.
 ///
-/// Judged by the matcher's own predicate rather than by a substring test of
-/// its own. The oracle used to be "every name containing the query", which
-/// against a correctly narrowed server answer reports every file the filter
-/// removed as *missing* - and three of those in one process switch
-/// server-side filtering off for good. The audit has to compare like with
-/// like.
+/// Uses the matcher's own predicate so that names correctly removed by the
+/// query's filters are not counted as server misses.
 fn local_matches(snapshot: &Snapshot, query: &Query) -> Vec<String> {
     let needle = fold::fold_query(query.term());
     (0..snapshot.len() as u32)
@@ -164,13 +146,12 @@ fn local_matches(snapshot: &Snapshot, query: &Query) -> Vec<String> {
         .collect()
 }
 
-/// Runs server-side verification, and polices it.
+/// Runs server-side verification and audits its results.
 pub struct Verifier {
     source: Arc<dyn DirSource>,
     /// Every enabled flat mapping, in configuration order.
     ///
-    /// A tree is absent on purpose: it records no directory stamp, by design,
-    /// so there is nothing here that could prove one current.
+    /// Trees are excluded because they record no directory stamp.
     dirs: Box<[PathBuf]>,
     enabled: AtomicBool,
     misses: AtomicU32,
@@ -200,7 +181,7 @@ impl Verifier {
         }
     }
 
-    /// Whether there is anything here a server-side check could be put to.
+    /// Returns whether any share is eligible for a server-side check.
     pub fn is_empty(&self) -> bool {
         self.dirs.is_empty()
     }
@@ -247,8 +228,7 @@ impl Verifier {
         hidden: &Hidden,
         cancel: &CancelToken,
     ) -> VerifyOutcome {
-        // Step 1: the cheap proof. An unchanged stamp makes everything below
-        // unnecessary.
+        // Step 1: an unchanged stamp makes everything below unnecessary.
         if let Some(stamp) = self.stamp_unchanged(snapshot) {
             return VerifyOutcome::IndexAuthoritative { stamp: Some(stamp) };
         }
@@ -272,12 +252,9 @@ impl Verifier {
 
         // Step 2: one round trip, matches only.
         let mut sink = VecSink::default();
-        // `hiding_system` as well as the extension filter below, and both are
-        // needed. This is a second route into the results list, and it fires
-        // exactly when a share has been written to recently - so without this
-        // a hidden file with an ordinary extension appeared or not depending
-        // on how lately somebody had saved something, which is the hardest
-        // kind of bug for a user to report.
+        // Hidden-system filtering is needed here as well as the extension filter
+        // below: this route fires when a share was recently written to, and
+        // without it hidden files would appear depending on recent activity.
         let opts = ListOpts::default()
             .with_max_entries(MAX_SERVER_HITS)
             .hiding_system(hidden.hides_system());
@@ -302,9 +279,8 @@ impl Verifier {
             Err(e) => return VerifyOutcome::Failed(e),
         };
 
-        // Win32 matches 8.3 short names too, so drop anything whose long name
-        // does not actually contain the query. Cheap, since only matches came
-        // over the wire.
+        // Win32 matches 8.3 short names too, and the pattern may be loose, so
+        // narrow the server's names back to the query.
         let confirmed: Vec<String> = sink
             .names
             .into_iter()
@@ -313,12 +289,9 @@ impl Verifier {
 
         let verdict = self.run_audit(&confirmed, snapshot, query);
 
-        // Audited first, then filtered. The audit is a claim about the
-        // *server's* pattern matching, and judging it against a list this
-        // program had already trimmed would report our own hidden files as the
-        // server dropping results - which after
-        // `SERVER_FILTER_MISS_LIMIT` of them would disable the whole mechanism
-        // for the rest of the session.
+        // Audit before filtering hidden files. The audit judges the server's
+        // matching; auditing a pre-filtered list would count hidden files as server
+        // misses and could disable the mechanism.
         let shown: Vec<String> = confirmed.into_iter().filter(|n| !hidden.hides(n)).collect();
         let matched = shown.len() as u32;
         let hits = rank_server_names(self.dir(), shown, query);
@@ -360,9 +333,8 @@ fn rank_server_names(dir: &Path, names: Vec<String>, query: &Query) -> Vec<Hit> 
         .into_iter()
         .enumerate()
         .filter_map(|(i, name)| {
-            // The *justifying* occurrence, not the leftmost one, so a row the
-            // server replaced ranks and underlines where the local matcher
-            // would have put it.
+            // Use the justifying occurrence, not the leftmost, so a server row ranks
+            // and underlines where the local matcher would have put it.
             let folded = fold::fold_query(&name);
             let pos = memchr::memmem::find(&folded, &needle)?;
             let at = query::admits(&folded, &needle, pos as u32, query.mode(), query.types())?;
@@ -454,7 +426,7 @@ mod tests {
 
     // --- the cheap path ----------------------------------------------------
 
-    /// The common case: nothing changed, so no query is issued at all.
+    /// Nothing changed, so no query is issued.
     #[test]
     fn an_unchanged_stamp_short_circuits_the_whole_verification() {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha.txt"]);
@@ -519,10 +491,7 @@ mod tests {
 
     // --- hidden files ------------------------------------------------------
 
-    /// The server is a second route into the results list, and a filter that
-    /// only covered the local matcher would mean the same query returned
-    /// `Thumbs.db` or not depending on whether a drive had been touched
-    /// recently - which is the hardest kind of bug to be told about.
+    /// Hidden-file filtering also applies to server results.
     #[test]
     fn a_hidden_file_the_server_returned_is_not_shown() {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha.pdf", "alpha.db"]);
@@ -545,12 +514,7 @@ mod tests {
         }
     }
 
-    /// The attribute half of the filter, on the route that nearly missed it.
-    ///
-    /// The server query is a second way into the results list and fires
-    /// exactly when a share has been written to lately, so a marked file with
-    /// an ordinary extension used to appear or not depending on how recently
-    /// somebody had saved something.
+    /// Hidden-attribute filtering also applies to server results.
     #[test]
     fn a_marked_file_the_server_returned_is_not_shown_either() {
         use crate::index::fake_source::FakeEntry;
@@ -588,11 +552,8 @@ mod tests {
         assert_eq!(shown(&Hidden::new::<&str>(&[], true)), vec!["alpha.pdf"]);
     }
 
-    /// The audit is a claim about the *server's* pattern matching, so it is
-    /// run before the filter. Judging it against a list this program had
-    /// already trimmed would report our own hidden files as the server
-    /// dropping results - and after `SERVER_FILTER_MISS_LIMIT` of those it
-    /// would switch the whole mechanism off for the rest of the session.
+    /// The audit runs before the hidden filter, so filtered names are not
+    /// counted as server misses.
     #[test]
     fn hiding_a_file_does_not_make_the_server_look_wrong() {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha.pdf", "alpha.db"]);
@@ -621,8 +582,7 @@ mod tests {
 
     // --- the audit in situ -------------------------------------------------
 
-    /// The failure mode the audit exists to catch, and the self-disabling
-    /// behaviour that makes the feature safe to ship untested.
+    /// The audit catches an under-returning server and disables the mechanism.
     #[test]
     fn repeated_under_returns_disable_the_server_filter() {
         let src = FakeDirSource::new().with_dir("V:\\", &["alpha_one.txt", "alpha_two.txt"]);

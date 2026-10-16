@@ -1,13 +1,7 @@
-//! A walk driven through the index actor, on real threads.
+//! Tree walks driven through the index actor on real threads.
 //!
-//! `tests/tree_walk.rs` proves the walk and `tests/index_schedule.rs` proves
-//! the schedule; until this file existed nothing proved they compose. That gap
-//! is where the interesting failures live: an actor that reads the wrong
-//! index's state, a walk whose results never reach the store, a shutdown that
-//! cannot interrupt a pass running for minutes.
-//!
-//! Real threads and a compressed cadence rather than a simulated clock,
-//! because what is under test here *is* the wiring.
+//! Covers the wiring between walk, schedule, store, cache and watcher, so it
+//! uses real threads and a compressed cadence rather than a simulated clock.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,8 +21,8 @@ use files::util::cancel::CancelToken;
 
 const TREE_ROOT: &str = "R:\\";
 
-/// A share shaped like the real one, including the folder no routing rule
-/// would have guessed.
+/// A fake share with a flat directory and a tree, including a file in an
+/// unconventionally named folder.
 fn share() -> FakeDirSource {
     FakeDirSource::new()
         .with_dir(files::config::CUSTPRO_PATH, &["p12345 cover.pdf"])
@@ -43,8 +37,7 @@ fn share() -> FakeDirSource {
         )
 }
 
-/// The shipped configuration has no tree mapping yet - that arrives with the
-/// rewritten `default_config.toml` - so the root is set directly here.
+/// Settings with a single tree mapping at `TREE_ROOT` and persistence off.
 fn settings() -> Settings {
     Settings {
         persist: false,
@@ -91,12 +84,12 @@ fn tree_store() -> Arc<IndexStore> {
     ))
 }
 
-/// Drains the event channel, so a `try_send` from the actor never blocks and
-/// the test is not timing-sensitive to how fast it reads.
+/// Returns an event sink drained on its own thread, so the actor's `try_send`
+/// never blocks.
 fn draining_events() -> files::app::event::Events {
     let (tx, rx) = bounded::<AppEvent>(256);
     std::thread::spawn(move || while rx.recv().is_ok() {});
-    // Nothing is drawing, so nothing needs waking.
+    // No UI to wake.
     files::app::event::Events::headless(tx)
 }
 
@@ -136,9 +129,7 @@ fn found(store: &IndexStore, query: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// The headline. A file whose folder no rule would have guessed is walked by
-/// the actor, published to the store, and found by its code - the whole
-/// project in one assertion.
+/// The actor walks the tree, publishes it, and a nested file is found by code.
 #[test]
 fn the_actor_walks_the_tree_and_the_file_becomes_findable() {
     let store = tree_store();
@@ -159,7 +150,7 @@ fn the_actor_walks_the_tree_and_the_file_becomes_findable() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// And the folder case, which is how a job code usually appears.
+/// A code matching a folder name finds the files inside it.
 #[test]
 fn a_code_naming_a_folder_finds_its_contents_through_the_actor() {
     let store = tree_store();
@@ -177,13 +168,11 @@ fn a_code_naming_a_folder_finds_its_contents_through_the_actor() {
         vec![
             "R:\\11d\\0704\\drawing.pdf",
             "R:\\11d\\0704\\quote.pdf",
-            // Matched on its own name rather than its folder: `0704` really is
-            // a substring of it, and a search is not a router - it reports
-            // what matched rather than deciding what was meant.
+            // Matched on its own name, which contains `0704`.
             "R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf",
         ]
     );
-    // The two whose *folder* matched rank behind the one whose name did.
+    // Folder matches rank behind the name match.
     assert!(
         found(&store, "0704")[0].ends_with("11-3-0704 survey.pdf"),
         "a name match should outrank a folder match"
@@ -191,15 +180,12 @@ fn a_code_naming_a_folder_finds_its_contents_through_the_actor() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// The walk must not touch the flat index, and the flat actor must not touch
-/// the tree. Each slot has exactly one writer, which is what the store's
-/// single-writer rule actually requires.
+/// A tree actor writes only its own slot; the store requires one writer per
+/// slot.
 #[test]
 fn the_tree_actor_leaves_the_flat_index_alone() {
     let store = mixed_store();
-    // Owns the tree, which is mapping 1. Two of the writes in `run` used to
-    // ignore the actor's kind entirely and land on the flat mapping's status,
-    // so this asserts more than it used to.
+    // Owns the tree, which is mapping 1.
     let ctx = IndexContext::new(
         settings(),
         MappingId(1),
@@ -227,8 +213,7 @@ fn the_tree_actor_leaves_the_flat_index_alone() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// An unreadable folder is reported rather than silently dropped - the same
-/// failure the routing rules produced, and the reason this index exists.
+/// An unreadable folder degrades the tree and is named in its coverage report.
 #[test]
 fn an_unreadable_folder_degrades_the_tree_and_names_itself() {
     let src = share();
@@ -257,8 +242,7 @@ fn an_unreadable_folder_degrades_the_tree_and_names_itself() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// A folder deleted while the walk is running is ordinary churn on a share
-/// people are working on, and must not be reported as a fault.
+/// A folder deleted during the walk counts as vanished, not as a fault.
 #[test]
 fn a_folder_that_vanished_mid_walk_does_not_degrade_the_tree() {
     let src = share();
@@ -278,12 +262,10 @@ fn a_folder_that_vanished_mid_walk_does_not_degrade_the_tree() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// The actor must settle rather than re-walking on every wake.
+/// The actor settles rather than re-walking on every wake.
 ///
-/// This is the failure the review caught before it shipped: an actor that
-/// consulted the *flat* index for "do I have a snapshot" would be told no on
-/// every wake, make every scan a first run, and leave the minimum spacing as
-/// the only thing between the share and a continuous re-walk.
+/// Guards against the actor checking the wrong slot for an existing snapshot,
+/// which would make every wake a first run.
 #[test]
 fn the_tree_settles_instead_of_walking_continuously() {
     let src = share();
@@ -295,8 +277,7 @@ fn the_tree_settles_instead_of_walking_continuously() {
         |s| s.first_tree_slot().as_tree().is_some(),
         Duration::from_secs(5)
     ));
-    // `Cadence::fast` scales an hour to 400ms, so this is several floors'
-    // worth of wall clock - long enough that a runaway would be obvious.
+    // `Cadence::fast` scales an hour to 400ms, so a runaway would show here.
     let after_first = src.list_count(TREE_ROOT);
     std::thread::sleep(Duration::from_millis(200));
     let after_settling = src.list_count(TREE_ROOT);
@@ -309,12 +290,10 @@ fn the_tree_settles_instead_of_walking_continuously() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// A healthy tree must not be reported as degraded.
+/// A healthy tree is not reported as degraded.
 ///
-/// The other defect the review caught: a tree captures no directory stamp by
-/// design, and the flat path degrades whenever a scan captures none - so a
-/// perfectly healthy tree would have read "change detection unavailable"
-/// forever, on the happy path.
+/// A tree captures no directory stamp by design, unlike a flat scan, where a
+/// missing stamp means degraded change detection.
 #[test]
 fn a_healthy_tree_is_not_reported_as_degraded() {
     let store = tree_store();
@@ -334,14 +313,13 @@ fn a_healthy_tree_is_not_reported_as_degraded() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// Shutdown has to reach a walk that is already running, or every exit during
-/// one leaks the thread and its outstanding queries.
+/// Shutdown interrupts a running walk instead of leaking its thread.
 #[test]
 fn shutdown_interrupts_a_running_walk() {
     let paths: Vec<String> = (0..400).map(|i| format!("d{i:03}\\f.pdf")).collect();
     let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     let src = FakeDirSource::new().with_tree(TREE_ROOT, &refs);
-    // Enough latency per directory that the walk is certainly still running.
+    // Per-directory latency keeps the walk running during shutdown.
     src.set_latency(Duration::from_millis(5));
 
     let store = tree_store();
@@ -366,8 +344,7 @@ fn shutdown_interrupts_a_running_walk() {
     assert!(started.elapsed() < Duration::from_millis(500));
 }
 
-/// Results appear while the walk is still running, which is what makes a
-/// three-minute pass usable rather than a blank screen.
+/// Partial results are searchable while the walk is still running.
 #[test]
 fn the_tree_is_searchable_before_the_walk_finishes() {
     let paths: Vec<String> = (0..400)
@@ -424,7 +401,7 @@ fn persisting_tree_actor(
     actor::spawn(ctx, draining_events()).expect("the actor starts")
 }
 
-/// True once the walk has written its cache file.
+/// Returns true once a `.idx` cache file exists under `cache`.
 fn cached(cache: &std::path::Path) -> bool {
     std::fs::read_dir(cache).is_ok_and(|rd| {
         rd.flatten()
@@ -432,19 +409,11 @@ fn cached(cache: &std::path::Path) -> bool {
     })
 }
 
-/// The regression test for the morning stampede.
+/// A fresh cache is trusted on launch: the share is not enumerated at all.
 ///
-/// A tree records no directory stamp - no single timestamp can stand for three
-/// hundred thousand directories - and the scheduler used to credit a cache's
-/// age against the re-walk floor *only* when a stamp came with it. Its stated
-/// remedy was "one scan brings it up to date and establishes a stamp for next
-/// time", which for a tree never terminates: the walk returns no stamp either,
-/// so the next launch is in exactly the same position and reads the whole
-/// share again. Every launch, on every machine.
-///
-/// Three hundred people logging on at nine o'clock made that 2.7 x 10^8 SMB
-/// round trips in a fifteen-minute window, so this asserts the strongest thing
-/// available: after a warm start the source is not enumerated *at all*.
+/// A tree has no directory stamp, so the cache's age must count against the
+/// re-walk floor without one; otherwise every launch on every client re-walks
+/// the whole share.
 #[test]
 fn a_warm_tree_does_not_re_walk_the_share() {
     let cache = tempfile::tempdir().unwrap();
@@ -458,7 +427,7 @@ fn a_warm_tree_does_not_re_walk_the_share() {
     );
     actor.shutdown(Duration::from_millis(500));
 
-    // Second launch, same share, same cache, and a source that counts.
+    // Second launch with the same cache and a source that records calls.
     let src = share();
     let second = tree_store();
     let mut actor = persisting_tree_actor(src.clone(), Arc::clone(&second), cache.path());
@@ -492,12 +461,9 @@ fn a_warm_tree_does_not_re_walk_the_share() {
     );
 }
 
-/// The other half of the same rule, for a share that *is* on a timer: a cache
-/// old enough to be past the floor still triggers a pass. Without this, the
-/// fix above would be "never re-read anything", which is a different bug.
+/// On an `Auto` tree, a cache older than the floor still triggers a walk.
 ///
-/// A tree defaults to `Manual` now, so this has to opt back in - which is the
-/// contract worth pinning, since `Auto` is what a small share will use.
+/// Trees default to `Manual`, so this opts in to `Auto`.
 #[test]
 fn an_auto_tree_whose_cache_is_past_the_floor_still_walks() {
     let cache = tempfile::tempdir().unwrap();
@@ -511,8 +477,8 @@ fn an_auto_tree_whose_cache_is_past_the_floor_still_walks() {
     ));
     actor.shutdown(Duration::from_millis(500));
 
-    // `Cadence::fast()` compresses the floor to milliseconds, so by the time
-    // the second actor starts the restored cache is already past it.
+    // `Cadence::fast()` compresses the floor to milliseconds, so the restored
+    // cache is already past it when the second actor starts.
     std::thread::sleep(Duration::from_millis(50));
 
     let src = share();
@@ -542,10 +508,7 @@ fn an_auto_tree_whose_cache_is_past_the_floor_still_walks() {
     );
 }
 
-/// And the point of `manual`: the same stale cache, left alone.
-///
-/// This is what three hundred clients do instead of re-walking nine hundred
-/// thousand directories apiece every half hour.
+/// On a `Manual` tree, a stale cache is not re-walked on a timer.
 #[test]
 fn a_manual_tree_leaves_a_stale_cache_alone() {
     let cache = tempfile::tempdir().unwrap();
@@ -562,8 +525,7 @@ fn a_manual_tree_leaves_a_stale_cache_alone() {
 
     let src = share();
     let second = tree_store();
-    // `persisting_settings` builds a tree mapping, which now defaults to
-    // manual - so this is the shipped behaviour, not an opt-in.
+    // `persisting_settings` builds a tree mapping, which defaults to manual.
     let mut actor = persisting_tree_actor(src.clone(), Arc::clone(&second), cache.path());
     assert!(wait_for(
         &second,
@@ -580,7 +542,7 @@ fn a_manual_tree_leaves_a_stale_cache_alone() {
     assert_eq!(listed, 0, "a manual share must not walk on a timer");
 }
 
-/// Manual means "not on a timer", not "never". The user asking still works.
+/// A `Manual` tree still walks on a forced refresh.
 #[test]
 fn a_manual_tree_still_answers_a_forced_refresh() {
     let cache = tempfile::tempdir().unwrap();
@@ -617,7 +579,7 @@ fn a_manual_tree_still_answers_a_forced_refresh() {
     assert!(walked, "F5 must reach a manual share");
 }
 
-/// Turns a settings fixture's mapping back to `auto`.
+/// Returns `s` with every mapping's refresh policy set to `Auto`.
 fn auto_refresh(s: Settings) -> Settings {
     let mut mappings: Vec<_> = s.routes.all().to_vec();
     for m in &mut mappings {
@@ -632,12 +594,10 @@ fn auto_refresh(s: Settings) -> Settings {
     }
 }
 
-/// The point of persisting at all: 300,000 directories is one to three minutes
-/// of round trips, and without a cache that is the cost of every launch.
+/// A walked tree is cached and restored on the next launch.
 ///
-/// The second actor is given a share that is *not there*, so its own walk
-/// fails immediately and cannot mask the question being asked - whatever is in
-/// the store afterwards came off the disk.
+/// The second actor gets an empty share, so anything in the store afterwards
+/// came from the cache.
 #[test]
 fn a_walked_tree_is_cached_and_comes_back_on_the_next_launch() {
     let cache = tempfile::tempdir().unwrap();
@@ -680,15 +640,15 @@ fn a_walked_tree_is_cached_and_comes_back_on_the_next_launch() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// A tree actor pointed at a flat mapping's cache, or the reverse, must not
-/// decode it. The cache key is per-directory so this should never arise - but
-/// the two formats share a magic number and a version, and "should never
-/// arise" is how one directory comes to be served as a whole share.
+/// A tree actor rejects a flat cache written for the same root.
+///
+/// Flat and tree caches share a magic number and version, so the kind must be
+/// checked explicitly.
 #[test]
 fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
     let cache = tempfile::tempdir().unwrap();
 
-    // A *flat* actor indexing the tree root, so both write under the same key.
+    // A flat actor indexing the tree root, so both use the same cache key.
     let flat_store = Arc::new(IndexStore::single(
         "custompro",
         std::path::Path::new(TREE_ROOT),
@@ -715,8 +675,8 @@ fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
     ));
     flat.shutdown(Duration::from_millis(500));
 
-    // Now a tree actor on the same root, with the share gone so nothing but
-    // the cache can populate it.
+    // A tree actor on the same root with an empty share, so only the cache
+    // could populate it.
     let store = tree_store();
     let mut tree = persisting_tree_actor(FakeDirSource::new(), Arc::clone(&store), cache.path());
     assert!(
@@ -736,20 +696,16 @@ fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
 
 // --- live updates ----------------------------------------------------------
 
-/// A change notification arriving at a running actor, end to end: the fake
-/// watcher fires, the queue debounces, the scheduler asks for a patch, the
-/// actor re-reads the dirty folder and republishes.
-///
-/// The property that decides whether any of this was worth building is the
-/// last one here - that a live update reads the folders that changed and not
-/// the share.
+/// Change notifications end to end: the fake watcher fires, the queue
+/// debounces, the scheduler requests a patch, and the actor re-reads the dirty
+/// folder and republishes.
 mod live {
     use super::*;
     use files::index::watch::fake::ScriptedWatcher;
     use files::index::watch::{WatchEvent, WatchQueue};
     use std::time::Duration as Dur;
 
-    /// Milliseconds, so a test can watch a debounce go by.
+    /// A watch queue with a 10ms debounce.
     fn queue() -> Arc<WatchQueue> {
         Arc::new(WatchQueue::new(Dur::from_millis(10), 1_000))
     }
@@ -767,12 +723,10 @@ mod live {
         actor::spawn(ctx, draining_events()).expect("the actor starts")
     }
 
-    /// A patched folder has to reach the disk, or it is lost on every restart.
+    /// A patched folder is persisted and survives a restart.
     ///
-    /// This is what makes a manually-refreshed share workable at all. The
-    /// watcher keeps it current while the program runs, but nothing re-walks
-    /// on a timer any more - so a patch that never got written is a folder
-    /// that stays stale until somebody asks for a full pass.
+    /// A manual share is never re-walked on a timer, so an unsaved patch would
+    /// stay stale until a forced refresh.
     #[test]
     fn a_patched_folder_survives_a_restart() {
         let cache = tempfile::tempdir().unwrap();
@@ -812,8 +766,8 @@ mod live {
         // save has happened by now; the shutdown path would catch it anyway.
         actor.shutdown(Dur::from_millis(500));
 
-        // Restart against the same cache and a share that no longer has the
-        // file, so anything found afterwards can only have come off the disk.
+        // Restart against a share without the new file, so a hit can only come
+        // from the cache.
         let cold = share();
         let second = tree_store();
         let mut actor = persisting_tree_actor(cold, Arc::clone(&second), cache.path());
@@ -828,12 +782,11 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// Two saves in a row must not land on the same filename.
+    /// Repeated saves use distinct filenames.
     ///
-    /// A patched index keeps the capture time of the walk it grew from, and
-    /// the cache filename used to be built from that alone - so the second
-    /// save of a session renamed over the file the process already had mapped,
-    /// which on Windows is `ERROR_SHARING_VIOLATION`.
+    /// A patched index keeps its walk's capture time, so a filename derived
+    /// from that alone would rename over the currently mapped file, which
+    /// fails on Windows with `ERROR_SHARING_VIOLATION`.
     #[test]
     fn repeated_saves_do_not_collide_on_a_filename() {
         let cache = tempfile::tempdir().unwrap();
@@ -875,9 +828,7 @@ mod live {
         }
         actor.shutdown(Dur::from_millis(500));
 
-        // The point: the index is still readable after several saves. A
-        // rename over a mapped file would have failed the save, leaving the
-        // pointer naming a file that is not there.
+        // The cache must still be readable after several saves.
         let second = tree_store();
         let mut actor = persisting_tree_actor(share(), Arc::clone(&second), cache.path());
         assert!(
@@ -929,8 +880,7 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// A file deleted on the share has to leave the index, or a search offers
-    /// a path that opens nothing.
+    /// A notified deletion removes the file from the index.
     #[test]
     fn a_notified_deletion_removes_the_file() {
         let src = share();
@@ -951,14 +901,12 @@ mod live {
             wait_for(&store, |s| found(s, "spec").is_empty(), Dur::from_secs(5)),
             "the deleted file is still in the index"
         );
-        // And the rest of the share is untouched.
+        // The rest of the share is untouched.
         assert!(!found(&store, "11-3-0704").is_empty());
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// The whole cost argument. If a notification re-walked the share there
-    /// would be no reason to have a watcher at all: the floor already does
-    /// that, once every half hour.
+    /// A live update reads only the changed folder, not the whole share.
     #[test]
     fn a_live_update_reads_the_changed_folder_and_not_the_share() {
         let src = share();
@@ -990,9 +938,8 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// An overflow cannot say what changed, so on a share that refreshes on a
-    /// timer it is the one case that re-walks - and everything it lost comes
-    /// back.
+    /// On an `Auto` share, an overflow triggers a full walk that recovers all
+    /// missed changes.
     #[test]
     fn an_overflow_falls_back_to_a_full_walk_on_an_auto_share() {
         let src = share();
@@ -1015,7 +962,7 @@ mod live {
             Dur::from_secs(5)
         ));
 
-        // Two folders changed; the watcher only knows that it lost track.
+        // Two folders change, but the watcher reports only an overflow.
         src.add_file("R:\\ab12", "one.pdf");
         src.add_file("R:\\11d\\0704", "two.pdf");
         watcher.push(WatchEvent::Overflow);
@@ -1031,14 +978,11 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// On a share that refreshes on demand, the same overflow says so and
-    /// waits.
+    /// On a `Manual` share, an overflow marks the share stale instead of
+    /// walking.
     ///
-    /// One person copying a large folder in overruns every client's watch
-    /// buffer at once. If that started a full pass on each of them, a single
-    /// ordinary action would put three hundred simultaneous re-walks on the
-    /// server - which is the burst the on-demand policy exists to prevent. So
-    /// the share is marked, named, and left for somebody to ask about.
+    /// A large copy overflows every client's watch buffer at once; walking on
+    /// overflow would put simultaneous re-walks from all clients on the server.
     #[test]
     fn an_overflow_on_a_manual_share_is_reported_rather_than_walked() {
         let src = share();
@@ -1075,7 +1019,7 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// And asking for the pass clears it.
+    /// A forced refresh clears the missed-changes mark.
     #[test]
     fn refreshing_clears_the_missed_changes_mark() {
         let src = share();
@@ -1109,9 +1053,8 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// A folder that cannot be read is left exactly as it was. Replacing it
-    /// with nothing would turn a transient network error into files that
-    /// cannot be found at all - the failure this whole index exists to remove.
+    /// A folder that fails to re-read keeps its previous contents rather than
+    /// being emptied.
     #[test]
     fn an_unreadable_folder_is_left_alone_rather_than_emptied() {
         let src = share();
@@ -1142,8 +1085,8 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// Believing you are live when you are not is worse than knowing you are
-    /// not, so the failure is recorded rather than swallowed.
+    /// An unavailable watch is recorded and degrades health, without
+    /// triggering a re-read.
     #[test]
     fn an_unavailable_watch_is_recorded_and_costs_no_extra_walk() {
         let src = share();
@@ -1191,10 +1134,8 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// A real coverage hole outranks a dead watch. One means files that cannot
-    /// be found at all; the other means new ones take until the floor to
-    /// appear, and replacing the first message with the second would hide the
-    /// one somebody has to act on.
+    /// An unreadable subtree outranks a dead watch on the status line, since
+    /// it means files cannot be found at all.
     #[test]
     fn an_unreadable_subtree_outranks_a_dead_watch_on_the_status_line() {
         let src = share();
@@ -1231,8 +1172,8 @@ mod live {
         actor.shutdown(Dur::from_millis(500));
     }
 
-    /// The watcher's thread parks in a call no flag can reach, so shutdown has
-    /// to tell it out of band or it waits out the whole budget.
+    /// Shutdown stops the watcher thread, which blocks in a call a flag cannot
+    /// interrupt.
     #[test]
     fn shutdown_stops_the_watcher_thread() {
         let store = tree_store();

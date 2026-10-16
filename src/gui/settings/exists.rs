@@ -1,47 +1,26 @@
-//! Whether a configured drive is actually there, asked no more than it has
-//! to be.
+//! A short-lived cache of whether each configured drive path is a directory.
 //!
-//! The drive list draws a warning on any row whose path is not a directory,
-//! which is the one configuration error with no other symptom: a search over
-//! a drive that is not mapped finds nothing, and a code with no files looks
-//! exactly like a job with no files.
-//!
-//! Asking is a `stat`. On a mapped network drive that is a round trip, and
-//! on an *unreachable* one it is a round trip that has to time out - the
-//! expensive case being exactly the case the warning exists for. The drive
-//! list is redrawn every frame the settings window is open, so with three
-//! drives configured and one of them down, the page was issuing sixty
-//! blocking network calls a second against a share that was not answering.
-//!
-//! So the answer is kept for a few seconds. Long enough that redrawing costs
-//! nothing, short enough that plugging a drive in and looking at the window
-//! shows the change without anybody having to know there is a cache.
+//! The drive list warns on missing paths and redraws every frame. Each check
+//! is a `stat`, which on an unreachable network drive blocks until it times
+//! out, so answers are cached for [`TTL`].
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How long an answer is kept.
-///
-/// Five seconds. The thing being cached changes when somebody maps a drive
-/// or plugs one in, which is a deliberate act followed by looking at this
-/// window - so the only requirement is that the wait afterwards is shorter
-/// than the time it takes to look.
+/// How long a cached answer stays valid. Short enough that a newly mapped
+/// drive shows up promptly.
 pub const TTL: Duration = Duration::from_secs(5);
 
-/// What was asked, when.
+/// Cached directory checks, keyed by path, with the time each was taken.
 #[derive(Default, Clone)]
 pub struct DirCache {
     seen: HashMap<PathBuf, (bool, Instant)>,
 }
 
 impl DirCache {
-    /// Whether `path` is a directory, asking `probe` at most once per
-    /// [`TTL`].
-    ///
-    /// Takes the probe as an argument rather than calling `Path::is_dir`
-    /// directly, so the caching rule can be tested without a filesystem and
-    /// without a clock that has to be waited on.
+    /// Returns whether `path` is a directory, calling `probe` at most once per
+    /// [`TTL`]. The probe and clock are injected so the cache is testable.
     pub fn is_dir(&mut self, path: &Path, now: Instant, probe: impl FnOnce(&Path) -> bool) -> bool {
         if let Some((answer, at)) = self.seen.get(path)
             && now.duration_since(*at) < TTL
@@ -53,11 +32,8 @@ impl DirCache {
         answer
     }
 
-    /// Drops answers nobody has asked for since `TTL` ago.
-    ///
-    /// Without this the map grows by one entry for every path that was ever
-    /// typed into the add row and then edited, and this window can be left
-    /// open for hours.
+    /// Drops answers older than [`TTL`], so paths typed and abandoned in the
+    /// add row do not accumulate.
     pub fn forget_stale(&mut self, now: Instant) {
         self.seen.retain(|_, (_, at)| now.duration_since(*at) < TTL);
     }
@@ -68,7 +44,7 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    /// A probe that counts how many times it was asked.
+    /// Returns a probe that counts its calls.
     fn counting(count: &Cell<usize>, answer: bool) -> impl FnOnce(&Path) -> bool + '_ {
         move |_| {
             count.set(count.get() + 1);
@@ -76,7 +52,6 @@ mod tests {
         }
     }
 
-    /// The whole point: a redraw does not cost a round trip.
     #[test]
     fn asking_twice_inside_the_window_asks_the_disk_once() {
         let mut cache = DirCache::default();
@@ -89,7 +64,6 @@ mod tests {
         assert_eq!(asked.get(), 1, "the second call reached the disk");
     }
 
-    /// And after the window it does, so plugging a drive in shows up.
     #[test]
     fn an_answer_older_than_the_window_is_taken_again() {
         let mut cache = DirCache::default();
@@ -102,7 +76,6 @@ mod tests {
         assert_eq!(asked.get(), 2);
     }
 
-    /// Two drives are two questions.
     #[test]
     fn two_paths_do_not_share_an_answer() {
         let mut cache = DirCache::default();
@@ -112,7 +85,6 @@ mod tests {
         assert!(cache.is_dir(Path::new(r"R:\"), now, |_| false));
     }
 
-    /// A window left open for hours does not accumulate a row per keystroke.
     #[test]
     fn paths_nobody_asks_about_are_forgotten() {
         let mut cache = DirCache::default();

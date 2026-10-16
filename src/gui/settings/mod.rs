@@ -1,32 +1,13 @@
-//! The settings window, drawn.
+//! Renders the settings window. The wording lives in
+//! [`crate::view::settings`]; this module handles layout only, so wording can
+//! be tested without a font.
 //!
-//! The words are in [`crate::view::settings`], which knows nothing about
-//! rectangles; this is the half that knows nothing about wording. The split
-//! is the one [`crate::view`]'s module note argues for, and it is why the
-//! house-style test can check every line on the form without a font.
+//! Setting cards use a flat fill rather than `theme::raise` shading: a page
+//! holds a dozen or more cards, and the feathered shadows would cost thousands
+//! of shapes per second while the window is open.
 //!
-//! # A card per setting, and no shading
-//!
-//! The panel next door is soft-UI: a surface is the colour of its ground and
-//! is legible only by the shading at its edges, which `theme::raise` and
-//! `theme::press` paint. This window is not, and the difference is deliberate
-//! rather than an oversight.
-//!
-//! A form is a list of small tiles, one per setting, and `raise` costs two
-//! feathered shadow shapes plus a fill for every one of them. A page here
-//! holds a dozen or more, and the shell asks for a frame every time one is
-//! open, so the shading would be several thousand feathered shapes a second
-//! to say something a flat fill one step off the ground says for nothing.
-//!
-//! The panel keeps its shading, where two surfaces earn it.
-//!
-//! # Two columns, two scrolls
-//!
-//! A `SidePanel` and a `CentralPanel`, each with a `ScrollArea` of its own,
-//! so the nav does not move when a long page is scrolled and a short page
-//! does not leave the nav stranded. That is the arrangement Ueli has and it
-//! is the only one that behaves when the two columns differ in height, which
-//! they almost always do.
+//! The nav and the page each have their own `ScrollArea`, so scrolling a long
+//! page does not move the nav.
 
 pub mod app;
 pub mod exists;
@@ -45,18 +26,10 @@ use crate::view::settings::{Page, PageId};
 
 pub use page::Form;
 
-/// Draws the whole window: the list of pages, and the page.
+/// Draws the nav and the current page, and returns the page to show next.
 ///
-/// Takes the current page by value and returns the one that should show
-/// next, rather than taking `&mut`, so the caller keeps the only copy. The
-/// same reason the window returns a `Clicked` instead of reaching back into
-/// the shell.
-///
-/// Takes the pages already built, which it did not used to. `view::settings::
-/// pages` walks the whole configuration and allocates a `Page` for each of
-/// the eight, and it was being called twice on the frame the window opened -
-/// once here and once in `wants_report` - for one answer each. Now the
-/// caller builds it once and both read the same slice.
+/// The caller builds `pages` once per frame and shares it with
+/// [`wants_report`].
 pub fn show(
     ui: &mut egui::Ui,
     theme: &Theme,
@@ -69,10 +42,9 @@ pub fn show(
     let mut chosen = current;
 
     egui::containers::Panel::left("files-settings-nav")
-        // `exact_size`, not `exact_width`: in 0.36 one `Panel` type serves
-        // all four edges and the setter is named for the edge it is on.
+        // egui 0.36 uses one `Panel` type for all edges, so the setter is
+        // `exact_size` rather than `exact_width`.
         .exact_size(theme::NAV_W)
-        // Ueli's is neither, and there is nothing here to reveal.
         .resizable(false)
         .show_separator_line(true)
         .frame(
@@ -97,8 +69,8 @@ pub fn show(
         )
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
-                // Salted apart from the nav, or the two share an offset and
-                // the list jumps every time a long page is scrolled.
+                // A distinct salt from the nav; otherwise both share one
+                // scroll offset.
                 .id_salt("files-settings-content-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -112,16 +84,15 @@ pub fn show(
     chosen
 }
 
-/// Whether the page showing needs the `doctor` report taken.
+/// Returns whether the current page needs the `doctor` report.
 pub fn wants_report(pages: &[Page], current: PageId) -> bool {
     page::find(pages, current).is_some_and(page::wants_report)
 }
 
-/// The panel's surface without its transparency.
+/// Returns `colour` with full opacity.
 ///
-/// This window is a document rather than an overlay: it sits over other
-/// programs for minutes at a time, and text on a translucent ground is
-/// harder to read the longer you read it.
+/// The settings window stays open for long reads, where a translucent
+/// background hurts legibility.
 pub fn opaque(colour: egui::Color32) -> egui::Color32 {
     egui::Color32::from_rgb(colour.r(), colour.g(), colour.b())
 }

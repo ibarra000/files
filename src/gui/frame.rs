@@ -1,27 +1,8 @@
-//! One frame's composition.
+//! Per-frame composition for `Shell::ui`: measure the state, update the
+//! motion, and return the body to draw.
 //!
-//! The three steps `Shell::ui` takes before it draws anything: measure the
-//! state, tell the animator, ask it what this frame looks like.
-//!
-//! Lifted out of the shell because all three are pure. Nothing here opens a
-//! window, reads a clock or touches the GPU: it is `(&AppState, dt)` in and a
-//! [`Visual`] out, exactly the bargain [`crate::gui::anim::Motion`] already
-//! makes one layer down. That is what lets a test drive the real composition
-//! rather than a transcription of it.
-//!
-//! # There used to be a fourth step
-//!
-//! Deciding how big the window should be. `panel::show` paints into
-//! `ui.max_rect()`, so the window's height *was* the panel's height, and
-//! resizing it was how the panel grew and shrank. That cost a `SetWindowPos`
-//! and a swapchain reconfigure per change, which is why the height transition
-//! was deleted, why a dead-band guarded the rounding, and why
-//! `tests/jitter.rs` counted resizes at all.
-//!
-//! The panel is six hundred by four hundred now and stays there, so the whole
-//! question is answered by a constant and none of that machinery has anything
-//! left to do. The list scrolls inside the window instead of the window
-//! growing around the list.
+//! Pure (`(&AppState, dt)` in, [`Content`] out), so tests can drive the real
+//! composition. The window has a fixed size; the list scrolls inside it.
 
 use crate::app::state::AppState;
 use crate::gui::anim::{Content, Motion};
@@ -38,8 +19,8 @@ impl Frame {
         Self::default()
     }
 
-    /// Told what the world looks like, then how much time has passed, then
-    /// asked what to draw. One order, in one place.
+    /// Retargets the motion from `state`, advances it by `dt`, and returns the
+    /// body to draw.
     pub fn advance(&mut self, state: &AppState, dt: f32) -> Content {
         self.motion.retarget(panel::body_of(state));
         self.motion.advance(dt)

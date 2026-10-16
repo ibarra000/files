@@ -1,39 +1,27 @@
-//! Searching a share that is never read in full.
+//! Searches a share that is never read in full, by querying the file server.
 //!
-//! # Why this is a kind of mapping rather than a fallback
+//! Live search is a configured mapping kind rather than an automatic fallback
+//! for large shares, so the meaning of "no matches" does not change silently.
 //!
-//! The rejected design was a runtime escape hatch: index everything, and when
-//! a share turns out to be too large, quietly stop walking it and start
-//! querying instead. That fails the way the old routing rules failed - the
-//! share's behaviour changes under the user with no symptom, and "no matches"
-//! comes to mean two different things on two different days. A configured kind
-//! is a promise somebody made and can read back.
+//! # Cost of one pass
 //!
-//! # What one pass costs, exactly
+//! `FindFirstFileExW` evaluates the pattern on the server within one folder:
 //!
-//! `FindFirstFileExW` evaluates the pattern on the server but within **one**
-//! folder, so reach has to be bought a round trip at a time:
+//! * **One round trip** for the root's filtered query, which returns matching
+//!   files and matching subfolder names. At the default depth of one this
+//!   answers the common case, since a job code often names a folder.
+//! * **One more per matching subfolder**, to list its contents. This mirrors
+//!   [`crate::search::matcher`]'s folder pass so a live share and a walked
+//!   tree rank folder matches the same way.
+//! * **One more per folder expanded below depth one**, to find non-matching
+//!   folders, which no filtered query can reveal. This is why depth is
+//!   per-mapping and defaults to one.
 //!
-//! * **One round trip** for the root's filtered query. It returns the matching
-//!   files *and the matching subfolder names*, and the second half matters more
-//!   than the first - a job code names a folder at least as often as a file, so
-//!   at the shipped depth of one this single round trip answers the common
-//!   question outright.
-//! * **One more per matching subfolder**, to list what is inside it. This
-//!   mirrors [`crate::search::matcher`]'s folder pass exactly, so a live share
-//!   and a walked tree rank a folder match the same way.
-//! * **One more per folder expanded, and only below depth one**, to learn the
-//!   folders whose names *do not* match - which no filtered query can reveal.
-//!   That is the expensive half, and the reason depth is per-mapping and
-//!   defaults to one.
+//! # Coverage travels with the hits
 //!
-//! # Why the coverage travels with the hits
-//!
-//! Everything here answers a bounded fraction of the question. A caller that
-//! cannot tell "nothing matched on the share" from "nothing matched in the
-//! fourteen folders I could afford" will render the second as the first, which
-//! is the one lie this program is built not to tell. So [`LiveOutcome`] has no
-//! variant that reports hits without also reporting reach.
+//! A pass answers a bounded fraction of the question. [`LiveOutcome`] has no
+//! variant that reports hits without also reporting reach, so callers can
+//! distinguish "nothing on the share" from "nothing in the folders visited".
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,9 +43,8 @@ use crate::util::cancel::CancelToken;
 
 /// Splits an enumeration into the files and the folders it returned.
 ///
-/// The two are wanted separately and a single `Vec` of names cannot say which
-/// is which, because the attribute is only in hand while the directory entry
-/// is.
+/// The attribute is only available while the directory entry is, so a plain
+/// list of names could not tell the two apart.
 #[derive(Debug, Default)]
 struct SplitSink {
     files: Vec<String>,
@@ -116,25 +103,23 @@ pub enum LiveStop {
 impl LiveStop {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Budget => "it had asked as much as it may",
-            Self::Deadline => "it ran out of time",
-            Self::Capped => "there were too many matches",
-            Self::Cancelled => "you kept typing",
+            Self::Budget => "request limit reached",
+            Self::Deadline => "timed out",
+            Self::Capped => "too many matches",
+            Self::Cancelled => "replaced by a newer search",
         }
     }
 }
 
 /// What a pass reached, and what it did not.
 ///
-/// Deliberately not folded into `SearchOutcome`: that type describes a sweep
-/// over an index this process owns, where "how much of the share did you look
-/// at" has one answer and it is "all of it".
+/// Separate from `SearchOutcome`, which describes a sweep over a fully owned
+/// index where coverage is always complete.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LiveCoverage {
     pub dirs_queried: u32,
-    /// Folders known to exist and never asked about.
-    ///
-    /// The number that matters: it is the size of the hole in the answer.
+    /// Folders known to exist and never asked about; the size of the hole in
+    /// the answer.
     pub dirs_skipped: u32,
     pub round_trips: u32,
     pub deepest: u16,
@@ -152,17 +137,15 @@ impl LiveCoverage {
 /// Why a share was not asked at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LiveSkip {
-    /// The query cannot be expressed as a literal pattern, so the server
-    /// cannot be asked. Named rather than silent: on a live share this is the
-    /// difference between "no matches" and "not searched".
+    /// The query cannot be expressed as a literal pattern. Reported so that
+    /// "not searched" is distinguishable from "no matches".
     Pattern(PatternReject),
     /// Asked too recently.
     ///
-    /// Carries how long until it may be asked again, so the footer can count
-    /// down rather than going quiet.
+    /// Carries the time until the next allowed query, for the footer countdown.
     Throttled { retry_in: Duration },
-    /// The source will not push a filter down, so every query would be a full
-    /// enumeration wearing a filter.
+    /// The source cannot push a filter down, so every query would be a full
+    /// enumeration.
     Unsupported,
     /// Switched off for the rest of the process after repeated refusals.
     Disabled { failures: u32 },
@@ -172,9 +155,9 @@ impl LiveSkip {
     pub fn label(&self) -> String {
         match self {
             Self::Pattern(r) => r.label(),
-            Self::Throttled { .. } => "it was just asked".into(),
-            Self::Unsupported => "this drive cannot search for you".into(),
-            Self::Disabled { .. } => "searching this drive is switched off".into(),
+            Self::Throttled { .. } => "searched moments ago".into(),
+            Self::Unsupported => "server-side search not supported".into(),
+            Self::Disabled { .. } => "live search is turned off".into(),
         }
     }
 }
@@ -201,23 +184,17 @@ pub struct LiveShare {
     depth: u16,
     /// Roots of other enabled mappings beneath this one.
     ///
-    /// They are already indexed, so querying them as well would return every
-    /// file under them twice. This is what makes a walked tree *inside* a live
-    /// share a legal - and useful - configuration.
+    /// They are already indexed, so querying them would return their files
+    /// twice. This allows a walked tree inside a live share.
     excluded: Box<[PathBuf]>,
     source: Arc<dyn DirSource>,
     /// Nanoseconds since `started` at the last query, or [`NEVER_ASKED`].
     ///
-    /// The sentinel is not zero, and that is not fastidiousness: two `Instant`s
-    /// taken microseconds apart can be equal on Windows, so a share asked at
-    /// the moment it was constructed would store zero and then read it back as
-    /// "never asked" - and the floor would let the next query straight
-    /// through. A test caught exactly that.
+    /// The sentinel is not zero because two `Instant`s taken microseconds apart
+    /// can be equal on Windows, and a stored zero would read as "never asked".
     ///
-    /// An atomic rather than a field on the state machine, because it is a
-    /// property of the share rather than of the interaction: a paste, a held
-    /// key and a snapshot-change re-run all have to be bounded by the same
-    /// number, and only one of them goes through the keyboard.
+    /// Atomic because the rate limit belongs to the share: pastes, held keys and
+    /// snapshot-change re-runs must all share the same bound.
     started: Instant,
     last_query_nanos: AtomicU64,
     failures: AtomicU32,
@@ -265,7 +242,7 @@ impl LiveShare {
         self.failures.load(Ordering::Relaxed)
     }
 
-    /// Whether this share may be asked now, and if not how long until it may.
+    /// Returns whether this share may be asked now, and if not how long until it may.
     fn admission(&self, now: Instant) -> Result<(), LiveSkip> {
         if !self.is_enabled() {
             return Err(LiveSkip::Disabled {
@@ -293,9 +270,8 @@ impl LiveShare {
 
     /// Records a refusal, switching the share off after enough of them.
     ///
-    /// Mirrors the verifier's self-disabling for the same reason: a mechanism
-    /// that cannot be tested against the real server has to be able to take
-    /// itself out of service, and say that it has.
+    /// Mirrors the verifier's self-disabling, since the mechanism cannot be
+    /// tested against every real server.
     fn note_failure(&self) -> u32 {
         let n = self.failures.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= LIVE_FAILURE_LIMIT {
@@ -351,10 +327,8 @@ impl LiveShare {
 
         match pass.run() {
             Err(err) => {
-                // An unreachable share is not a refusal to filter, so it does
-                // not count against the limit: the share may simply be down,
-                // and disabling the search for the rest of the process would
-                // outlive the outage.
+                // An unreachable share is not a refusal to filter and does not count
+                // against the limit; disabling would outlive the outage.
                 if matches!(err, EnumError::Unsupported(_)) {
                     let failures = self.note_failure();
                     return LiveOutcome::Skipped(if self.is_enabled() {
@@ -379,7 +353,7 @@ impl LiveShare {
     }
 }
 
-/// One pass over one share. Exists so the bookkeeping is not eleven arguments.
+/// One pass over one share; groups the bookkeeping state.
 struct Pass<'a> {
     share: &'a LiveShare,
     query: &'a Query,
@@ -412,9 +386,8 @@ impl Pass<'_> {
 
     fn opts(&self) -> ListOpts {
         ListOpts {
-            // Folders matter as much as files here: a job code names a folder
-            // at least as often as it names a file, and the filtered query is
-            // the only thing that will ever reveal one.
+            // Folders matter as much as files: the filtered query is the only way
+            // to find a folder named by the code.
             files_only: false,
             ..ListOpts::default()
         }
@@ -423,9 +396,8 @@ impl Pass<'_> {
     }
 
     fn run(&mut self) -> Result<(), EnumError> {
-        // Breadth-first, so that a pass which runs out of budget has spent it
-        // on the shallowest folders - the ones most likely to hold what was
-        // asked for, and the ones a person would have looked in first.
+        // Breadth-first, so a pass that runs out of budget has spent it on the
+        // shallowest folders.
         let mut frontier: Vec<(PathBuf, u16)> = vec![(self.share.root.clone(), 0)];
 
         while let Some((dir, level)) = frontier.pop() {
@@ -434,15 +406,13 @@ impl Pass<'_> {
                 Ok(()) => {}
                 Err(Halt::Stop(stop)) => {
                     self.coverage.stopped = Some(stop);
-                    // Whatever is still queued is a hole in the answer, and
-                    // saying how big it is is the whole point of this type.
+                    // Whatever is still queued is reported as a hole in the answer.
                     self.coverage.dirs_skipped += frontier.len() as u32;
                     return Ok(());
                 }
                 Err(Halt::Enum(err)) => {
-                    // The root failing is the share failing. A folder deeper
-                    // down failing is one hole, not an outage - the same
-                    // distinction the walker draws.
+                    // A failing root is a failing share. A deeper failing folder is one
+                    // hole, as in the walker.
                     if level == 0 {
                         return Err(err);
                     }
@@ -468,10 +438,8 @@ impl Pass<'_> {
             .query(dir, self.wildcard, &mut sink, &self.opts(), self.cancel)
         {
             Ok(_) => {}
-            // `FindFirstFileExW` reports "nothing matched the pattern" as
-            // `ERROR_FILE_NOT_FOUND`, which is an answer rather than an
-            // outage. Reading it as a failure would turn every unsuccessful
-            // search on a live share into "the drive did not answer".
+            // `FindFirstFileExW` reports "nothing matched" as
+            // `ERROR_FILE_NOT_FOUND`, which is an answer rather than an outage.
             Err(EnumError::Empty) => {}
             Err(err) => return Err(Halt::Enum(err)),
         }
@@ -481,8 +449,8 @@ impl Pass<'_> {
             self.take(dir, name, false);
         }
 
-        // A folder whose own name matched brings its files with it, exactly as
-        // the tree matcher does.
+        // A folder whose own name matched brings its files with it, as in the
+        // tree matcher.
         for name in &sink.dirs {
             let child = dir.join(name);
             if self.share.is_excluded(&child) {
@@ -491,8 +459,8 @@ impl Pass<'_> {
             self.expand(&child)?;
         }
 
-        // Below the configured depth, the folders that did *not* match still
-        // have to be visited - and only a full listing can name them.
+        // Below the configured depth, non-matching folders must also be visited,
+        // and only a full listing can name them.
         if level + 1 < self.share.depth {
             self.spend().map_err(Halt::Stop)?;
             let mut all = SplitSink::with_cap(MAX_SERVER_HITS);
@@ -526,9 +494,7 @@ impl Pass<'_> {
         match self.share.source.list(dir, &mut sink, &opts, self.cancel) {
             Ok(_) => {}
             Err(_) => {
-                // One unreadable folder is a hole, not a failure: the rest of
-                // the answer is still worth showing, and the count says one is
-                // missing.
+                // One unreadable folder is a hole, not a failure; the count records it.
                 self.coverage.dirs_skipped += 1;
                 return Ok(());
             }
@@ -537,9 +503,8 @@ impl Pass<'_> {
         for name in &sink.files {
             if self.take(dir, name, true) {
                 shown += 1;
-                // The same bound the tree matcher uses, and for the same
-                // reason: one enormous folder must not fill every slot and
-                // hide every other folder that matched.
+                // Same bound as the tree matcher: one large folder must not fill every
+                // slot and hide other matching folders.
                 if shown >= MAX_FILES_PER_FOLDER {
                     break;
                 }
@@ -548,18 +513,17 @@ impl Pass<'_> {
         Ok(())
     }
 
-    /// Admits one name, if the query really wants it.
+    /// Admits one name if the query wants it.
     ///
-    /// The server pattern is deliberately a superset - see
-    /// [`pattern::wildcard_for`] - so this is where a trailing match, and a
-    /// filter naming several types, are narrowed back to what was asked for.
+    /// The server pattern is a superset (see [`pattern::wildcard_for`]), so a
+    /// trailing match and a multi-type filter are narrowed here.
     fn take(&mut self, dir: &Path, name: &str, inherited: bool) -> bool {
         if self.hidden.hides(name) {
             return false;
         }
         if inherited {
             // The file's own name did not match; its folder did. Only the type
-            // filter applies, for the reason the tree matcher gives.
+            // filter applies, as in the tree matcher.
             if !self
                 .query
                 .types()
@@ -652,8 +616,7 @@ mod tests {
         assert!(cover.complete());
     }
 
-    /// A job code names a folder at least as often as a file, which is what
-    /// makes the shipped depth of one worth having at all.
+    /// Folder matches are found at depth one.
     #[test]
     fn a_matching_folder_brings_its_files_with_it() {
         let src = Arc::new(
@@ -676,8 +639,8 @@ mod tests {
         assert_eq!(paths, ["V:\\archive\\p12345\\a.pdf"]);
     }
 
-    /// The server pattern is deliberately a superset, so the narrowing has to
-    /// happen here or a trailing match would return the leading ones too.
+    /// The server pattern is a superset, so a trailing match must be narrowed
+    /// locally.
     #[test]
     fn a_trailing_match_is_narrowed_back_from_the_loose_server_pattern() {
         let src =
@@ -687,8 +650,7 @@ mod tests {
     }
 
     /// `FindFirstFileExW` matches within one folder, so depth one cannot see a
-    /// file two levels down. Saying how many folders were left unasked is the
-    /// difference between "there is no such file" and "I did not look there".
+    /// file two levels down; the unasked folders are counted.
     #[test]
     fn depth_one_reports_the_folders_it_did_not_reach() {
         let src = Arc::new(
@@ -710,9 +672,8 @@ mod tests {
         assert!(cover.round_trips > 1, "{cover:?}");
     }
 
-    /// The whole feature defeated in one line: a source that cannot push the
-    /// filter down would answer every query with a full enumeration wearing a
-    /// filter, which is the cost configuring the share this way avoids.
+    /// A source that cannot push the filter down is refused, since every query
+    /// would be a full enumeration.
     #[test]
     fn a_source_that_cannot_filter_is_refused_rather_than_enumerated() {
         let src = Arc::new(FakeDirSource::new().with_dir(ROOT, &["p12345.pdf"]));
@@ -748,9 +709,8 @@ mod tests {
         ));
     }
 
-    /// One client must cost a share at most one query per second however
-    /// pathological its input - a held key, a paste loop, a burst of index
-    /// updates each re-running the match.
+    /// A share receives at most one query per second regardless of input rate
+    /// (held keys, paste loops, bursts of index updates).
     #[test]
     fn a_share_asked_twice_in_a_moment_is_only_asked_once() {
         let src = Arc::new(FakeDirSource::new().with_dir(ROOT, &["p12345.pdf"]));
@@ -777,8 +737,7 @@ mod tests {
         );
     }
 
-    /// On a live share this is the difference between "no matches" and "not
-    /// searched", so it is named rather than reported as an empty answer.
+    /// Reported as "not searched" rather than as an empty answer.
     #[test]
     fn a_query_that_cannot_be_a_pattern_is_skipped_with_a_reason() {
         let src = Arc::new(FakeDirSource::new().with_dir(ROOT, &["p12345.pdf"]));
@@ -788,8 +747,7 @@ mod tests {
         }
     }
 
-    /// A walked tree inside a live share is a legal configuration, and this is
-    /// what stops it returning every file under it twice.
+    /// A walked tree inside a live share is not returned twice.
     #[test]
     fn a_folder_another_mapping_already_covers_is_never_queried() {
         let src = Arc::new(

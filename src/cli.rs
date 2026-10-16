@@ -1,8 +1,6 @@
-//! Argument parsing.
+//! Command-line argument parsing, shared by `files` and `files-cli`.
 //!
-//! Hand-rolled rather than pulling in a parser: there are five flags, and
-//! keeping the dependency out keeps the binary small and the startup path
-//! trivial.
+//! Hand-rolled to avoid a parser dependency and keep startup trivial.
 
 use std::path::PathBuf;
 
@@ -13,8 +11,8 @@ use crate::view::settings::PageId;
 
 /// How a `--bench --walk` run is bounded.
 ///
-/// Kept separate from `walk::WalkOpts` so the CLI can express "unset" and let
-/// the defaults come from one place rather than being restated here.
+/// Separate from `walk::WalkOpts` so unset values fall back to that type's
+/// defaults instead of being restated here.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WalkArgs {
     pub concurrency: Option<usize>,
@@ -24,32 +22,20 @@ pub struct WalkArgs {
 /// What the program was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
-    /// Run the search panel. The default, and what the program is.
+    /// Run the search panel (the default).
     Gui,
-    /// Run the settings window, and nothing else.
+    /// Run only the settings window.
     ///
-    /// Not a debugging aid. It is how the settings window is opened at all:
-    /// the panel starts a copy of itself this way rather than drawing the
-    /// form inside its own viewport, which is how Ueli does it and is the
-    /// only arrangement in which the window is genuinely independent of the
-    /// panel - resizable, in the taskbar, and not fighting a panel that is
-    /// always on top.
-    ///
-    /// It is also a legitimate thing to type. With no panel running the
-    /// window opens anyway, reads the configuration file, and writes to it;
-    /// what it cannot do is the three things that need a running panel, and
-    /// it says so rather than failing when pressed.
+    /// The panel opens settings by starting a copy of itself in this mode, so
+    /// the window is independent: resizable, in the taskbar, and not under the
+    /// always-on-top panel. Without a running panel it still edits the config
+    /// file, and reports the actions that need the panel as unavailable.
     Settings {
-        /// Which page to open on. `None` means the one it was last left on,
-        /// which is what a toggle should do.
+        /// Page to open on; `None` reopens the last page shown.
         page: Option<PageId>,
-        /// Which settings a command-line flag on the *panel* is holding.
-        ///
-        /// Without this the window would be a second process with a second
-        /// view of what is overridden, and `files --viewer pdf` would give a
-        /// settings window that offers to save the viewer, reports success,
-        /// and changes nothing at all. The panel passes its own
-        /// `Settings::cli_pinned` across. See `config::Pin`.
+        /// Settings pinned by the panel's own command-line flags (its
+        /// `Settings::cli_pinned`), so the window does not offer to save
+        /// values a flag overrides. See `config::Pin`.
         pinned: u32,
     },
     /// Fast, read-only capability report.
@@ -59,8 +45,7 @@ pub enum Mode {
         query: Option<String>,
         allow_write: bool,
         /// Walk the tree recursively and report its shape instead of timing a
-        /// single directory. The measurement that decides whether indexing a
-        /// whole share is affordable.
+        /// single directory.
         walk: Option<WalkArgs>,
     },
     /// Validate the configuration and print the routing table, without
@@ -70,9 +55,9 @@ pub enum Mode {
     },
     /// Finish an update: wait for the panel to exit, install, start it again.
     ///
-    /// Not a thing anybody types. `files.exe` starts a copy of `files-cli.exe`
-    /// this way from outside the installation, because an installer cannot
-    /// replace the executable that is driving it. See `crate::update::apply`.
+    /// Internal: `files.exe` starts a staged copy of `files-cli.exe` this way,
+    /// because an installer cannot replace the executable driving it. See
+    /// `crate::update::apply`.
     ApplyUpdate {
         msi: PathBuf,
         wait_pid: u32,
@@ -90,7 +75,7 @@ pub struct Overrides {
     pub server_filter: Option<bool>,
     pub persist: Option<bool>,
     pub index_log: Option<PathBuf>,
-    /// As written. Whether it names a viewer depends on the configuration.
+    /// Unvalidated; valid names depend on the configuration.
     pub viewer: Option<String>,
     pub pdf_viewer: Option<PathBuf>,
     pub hotkey: Option<crate::hotkey::spec::HotkeySpec>,
@@ -101,16 +86,13 @@ pub struct Args {
     pub mode: Mode,
     pub config: ConfigChoice,
     pub overrides: Overrides,
-    /// Run against an in-memory fake instead of the real drives, so the whole
-    /// application can be exercised on a machine without them.
+    /// Use an in-memory fake source instead of the real drives.
     pub demo: bool,
 }
 
-/// Applies an override and records that a flag is holding it.
+/// Applies an override and pins its key to the session.
 ///
-/// One helper rather than a `pin_to_session` line beside each assignment,
-/// because the pin is not optional and a line that can be left out will be.
-/// Written so that adding the next override means writing the key down.
+/// Bundled so a new override cannot be applied without also being pinned.
 fn pinned<T>(
     s: &mut Settings,
     key: SettingKey,
@@ -123,7 +105,7 @@ fn pinned<T>(
     }
 }
 
-/// What to say about a `--viewer` that names nothing.
+/// Error message for a `--viewer` value that matches no viewer.
 fn unknown_viewer(name: &str, viewers: &crate::config::Viewers) -> String {
     let mut expected = String::from("\"auto\", \"pdf\"");
     for n in viewers.names() {
@@ -151,15 +133,9 @@ impl Args {
         if let Some(v) = self.overrides.persist {
             s.persist = v;
         }
-        // The four above are not settings the window can write, so there is
-        // nothing for a flag to be holding. The four below are, and every
-        // one of them has to say so: a flag outranks the file for this run,
-        // so writing the file would report a save the next start ignores.
-        //
-        // Only `--viewer` used to. The other three set their field and said
-        // nothing, so the settings window offered to save a path that
-        // `--pdf-viewer` was overruling, reported success, and changed
-        // nothing at all - the precise failure `Pin` exists to prevent.
+        // The overrides above are not writable from the settings window. Those
+        // below are, so each must be pinned; otherwise the window would save a
+        // value that the flag overrides.
         let viewer = match self.overrides.viewer.as_deref() {
             Some(name) => Some(ViewerKind::parse(name, &s.viewers).ok_or_else(|| {
                 vec![ConfigError {
@@ -189,10 +165,8 @@ impl Args {
             self.overrides.index_log.clone(),
             |s, v| s.index_log = Some(v),
         );
-        // And whatever the *panel's* flags are holding, where this process
-        // is the settings window rather than the panel. Merged rather than
-        // assigned: a `--viewer` on this line pins the viewer here too, and
-        // the two sets are both true.
+        // In the settings window, also merge in the panel's pins; both sets
+        // apply.
         if let Mode::Settings { pinned, .. } = self.mode {
             s.cli_pinned |= pinned;
         }
@@ -210,95 +184,78 @@ impl std::fmt::Display for ArgError {
 }
 
 pub const HELP: &str = "\
-files - job code file search
+files - nfs & smb indexer
 
 USAGE:
-    files [OPTIONS]
-    files --doctor
-    files --check-config [--query <CODE>]
-    files --bench [--query <CODE>] [--allow-write]
-    files --bench --walk [--concurrency <N>] [--max-depth <N>]
+    files [OPTIONS]                 the search panel (tray application)
+    files --settings                the settings window
+    files-cli --doctor
+    files-cli --check-config [--query <CODE>]
+    files-cli --bench [--query <CODE>] [--allow-write]
+    files-cli --bench --walk [--concurrency <N>] [--max-depth <N>]
 
 MODES:
-    (none)              interactive search
-    --settings          the settings window on its own. The panel starts one
-                        of these; typing it with no panel running opens the
-                        window anyway, and every setting still saves.
-    --doctor            report drive type, SMB dialect, and capabilities
-                        (fast, read-only, safe to run any time)
-    --bench             time every enumeration strategy against the real
-                        drives and cross-check that they agree
-                        (slow: enumerates the share several times)
-    --bench --walk      walk every configured share recursively and report
-                        how many directories and files it holds, how deep it
-                        goes, and how long reading all of it took
-                        (read-only, but it reads the entire tree: minutes on
-                        a large share. This is the measurement that says
-                        whether indexing whole shares is affordable)
+    (none)              run the search panel
+    --settings          open the settings window. Works without a running
+                        panel; every setting still saves
+    --doctor            report drive type, SMB dialect and capabilities
+                        (fast and read-only)
+    --bench             time each enumeration strategy against the
+                        configured drives and check that they agree
+                        (slow: reads each drive several times)
+    --bench --walk      walk each configured drive recursively and report
+                        directory and file counts, depth and duration
+                        (read-only; can take minutes on a large drive)
 
 OPTIONS:
     --config <PATH>     read this configuration file instead of the default
-    --check-config      validate the configuration, print the routing table
-                        and exit, without touching the network
-    --no-config         ignore any configuration file and use the built-in
-                        defaults - the quickest way to rule the file out
-    --query <CODE>      job code to use for --bench or --check-config
-    --allow-write       let --bench create one temp file, to confirm the
-                        directory timestamp actually moves on this server
+    --check-config      validate the configuration, print the drives and
+                        exit, without touching the network
+    --no-config         ignore the configuration file and use the built-in
+                        defaults
+    --query <CODE>      job code for --bench or --check-config
+    --allow-write       let --bench create one temporary file, to confirm
+                        directory timestamps update on this server
     --concurrency <N>   directories --bench --walk reads at once (default 8,
-                        max 64). Higher finishes sooner and leans harder on
-                        the file server; SMB2 credits stop rewarding it well
-                        before 64
-    --max-depth <N>     how deep --bench --walk descends (default 32)
+                        max 64)
+    --max-depth <N>     maximum depth for --bench --walk (default 32)
     --enum <STRATEGY>   handle | findfirst | std        (default: handle)
     --matcher <KIND>    simd | naive                    (default: simd)
     --server-filter <on|off>
-                        push the search pattern to the file server
+                        send the search pattern to the file server
                         (default: off until --bench confirms it is safe)
     --viewer <KIND>     auto | pdf | <a [[viewer]] name> (default: auto)
-                        auto hands each file to the program Windows has for
-                        it. pdf gathers every page of the code into one
-                        document and opens it with the system's PDF handler;
-                        a type a [[viewer]] claims, such as a drawing, goes to
-                        that viewer instead. A [[viewer]] name opens the
-                        single selected file with that program. F2 switches
-                        while running, but this flag pins it for the run
-    --pdf-viewer <PATH> open merged PDFs with this program instead of
-                        whatever is registered for .pdf
-    --hotkey <CHORD>    the global hotkey that summons the compact quick
-                        search window, or \"off\" to claim no key. Modifiers
-                        ctrl/alt/shift/win plus a letter, a digit, f1-f24 or
-                        space (default: ctrl+shift+space). The Copilot key on
-                        newer keyboards sends shift+win+f23, so that value
-                        binds the key itself
+                        auto opens each file in its default app. pdf
+                        combines a code's pages into one document; types a
+                        [[viewer]] claims go to that viewer instead. A
+                        [[viewer]] name opens the selected file with that
+                        program. F2 switches at run time; this flag pins it
+    --pdf-viewer <PATH> open combined PDFs with this program instead of the
+                        default PDF app
+    --hotkey <CHORD>    global hotkey that shows the panel, or \"off\" to
+                        disable it. ctrl/alt/shift/win plus a letter, digit,
+                        f1-f24 or space (default: ctrl+shift+space). The
+                        Copilot key sends shift+win+f23
     --apply-update      finish an update: wait for the running panel to exit,
-    --msi <PATH>        install <PATH>, then start it again from --relaunch.
-    --wait-pid <PID>    Started by the panel itself from a staging folder,
-    --relaunch <PATH>   because an installer cannot replace the executable
-                        driving it. Not a thing to type by hand
+    --msi <PATH>        install <PATH>, then start --relaunch. Started by the
+    --wait-pid <PID>    panel from a staging folder, because an installer
+    --relaunch <PATH>   cannot replace the program running it. Internal
     --no-persist        do not read or write the on-disk index
-    --index-log <PATH>  append one line per index scheduling decision: what
-                        woke it, what the directory stamp said, whether it
-                        rebuilt and why, and when it will look again
-                        (off by default; it answers why did it reindex)
-                        how much colour to use. Detection reads COLORTERM and
-                        WT_SESSION; NO_COLOR always wins, and FILES_COLOR sets
-                        it without a flag. FILES_GLYPHS=ascii replaces the
-                        marks for a font that lacks them
-    --gui               run the desktop window instead of the terminal
-    --demo              run against synthetic data, with no drives at all
-    -h, --help          show this
+    --index-log <PATH>  append one line per index scheduling decision: the
+                        trigger, the directory stamp, whether it rebuilt,
+                        and the next check (off by default)
+    --demo              run against synthetic data, with no drives
+    -h, --help          show this help
     -V, --version       show the version
 
 CONFIGURATION:
-    Mappings live in %APPDATA%\\files\\config.toml, written with sensible
-    defaults on first run. Each mapping names a share, says whether it is one
-    flat indexed directory or a parent of per-job folders, and carries the
-    patterns that route a code to it. Add a share by adding a [[mapping]].
+    %APPDATA%\\files\\config.toml, written from a commented template on
+    first run. Add a [[mapping]] for each drive to search, then validate
+    the file with files-cli --check-config.
 
 ENVIRONMENT:
-    FILES_BASE_PATH, FILES_CUSTPRO_PATH   repoint the 'jobs' / 'custompro'
-                                          mappings
+    FILES_BASE_PATH, FILES_CUSTPRO_PATH   repoint the mappings named 'jobs'
+                                          and 'custompro'
     FILES_FS_STRATEGY, FILES_MATCHER, FILES_SERVER_FILTER, FILES_PERSIST,
     FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER,
     FILES_HISTORY, FILES_HOTKEY, FILES_THEME, FILES_STALE_NOTICES,
@@ -309,20 +266,13 @@ ENVIRONMENT:
     FILES_HIDE_ON_ESCAPE, FILES_DOCK, FILES_COLUMNS,
     FILES_CHECK_FOR_UPDATES, FILES_UPDATE_GITHUB
 
-    Any of these outranks the configuration file, so a setting changed in the
-    settings window applies for the session and is not saved - the window says
-    which variable is holding it. Unset the variable to make the change stick.
+    These outrank the configuration file. A setting held by one applies for
+    the session only, and the settings window names the variable.
 
-    FILES_PROBE_INTERVAL, FILES_RESCAN_FLOOR   how often the index checks
-                                          whether the share changed, and how
-                                          long it may go without a full
-                                          rescan, in whole seconds. Lowering
-                                          both is how a freshness problem is
-                                          reproduced in minutes rather than
-                                          hours.
-
-    Every strategy is switchable without a rebuild, so a fast path that
-    misbehaves on the real network can be turned off in the field.
+    FILES_PROBE_INTERVAL, FILES_RESCAN_FLOOR
+                        seconds between change checks, and the longest gap
+                        between full rescans. Lower both to reproduce a
+                        freshness problem quickly
 ";
 
 /// Parses arguments over a base of environment-derived settings.
@@ -422,8 +372,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
             "--demo" => demo = true,
             "--no-persist" => overrides.persist = Some(false),
             "--viewer" => {
-                // Kept as written: whether it names a viewer depends on the
-                // configuration, which is not read until `settings`.
+                // Validated in `settings`, once the configured viewers are known.
                 overrides.viewer = Some(value("--viewer")?);
             }
             "--pdf-viewer" => {
@@ -470,10 +419,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
         }
     }
 
-    // Above everything, including `--check-config`. This is not a mode
-    // somebody chose from a menu of them; it is an instruction from the copy
-    // of this program that is about to exit, and anything else on the line
-    // would be a mistake rather than a preference.
+    // Takes precedence over every other mode, including `--check-config`:
+    // it is issued by the exiting app, not chosen by a user.
     if apply_update {
         let msi = msi.ok_or_else(|| ArgError("--apply-update needs --msi".into()))?;
         let wait_pid =
@@ -490,10 +437,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
         });
     }
 
-    // Above the text modes and below `--apply-update`, for the same reason
-    // as the latter: it is an instruction from the copy of this program that
-    // is already running, not a preference somebody expressed alongside
-    // others.
+    // Below `--apply-update`, above the text modes: it is issued by the
+    // running panel.
     if settings_window {
         return Ok(Args {
             mode: Mode::Settings { page, pinned },
@@ -522,7 +467,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, ArgError> 
     })
 }
 
-/// Parses the real process arguments, skipping argv[0].
+/// Parses the real process arguments, skipping `argv[0]`.
 pub fn parse_env() -> Result<Args, ArgError> {
     parse(std::env::args().skip(1))
 }
@@ -541,16 +486,7 @@ mod tests {
         assert_eq!(args(&[]).unwrap().mode, Mode::Gui);
     }
 
-    /// A flag that overrides a setting the window can write has to say so,
-    /// or the window offers to save a value the next start will ignore.
-    ///
-    /// Only `--viewer` did. The other three set their field silently, so
-    /// with `--pdf-viewer` given the settings window showed the path as
-    /// editable, wrote it to the file, reported a success, and changed
-    /// nothing about the running program or the next one.
-    ///
-    /// `--no-config` so this tests the flags rather than whatever
-    /// configuration file the machine running it happens to have.
+    /// `--no-config` isolates the test from the machine's config file.
     #[test]
     fn a_flag_that_overrides_a_writable_setting_pins_it_for_the_session() {
         let a = args(&[
@@ -582,8 +518,6 @@ mod tests {
         }
     }
 
-    /// And one nothing overrode is not pinned to the command line, or the
-    /// pin would mean nothing.
     #[test]
     fn a_setting_no_flag_touched_is_not_pinned_to_the_command_line() {
         let s = args(&["--no-config", "--viewer", "pdf"])
@@ -709,8 +643,6 @@ mod tests {
         );
     }
 
-    /// Checking the configuration is the thing you do when something else is
-    /// misbehaving, so it takes precedence over the other modes.
     #[test]
     fn check_config_wins_over_bench() {
         assert!(matches!(
@@ -785,8 +717,7 @@ mod tests {
         }
     }
 
-    /// The ENVIRONMENT block is the only record of these names, and nothing
-    /// else fails when one is added to the loader and forgotten here.
+    /// The ENVIRONMENT block in `HELP` is the only documentation of these names.
     #[test]
     fn the_help_text_documents_every_environment_variable_the_loader_reads() {
         for var in [
@@ -806,10 +737,8 @@ mod tests {
             assert!(HELP.contains(var), "{var} is undocumented");
         }
 
-        // The list above is hand-written and had already fallen behind -
-        // FILES_THEME was read by the loader and named by no one. Everything
-        // the settings window can write is enumerable, so that half is asked
-        // of the enumeration rather than of somebody's memory.
+        // Writable settings are enumerable, so check them all rather than
+        // relying on the hand-written list above.
         for key in crate::config::write::SettingKey::ALL {
             assert!(HELP.contains(key.env()), "{} is undocumented", key.env());
         }
@@ -833,8 +762,8 @@ mod tests {
         assert_eq!(args(&[]).unwrap().overrides.viewer, None);
     }
 
-    /// Checked once the configuration is read, against the viewers it adds:
-    /// with none, only the built-in two are names.
+    /// Validated after the configuration loads; with no config, only the two
+    /// built-in viewers exist.
     #[test]
     fn an_unknown_viewer_is_rejected_with_its_name() {
         let errs = args(&["--no-config", "--viewer", "notepad"])

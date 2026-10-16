@@ -1,12 +1,8 @@
 //! Retry pacing for the index refresher.
 //!
-//! Full jitter, not equal jitter: with a single client the only job jitter has
-//! is to avoid re-synchronising with a server-side hiccup, and full jitter
-//! occasionally retries fast - which is exactly what you want when a VPN
-//! reconnects.
-//!
-//! The healthy cadence gets its own +/-10% jitter too, so a fleet of these
-//! apps does not hammer the file server in lockstep on the minute.
+//! Uses full jitter, which occasionally retries quickly (useful when a VPN
+//! reconnects). The healthy interval gets +/-10% jitter so many clients do not
+//! hit the file server in lockstep.
 
 use std::time::Duration;
 
@@ -33,8 +29,8 @@ impl Backoff {
 
     /// The exponential ceiling for `attempt`, before jitter.
     pub fn ceiling(&self, attempt: u32) -> Duration {
-        // `checked_mul` saturates the shift instead of wrapping on a long
-        // outage - an unreachable drive must not produce a zero-length sleep.
+        // Saturate instead of wrapping on a long outage, so the delay never
+        // becomes zero.
         let factor = 1u32.checked_shl(attempt.min(31)).unwrap_or(u32::MAX);
         self.base
             .checked_mul(factor)

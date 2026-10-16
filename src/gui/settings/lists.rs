@@ -1,15 +1,8 @@
-//! The alias list and the drive list.
+//! The alias and drive list editors.
 //!
-//! Moved out of `gui::windows` when the form became pages: these two are the
-//! only blocks with logic of their own, they carry the most careful comments
-//! in the window, and both were well past the size a module is held to here.
-//!
-//! Neither holds a draft of the list it edits. Adding and removing each write
-//! the whole array immediately, so the window never has a version of the
-//! aliases or the drives the file does not - which is the promise the rest of
-//! the form makes, kept the same way. The boxes on the "add" row are the
-//! exception that proves it: they are what somebody is typing, not what is
-//! configured.
+//! Neither keeps a draft copy of its list: each add or remove writes the
+//! whole array immediately, so the window always matches the config file.
+//! Only the "add" row's input boxes hold unsaved state.
 
 use eframe::egui;
 
@@ -26,10 +19,7 @@ pub struct DriveDraft {
     path: String,
     kind: crate::paths::MappingKind,
     problem: Option<String>,
-    /// The drive whose removal is waiting on an answer.
-    ///
-    /// Same category as the boxes above: the state a control has while it
-    /// is being used, and not a copy of the drive list.
+    /// The drive whose removal is awaiting confirmation.
     confirming: Option<crate::paths::MappingId>,
 }
 
@@ -38,8 +28,8 @@ impl Default for DriveDraft {
         Self {
             name: String::new(),
             path: String::new(),
-            // What most drives are, and the one whose cost is a background
-            // walk rather than a round trip per search.
+            // The common case; indexed by a background walk rather than a
+            // round trip per search.
             kind: crate::paths::MappingKind::Tree,
             problem: None,
             confirming: None,
@@ -47,38 +37,27 @@ impl Default for DriveDraft {
     }
 }
 
-/// The three boxes on the row that adds an alias.
+/// The input boxes on the row that adds an alias.
 #[derive(Default)]
 pub struct AliasDraft {
     name: String,
     code: String,
     note: String,
-    /// Shown under the row, and only after an attempt: complaining that a name
-    /// is empty before anybody has typed one is nagging.
+    /// Validation error, set only after an add attempt.
     problem: Option<String>,
 }
 
-/// The drives, with a row to add one and a button to take one away.
+/// Draws the drive list with add and remove controls.
 ///
-/// The most dangerous control in this window, and the one written most
-/// carefully. A mistyped drive path is the single configuration error with no
-/// symptom: the search finds nothing, and a code with no files looks exactly
-/// like a job with no files. So a path that is not there is called out on the
-/// row rather than accepted silently - as a warning and not a refusal,
-/// because this configuration follows people onto laptops where `R:\`
-/// legitimately is not mapped.
-///
-/// Every change is written whole and takes effect at the next start. Nothing
-/// is applied live: an index actor per drive is started once, and telling one
-/// to become a different drive is a much larger thing than editing a list.
+/// A missing path is flagged as a warning rather than rejected, because the
+/// config roams to machines where a drive may legitimately be unmapped.
+/// Changes take effect at the next start, since each drive's index actor is
+/// started once.
 pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
     intro(ui, theme, DRIVES.help);
 
     let current = settings.routes.all();
     for mapping in current {
-        // The one error with no symptom, said out loud on the row it is
-        // about. A warning rather than a refusal: this file roams, and a
-        // laptop at home has none of these drives mapped.
         let missing = mapping.enabled
             && !mapping.path.as_os_str().is_empty()
             && !form.exists.is_dir(&mapping.path, form.now, |p| p.is_dir());
@@ -113,10 +92,8 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
                 }
             },
             |ui| {
-                // Asked rather than done. This is the one control in the
-                // window that cannot be undone by pressing it again: the
-                // path is the part nobody remembers, and the rewrite costs
-                // the comments around the drive list in the file.
+                // Confirmed first: removal is not reversible from the UI, and
+                // rewriting the list drops its comments in the file.
                 if ui.button(DRIVES.remove).clicked() {
                     form.drive.confirming = Some(mapping.id);
                 }
@@ -187,12 +164,10 @@ pub fn drives(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut 
     }
 }
 
-/// The list as it would be with this drive added, or why it cannot be.
+/// Returns the list with the drafted drive appended, or why it is invalid.
 ///
-/// The set rules come from `paths::conflicts`, which is what the loader uses,
-/// so a drive this accepts is one the next start accepts. The rest - a name,
-/// a path, a name that is already taken - are the per-entry rules the parser
-/// applies against a line, restated here against a box.
+/// Set-level rules come from `paths::conflicts`, as in the loader; the
+/// per-entry checks mirror the parser's.
 fn new_drive(
     current: &[crate::paths::Mapping],
     draft: &DriveDraft,
@@ -211,8 +186,7 @@ fn new_drive(
 
     let mut next = current.to_vec();
     next.push(crate::paths::Mapping {
-        // The position it is about to occupy. Ids are positions in this list,
-        // so the one being appended takes the index at the end of it.
+        // Ids are list positions, so the appended entry takes the next index.
         id: crate::paths::MappingId(next.len() as u16),
         name: name.into(),
         path: crate::util::winpath::normalise_root(std::path::Path::new(path)),
@@ -228,13 +202,7 @@ fn new_drive(
     }
 }
 
-/// The alias list, with a row to add one and a button to take one away.
-///
-/// There is no draft list. Adding and removing each write the whole array
-/// immediately, so the window never holds a version of the aliases the file
-/// does not - which is the same promise the rest of this form makes, kept the
-/// same way. The three boxes on the "add" row are the exception that proves
-/// it: they are what somebody is typing, not what is configured.
+/// Draws the alias list with add and remove controls.
 pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut Form<'_>) {
     intro(ui, theme, ALIASES.help);
 
@@ -263,10 +231,6 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
             |_| {},
             |ui| {
                 if ui.button(ALIASES.remove).clicked() {
-                    // The whole list, minus this one. Rewriting the array
-                    // wholesale is what keeps "what the window shows" and
-                    // "what the file says" the same object rather than two
-                    // that have to be kept in step.
                     form.aliases = Some(
                         current
                             .iter()
@@ -297,9 +261,7 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
                 .desired_width(widths[2]),
         );
         if ui.button(ALIASES.add).clicked() {
-            // The very same check the loader applies, from the same function.
-            // Anything this accepts is something the next start will accept,
-            // which is the entire point of it living in `crate::alias`.
+            // Same check the loader applies, so anything accepted here loads.
             match crate::alias::check(&form.draft.name, &form.draft.code, current) {
                 Ok(()) => {
                     let mut next = current.to_vec();
@@ -318,8 +280,6 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
         }
     });
 
-    // Only after an attempt. Complaining that a name is empty before anybody
-    // has typed one is nagging at somebody who has done nothing wrong.
     if let Some(problem) = &form.draft.problem {
         widgets::message_bar(
             ui,
@@ -330,25 +290,17 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
     }
 }
 
-/// Room for the checkbox that turns a drive off, and for a button after it.
-///
-/// Two numbers where there used to be twelve. Both are what a control of
-/// that kind actually occupies rather than a column somebody sized by eye,
-/// and neither varies with the window - which is the point of declaring
-/// them as `Cell::Fixed`.
+/// Fixed widths of a drive row's checkbox and a list row's button, in points.
 const CHECKBOX_W: f32 = 24.0;
 const BUTTON_W: f32 = 84.0;
 
-/// The row at the foot of a list, with three boxes and a button.
+/// Draws the add row at the foot of a list: three boxes and a button.
 ///
-/// The one place in this window where a narrow window wraps rather than
-/// elides. Everywhere else an over-long value is cut with an ellipsis and
-/// the eye fills it in; a text box treated that way is a box somebody cannot
-/// type a path into, so when the three will not fit on one line they go onto
-/// two. That is what `row_cells` returning `None` means, and this is the
-/// only caller that acts on it.
+/// Unlike other rows, this wraps rather than elides when narrow, because a
+/// truncated text box cannot be typed into. It is the only caller that acts
+/// on `row_cells` returning `None`.
 fn add_row(ui: &mut egui::Ui, build: impl FnOnce(&mut egui::Ui, [f32; 3])) {
-    /// What each of the three boxes would like, and the least each can be.
+    /// Preferred and minimum width of each box.
     const WANT: [f32; 3] = [84.0, 214.0, 150.0];
     const LEAST: [f32; 3] = [56.0, 120.0, 72.0];
 
@@ -365,23 +317,17 @@ fn add_row(ui: &mut egui::Ui, build: impl FnOnce(&mut egui::Ui, [f32; 3])) {
             ui.horizontal(|ui| build(ui, capped));
         }
         None => {
-            // Two lines. Each box gets the whole width, which is the one
-            // arrangement that is never cramped.
+            // Stack the boxes, each at full width.
             let full = (avail - CELL_GAP).max(LEAST[0]);
             ui.vertical(|ui| build(ui, [full, full, full]));
         }
     }
 }
 
-/// Between the boxes on the add row, and the same gap a list row uses.
+/// Gap between boxes on the add row; matches the list row gap.
 const CELL_GAP: f32 = 8.0;
 
-/// The sentence over a list, saying what the list is for.
-///
-/// Not a `setting_row`: a list has no single value and so no control to put
-/// beside one, and wrapping it in a tile would make an empty tile above the
-/// entries. Plain prose, at the same size and colour a row uses for its
-/// help, so the two read as the same kind of line.
+/// Draws the explanatory line above a list, styled like a row's help text.
 fn intro(ui: &mut egui::Ui, theme: &Theme, text: &str) {
     ui.label(
         egui::RichText::new(text)

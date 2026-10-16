@@ -1,9 +1,7 @@
 //! The single canonical case-folding function.
 //!
-//! Both the indexer and the query path MUST fold through here. If the two
-//! sides ever disagree by even one byte the result is a silent zero-match that
-//! is essentially impossible to reproduce on a developer machine, so this is
-//! deliberately the only implementation in the crate.
+//! The indexer and the query path must both fold through here; any mismatch
+//! causes silent zero-match results.
 //!
 //! # The length-preserving contract
 //!
@@ -12,12 +10,10 @@
 //! in [`crate::index::snapshot::Snapshot`] address both the folded arena and
 //! the original-case arena.
 //!
-//! ASCII takes the obvious path. For non-ASCII we apply `char::to_lowercase`
-//! only when it yields exactly one `char` whose UTF-8 encoding is the same
-//! length as the input's; otherwise the character is copied through unchanged.
-//! That covers Latin-1 Supplement, Latin Extended-A, Cyrillic and Greek - i.e.
-//! effectively all real filenames. The cases it declines are length-changing or
-//! multi-char folds:
+//! For non-ASCII, `char::to_lowercase` is applied only when it yields one
+//! `char` of the same UTF-8 length; otherwise the character is copied
+//! unchanged. This covers Latin-1, Latin Extended-A, Cyrillic and Greek. The
+//! declined cases are length-changing or multi-char folds:
 //!
 //! | Char | Would fold to | Declined because |
 //! |------|---------------|------------------|
@@ -27,12 +23,12 @@
 //! | `Å` U+212B ANGSTROM (3 B) | `å` (2 B) | length change |
 //!
 //! [`needs_unicode_fallback`] reports when a query might be affected, so the
-//! matcher can fall back to a slow full-Unicode comparison rather than being
-//! silently wrong. See `crate::search::matcher`.
+//! matcher can fall back to a full-Unicode comparison. See
+//! `crate::search::matcher`.
 
 use smallvec::SmallVec;
 
-/// Inline capacity for a folded query. Job codes are far shorter than this.
+/// Inline capacity for a folded query; typical queries are much shorter.
 pub type FoldedQuery = SmallVec<[u8; 64]>;
 
 /// Folds `name` to lowercase, appending to `out`.
@@ -44,8 +40,7 @@ pub fn fold_into(name: &str, out: &mut Vec<u8>) -> usize {
     let bytes = name.as_bytes();
 
     if bytes.is_ascii() {
-        // Fast path: ~100% of real filenames. `make_ascii_lowercase` is
-        // auto-vectorized by LLVM.
+        // Fast path for ASCII; `make_ascii_lowercase` is auto-vectorized.
         out.extend_from_slice(bytes);
         out[before..].make_ascii_lowercase();
     } else {
@@ -84,20 +79,16 @@ pub fn fold_query(query: &str) -> FoldedQuery {
     FoldedQuery::from_vec(v)
 }
 
-/// True when `query` contains a character whose correct lowercase form this
-/// module declines to apply, so a fast-path miss might be a false negative.
+/// Returns true when a fast-path miss for `query` might be a false negative.
 ///
-/// Any non-ASCII character is treated as suspect. Being conservative costs
-/// nothing: the caller only consults this after the fast path already returned
-/// zero matches, which for an ASCII query (the overwhelming majority) can never
-/// happen because `is_ascii()` short-circuits first.
+/// Any non-ASCII character counts. Callers check this only after the fast path
+/// found nothing, so the conservative answer is cheap.
 pub fn needs_unicode_fallback(query: &str) -> bool {
     !query.is_ascii()
 }
 
-/// Slow, allocating, fully Unicode-correct containment check.
-///
-/// Only reachable from the fallback path described above.
+/// Slow, allocating, fully Unicode-correct containment check, used only by
+/// the fallback path.
 pub fn contains_unicode_ci(haystack: &str, needle: &str) -> Option<usize> {
     haystack.to_lowercase().find(&needle.to_lowercase())
 }

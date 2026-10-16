@@ -1,20 +1,8 @@
-//! The index schedule, simulated.
+//! Simulation tests for `files::index::schedule`.
 //!
-//! The bug these tests exist for was reported as "random indexing reloads":
-//! a million-entry share re-enumerated roughly once a minute instead of once
-//! an hour, at intervals that looked arbitrary because the probe cadence
-//! carries +/-10% jitter.
-//!
-//! It survived into a shipped build because it was **unreachable from a
-//! test**. The probe interval is sixty seconds and the rescan floor is an
-//! hour, so no timer-driven refresh had ever fired in the suite; the only way
-//! any test could make the index actor act was to send it an explicit refresh,
-//! which takes a different branch entirely.
-//!
-//! `files::index::schedule` reads no clock and does no I/O, so a day of
-//! operation can be stepped through here in microseconds - and the question
-//! "how many times does this rebuild in twenty-four hours?" becomes an
-//! assertion instead of an impression.
+//! The scheduler reads no clock and does no I/O, so days of timer-driven
+//! probes, scans and patches run in microseconds and enumeration counts can be
+//! asserted directly.
 
 use std::time::{Duration, Instant};
 
@@ -27,8 +15,7 @@ const SEED: u64 = 0xD15E_A5ED_D15E_A5ED;
 const HOUR: Duration = Duration::from_secs(3600);
 const DAY: Duration = Duration::from_secs(24 * 3600);
 
-/// A share the simulator can interrogate. Every method is answered instantly;
-/// only the simulated clock moves.
+/// A simulated share. Calls return instantly; only the simulated clock moves.
 trait Share {
     fn probe(&mut self, now: Instant) -> Result<DirStamp, EnumError>;
     fn scan(&mut self, now: Instant) -> Result<Option<DirStamp>, EnumError>;
@@ -39,9 +26,8 @@ trait Share {
 struct Scan {
     at: Instant,
     reason: ScanReason,
-    /// Whether it produced a listing. Only a *successful* enumeration resets
-    /// the rescan floor, so the two are paced by different things and have to
-    /// be counted separately.
+    /// Whether it produced a listing. Only a successful enumeration resets the
+    /// rescan floor, so successes and failures are counted separately.
     ok: bool,
 }
 
@@ -70,15 +56,14 @@ impl Sim {
         }
     }
 
-    /// One wake-up: feeds inputs back until the scheduler says to wait.
+    /// Runs one timer wake-up, feeding inputs back until the scheduler waits.
     ///
-    /// Mirrors the actor's driver loop exactly, including its step bound, so a
-    /// rule that failed to terminate would show up here first.
+    /// Mirrors the actor's driver loop, including its step bound.
     fn wake(&mut self, share: &mut dyn Share, forced: bool) -> Instant {
         self.drive(share, Input::Woke { forced })
     }
 
-    /// One wake-up caused by the watcher rather than the clock.
+    /// Runs one wake-up caused by the watcher rather than the clock.
     fn notify(&mut self, share: &mut dyn Share, full: bool) -> Instant {
         self.drive(share, Input::Changed { full })
     }
@@ -144,7 +129,7 @@ impl Sim {
         self.scans.len()
     }
 
-    /// Enumerations that actually produced a listing.
+    /// Counts enumerations that produced a listing.
     fn completed_scans(&self) -> usize {
         self.scans.iter().filter(|s| s.ok).count()
     }
@@ -153,7 +138,7 @@ impl Sim {
         self.scans.iter().map(|s| s.reason).collect()
     }
 
-    /// Smallest gap between two consecutive enumerations.
+    /// Returns the smallest gap between two consecutive enumerations.
     fn tightest_gap(&self) -> Option<Duration> {
         self.scans
             .windows(2)
@@ -168,8 +153,7 @@ impl Sim {
 
 // --- scripted shares -------------------------------------------------------
 
-/// Nothing ever changes. The overwhelmingly common case in production: the
-/// CustomPro directory is quiet for hours at a time.
+/// A share that never changes; the common case in production.
 struct Stable(DirStamp);
 
 impl Share for Stable {
@@ -181,11 +165,10 @@ impl Share for Stable {
     }
 }
 
-/// Enumerates fine, but will not answer the freshness probe.
+/// Enumerates, but refuses the freshness probe.
 ///
-/// The exact shape of the reported failure: a server that rejects
-/// `FileBasicInfo` on a directory handle. The scan's own stamp capture fails
-/// for the same reason, so it yields `Ok(None)`.
+/// Models a server that rejects `FileBasicInfo` on a directory handle. The
+/// scan's own stamp capture fails for the same reason, so it yields `Ok(None)`.
 struct RefusesProbe;
 
 impl Share for RefusesProbe {
@@ -197,7 +180,7 @@ impl Share for RefusesProbe {
     }
 }
 
-/// Reachable intermittently at best - a VPN flapping, or a laptop on wifi.
+/// A share whose probes and scans always fail transiently.
 struct Unreachable;
 
 impl Share for Unreachable {
@@ -209,7 +192,7 @@ impl Share for Unreachable {
     }
 }
 
-/// A busy directory: something is added every `period`.
+/// A directory whose stamp changes every `period`.
 struct Churning {
     period: Duration,
     origin: Option<Instant>,
@@ -260,11 +243,8 @@ impl Share for ScanFailsAtFirst {
 
 // --- the reload storm ------------------------------------------------------
 
-/// The primary regression test.
-///
-/// Before the fix this produced roughly 1,400 full enumerations a day - one
-/// per probe interval - because "I have no stamp to compare against" was read
-/// as "the directory changed".
+/// A missing stamp is not treated as a change, so a share that refuses the
+/// probe is rebuilt on the rescan floor rather than on every probe.
 #[test]
 fn a_share_that_refuses_the_probe_is_enumerated_once_per_floor_not_once_per_probe() {
     let mut sim = Sim::new(Cadence::shipped());
@@ -301,11 +281,8 @@ fn a_quiet_share_is_enumerated_only_on_the_floor() {
     let mut sim = Sim::new(Cadence::shipped());
     sim.run_for(DAY, &mut Stable(DirStamp::new(1, 1)));
 
-    // The floor is "at least an hour, plus up to `FLOOR_SPREAD_PERCENT` of
-    // one", so a day holds between `DAY / (floor * 1.25)` and `DAY / floor`
-    // passes. The spread exists so that three hundred clients do not re-walk
-    // on the same minute; here it simply means the count is a band, not a
-    // number.
+    // The floor is an hour plus up to `FLOOR_SPREAD_PERCENT` (25%) of one, so
+    // a day holds between `DAY / (floor * 1.25)` and `DAY / floor` passes.
     let most = (DAY.as_secs() / HOUR.as_secs()) as usize + 2;
     let fewest = (DAY.as_secs() * 100 / (HOUR.as_secs() * (100 + 25))) as usize - 1;
     assert!(
@@ -322,8 +299,8 @@ fn a_quiet_share_is_enumerated_only_on_the_floor() {
     );
 }
 
-/// An unreachable drive is not a stale index. The backoff paces the probe; the
-/// floor is what eventually forces a rebuild, and nothing else may.
+/// An unreachable share is not treated as stale: backoff paces the probe and
+/// scans never start closer than the spacing floor.
 #[test]
 fn an_unreachable_share_is_not_hammered_with_enumerations() {
     let mut sim = Sim::new(Cadence::shipped());
@@ -344,9 +321,8 @@ fn an_unreachable_share_is_not_hammered_with_enumerations() {
     );
 }
 
-/// The second regression test. `last_full_scan` used to be set only on
-/// success, so a failing scan left the rescan floor permanently due and every
-/// full-jitter retry - uniform in `0..=ceiling` - started another enumeration.
+/// Failed scans still count toward spacing, so full-jitter retries cannot
+/// start enumerations closer than `min_scan_spacing`.
 #[test]
 fn a_failing_scan_never_retries_faster_than_the_spacing_floor() {
     let cadence = Cadence::shipped();
@@ -459,11 +435,7 @@ fn recovering_from_a_refusing_share_returns_to_the_cheap_cadence() {
     );
 }
 
-/// A week, in microseconds.
-///
-/// Not `#[ignore]`d: the whole point of a scheduler that reads no clock is
-/// that a week costs the same as a second, so there is no reason for the
-/// long-horizon check to be one nobody runs.
+/// Simulates a week. Not ignored, because simulated time makes it cheap.
 #[test]
 fn a_week_of_a_share_that_cannot_be_probed_stays_on_the_floor() {
     let week = DAY * 7;
@@ -476,8 +448,7 @@ fn a_week_of_a_share_that_cannot_be_probed_stays_on_the_floor() {
         "{} enumerations in a week; the floor allows about {floors}",
         sim.scan_count()
     );
-    // The failing behaviour was one enumeration per probe interval. Stating
-    // the old number makes the regression unmissable if it ever returns.
+    // Compare against one enumeration per 60s probe interval.
     let old_behaviour = (week.as_secs() / 60) as usize;
     assert!(
         sim.scan_count() * 50 < old_behaviour,
@@ -493,9 +464,9 @@ fn a_week_of_a_quiet_share_never_drifts() {
     sim.run_for(week, &mut Stable(DirStamp::new(1, 1)));
 
     let floors = (week.as_secs() / HOUR.as_secs()) as usize;
-    // A window either side: the floor fires at the first wake at or after the
-    // hour, the probe jitter decides whether the last one lands inside the
-    // week, and the floor spread stretches each gap by up to a quarter.
+    // A band, not a number: the floor fires at the first wake after the hour,
+    // probe jitter decides whether the last one lands inside the week, and
+    // the floor spread stretches each gap by up to a quarter.
     let fewest = (week.as_secs() * 100 / (HOUR.as_secs() * (100 + 25))) as usize - 1;
     assert!(
         (fewest..=floors + 1).contains(&sim.scan_count()),
@@ -526,7 +497,7 @@ enum ScanStep {
     Failed,
 }
 
-/// Replays a fixed script, cycling. Arbitrary, but deterministic per case.
+/// A share that replays a fixed script of answers, cycling.
 struct Scripted {
     probes: Vec<ProbeStep>,
     scans: Vec<ScanStep>,
@@ -587,9 +558,8 @@ fn scan_steps() -> impl Strategy<Value = Vec<ScanStep>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(400))]
 
-    /// The invariant the whole rewrite rests on. Whatever the share does, two
-    /// enumerations of a million-entry directory never start closer together
-    /// than the spacing floor - and nothing but an F5 can bypass it.
+    /// Whatever the share answers, two timer-driven enumerations never start
+    /// closer than the spacing floor. Only a forced refresh (F5) bypasses it.
     #[test]
     fn no_sequence_of_answers_can_produce_back_to_back_enumerations(
         probes in probe_steps(),
@@ -610,8 +580,8 @@ proptest! {
         }
     }
 
-    /// A bound on the damage, stated in the units the user feels: how many
-    /// times can the screen say "building index" in six hours?
+    /// The enumeration count over six hours is bounded by elapsed time over
+    /// the spacing floor.
     #[test]
     fn the_number_of_enumerations_is_bounded_by_the_elapsed_time(
         probes in probe_steps(),
@@ -631,14 +601,11 @@ proptest! {
         );
     }
 
-    /// The regression property, stated for every possible scan behaviour: a
-    /// share whose probe always fails must fall back to the rescan floor, not
-    /// to the probe interval.
+    /// For any scan behaviour, a share whose probe always fails is rebuilt on
+    /// the rescan floor, not on the probe interval.
     ///
-    /// Counted over *completed* enumerations, because only those reset the
-    /// floor. Failed ones retry on the scan backoff, which the two properties
-    /// above already bound - and conflating the two is how the first draft of
-    /// this test managed to fail against an entirely legitimate schedule.
+    /// Counts completed enumerations only, because only those reset the floor;
+    /// failed ones retry on the scan backoff, bounded by the properties above.
     #[test]
     fn refusing_every_probe_falls_back_to_the_floor(
         scans in scan_steps(),
@@ -664,13 +631,12 @@ proptest! {
 
 // --- live change notification ----------------------------------------------
 
-/// A tree never probes, so a notification is the only thing that can tell it
-/// anything before the floor comes round. What it does with one is therefore
-/// the whole of the live-update behaviour.
+/// Watcher notifications for a walked tree, which has no stamp to probe and
+/// relies on notifications for updates between floors.
 mod notifications {
     use super::*;
 
-    /// A walked tree: no stamp, ever.
+    /// A walked tree, which never yields a stamp.
     struct Tree;
 
     impl Share for Tree {
@@ -689,9 +655,8 @@ mod notifications {
         sim
     }
 
-    /// The point of the whole mechanism: a described change is patched in, not
-    /// walked. A re-walk costs one to three minutes of round trips, so doing
-    /// one per notification would be a share under permanent enumeration.
+    /// A described change is patched in rather than re-walked; a re-walk costs
+    /// one to three minutes of round trips.
     #[test]
     fn a_described_change_is_patched_rather_than_walked() {
         let mut sim = walked();
@@ -702,8 +667,8 @@ mod notifications {
         assert_eq!(sim.scan_count(), 1, "no second pass over the share");
     }
 
-    /// An overflow leaves nothing to patch, so only a full pass can say what
-    /// the share now holds - and it is paced like any other pass.
+    /// An overflow leaves nothing to patch, so it triggers a full pass, paced
+    /// like any other.
     #[test]
     fn an_overflow_is_a_full_pass() {
         let mut sim = walked();
@@ -715,15 +680,13 @@ mod notifications {
         assert_eq!(sim.scans[1].reason, ScanReason::Changed);
     }
 
-    /// Otherwise a share that overflows continuously - which is exactly what a
-    /// share somebody is copying a job folder onto does - would re-walk itself
-    /// end to end, over and over, for as long as the copy lasted.
+    /// Continuous overflows, as during a large copy, do not re-walk the share
+    /// faster than the spacing floor.
     #[test]
     fn overflowing_repeatedly_does_not_re_walk_continuously() {
         let mut sim = walked();
-        // Time is advanced by hand rather than by following the deadline the
-        // scheduler hands back: jumping to it would satisfy the very floor
-        // under test.
+        // Advance time by hand; jumping to the returned deadline would satisfy
+        // the floor under test.
         for _ in 0..50 {
             sim.now += Duration::from_secs(1);
             sim.notify(&mut Tree, true);
@@ -735,8 +698,8 @@ mod notifications {
         );
     }
 
-    /// And the patches have a floor of their own, or a folder being written to
-    /// would have its subtree re-read on every event.
+    /// Patches have their own spacing floor, so a folder being written to is
+    /// not re-read on every event.
     #[test]
     fn patches_are_paced_by_their_own_floor() {
         let mut sim = walked();
@@ -754,8 +717,7 @@ mod notifications {
         );
     }
 
-    /// Much shorter than the scan floor, though - a patch reads folders, not
-    /// the share, so pacing the two alike would make live updates pointless.
+    /// A patch reads folders, not the whole share, so its floor is much shorter.
     #[test]
     fn the_patch_floor_is_far_shorter_than_the_scan_floor() {
         let c = Cadence::tree();
@@ -763,9 +725,8 @@ mod notifications {
         assert!(c.patch_spacing < c.rescan_floor);
     }
 
-    /// A patch is not a full pass. If it satisfied the floor, a share changing
-    /// steadily would never be walked again - and the floor is precisely the
-    /// backstop against a watcher that silently stops firing.
+    /// Patches do not reset the rescan floor, which is the backstop against a
+    /// watcher that silently stops firing.
     #[test]
     fn patching_does_not_postpone_the_floor() {
         let mut sim = walked();
@@ -776,8 +737,7 @@ mod notifications {
         while sim.now < started + floor * 2 {
             sim.now += step;
             sim.notify(&mut Tree, false);
-            // The timer still fires alongside the watcher, exactly as it does
-            // in the actor - the deadline there is the earlier of the two.
+            // The timer fires alongside the watcher, as in the actor.
             sim.wake(&mut Tree, false);
         }
 
@@ -789,8 +749,7 @@ mod notifications {
         );
     }
 
-    /// With nothing indexed there is nothing to patch, and the first pass has
-    /// to happen anyway.
+    /// With nothing indexed, a notification triggers the first pass.
     #[test]
     fn a_change_before_the_first_pass_is_the_first_pass() {
         let mut sim = Sim::new(Cadence::tree());
@@ -800,8 +759,7 @@ mod notifications {
         assert_eq!(sim.scans[0].reason, ScanReason::FirstRun);
     }
 
-    /// A patch that fails must not back the floor off. A failing watcher is
-    /// exactly when the floor is the guarantee that matters.
+    /// A failed patch does not push back the rescan floor.
     #[test]
     fn a_failed_patch_leaves_the_schedule_alone() {
         let mut sched = Scheduler::new(Cadence::tree(), Some(SEED));

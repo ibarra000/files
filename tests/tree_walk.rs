@@ -1,14 +1,7 @@
-//! Recursive walking, driven against a fake tree.
+//! Recursive walking, driven against an in-memory fake tree.
 //!
-//! The share this is for holds millions of files and does not exist on the
-//! machine the code is written on, so every property that matters here has to
-//! be provable in memory: that the walk finds everything, that it finds it
-//! regardless of how many threads read it, that one unreadable folder does not
-//! cost the rest, and that nothing it does can fail to terminate.
-//!
-//! The first test is the whole reason the walk exists. Routing by regex meant
-//! a file whose folder did not follow the naming rule was not "no results" but
-//! silently absent, and no amount of testing the router could have found it.
+//! Checks that the walk finds everything regardless of thread count, that one
+//! unreadable folder does not cost the rest, and that it always terminates.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -20,8 +13,8 @@ use files::index::walk::{TreeSink, WalkOpts, WalkReport, walk_tree};
 use files::util::cancel::{CancelToken, Epoch};
 use parking_lot::Mutex;
 
-/// Records everything, so a walk is compared against the tree it was handed
-/// rather than against a count of it.
+/// Records every entry, so a walk is compared against its tree rather than
+/// against a count.
 #[derive(Debug, Default)]
 struct Collect {
     seen: Mutex<Vec<(String, Vec<String>)>>,
@@ -47,8 +40,7 @@ impl Collect {
         self.seen.lock().iter().map(|(d, _)| d.clone()).collect()
     }
 
-    /// Every file as a path relative to the root, which is what an index built
-    /// on this walk would store.
+    /// Every file as a path relative to the root, as an index would store it.
     fn paths(&self) -> HashSet<String> {
         self.seen
             .lock()
@@ -106,8 +98,7 @@ fn finds_every_file_in_the_tree() {
     );
 }
 
-/// The bug the walk exists to remove. No routing rule would guess this folder,
-/// so the file used to be unreachable rather than merely unranked.
+/// A file in a folder no naming rule would predict is still found.
 #[test]
 fn finds_a_file_whose_folder_no_routing_rule_would_have_guessed() {
     let src =
@@ -127,8 +118,7 @@ fn the_root_itself_is_reported_as_the_empty_relative_path() {
     assert!(sink.dirs().contains(""), "{:?}", sink.dirs());
 }
 
-/// Same tree, however many threads read it. Without this the walk could be
-/// correct only on the machine it was timed on.
+/// The result is the same for any thread count.
 #[test]
 fn the_result_does_not_depend_on_concurrency() {
     let (serial_report, serial) = walk(&tree(), &WalkOpts::default().with_concurrency(1));
@@ -143,8 +133,8 @@ fn the_result_does_not_depend_on_concurrency() {
     }
 }
 
-/// The concurrency limit is a promise to someone else's production file
-/// server, so it is asserted directly rather than inferred from timing.
+/// The concurrency limit protects the file server, so it is asserted directly
+/// rather than inferred from timing.
 #[test]
 fn never_reads_more_directories_at_once_than_it_was_allowed() {
     let paths: Vec<String> = (0..64).map(|i| format!("d{i:03}\\f.pdf")).collect();
@@ -159,8 +149,7 @@ fn never_reads_more_directories_at_once_than_it_was_allowed() {
     }
 }
 
-/// An unreadable folder in the middle of a share must not cost the other
-/// 299,999.
+/// An unreadable folder is recorded and its siblings are still walked.
 #[test]
 fn an_unreadable_directory_is_recorded_and_its_siblings_still_walked() {
     let src = tree();
@@ -198,8 +187,8 @@ fn a_junction_is_counted_but_not_followed() {
     assert_eq!(report.files, 6, "and so found nothing twice");
 }
 
-/// Following one is opt-in, and the depth limit is what stops the cycle - the
-/// file-id guard that would do it properly is unavailable on many SMB servers.
+/// Following junctions is opt-in, and the depth limit stops cycles, since many
+/// SMB servers do not provide the file IDs a proper cycle guard needs.
 #[test]
 fn a_followed_junction_cannot_outrun_the_depth_limit() {
     let src = FakeDirSource::new()
@@ -275,10 +264,8 @@ fn a_missing_root_is_reported_rather_than_hung_on() {
     assert!(!report.complete());
 }
 
-/// A folder deleted while the walk is running is ordinary churn on a share
-/// people are working on. Counting it as a coverage hole would leave a
-/// perfectly healthy share permanently degraded, and the warnings that do
-/// matter would be ignored along with it.
+/// A folder deleted mid-walk is ordinary churn, not a coverage hole; counting
+/// it would mark a healthy share as degraded.
 #[test]
 fn a_folder_that_vanishes_mid_walk_is_not_a_coverage_hole() {
     let src = tree();
@@ -295,7 +282,6 @@ fn a_folder_that_vanishes_mid_walk_is_not_a_coverage_hole() {
     assert!(sink.paths().contains("ab12\\spec.pdf"));
 }
 
-/// Where an unreadable one is exactly that, and must be reported.
 #[test]
 fn an_unreadable_folder_is_a_coverage_hole() {
     let src = tree();
@@ -323,8 +309,8 @@ fn cancelling_stops_the_walk() {
     assert!(!report.complete());
 }
 
-/// A sink reporting itself full stops the walk. That is how an index that has
-/// run out of room says so without the walk needing to know what an index is.
+/// A sink reporting itself full stops the walk, so the walk needs no knowledge
+/// of index capacity.
 #[test]
 fn a_full_sink_stops_the_walk() {
     #[derive(Default)]
@@ -352,8 +338,7 @@ fn a_full_sink_stops_the_walk() {
     assert!(report.dirs_visited < 100);
 }
 
-/// A wide, deep tree, to show the frontier terminates and nothing is lost or
-/// double-counted at scale.
+/// A wide, deep tree terminates with nothing lost or double-counted.
 #[test]
 fn a_large_tree_is_walked_exactly_once_through() {
     let mut paths = Vec::new();
@@ -398,8 +383,7 @@ fn found(index: &files::index::tree::TreeIndex, query: &str) -> Vec<String> {
     .collect()
 }
 
-/// The whole project, in one assertion: a file whose folder no routing rule
-/// would have guessed is walked, indexed, and found by its code.
+/// A file in an unpredictable folder is walked, indexed and found by its code.
 #[test]
 fn a_walked_tree_can_be_searched_for_a_code_no_rule_would_have_routed() {
     let src = FakeDirSource::new().with_tree(
@@ -420,7 +404,6 @@ fn a_walked_tree_can_be_searched_for_a_code_no_rule_would_have_routed() {
     );
 }
 
-/// And the folder case, which is how a job code usually appears.
 #[test]
 fn a_code_that_names_a_folder_finds_what_is_in_it() {
     let src = FakeDirSource::new().with_tree(
@@ -441,9 +424,7 @@ fn a_code_that_names_a_folder_finds_what_is_in_it() {
     );
 }
 
-/// The index is searchable while the walk is still running, which is what
-/// makes a three-minute walk of a real share usable rather than a blank
-/// screen.
+/// The index is searchable while the walk is still running.
 #[test]
 fn a_partially_walked_tree_is_already_searchable() {
     let paths: Vec<String> = (0..400)
@@ -453,8 +434,7 @@ fn a_partially_walked_tree_is_already_searchable() {
     let src = FakeDirSource::new().with_tree("R:\\", &refs);
 
     let sink = SegmentSink::new("R:\\");
-    // Stopped early on purpose, exactly as reading the index mid-walk would
-    // see it.
+    // Stopped early, as a mid-walk read would see it.
     let mut opts = WalkOpts::default().with_concurrency(1);
     opts.max_dirs = 20;
     let report = walk_tree(&src, Path::new("R:\\"), &opts, &sink, &CancelToken::never());
@@ -465,8 +445,7 @@ fn a_partially_walked_tree_is_already_searchable() {
     assert!(!found(&index, "0704").is_empty());
 }
 
-/// Segments are an implementation detail; the answers must not depend on
-/// where the boundaries fell.
+/// Results do not depend on where segment boundaries fall.
 #[test]
 fn segmenting_does_not_change_what_is_found() {
     let paths: Vec<String> = (0..300)
@@ -527,8 +506,7 @@ fn the_index_holds_exactly_what_the_walk_found() {
     );
 }
 
-/// A large tree crosses several segment boundaries, and every one of its
-/// files must still resolve to the right path.
+/// Every file in a tree spanning several segments resolves to its path.
 #[test]
 fn a_tree_spanning_many_segments_resolves_every_path() {
     let mut paths = Vec::new();
@@ -544,8 +522,7 @@ fn a_tree_spanning_many_segments_resolves_every_path() {
     assert!(report.complete());
     assert_eq!(index.len(), 1_600);
 
-    // Every path is distinct and well formed, which is what the run table has
-    // to get right across a boundary.
+    // Every path is distinct and well formed across segment boundaries.
     let all: std::collections::HashSet<String> = (0..index.len() as u32)
         .map(|i| index.full_path(i).unwrap())
         .collect();
@@ -555,8 +532,8 @@ fn a_tree_spanning_many_segments_resolves_every_path() {
 
 // --- seeded walks ----------------------------------------------------------
 
-/// A walk seeded with the dirty folders is what turns a change notification
-/// into work proportional to what changed rather than to the share.
+/// A walk seeded with dirty folders does work proportional to the change, not
+/// to the share.
 mod subtrees {
     use super::*;
     use files::index::walk::walk_subtrees;
@@ -609,17 +586,16 @@ mod subtrees {
         );
     }
 
-    /// A prefix is not a parent. Without the separator check, refreshing
-    /// `ab12` would read `ab12x` as well and then the caller would replace a
-    /// subtree it never walked.
+    /// A prefix is not a parent: refreshing `ab12` must not read `ab12x`, or the
+    /// caller would replace a subtree it never walked.
     #[test]
     fn a_seed_does_not_pick_up_a_sibling_that_merely_starts_the_same() {
         let (sink, _) = seeded(&["ab12"]);
         assert_eq!(dirs(&sink), vec!["ab12".to_string()]);
     }
 
-    /// Reading the same directory twice would hand the sink two directories
-    /// with one name, and a folder match would return its contents doubled.
+    /// A directory covered by two seeds is read once; otherwise a folder match
+    /// would return its contents twice.
     #[test]
     fn a_seed_already_covered_by_another_is_not_walked_twice() {
         let (sink, _) = seeded(&["11d", "11d\\0704", "11d"]);
@@ -639,16 +615,15 @@ mod subtrees {
         assert_eq!(dirs(&sink), vec!["ab12".to_string(), "ab12x".to_string()]);
     }
 
-    /// A dirty root degenerates to a full walk, which is the honest answer.
+    /// A dirty root becomes a full walk.
     #[test]
     fn the_root_as_a_seed_walks_everything() {
         let (sink, _) = seeded(&["", "ab12"]);
         assert_eq!(dirs(&sink).len(), 6);
     }
 
-    /// A folder that is gone is ordinary churn, and the caller needs to be
-    /// able to tell it from a folder it simply could not read - one means
-    /// "delete it from the index", the other means "leave it alone".
+    /// A deleted seed is reported as vanished, not unreadable: the caller
+    /// removes the first from the index and leaves the second alone.
     #[test]
     fn a_seed_that_has_been_deleted_is_counted_as_vanished_not_as_a_hole() {
         let sink = Collect::default();

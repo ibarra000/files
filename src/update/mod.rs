@@ -1,44 +1,16 @@
-//! Finding out that a newer version exists.
+//! Checking for a newer version.
 //!
-//! Two places to look, and one is chosen by [`Source::of`]: a share, if
-//! `update_from` names one, and otherwise the GitHub repository this build
-//! came from - unless `check_for_updates` is off. Both publish the same
-//! `latest.toml` beside the same installer, so both answer with the same
-//! [`Found`], and nothing after the look knows which it was.
+//! [`Source::of`] picks the share named by `update_from` if set, otherwise the
+//! GitHub repository this build came from (unless `check_for_updates` is off).
+//! Both publish `latest.toml` beside the installer and yield the same
+//! [`Found`]. A configured share takes precedence so an administrator controls
+//! when machines upgrade. See [`github`] and [`http`] for the GitHub path.
 //!
-//! # Why a share is still the first choice
+//! A share is read with `std::fs`, needing no HTTP or TLS stack and no extra
+//! credentials; an unreachable share is reported quietly.
 //!
-//! The rest of this note is the argument for the share, and it still holds
-//! where there is one: an office that runs its own update folder decides when
-//! its machines move to a new version, and GitHub would take that decision
-//! away. GitHub is for everybody else - the laptop with no share to read,
-//! which before this was never told about a new version at all. See
-//! [`github`] for what it does differently, and [`http`] for why it needs no
-//! new dependency.
-//!
-//! # Why a file share rather than a URL
-//!
-//! This program already lives in an SMB world: every drive it searches is one,
-//! and every machine it runs on is on the domain that serves them. So the
-//! update folder is one more share, read with `std::fs` like anything else.
-//!
-//! That buys a great deal for a feature this small. No HTTP client and no TLS
-//! stack - the two largest dependencies this would otherwise take, into a
-//! crate whose manifest argues for each one it has. No certificate to renew,
-//! no server to run, and no second set of credentials: whoever may read the
-//! share may take the update, which is a decision an administrator already
-//! made with tools they already use.
-//!
-//! What it costs is a laptop off the domain, which finds the share missing and
-//! says so quietly. That is the right failure for a machine that also cannot
-//! reach any of the drives it searches.
-//!
-//! # What this module will not do
-//!
-//! It does not install anything on its own, and it does not check at startup.
-//! An update that arrives unasked is one that interrupts somebody mid-search,
-//! and a check in the startup path is an SMB round trip - or an SMB timeout -
-//! in front of a window somebody is waiting for.
+//! Nothing is installed automatically and nothing is checked at startup, so
+//! the window never waits on an SMB round trip.
 
 pub mod apply;
 pub mod check;
@@ -54,36 +26,24 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Settings;
 
-/// What the manifest is called, in the configured folder.
+/// File name of the manifest in the update folder.
 pub const MANIFEST_NAME: &str = "latest.toml";
 
-/// What a look at the update folder found.
+/// Result of checking for an update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
     /// A newer version, and where its installer is.
     Available {
         manifest: Manifest,
         msi: PathBuf,
-        /// Whether that installer is actually on disk, answered once here
-        /// rather than at every reader.
-        ///
-        /// The About page asks this twice a frame - once to decide whether
-        /// to warn and once to decide whether to offer the button - and the
-        /// settings window is redrawn continuously while it is open. That
-        /// is two `stat` calls per frame against a network share, which is
-        /// two round trips per frame on a laptop over a VPN. It is answered
-        /// when the manifest is read, which is once every four hours, and
-        /// being a few hours stale is exactly as wrong as the manifest
-        /// beside it.
+        /// Whether the installer exists, checked once when the manifest is
+        /// read so the About page does not `stat` a network share every frame.
         msi_present: bool,
     },
-    /// The folder was read and holds nothing newer than this build.
+    /// Nothing newer than this build.
     UpToDate,
-    /// The folder could not be read, or what it held could not be used.
-    ///
-    /// Not an error anybody is made to act on: a share that is unreachable
-    /// because the laptop is at home is the ordinary case, and the only honest
-    /// response is a quiet line rather than a dialog.
+    /// The source could not be read or its contents were unusable. Shown as a
+    /// quiet status line; an unreachable share is the ordinary off-site case.
     Unavailable { detail: String },
 }
 
@@ -97,12 +57,11 @@ pub enum Source {
 }
 
 impl Source {
-    /// Where these settings say to look, if anywhere.
+    /// Returns the configured update source, if any.
     ///
-    /// A share wins when there is one, because somebody configured it on
-    /// purpose. Otherwise GitHub, from `Cargo.toml`'s `repository` - or from
-    /// `FILES_UPDATE_GITHUB`, which exists so a release can be tried against
-    /// a scratch repository before it is published to the real one.
+    /// A configured share wins. Otherwise GitHub, from `Cargo.toml`'s
+    /// `repository` or `FILES_UPDATE_GITHUB` (for testing against a scratch
+    /// repository).
     pub fn of(settings: &Settings) -> Option<Self> {
         if let Some(folder) = &settings.update_from {
             return Some(Self::Folder(folder.clone()));
@@ -116,7 +75,7 @@ impl Source {
         Some(Self::GitHub(repo))
     }
 
-    /// Where, in words, for the About page and `--doctor`.
+    /// Returns a description for the About page and `--doctor`.
     pub fn describe(&self) -> String {
         match self {
             Self::Folder(folder) => folder.display().to_string(),
@@ -124,16 +83,16 @@ impl Source {
         }
     }
 
-    /// Whether this is the internet rather than a share.
+    /// Whether the source is on the internet rather than a share.
     pub const fn is_remote(&self) -> bool {
         matches!(self, Self::GitHub(_))
     }
 }
 
-/// Looks wherever `source` says, and says what it means for this build.
+/// Checks `source` against the running version.
 ///
-/// `cache_dir` is where a GitHub installer is downloaded to; a share's is
-/// read where it stands.
+/// `cache_dir` receives a downloaded GitHub installer; a share's installer is
+/// used in place.
 pub fn look_at(source: &Source, running: Version, cache_dir: Option<&Path>) -> Found {
     match source {
         Source::Folder(folder) => look(folder, running),
@@ -141,10 +100,7 @@ pub fn look_at(source: &Source, running: Version, cache_dir: Option<&Path>) -> F
     }
 }
 
-/// Reads the manifest in `folder` and says what it means for this build.
-///
-/// Takes the running version rather than reading it, so the decision is
-/// testable without being the version this happens to be compiled as.
+/// Reads the manifest in `folder` and compares it with `running`.
 pub fn look(folder: &Path, running: Version) -> Found {
     let path = folder.join(MANIFEST_NAME);
     let text = match std::fs::read_to_string(&path) {
@@ -169,11 +125,8 @@ pub fn look(folder: &Path, running: Version) -> Found {
         return Found::UpToDate;
     }
 
-    // Joined here rather than by the caller, so the one place that has already
-    // proved the name is a bare one is the place that builds the path from it.
+    // `manifest::parse` has verified `msi` is a bare file name.
     let msi = folder.join(&manifest.msi);
-    // Asked once, here, rather than at every reader on every frame. See the
-    // field's own note.
     let msi_present = msi.is_file();
     Found::Available {
         manifest,
@@ -186,7 +139,6 @@ pub fn look(folder: &Path, running: Version) -> Found {
 mod tests {
     use super::*;
 
-    /// A share somebody configured outranks the internet.
     #[test]
     fn a_configured_share_is_looked_in_rather_than_github() {
         let settings = Settings {
@@ -196,7 +148,6 @@ mod tests {
         assert!(matches!(Source::of(&settings), Some(Source::Folder(_))));
     }
 
-    /// Out of the box, the repository this build came from.
     #[test]
     fn with_no_share_github_is_looked_at_by_default() {
         let source = Source::of(&Settings::fixture());
@@ -204,7 +155,6 @@ mod tests {
         assert!(source.unwrap().describe().starts_with("GitHub"));
     }
 
-    /// And turning it off means nothing is looked at at all.
     #[test]
     fn turning_the_check_off_looks_nowhere() {
         let settings = Settings {
@@ -240,15 +190,13 @@ mod tests {
         assert_eq!(look(dir.path(), Version::new(0, 3, 0)), Found::UpToDate);
     }
 
-    /// A share rolled back must not offer to install backwards - the
-    /// installer refuses a downgrade, so the prompt could not be satisfied.
+    /// The installer refuses downgrades, so an older version is not offered.
     #[test]
     fn an_older_published_version_is_up_to_date() {
         let dir = folder(PUBLISHED);
         assert_eq!(look(dir.path(), Version::new(1, 0, 0)), Found::UpToDate);
     }
 
-    /// The ordinary case for a laptop at home, and it must be quiet.
     #[test]
     fn a_folder_that_is_not_there_is_unavailable_rather_than_an_error() {
         let found = look(
@@ -270,8 +218,6 @@ mod tests {
         }
     }
 
-    /// The installer path is built from a name the parser has already proved
-    /// cannot leave the folder.
     #[test]
     fn the_installer_is_always_inside_the_folder_that_named_it() {
         let dir = folder(PUBLISHED);

@@ -1,18 +1,14 @@
 //! A one-item, replace-on-write mailbox: "latest request wins".
 //!
-//! Used to feed the search, verify and prefetch workers. Chosen over an
-//! unbounded channel plus drain-to-latest for one specific reason: storing the
-//! request and bumping the epoch happen under the *same* mutex acquisition, so
-//! there is no window in which a worker can observe a request whose epoch is
-//! already stale. "At most one request pending" becomes a type invariant rather
-//! than a loop every consumer has to remember to write.
+//! Feeds the search, verify and prefetch workers. Storing the request and
+//! bumping the epoch happen under one mutex acquisition, so a worker never
+//! sees a request whose epoch is already stale.
 //!
 //! # No request is ever lost
 //!
 //! Workers run `while let Some(req) = slot.take_blocking() { run(req) }`. A
 //! [`LatestSlot::put`] that lands *during* `run` is picked up by the very next
-//! `take_blocking`, which returns immediately. The user's final keystroke is
-//! therefore always serviced.
+//! `take_blocking`, so the final request is always serviced.
 
 use parking_lot::{Condvar, Mutex};
 
@@ -71,8 +67,8 @@ impl<T> LatestSlot<T> {
             if guard.closed {
                 return None;
             }
-            // Predicate loop, not a bare wait: guards against spurious wakeups
-            // and against a notify that races with a take.
+            // Loop on the predicate to handle spurious wakeups and a notify
+            // racing a take.
             self.ready.wait(&mut guard);
         }
     }
@@ -144,8 +140,8 @@ mod tests {
         assert_eq!(slot.put(4), Some(4));
     }
 
-    /// The property the whole design rests on: a value stored while the worker
-    /// is busy is not lost, it is serviced on the next iteration.
+    /// A value stored while the worker is busy is serviced on the next
+    /// iteration.
     #[test]
     fn a_put_during_a_run_is_serviced_next() {
         let slot = Arc::new(LatestSlot::<u32>::new());

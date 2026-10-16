@@ -1,22 +1,10 @@
-//! Everything that did not fit on the footer, behind one key.
+//! The actions menu: a card above the footer's `⋮` button listing each action
+//! with an optional mark, a label and its keyboard shortcut.
 //!
-//! A card floating above the `⋮` button, right-aligned to it, exactly where
-//! Ueli puts its own. Each row is an optional mark, a label, and the keyboard
-//! shortcut for the same thing pushed to the right - so the menu is also the
-//! only place the program teaches its own chords.
-//!
-//! # Why it is drawn rather than built out of a `Popup`
-//!
-//! egui has one, and it owns the question of whether the menu is open. That
-//! question belongs to [`crate::app::state::AppState::actions_open`], because
-//! Escape has to close the menu rather than the panel, and which key means
-//! what is the state machine's business - a popup that egui could close on
-//! its own would be a second opinion about a state Escape is already deciding
-//! against.
-//!
-//! So the card is an [`egui::Area`] painted by hand, and the one behaviour a
-//! `Popup` would have supplied - a press outside shuts it - is the explicit
-//! check at the bottom of [`show`].
+//! The card is a hand-painted `egui::Area` rather than an `egui::Popup`, because
+//! open/closed state belongs to [`crate::app::state::AppState::actions_open`]
+//! (Escape closes the menu before the panel). Click-outside dismissal is
+//! therefore handled explicitly in [`show`].
 
 use eframe::egui::{Align2, Area, Id, Order, Rect, Sense, Ui, pos2, vec2};
 
@@ -26,24 +14,23 @@ use crate::app::state::pointer::Intent;
 use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::actions::{Action, ActionId};
 
-/// One row of the menu.
+/// Height of one menu row.
 const ROW_H: f32 = 28.0;
 
-/// The air inside the card.
+/// Padding inside the card.
 const CARD_PAD: f32 = 4.0;
 
-/// The air inside a row, left and right.
+/// Horizontal padding inside a row.
 const ROW_PAD_X: f32 = 8.0;
 
-/// The room kept for a row's mark, and the air after it.
+/// Width reserved for a row's mark, and the gap after it.
 const ICON_SLOT: f32 = 16.0;
 const ICON_GAP: f32 = 10.0;
 
-/// The air between the widest label and the shortcut beside it.
+/// Minimum gap between a label and its shortcut.
 const LABEL_GAP: f32 = 24.0;
 
-/// The card's widest, so a long description does not push the menu off the
-/// panel it is floating over.
+/// Maximum card width, so a long label cannot push the menu off the panel.
 const MAX_W: f32 = 320.0;
 
 /// Draws the menu, if it is open, and reports what the pointer did to it.
@@ -59,10 +46,8 @@ pub fn show(ui: &Ui, state: &AppState, theme: &Theme, panel: Rect) -> Vec<Intent
     let mut intents = Vec::new();
     let card = measure(ui, theme, &entries, panel);
 
-    // Its own layer, so it is drawn over the list and takes presses from it.
-    // `Order::Foreground` rather than `Order::Middle`: the rows underneath
-    // are registered every frame, and a menu that shared their layer would
-    // hand a click to whichever was added last.
+    // `Order::Foreground` so the card sits above the list rows; on a shared
+    // layer a click would go to whichever widget was registered last.
     let response = Area::new(Id::new("files-actions"))
         .order(Order::Foreground)
         .fixed_pos(card.min)
@@ -73,10 +58,8 @@ pub fn show(ui: &Ui, state: &AppState, theme: &Theme, panel: Rect) -> Vec<Intent
         })
         .response;
 
-    // A press anywhere else shuts it, which is the one thing `egui::Popup`
-    // would have done for us. Checked against the card *and* the button that
-    // opened it: without the second, a click on `⋮` while the menu is up
-    // would close it here and reopen it in the footer on the same press.
+    // A press outside closes the menu. The `⋮` button is excluded, otherwise
+    // a press on it would close the menu here and reopen it in the footer.
     let clicked_away = ui.input(|i| i.pointer.any_pressed())
         && ui
             .ctx()
@@ -89,12 +72,10 @@ pub fn show(ui: &Ui, state: &AppState, theme: &Theme, panel: Rect) -> Vec<Intent
     intents
 }
 
-/// Where the `⋮` is, so a press on it is not also a press outside the menu.
+/// Returns the `⋮` button's rect.
 ///
-/// Recomputed rather than passed down from the footer, because the footer
-/// draws before this and the two would otherwise have to agree through a
-/// return value threaded across the whole panel. It is arithmetic off the
-/// same three constants.
+/// Recomputed from the footer's layout constants; keep in sync with
+/// `footer.rs`.
 fn more_button(panel: Rect) -> Rect {
     const BUTTON: f32 = 24.0;
     Rect::from_min_size(
@@ -106,11 +87,8 @@ fn more_button(panel: Rect) -> Rect {
     )
 }
 
-/// Where the card goes, and how big it is.
-///
-/// Above the button and right-aligned to it, which is Ueli's `RectAlign`
-/// `TOP_END`. Clamped to the panel rather than to the screen: the panel is
-/// frameless and a menu hanging off its edge would have no surface to sit on.
+/// Returns the card's rect: above the `⋮` button, right-aligned to it, and
+/// clamped to the panel (not the screen), since the panel is frameless.
 fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
     let painter = ui.painter();
     let label_font = theme::font(theme::SIZE_CAPTION, Weight::Semibold);
@@ -146,9 +124,8 @@ fn measure(ui: &Ui, theme: &Theme, entries: &[Action], panel: Rect) -> Rect {
 fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &mut Vec<Intent>) {
     let painter = ui.painter().clone();
     let radius = theme::radius(theme::RADIUS_MEDIUM);
-    // The window's own ground rather than a tile's. A key cap is
-    // `NeutralBackground5`, which against `NeutralBackground3` comes to
-    // 1.07:1 in the light theme - the caps would be invisible on a card.
+    // Window surface, not a tile: key caps (`NeutralBackground5`) on
+    // `NeutralBackground3` are 1.07:1 in the light theme.
     painter.rect_filled(card, radius, theme.surface);
     painter.rect_stroke(
         card,
@@ -214,12 +191,7 @@ fn paint(ui: &mut Ui, theme: &Theme, entries: &[Action], card: Rect, intents: &m
     }
 }
 
-/// The mark beside a row, where one says anything the label does not.
-///
-/// Deliberately not one per row. A menu where every line has a small grey
-/// shape in front of it is a menu read as a picture book; the marks here are
-/// the three that are recognised without being read, and the rest of the
-/// gutter is the alignment they buy.
+/// Returns the mark drawn beside an action's row.
 const fn icon_of(id: ActionId) -> Option<Icon> {
     match id {
         ActionId::Open
@@ -237,8 +209,7 @@ const fn icon_of(id: ActionId) -> Option<Icon> {
 mod tests {
     use super::*;
 
-    /// Every row has a mark, so the gutter is never a column of air beside
-    /// one line that happens to have one.
+    /// Every action has a mark, so the gutter never sits empty.
     #[test]
     fn every_action_has_a_mark() {
         for id in [
@@ -256,8 +227,6 @@ mod tests {
         }
     }
 
-    /// The menu is anchored above its button and right-aligned to it, which
-    /// is what keeps it over the panel rather than off the side of it.
     #[test]
     fn the_button_is_where_the_footer_puts_it() {
         let panel = Rect::from_min_size(pos2(0.0, 0.0), vec2(theme::PANEL_W, theme::PANEL_H));

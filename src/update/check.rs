@@ -1,25 +1,11 @@
-//! The thread that looks at the update folder now and then.
+//! The periodic update-check thread.
 //!
-//! One thread for the life of the process, started only when a folder is
-//! configured, and it spends all but a few milliseconds of its life asleep.
-//! That is the shape every other worker here has, and for the same reason:
-//! [`crate::app::actors`] guarantees a fixed thread population, so nothing is
-//! spawned per keystroke and thread growth is impossible by construction
-//! rather than by discipline.
+//! One thread for the life of the process, started only when a source is
+//! configured, per the fixed thread population in [`crate::app::actors`].
 //!
-//! # Why it sleeps on a channel rather than on the clock
-//!
-//! `recv_timeout` rather than `sleep`, so the thread is reachable while it
-//! waits. It has to be for two reasons: somebody pressing "Check now" should
-//! not wait out the rest of a four-hour nap, and quitting must not wait out
-//! any of it. A thread parked in `sleep` can do neither.
-//!
-//! # Why the first look is late
-//!
-//! Reading the folder is an SMB round trip, and an SMB round trip to a share
-//! that is not there is a timeout. Neither belongs in front of a window
-//! somebody is waiting for, so the first look happens a minute in, by which
-//! time the panel has long since been summoned, used and dismissed.
+//! It waits with `recv_timeout` rather than `sleep` so "Check now" and
+//! shutdown take effect immediately. The first check is delayed to keep a
+//! possible SMB timeout off the startup path.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,23 +17,16 @@ use crossbeam_channel::{Sender, bounded};
 use crate::app::event::{AppEvent, Events, UpdateMsg};
 use crate::update::{Version, look_at};
 
-/// How long after startup the folder is first read.
-///
-/// Long enough to be well clear of the startup path, short enough that
-/// somebody who leaves the program running all day is told the same morning.
+/// Delay before the first check after startup.
 const FIRST_LOOK: Duration = Duration::from_secs(60);
 
-/// How often after that.
-///
-/// Four hours. A release happens a few times a year, so this is already far
-/// more often than it needs to be; what sets it is the other end - a few
-/// hundred copies reading one small file on a timer, where four hours is two
-/// reads a working day each and invisible against anything else on the share.
+/// Interval between checks; keeps load on a shared folder negligible across
+/// hundreds of installs.
 const INTERVAL: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// What the thread can be asked to do.
+/// Requests to the checker thread.
 enum Ask {
-    /// Look now, because somebody asked.
+    /// Check immediately.
     Now,
     Stop,
 }
@@ -59,20 +38,16 @@ pub struct Checker {
 }
 
 impl Checker {
-    /// Starts looking, from a minute after now.
+    /// Starts the checker; the first check runs after `FIRST_LOOK`.
     ///
-    /// `running` is passed in rather than read, so a test can be a version
-    /// other than the one it happens to be compiled as.
-    /// `cache_dir` is where a GitHub installer is downloaded to.
+    /// `cache_dir` receives a downloaded GitHub installer.
     pub fn start(
         source: Source,
         running: Version,
         cache_dir: Option<PathBuf>,
         events: Events,
     ) -> std::io::Result<Self> {
-        // One slot. Two "check now" presses a second apart are one question,
-        // and the second may be dropped without anybody being misled - the
-        // answer to the first is about to arrive.
+        // One slot: a second "check now" while one is queued is redundant.
         let (tx, rx) = bounded::<Ask>(1);
         let handle = std::thread::Builder::new()
             .name("files-update".into())
@@ -81,19 +56,15 @@ impl Checker {
                 loop {
                     let wait = due.saturating_duration_since(Instant::now());
                     match rx.recv_timeout(wait) {
-                        // The sender is gone, which is shutdown by another
-                        // name and must be treated as one: a thread that kept
-                        // looking would hold the process open.
+                        // A dropped sender also means shutdown.
                         Ok(Ask::Stop) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                             return;
                         }
                         Ok(Ask::Now) | Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
                     }
 
-                    // Every outcome is reported, including the dull one. The
-                    // settings window says when it last looked, and a check
-                    // that answered nothing at all would leave that reading as
-                    // though the thread had died.
+                    // Every outcome is reported, so the settings window can
+                    // show when the last check ran.
                     let found = look_at(&source, running, cache_dir.as_deref());
                     if events
                         .send(AppEvent::Update(UpdateMsg::Looked(Box::new(found))))
@@ -111,17 +82,15 @@ impl Checker {
         })
     }
 
-    /// Asks for a look now. Dropped if one is already queued.
+    /// Requests an immediate check; ignored if one is already queued.
     pub fn check_now(&self) {
         let _ = self.tx.try_send(Ask::Now);
     }
 
-    /// Stops the thread and waits for it, briefly.
+    /// Stops the thread, waiting up to `budget`.
     ///
-    /// Budgeted like every other join here. The worst this can be waiting on
-    /// is one read of a small file, and unlike an abandoned index write there
-    /// is nothing half-finished for it to leave behind - so a thread that
-    /// misses the budget is abandoned rather than waited for.
+    /// A thread that misses the budget is abandoned; it has no partial state
+    /// to leave behind.
     pub fn shutdown(&mut self, budget: Duration) -> bool {
         let _ = self.tx.try_send(Ask::Stop);
         let Some(handle) = self.handle.take() else {
@@ -143,9 +112,6 @@ mod tests {
     use super::*;
     use crate::update::Found;
 
-    /// The cadence has to be sane in both directions: not so eager that a few
-    /// hundred copies are a load on the share, not so lazy that somebody who
-    /// never restarts is never told.
     #[test]
     fn the_first_look_is_well_clear_of_the_startup_path() {
         assert!(FIRST_LOOK >= Duration::from_secs(30));
@@ -157,7 +123,6 @@ mod tests {
         assert!(INTERVAL >= Duration::from_secs(60 * 60));
     }
 
-    /// A thread that ignored a stop would hold the process open.
     #[test]
     fn asking_it_to_stop_stops_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -177,7 +142,6 @@ mod tests {
         );
     }
 
-    /// Nobody should wait out the first minute to find out where they stand.
     #[test]
     fn asking_for_a_look_now_does_not_wait_for_the_timer() {
         let dir = tempfile::tempdir().unwrap();
@@ -213,8 +177,6 @@ mod tests {
         checker.shutdown(Duration::from_secs(5));
     }
 
-    /// Including the dull answer, or the window could not say when it last
-    /// looked without that reading as though the thread had died.
     #[test]
     fn an_unreachable_folder_is_reported_rather_than_swallowed() {
         let (tx, rx) = bounded(16);

@@ -1,18 +1,12 @@
-//! What one result row says.
-//!
-//! Two questions, neither of which needs a renderer to answer: which part of
-//! the filename is the reason this row is here, and which folder it is in.
-//! Both were previously tangled up in ratatui `Span`s in `ui::results`, and
-//! both are the kind of thing that is wrong in a way nobody notices - a
-//! highlight one byte out looks deliberate.
+//! The text of one result row: the matched part of the filename and the
+//! folder it is in.
 
 use crate::search::matcher::Hit;
 
 /// A filename split around the run that matched.
 ///
-/// `matched` is empty when there is nothing to highlight - either the row was
-/// pulled in because its *folder* matched, or the offsets did not survive the
-/// guard below.
+/// `matched` is empty when the row matched by folder or the offsets were
+/// invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Name<'a> {
     pub before: &'a str,
@@ -21,7 +15,7 @@ pub struct Name<'a> {
 }
 
 impl<'a> Name<'a> {
-    /// The whole name, unhighlighted.
+    /// Returns the whole name, unhighlighted.
     fn plain(name: &'a str) -> Self {
         Self {
             before: name,
@@ -37,17 +31,14 @@ impl<'a> Name<'a> {
 
 /// Splits a hit's name around the run the query matched.
 ///
-/// `query_len` is in bytes of the *folded* query, which the matcher guarantees
-/// is byte-length-identical to what it matched - so it indexes the original
-/// name too. That guarantee is load-bearing and unenforceable from here, hence
-/// the boundary checks: a pathological name must render wrong at worst, never
-/// panic in the middle of a frame.
+/// `query_len` is the byte length of the folded query, which the matcher
+/// guarantees equals the matched span in the original name. Out-of-range or
+/// non-boundary offsets fall back to an unhighlighted name instead of
+/// panicking.
 pub fn highlight(hit: &Hit, query_len: usize) -> Name<'_> {
     let name: &str = &hit.name;
 
-    // Nothing in its own name matched - the folder did. Inventing a range here
-    // would underline characters chosen at random, which reads as a bug in the
-    // search rather than as an explanation of the row.
+    // The folder matched, not the name, so there is no range to highlight.
     if hit.is_inherited() || query_len == 0 {
         return Name::plain(name);
     }
@@ -67,39 +58,25 @@ pub fn highlight(hit: &Hit, query_len: usize) -> Name<'_> {
     }
 }
 
-/// The folder a hit is in, for the dimmed right-hand column.
+/// Returns the folder part of a path, for the dimmed right-hand column.
 ///
-/// A plain suffix strip rather than `Path::parent`, because these are UNC and
-/// drive paths that came from the index as strings and go back out as strings;
-/// round-tripping them through `Path` on the way to a text label would buy
-/// nothing and would quietly normalise separators the user recognises.
+/// A string split rather than `Path::parent`, so separators are shown exactly
+/// as indexed.
 pub fn folder(path: &str) -> &str {
     let Some(cut) = path.rfind(['\\', '/']) else {
-        // A path that is nothing but a name - the fake sources in the tests
-        // produce these - has no folder to show.
+        // A bare name (as produced by test sources) has no folder.
         return "";
     };
-    // A file at the top of a drive is in `R:\`, not in `R:`, and one at the
-    // root of a share is in `\`. Dropping the separator there turns a location
-    // into a claim about which drive, so those two keep it.
+    // Root folders keep their trailing separator: `R:\` and `\`.
     let root = cut == 0 || path[..cut].ends_with(':');
     &path[..cut + usize::from(root)]
 }
 
-/// Which configured drive a hit came off, for the badge at the end of a row.
+/// Returns the name of the enabled drive a hit came from, for the row badge.
 ///
-/// The one thing worth keeping out of the deleted `crate::preview`, where it
-/// was half of `locate` - the other half was [`folder`], which was already
-/// here and which `locate` called.
-///
-/// Derived at paint time rather than stored on a [`Hit`]. There are a handful
-/// of drives and at most [`crate::config::MAX_RESULTS`] rows, nearly all of
-/// them culled before they are laid out, so this is a few string comparisons
-/// per visible row against a list that is almost always two entries long.
-///
-/// `enabled` rather than `all`: a hit cannot have come off a drive that was
-/// not searched, and naming a switched-off drive on a row would be a label
-/// that contradicts the settings page.
+/// Computed at paint time rather than stored on a [`Hit`]; it is a few string
+/// comparisons per visible row. Disabled drives are skipped because they were
+/// not searched.
 pub fn drive_of<'a>(routes: &'a crate::paths::Routes, path: &str) -> Option<&'a str> {
     routes
         .enabled()
@@ -136,9 +113,6 @@ mod tests {
         assert!(name.is_highlighted());
     }
 
-    /// A row pulled in because its folder matched has nothing in its own name
-    /// to underline. Highlighting the first nine characters of `cover.pdf`
-    /// would be a confident lie.
     #[test]
     fn a_row_that_matched_by_folder_is_not_highlighted() {
         let mut h = hit("cover.pdf", 0);
@@ -150,8 +124,6 @@ mod tests {
         assert!(!name.is_highlighted());
     }
 
-    /// Rendering must not panic on a name the matcher's guarantee does not
-    /// hold for. Wrong at worst; never a torn frame.
     #[test]
     fn an_impossible_range_falls_back_to_the_plain_name() {
         for (pos, len) in [(99, 3), (0, 99), (u32::MAX - 1, 4), (2, usize::MAX)] {
@@ -162,8 +134,6 @@ mod tests {
         }
     }
 
-    /// The offsets are bytes, and a name can hold characters that are not one
-    /// byte long. Splitting inside one is a panic, not a rendering glitch.
     #[test]
     fn a_range_that_splits_a_character_falls_back_rather_than_panicking() {
         // "é" is two bytes, so offset 1 is inside it and offset 2 is after it.
@@ -193,8 +163,6 @@ mod tests {
         assert_eq!(folder("/mnt/jobs/a.pdf"), "/mnt/jobs");
     }
 
-    /// A file at the root of a drive is at `R:\`, not at `R:`. The second
-    /// claims it is on a drive; only the first says where.
     #[test]
     fn a_file_at_a_root_keeps_its_separator() {
         assert_eq!(folder(r"R:\a.pdf"), r"R:\");

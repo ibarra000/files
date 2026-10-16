@@ -1,35 +1,6 @@
-//! The footer: what the program knows, and what Enter will do.
-//!
-//! Ueli's arrangement. A subtle gear on the left; on the right a subtle
-//! button labelled with the *default action's description* and an `↵` chip, a
-//! vertical divider, and a `⋮` that opens everything else. Between them,
-//! whatever the program has to say.
-//!
-//! # What went, and why it is not a loss
-//!
-//! A row of key-hint chips, fitted from the right, dropping the
-//! lowest-priority hint whenever the line got tight. It was a good answer to
-//! the question it was asked, and the question was wrong: it listed which
-//! keys were live somewhere on the panel, which is not what somebody about to
-//! press Enter wants to know.
-//!
-//! Three things it could not do, and this can:
-//!
-//! * Say what Enter will actually do. `Enter open` is true of every launcher
-//!   ever written; `Open as one document` is the state `F2` left the program
-//!   in, which is the fact the viewer chip existed to carry and - at
-//!   `Priority::Normal` and six hundred points wide - was the first thing
-//!   dropped.
-//! * Offer the keys it names. A chip was a hint you could click, and only
-//!   four of them were wired; a menu row is the action.
-//! * Hold more than fits. `Ctrl+O`, `Ctrl+D`, `Ctrl+E` and the two copies
-//!   would have needed five more chips on a line that was already dropping
-//!   them.
-//!
-//! What is genuinely gone is the *advertisement* of `Ctrl+Q` and `Esc`, which
-//! were listed and deliberately not clickable. Escape is the key everybody
-//! tries first, and `Ctrl+Q` is on the tray icon's menu, which is where a
-//! thing that ends the session belongs.
+//! The footer: a settings button on the left, the status line in the middle,
+//! and on the right a button naming the default (Enter) action with its
+//! shortcut chip, a divider, and the `⋮` actions-menu button.
 
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{Align2, Color32, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -42,24 +13,22 @@ use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::actions::ActionId;
 use crate::view::{self, Emphasis};
 
-/// A square button holding one mark.
+/// Side length of a square icon button.
 const BUTTON: f32 = 24.0;
 
-/// The air between two things on this line.
+/// Gap between footer items.
 const GAP: f32 = 8.0;
 
-/// The air inside the button that names the default action.
+/// Horizontal padding inside the default-action button.
 const LABEL_PAD_X: f32 = 8.0;
 
-/// Room kept for the status line, whether or not it has anything to say.
+/// Minimum width reserved for the status line.
 ///
-/// Wide enough for the longest transient - `Checking the drive…` - with a
-/// warning longer than that left to truncate, which is what truncation is
-/// for. Fixed rather than fitted: a line that reflowed every time the phase
-/// changed would move under somebody reading it.
+/// Fits the longest transient message (`Checking the drive…`); longer text is
+/// truncated. Fixed so the layout does not reflow as the phase changes.
 const STATUS_RESERVE: f32 = 120.0;
 
-/// The gap between the result count and the status prose beside it.
+/// Gap between the result count and the status text.
 const COUNT_GAP: f32 = 12.0;
 
 pub fn show(
@@ -71,9 +40,7 @@ pub fn show(
 ) -> Vec<Intent> {
     let mut intents = Vec::new();
 
-    // The gear, first and on the left, exactly where Ueli has it. It is the
-    // only control on this line that is about the program rather than about
-    // the row the cursor is on.
+    // Settings button, on the left.
     let gear = Rect::from_min_size(
         pos2(
             rect.left() + theme::FOOTER_PAD,
@@ -85,7 +52,7 @@ pub fn show(
         intents.push(Intent::Act(ActionId::Settings));
     }
 
-    // And the two on the right, laid out from the edge inwards.
+    // Right-hand controls, laid out from the edge inwards.
     let more = Rect::from_min_size(
         pos2(
             rect.right() - theme::FOOTER_PAD - BUTTON,
@@ -93,7 +60,7 @@ pub fn show(
         ),
         vec2(BUTTON, BUTTON),
     );
-    if icon_button(ui, theme, more, Icon::More, "Everything else \u{b7} Ctrl+K").clicked() {
+    if icon_button(ui, theme, more, Icon::More, "More actions \u{b7} Ctrl+K").clicked() {
         intents.push(Intent::ShowActions(!state.actions_open));
     }
 
@@ -114,9 +81,9 @@ pub fn show(
     intents
 }
 
-/// The button that says what Enter will do, with its `↵` beside it.
+/// Draws the button naming the default action, with its shortcut chip.
 ///
-/// Returns its left edge, so the status line knows where it has to stop.
+/// Returns its left edge less `GAP`, where the status line must stop.
 fn default_button(
     ui: &mut Ui,
     theme: &Theme,
@@ -142,9 +109,7 @@ fn default_button(
         vec2(width, BUTTON),
     );
 
-    // The description is the accessible name, and the key is said in words
-    // beside it: `^ ↵` is a pair of pictures, and a reader handed those would
-    // say "circumflex".
+    // The accessible name spells out key names rather than chip glyphs.
     let spoken = match action.shortcut {
         Some(key) => format!("{} \u{b7} {}", action.description, chip::spoken(key)),
         None => action.description.to_string(),
@@ -183,11 +148,10 @@ fn default_button(
     rect.left() - GAP
 }
 
-/// A button with no frame until it is touched, holding one mark.
+/// Draws a frameless icon button that fills on hover.
 ///
-/// The tooltip is also the accessible name, because a button with no text has
-/// nothing else to offer a screen reader - the same rule the settings
-/// window's `subtle_icon_button` keeps, applied to a painted panel.
+/// The tooltip doubles as the accessible name, as in the settings window's
+/// `subtle_icon_button`.
 fn icon_button(
     ui: &mut Ui,
     theme: &Theme,
@@ -221,7 +185,7 @@ fn icon_button(
     response.on_hover_text(tooltip)
 }
 
-/// The tone glyph, the count, and whatever the program has to say.
+/// Draws the status line: tone glyph, result count and status text.
 fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, wall: SystemTime) {
     let painter = ui.painter().clone();
     let line = view::status::render(state, wall);
@@ -229,12 +193,8 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
 
     let mut left = band.left() + theme::FOOTER_PAD + BUTTON + GAP;
 
-    // The glyph, then the words. Colour alone does not carry the difference
-    // between "updated" and "unreachable" for about one man in twelve.
-    //
-    // Only when there is something to say. A standing dot beside an empty
-    // line is a mark that means nothing, and on the quiet panel it would be
-    // the only thing on the footer besides the gear.
+    // A tone glyph accompanies the colour for colour-blind users. Drawn only
+    // when there is status text.
     if !line.text.is_empty() {
         painter.text(
             pos2(left, band.center().y),
@@ -246,11 +206,8 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
     }
     left += 16.0;
 
-    // The reserved slot: drawn before the prose and outside its wrap width,
-    // so it is the one part of this line that truncation cannot reach.
-    //
-    // Strong rather than dim. How much a code found is something somebody is
-    // looking for, not a note about the state of the program.
+    // Result count, drawn outside the status text's wrap width so it is never
+    // truncated.
     let found = view::status::found(state);
     if !found.is_empty() {
         let width = painter
@@ -273,9 +230,7 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
         left += width + COUNT_GAP;
     }
 
-    // Whatever is left, truncated rather than overlapped: a status line
-    // running under the button that says what Enter does is unreadable, and
-    // the button is the part somebody is about to act on.
+    // Status text, ellipsised so it never runs under the default-action button.
     let stop = (right - GAP).max(left + STATUS_RESERVE.min(right - left).max(0.0));
     let mut job = LayoutJob::single_section(
         line.text.clone(),
@@ -295,10 +250,7 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
         galley,
         theme.dim,
     );
-    // The untruncated text, deliberately. What is painted may be ellipsised
-    // to fit; what is *said* has no width to fit into, and a reader that got
-    // the same abbreviation as the screen would be worse off than one that
-    // got the sentence.
+    // Announce the full, untruncated text.
     super::announce(
         ui,
         Rect::from_min_max(pos2(left, band.top()), pos2(stop, band.bottom())),

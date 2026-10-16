@@ -1,33 +1,18 @@
-//! Assembling one document out of its pages.
-//!
-//! The pages of a drawing set are separate PDFs on the share. This merges them
-//! into a single file on a local disk and hands back where it put it.
+//! Merges the separate page PDFs of a drawing set into one cached file.
 //!
 //! # Inherited page attributes
 //!
-//! `/MediaBox`, `/Resources`, `/CropBox` and `/Rotate` are *inheritable*: a
-//! page dictionary may omit them and take them from an ancestor `/Pages` node.
-//! Moving such a page under a new page tree therefore changes what it
-//! inherits, and the failure mode is the worst kind - the merged file opens
-//! perfectly and renders the wrong paper size, a cropped drawing, or nothing at
-//! all. lopdf's own `examples/merge.rs` does not handle this; it merges the
-//! source `/Pages` dictionaries together, so two scanners that disagree about
-//! paper size produce one correct set of pages and one silently wrong one.
+//! `/MediaBox`, `/Resources`, `/CropBox` and `/Rotate` may be inherited from an
+//! ancestor `/Pages` node, so reparenting a page can silently change its paper
+//! size, crop or content. [`resolve_inherited`] copies them onto each page
+//! before it is moved (pinned by
+//! `a_page_inheriting_its_mediabox_keeps_it_after_reparenting`).
 //!
-//! [`resolve_inherited`] copies those four keys onto each page *before* it is
-//! reparented, which makes the move a no-op as far as rendering is concerned.
-//! `a_page_inheriting_its_mediabox_keeps_it_after_reparenting` pins it.
+//! # Content-addressed output
 //!
-//! # The output name is its content
-//!
-//! The file is named for a hash of the pages that went into it, so the same
-//! document assembled twice is written once. That is not only a cache: it is
-//! also what makes the write safe. Renaming over a file that another process
-//! has open fails on Windows, and the file we would be overwriting is a PDF a
-//! viewer is very likely still holding. A content-addressed name is never
-//! overwritten, only created - the same reasoning as `index::persist`, where
-//! the note reads "a unique temp name in the same directory, so the rename is
-//! atomic and never lands on an existing (possibly mapped) file".
+//! The file is named by a hash of its inputs, so a document is written once and
+//! never overwritten. This matters on Windows, where renaming over a file a
+//! viewer holds open fails; `index::persist` uses the same approach.
 
 use std::fs::File;
 use std::io::Write;
@@ -39,28 +24,18 @@ use lopdf::{Document, Object, ObjectId, dictionary};
 use crate::search::pages::Page;
 use crate::util::winpath;
 
-/// Keys a page may inherit from an ancestor `/Pages` node.
-///
-/// The complete list from the PDF specification's table of inheritable page
-/// attributes. Missing one shows up as a rendering difference, not an error.
+/// Keys a page may inherit from an ancestor `/Pages` node: the complete list
+/// from the PDF specification.
 const INHERITABLE: [&[u8]; 4] = [b"MediaBox", b"Resources", b"CropBox", b"Rotate"];
 
-/// How deep a `/Parent` chain is followed before it is assumed to be a cycle.
-///
-/// These files come off a network share and are not trusted to be well formed.
-/// A `/Parent` loop in a malformed document would otherwise hang the open
-/// thread forever, which looks exactly like the share being slow.
+/// Maximum `/Parent` chain depth before it is treated as a cycle, so a
+/// malformed file cannot hang the open thread.
 const MAX_PARENT_DEPTH: usize = 32;
 
-/// Why one page could not be used.
-///
-/// Every variant has to read as something a person can act on: this ends up in
-/// a toast next to the file name, and "could not be read" with no further
-/// clue is the message this codebase exists to avoid.
+/// Why one page could not be used. Shown to the user next to the file name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Deleted since the index last saw it. The flat listing can be minutes
-    /// old, so this is expected rather than exceptional.
+    /// Deleted since the last index scan, which can be minutes old.
     Gone,
     Unreadable(String),
     NotPdf,
@@ -71,9 +46,8 @@ pub enum SkipReason {
     PagesUnreadable {
         lost: usize,
     },
-    /// Read back from a previous merge's note, where the name and the reason
-    /// were already rendered into one line. Kept as a variant rather than a
-    /// second string type so a cache hit and a fresh merge report identically.
+    /// Read back from a previous merge's note, where name and reason are
+    /// already one rendered line.
     Recorded,
 }
 
@@ -89,8 +63,8 @@ impl SkipReason {
             Self::PagesUnreadable { lost } => {
                 format!("{lost} of its pages could not be read")
             }
-            // Already a rendered "name (reason)" line; `describe` must not
-            // wrap it a second time.
+            // Already a rendered "name (reason)" line; `describe` returns it
+            // as is.
             Self::Recorded => String::new(),
         }
     }
@@ -112,7 +86,7 @@ impl Skipped {
     }
 }
 
-/// Why nothing could be produced at all.
+/// Why no document could be produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssembleError {
     /// Every page was skipped. Carries them so the report can say why.
@@ -127,18 +101,17 @@ impl AssembleError {
             Self::NothingUsable(skipped) => match skipped.first() {
                 Some(first) if skipped.len() == 1 => first.describe(),
                 Some(first) => format!("{} and {} more", first.describe(), skipped.len() - 1),
-                None => "there was nothing to open".into(),
+                None => "nothing to open".into(),
             },
             Self::Io(e) => e.clone(),
         }
     }
 }
 
-/// A document that is ready to hand to a viewer.
+/// A document ready to hand to a viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembled {
-    /// What to open. Either the merged file, or - for a group of one - the
-    /// original page, because rewriting a file just to open it is pure cost.
+    /// The merged file, or the original page for a group of one.
     pub path: Arc<str>,
     pub pages: usize,
     /// Members that were left out, in the order they appeared.
@@ -151,16 +124,13 @@ pub struct Assembled {
 
 /// Builds one PDF from `pages`, writing it under `cache_dir`.
 ///
-/// `pages` must already be in merge order; ordering is
-/// [`crate::search::pages`]'s job, not this one's.
+/// `pages` must already be in merge order (see [`crate::search::pages`]).
 pub fn assemble(pages: &[Page], cache_dir: &Path) -> Result<Assembled, AssembleError> {
     if pages.is_empty() {
         return Err(AssembleError::NothingUsable(Vec::new()));
     }
 
-    // One member is not a merge. Opening the original avoids reading it,
-    // rewriting it, and leaving a copy behind - and it is by far the most
-    // common case, since most jobs are a single drawing.
+    // A single page is opened in place after validation; no copy is written.
     if pages.len() == 1 {
         let page = &pages[0];
         return match probe(&page.path) {
@@ -183,15 +153,9 @@ pub fn assemble(pages: &[Page], cache_dir: &Path) -> Result<Assembled, AssembleE
     let out = dir.join(format!("{key}.pdf"));
     let note = dir.join(format!("{key}.txt"));
 
-    // A hit needs no reading, no parsing and no writing. Pressing Enter twice
-    // is therefore harmless, which is why there is no in-flight guard.
-    //
-    // What it *must* not do is claim more than it delivers. The cached file is
-    // not necessarily complete - a share that hiccuped once leaves a document
-    // short a few pages - so the outcome of the merge that produced it is
-    // recorded beside it and read back here. Reporting `pages.len()` and no
-    // skips, as this used to, told the user a short document was whole, and
-    // kept telling them for the whole cache lifetime.
+    // A cache hit does no I/O beyond the note, so repeated opens need no
+    // in-flight guard. The note records which pages the original merge
+    // skipped, so a hit reports the same page count and skips.
     if out.is_file()
         && let Some(skipped) = read_note(&note)
     {
@@ -211,9 +175,8 @@ pub fn assemble(pages: &[Page], cache_dir: &Path) -> Result<Assembled, AssembleE
 
     std::fs::create_dir_all(&dir).map_err(|e| AssembleError::Io(e.to_string()))?;
     write_atomically(doc, &out).map_err(|e| AssembleError::Io(e.to_string()))?;
-    // Written after the document, so a hit can only be taken once the thing it
-    // describes is actually on disk. A failure here costs a re-merge next
-    // time, which is the safe direction.
+    // Written after the document so a hit implies the document exists. A
+    // failure only costs a re-merge next time.
     let _ = write_note(&note, &skipped);
 
     Ok(Assembled {
@@ -225,10 +188,8 @@ pub fn assemble(pages: &[Page], cache_dir: &Path) -> Result<Assembled, AssembleE
     })
 }
 
-/// Records what a merge left out, beside the document it produced.
-///
-/// One line per skipped page, already described. An empty file means a
-/// complete document - which is the common case, and costs one `create`.
+/// Records what a merge left out, one described line per skipped page, beside
+/// the document. An empty file means the document is complete.
 fn write_note(path: &Path, skipped: &[Skipped]) -> std::io::Result<()> {
     let mut text = String::new();
     for s in skipped {
@@ -238,11 +199,7 @@ fn write_note(path: &Path, skipped: &[Skipped]) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
 
-/// Reads back a merge outcome, or `None` when there is nothing trustworthy.
-///
-/// `None` forces a re-merge rather than guessing. An older cache entry written
-/// before this file existed lands here, and re-merging it is cheaper than
-/// reporting a page count nobody checked.
+/// Reads back a merge outcome. `None` (no readable note) forces a re-merge.
 fn read_note(path: &Path) -> Option<Vec<Skipped>> {
     let text = std::fs::read_to_string(path).ok()?;
     Some(
@@ -263,8 +220,8 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
     let mut out = Document::with_version("1.5");
     let mut skipped = Vec::new();
 
-    // Collected first, reparented last: the `/Pages` node that will own them
-    // does not exist until every source has been renumbered.
+    // Pages are reparented last: the new `/Pages` node cannot be allocated
+    // until every source has been renumbered.
     let mut collected: Vec<(ObjectId, Object)> = Vec::new();
     let mut objects: Vec<(ObjectId, Object)> = Vec::new();
     let mut next_id = 1u32;
@@ -281,8 +238,7 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
             }
         };
 
-        // Object ids are per-document, so every source is moved into a fresh
-        // range before its objects join the pool.
+        // Object ids are per-document, so each source gets a fresh range.
         doc.renumber_objects_with(next_id);
         next_id = doc.max_id + 1;
 
@@ -295,8 +251,7 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
             continue;
         }
 
-        // Every page of the member, not just the first: a scanner that
-        // produced a two-page file must not lose its second page here.
+        // Every page of the member, not just the first.
         let before = collected.len();
         for id in &ids {
             let Some(dict) = resolve_inherited(&doc, *id) else {
@@ -305,10 +260,7 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
             collected.push((*id, Object::Dictionary(dict)));
         }
 
-        // A page whose dictionary could not be read is a page the user asked
-        // for and did not get. Dropping it silently made the document short
-        // with nothing to say why - the same failure the skip list exists to
-        // report.
+        // Report pages whose dictionaries could not be read.
         let taken = collected.len() - before;
         if taken < ids.len() {
             skipped.push(Skipped {
@@ -325,21 +277,13 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
         return (out, 0, skipped);
     }
 
-    // Every source has been renumbered into `1..next_id`, so the two objects
-    // created below must be allocated above that watermark.
-    //
-    // `out` is a fresh document whose own counter is still zero, so without
-    // this the new `/Pages` took object 1 and the new `/Catalog` took object 2
-    // - numbers the first source already owned - and the inserts below
-    // silently overwrote them. The merged file opened perfectly and rendered
-    // with whatever those two objects had been, which for a typical one-page
-    // source means the font. See
-    // `merging_does_not_overwrite_the_first_sources_objects`.
+    // Sources occupy `1..next_id`, so the new `/Pages` and `/Catalog` must be
+    // allocated above that, or they overwrite source objects (see
+    // `merging_does_not_overwrite_the_first_sources_objects`).
     out.max_id = next_id.saturating_sub(1);
 
-    // The page tree is rebuilt from scratch, so the sources' own `/Catalog`,
-    // `/Pages` and outline objects are dropped rather than merged. Outlines in
-    // particular would be a table of contents naming files the user never saw.
+    // The page tree is rebuilt, so the sources' `/Catalog`, `/Pages` and
+    // outline objects are dropped.
     let pages_id = out.new_object_id();
     for (id, object) in objects {
         match object.type_name().unwrap_or(b"") {
@@ -378,9 +322,7 @@ fn merge(pages: &[Page]) -> (Document, usize, Vec<Skipped>) {
     });
     out.trailer.set("Root", catalog_id);
 
-    // Closes the numbering up, which also repairs the high-water mark: lopdf
-    // assigns ids from 1 and sets `max_id` itself on the way out, so there is
-    // nothing to recompute here first.
+    // Compacts ids from 1; lopdf also resets `max_id`.
     out.renumber_objects();
 
     (out, count, skipped)
@@ -395,15 +337,10 @@ fn load(path: &str) -> Result<Document, SkipReason> {
     parse(&bytes)
 }
 
-/// Parses PDF bytes, wherever they came from.
-///
-/// Split out of [`load`] so that the header check and the parse are one step
-/// with one vocabulary of reasons: a file that is not a PDF at all and a file
-/// that is a broken one are different failures, and the report says which.
+/// Parses PDF bytes, distinguishing "not a PDF" from a malformed one.
 fn parse(bytes: &[u8]) -> Result<Document, SkipReason> {
-    // Checked before parsing so the report can say "not a PDF" - which names
-    // the actual problem - rather than surfacing a parser error about an
-    // object offset, which tells the user nothing they can act on.
+    // Header check first so the report says "not a PDF" instead of a parser
+    // error.
     if !bytes.starts_with(b"%PDF-") {
         return Err(SkipReason::NotPdf);
     }
@@ -415,28 +352,23 @@ fn parse(bytes: &[u8]) -> Result<Document, SkipReason> {
     Ok(doc)
 }
 
-/// Cheap check that a single page is openable, for the group-of-one path.
-///
-/// Parses rather than only sniffing: handing a viewer a corrupt file and
-/// letting it produce its own error message is worse than saying so here,
-/// where the file name is still on screen.
+/// Checks that a single page parses, for the group-of-one path, so a corrupt
+/// file is reported here instead of by the viewer.
 fn probe(path: &str) -> Option<SkipReason> {
     load(path).err()
 }
 
 /// Copies every inheritable attribute onto a page dictionary.
 ///
-/// Walks the `/Parent` chain and takes the nearest ancestor's value for any
-/// key the page does not already carry, which is exactly what a renderer would
-/// have done. After this the page no longer depends on its ancestors, so it
-/// can be reparented without changing how it draws.
+/// Takes the nearest ancestor's value for each missing key, as a renderer
+/// would, and removes `/Parent`, so the page can be reparented unchanged.
 fn resolve_inherited(doc: &Document, page: ObjectId) -> Option<lopdf::Dictionary> {
     let mut dict = doc.get_dictionary(page).ok()?.clone();
 
     let mut current = dict.get(b"Parent").ok().and_then(|o| o.as_reference().ok());
     let mut depth = 0;
     while let Some(parent) = current {
-        // A malformed file from the share must not be able to spin this loop.
+        // Guards against `/Parent` cycles in malformed files.
         if depth >= MAX_PARENT_DEPTH {
             break;
         }
@@ -459,16 +391,11 @@ fn resolve_inherited(doc: &Document, page: ObjectId) -> Option<lopdf::Dictionary
     Some(dict)
 }
 
-/// Identifies a document by the pages that make it up.
+/// Returns the cache key for a set of pages.
 ///
-/// Folds each page's path, size and modification time, so a re-scanned or
-/// replaced page produces a different name and the stale merge is simply never
-/// looked at again. Paths go through [`winpath::path_key`], which is case- and
-/// separator-insensitive - the right comparison on Windows, where `R:\A.PDF`
-/// and `r:/a.pdf` are one file.
-///
-/// FNV-1a, like the rest of the crate's hashing. Identifying a cache entry,
-/// never a security boundary.
+/// FNV-1a over each page's path key (case- and separator-insensitive, via
+/// [`winpath::path_key`]), size and modification time, so a replaced page
+/// yields a new key. Not a security boundary.
 fn cache_key(pages: &[Page]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |v: u64| {
@@ -479,10 +406,7 @@ fn cache_key(pages: &[Page]) -> u64 {
     };
     for page in pages {
         mix(winpath::path_key(Path::new(page.path.as_ref())));
-        // Metadata is one stat per page against a share we are about to read
-        // in full, so its cost is noise. Absent metadata hashes as zero, which
-        // makes the entry conservative rather than wrong: it just will not be
-        // reused.
+        // Missing metadata hashes as zero.
         let meta = std::fs::metadata(page.path.as_ref()).ok();
         mix(meta.as_ref().map(|m| m.len()).unwrap_or(0));
         mix(meta
@@ -494,12 +418,11 @@ fn cache_key(pages: &[Page]) -> u64 {
     h
 }
 
-/// Writes the document, then moves it into place in one step.
+/// Writes the document to a unique temp file beside `out`, syncs it, then
+/// renames it into place.
 ///
-/// Same shape as `index::persist`: a unique temp name beside the target,
-/// flushed and synced, then renamed. Without the sync a power loss can leave a
-/// renamed but empty file, which is indistinguishable from a valid cache entry
-/// and would open as a blank document forever.
+/// The sync prevents a power loss from leaving an empty file under a valid
+/// cache name.
 fn write_atomically(mut doc: Document, out: &Path) -> std::io::Result<()> {
     let mut buf = Vec::new();
     doc.save_to(&mut buf)
@@ -507,12 +430,7 @@ fn write_atomically(mut doc: Document, out: &Path) -> std::io::Result<()> {
     write_bytes_atomically(&buf, out)
 }
 
-/// The same, for bytes that are already a PDF.
-///
-/// Kept apart from the `lopdf` path because bytes that are already a document
-/// reach the cache *verbatim*: round-tripping them through a parser and a
-/// serialiser is a fidelity risk worth taking for a merge, which has no
-/// alternative, and not worth taking for a copy.
+/// Writes raw bytes atomically, as [`write_atomically`] does.
 fn write_bytes_atomically(bytes: &[u8], out: &Path) -> std::io::Result<()> {
     let dir = out.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
@@ -537,10 +455,8 @@ fn write_bytes_atomically(bytes: &[u8], out: &Path) -> std::io::Result<()> {
 
     match std::fs::rename(&tmp, out) {
         Ok(()) => Ok(()),
-        // Another instance assembled the same document first, or the one
-        // already there is read-only and Windows refused to replace it. The
-        // name is the content either way, so whatever is there is what we were
-        // about to write.
+        // The target already exists (another instance won, or it is
+        // read-only). The name is the content, so the existing file is valid.
         Err(_) if out.is_file() => {
             let _ = std::fs::remove_file(&tmp);
             Ok(())
@@ -554,9 +470,8 @@ fn write_bytes_atomically(bytes: &[u8], out: &Path) -> std::io::Result<()> {
 
 /// Removes merged documents older than `max_age`.
 ///
-/// The output cannot be deleted after it is opened - the viewer is holding it -
-/// so it is collected on a later run instead. Best effort, exactly like
-/// `index::persist::gc_orphans`.
+/// A document cannot be deleted while a viewer holds it, so collection runs on
+/// a later start. Best effort, like `index::persist::gc_orphans`.
 pub fn gc(cache_dir: &Path, max_age: std::time::Duration) {
     let dir = cache_dir.join("pdf");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -575,12 +490,8 @@ pub fn gc(cache_dir: &Path, max_age: std::time::Duration) {
             .map(|t| now.duration_since(t).unwrap_or_default() > max_age)
             .unwrap_or(false);
         if old {
-            // Cleared first, because a document handed over read-only cannot
-            // be deleted while it still is: `remove_file` is refused outright
-            // on Windows. Without this, the first collectable document is also
-            // the last, and the cache grows for as long as the program is
-            // installed. Unconditional - the attribute may have been set by a
-            // run whose configuration has since changed.
+            // Windows refuses to delete a read-only file, so always clear the
+            // attribute first; an earlier run may have set it.
             let _ = set_read_only(&entry.path(), false);
             let _ = std::fs::remove_file(entry.path());
         }
@@ -589,14 +500,9 @@ pub fn gc(cache_dir: &Path, max_age: std::time::Duration) {
 
 /// Sets or clears the read-only attribute on a file in the cache.
 ///
-/// `std::fs` rather than `SetFileAttributesW`: `Permissions::set_readonly` is
-/// `FILE_ATTRIBUTE_READONLY` on Windows, which is the whole of what this
-/// needs, and it costs no `unsafe` and no extra `windows-sys` feature.
-///
-/// Reading the current value first is not an optimisation. Every document in
-/// here is opened far more often than it is written, so the common call has
-/// nothing to do, and a `set_permissions` on a file a viewer currently holds
-/// is worth not making.
+/// `Permissions::set_readonly` maps to `FILE_ATTRIBUTE_READONLY` on Windows.
+/// Skips the write when the attribute already matches, avoiding a
+/// `set_permissions` on a file a viewer may hold.
 pub(crate) fn set_read_only(path: &Path, read_only: bool) -> std::io::Result<()> {
     let mut perms = std::fs::metadata(path)?.permissions();
     if perms.readonly() == read_only {
@@ -709,16 +615,9 @@ mod tests {
             .collect()
     }
 
-    /// The bug: `out` starts with `max_id == 0`, but every source has already
-    /// been renumbered into `1..next_id`. Allocating the new `/Pages` and
-    /// `/Catalog` from `out`'s own counter therefore handed back `(1,0)` and
-    /// `(2,0)` - object numbers the first source already owned - and the
-    /// inserts silently overwrote them.
-    ///
-    /// `one_page` lays out `1=Pages 2=Font 3=Resources 4=Content 5=Page
-    /// 6=Catalog`, so object 1 was filtered out anyway but object 2, the font,
-    /// was replaced by the catalog. The page then referenced a `/Type/Catalog`
-    /// as its font and rendered wrong - while opening perfectly.
+    /// The new `/Pages` and `/Catalog` must not reuse ids from the first
+    /// source. `one_page` puts its font at object 2, which a collision would
+    /// replace.
     #[test]
     fn merging_does_not_overwrite_the_first_sources_objects() {
         let dir = tempfile::tempdir().unwrap();
@@ -776,14 +675,10 @@ mod tests {
         assert_eq!(got.pages, 3);
         assert!(got.merged && !got.reused);
         assert!(got.skipped.is_empty());
-        // The widths are distinct per source, so this checks order, not just
-        // the count.
+        // Distinct widths per source make this an order check.
         assert_eq!(media_widths(&got.path), [595, 596, 597]);
     }
 
-    /// The silent one. Without `resolve_inherited` the page keeps no box of
-    /// its own, the new `/Pages` node has none either, and the document opens
-    /// blank.
     #[test]
     fn a_page_inheriting_its_mediabox_keeps_it_after_reparenting() {
         let dir = tempfile::tempdir().unwrap();
@@ -853,8 +748,6 @@ mod tests {
         assert!(got.skipped[0].describe().contains("no longer exists"));
     }
 
-    /// Rewriting a file just to open it is pure cost, and the overwhelmingly
-    /// common case is a job with one drawing.
     #[test]
     fn a_single_page_group_is_opened_without_being_merged() {
         let dir = tempfile::tempdir().unwrap();
@@ -887,8 +780,6 @@ mod tests {
         }
     }
 
-    /// Handing a viewer an empty document and calling it success would look
-    /// like the program worked and the job was empty.
     #[test]
     fn a_group_where_nothing_survived_is_a_failure_not_a_launch() {
         let dir = tempfile::tempdir().unwrap();
@@ -923,10 +814,8 @@ mod tests {
         assert_eq!(first.path, second.path);
     }
 
-    /// The bug: a hit returned `pages.len()` and no skips, so a document that
-    /// lost three pages to a share hiccup reported as complete - and kept
-    /// reporting that for the whole cache lifetime, because the key is derived
-    /// from the members that were *asked* for, not from what came back.
+    /// A cache hit reports the original merge's skips, since the key covers
+    /// the requested pages, not the ones that were merged.
     #[test]
     fn a_reused_document_reports_the_pages_it_actually_has() {
         let dir = tempfile::tempdir().unwrap();
@@ -950,9 +839,6 @@ mod tests {
         assert!(second.skipped[0].describe().contains("not a PDF"));
     }
 
-    /// Without the note there is nothing to trust, so re-merging is the only
-    /// honest option - this also covers cache entries written by an older
-    /// build.
     #[test]
     fn a_cached_document_with_no_record_of_its_merge_is_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
@@ -972,8 +858,6 @@ mod tests {
         assert_eq!(second.pages, 2);
     }
 
-    /// The key has to notice a page being replaced, or an edited drawing keeps
-    /// opening as the version it used to be.
     #[test]
     fn replacing_a_page_produces_a_different_document() {
         let dir = tempfile::tempdir().unwrap();
@@ -984,7 +868,7 @@ mod tests {
         ];
         let before = assemble(&pages, cache.path()).unwrap();
 
-        // A different size, so the key changes even where the clock is coarse.
+        // Different size, so the key changes even with a coarse clock.
         pages[1] = page_at(dir.path(), "b.pdf", &one_page("two but longer", 596));
         let after = assemble(&pages, cache.path()).unwrap();
 
@@ -1042,12 +926,8 @@ mod tests {
         assert!(!keep.is_file(), "an expired document must be collected");
     }
 
-    /// The interaction that makes the cache grow forever if it is missed.
-    ///
-    /// A document handed to the viewer read-only keeps that attribute, and
-    /// Windows refuses `remove_file` on a read-only file - so without the
-    /// clear in `gc`, the first document anybody opens is also the last one
-    /// the collector can ever remove.
+    /// Windows refuses `remove_file` on a read-only file, so `gc` must clear
+    /// the attribute first.
     #[test]
     fn a_read_only_document_is_still_collected() {
         let cache = tempfile::tempdir().unwrap();
@@ -1078,9 +958,7 @@ mod tests {
         set_read_only(&doc, true).unwrap();
         assert!(readonly(), "the document was not protected");
 
-        // Twice, because the option being off has to free a document an
-        // earlier run already marked - and a second call must not fail on a
-        // file that is already where it is being asked to be.
+        // Twice: clearing an already-clear file must succeed.
         set_read_only(&doc, false).unwrap();
         set_read_only(&doc, false).unwrap();
         assert!(!readonly(), "turning the option off did not give it back");

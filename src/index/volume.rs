@@ -1,20 +1,13 @@
-//! Volume interrogation: drive type, serial number, filesystem flags, and
-//! the SMB dialect in use.
+//! Volume interrogation: drive type, serial number, filesystem flags, and the
+//! SMB dialect. Reported by `--doctor` and used at runtime:
 //!
-//! This is what `--doctor` reports, and it is how several decisions get made
-//! at runtime instead of being guessed at build time:
-//!
-//! * The **volume serial** validates the persisted index. Without it, a drive
-//!   letter remapped to a different share would serve the previous mapping's
-//!   file list.
-//! * **`FILE_CASE_SENSITIVE_SEARCH`** is reported but deliberately not acted
-//!   on. It says the filesystem *supports* case-sensitive names, which NTFS
-//!   always does, not that lookups resolve case-sensitively - so branching on
-//!   it would disable server-side filtering on every ordinary volume.
-//! * The **SMB dialect** determines the negotiated maximum transfer size, and
-//!   therefore whether large directory buffers can help at all. On SMB 2.0.2
-//!   and some NAS firmware the cap is 64 KiB, which collapses the 1 MiB
-//!   strategy back onto the 64 KiB one.
+//! * The **volume serial** validates the persisted index, so a drive letter
+//!   remapped to another share does not serve the old file list.
+//! * **`FILE_CASE_SENSITIVE_SEARCH`** is reported only. It means the
+//!   filesystem supports case-sensitive names (NTFS always does), not that
+//!   lookups are case-sensitive.
+//! * The **SMB dialect** bounds the maximum transfer size. SMB 2.0.2 and some
+//!   NAS firmware cap it at 64 KiB, which makes 1 MiB buffers no faster.
 
 use std::path::Path;
 
@@ -33,7 +26,7 @@ use super::win_util::wide_path;
 use crate::util::winpath;
 
 /// Filesystem flag: the volume supports case-sensitive filename lookup.
-/// Not exported by `windows-sys`, so it is spelled out here.
+/// Not exported by `windows-sys`.
 pub const FILE_CASE_SENSITIVE_SEARCH: u32 = 0x0000_0001;
 
 /// `WNNC_NET_SMB`, the protocol id reported for an SMB share.
@@ -78,12 +71,10 @@ impl DriveKind {
         }
     }
 
-    /// Whether a volume handle (`\\.\X:`) could conceivably be opened.
+    /// Returns whether a volume handle (`\.\X:`) could be opened.
     ///
-    /// Only meaningful for MFT-style enumeration, which this crate does not
-    /// implement: both target drives are network shares, where no MFT is
-    /// exposed. `--doctor` reports this so the conclusion is visible rather
-    /// than assumed.
+    /// Relevant only to MFT enumeration, which is not implemented because
+    /// network shares expose no MFT. Reported by `--doctor`.
     pub fn supports_volume_handle(self) -> bool {
         matches!(self, Self::Fixed | Self::RamDisk)
     }
@@ -91,15 +82,15 @@ impl DriveKind {
 
 const DRIVE_UNKNOWN_RAW: u32 = 0;
 
-/// What is known about one root.
+/// Volume details for one configured root.
 #[derive(Debug, Clone, Default)]
 pub struct VolumeInfo {
     /// The directory as configured, which may be a subdirectory of the volume.
     pub root: String,
-    /// The volume root the volume-level queries were actually issued against.
+    /// The volume root the volume-level queries were issued against.
     pub volume_root: Option<String>,
-    /// True when `root` is deeper than its volume root, so `--doctor` can say
-    /// "subdirectory of V:\" rather than reporting a bare failure.
+    /// True when `root` is below its volume root, so `--doctor` can say
+    /// "subdirectory of V:\".
     pub is_subdirectory: bool,
     pub kind: Option<DriveKind>,
     pub unc_target: Option<String>,
@@ -108,24 +99,17 @@ pub struct VolumeInfo {
     pub max_component_len: Option<u32>,
     pub filesystem_flags: Option<u32>,
     pub remote_protocol: Option<RemoteProtocol>,
-    /// Populated when the volume could not be interrogated.
+    /// The Win32 error when the volume could not be interrogated.
     pub error: Option<u32>,
 }
 
 impl VolumeInfo {
-    /// Whether the volume reports `FILE_CASE_SENSITIVE_SEARCH`.
+    /// Returns whether the volume reports `FILE_CASE_SENSITIVE_SEARCH`.
     ///
-    /// **Informational only.** The flag means the filesystem *supports*
-    /// case-sensitive names, not that lookups are performed case-sensitively:
-    /// NTFS sets it on every volume while Win32 still resolves names
-    /// case-insensitively. Treating it as a disqualifier for server-side
-    /// filtering - as an earlier version of this code did - switched the
-    /// feature off everywhere and made `--doctor` raise an alarm about an
-    /// entirely ordinary drive.
-    ///
-    /// The question that actually matters, "does this server's pattern
-    /// matching agree with ours", is answered behaviourally: by the
-    /// superset audit in [`crate::search::verify`] and by `--bench`.
+    /// Informational only: NTFS sets it on every volume while Win32 still
+    /// resolves names case-insensitively, so it must not disable server-side
+    /// filtering. Whether the server's matching agrees with ours is checked
+    /// by the superset audit in [`crate::search::verify`] and by `--bench`.
     pub fn case_sensitive_search(&self) -> bool {
         self.filesystem_flags
             .is_some_and(|f| f & FILE_CASE_SENSITIVE_SEARCH != 0)
@@ -154,12 +138,12 @@ impl RemoteProtocol {
         }
     }
 
-    /// Best guess at whether the negotiated maximum transfer size allows
-    /// directory buffers above 64 KiB.
+    /// Returns whether the negotiated transfer size likely allows directory
+    /// buffers above 64 KiB.
     ///
-    /// SMB 2.0.2 caps at 64 KiB; later dialects normally negotiate 1 MiB, but
-    /// a given server may still cap lower - the enumerator halves its buffer
-    /// adaptively rather than trusting this.
+    /// SMB 2.0.2 caps at 64 KiB; later dialects usually allow 1 MiB, but a
+    /// server may cap lower, so the enumerator also halves its buffer
+    /// adaptively.
     pub fn likely_large_transactions(self) -> bool {
         self.is_smb() && (self.major > 2 || (self.major == 2 && self.minor >= 1))
     }
@@ -167,10 +151,8 @@ impl RemoteProtocol {
 
 /// Reads the drive type of the volume containing `path`.
 ///
-/// `GetDriveTypeW` answers `DRIVE_NO_ROOT_DIR` for anything that is not a
-/// volume root, so a configured subdirectory such as `V:\Documents\custpro`
-/// would otherwise stop being recognised as a network share. The volume root
-/// is derived first.
+/// `GetDriveTypeW` returns `DRIVE_NO_ROOT_DIR` for anything but a volume root,
+/// so the root is derived first.
 pub fn drive_kind(path: &Path) -> DriveKind {
     let Some(root) = winpath::volume_root_of(path) else {
         return DriveKind::NoRootDir;
@@ -183,9 +165,7 @@ pub fn drive_kind(path: &Path) -> DriveKind {
 
 /// Resolves the mapped drive containing `path` to its UNC target.
 pub fn unc_target(path: &Path) -> Option<String> {
-    // WNetGetConnectionW wants a bare device name such as `V:` - not a path.
-    // Trimming trailing separators is not enough once the configured root is
-    // a subdirectory.
+    // WNetGetConnectionW needs a bare device name such as `V:`, not a path.
     let letter = winpath::drive_letter_of(path)?;
     let wide = wide_nul(&letter);
 
@@ -203,11 +183,9 @@ pub fn unc_target(path: &Path) -> Option<String> {
 
 /// Interrogates the volume containing `path`, degrading field by field.
 ///
-/// `path` is the *configured* directory, which may be a subdirectory. Every
-/// volume-level query is issued against its volume root instead, because
-/// `GetVolumeInformationW` requires one and fails with `ERROR_DIR_NOT_ROOT`
-/// otherwise - taking the volume serial, the filesystem flags, and therefore
-/// the persisted index's identity check down with it.
+/// `path` may be a subdirectory. Volume-level queries use its volume root
+/// because `GetVolumeInformationW` otherwise fails with `ERROR_DIR_NOT_ROOT`,
+/// losing the serial that validates the persisted index.
 pub fn volume_info(path: &Path) -> VolumeInfo {
     let volume_root = winpath::volume_root_of(path);
     let mut info = VolumeInfo {
@@ -223,8 +201,8 @@ pub fn volume_info(path: &Path) -> VolumeInfo {
     info.unc_target = unc_target(path);
 
     let Some(volume_root) = volume_root else {
-        // Nothing volume-shaped to interrogate - a relative path, or a UNC
-        // path with no share component.
+        // No volume to interrogate: a relative path, or a UNC path with no
+        // share component.
         info.remote_protocol = remote_protocol(path);
         return info;
     };
@@ -260,18 +238,14 @@ pub fn volume_info(path: &Path) -> VolumeInfo {
         info.filesystem = Some(String::from_utf16_lossy(&fs_buf[..end]));
     }
 
-    // Deliberately the configured directory, not the volume root: this one
-    // goes through CreateFileW, which is happy with any directory, and the
-    // dialect of the share the files actually live on is what matters.
+    // Uses the configured directory, not the volume root: CreateFileW accepts
+    // any directory, and the dialect of the share holding the files matters.
     info.remote_protocol = remote_protocol(path);
     info
 }
 
-/// The serial of the volume containing `path`, for validating a persisted
-/// index.
-///
-/// Works for a configured subdirectory, because `volume_info` queries the
-/// volume root rather than the path it is given.
+/// Returns the serial of the volume containing `path`, for validating a
+/// persisted index. Works for subdirectories.
 pub fn volume_serial(path: &Path) -> Option<u32> {
     volume_info(path).volume_serial
 }
@@ -295,7 +269,7 @@ pub fn remote_protocol(root: &Path) -> Option<RemoteProtocol> {
     };
 
     if ok == 0 {
-        // Expected on a local volume: the drive simply is not remote.
+        // Expected on a local volume.
         return None;
     }
     Some(RemoteProtocol {
@@ -324,8 +298,7 @@ fn open_dir(dir: &Path) -> Option<Handle> {
     let wide = wide_path(dir, winpath::is_volume_root(dir));
     // SAFETY: `wide` is NUL-terminated and outlives the call. The flag
     // combination is the documented one for opening a directory; without
-    // FILE_FLAG_BACKUP_SEMANTICS this fails with ERROR_ACCESS_DENIED, which
-    // is the classic misdiagnosis.
+    // FILE_FLAG_BACKUP_SEMANTICS this fails with ERROR_ACCESS_DENIED.
     let h = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -370,15 +343,12 @@ mod tests {
 
     #[test]
     fn only_local_volumes_could_expose_a_volume_handle() {
-        // Both target drives are DRIVE_REMOTE, which is why no MFT path
-        // exists in this crate.
+        // Network shares are DRIVE_REMOTE, so no MFT path exists.
         assert!(!DriveKind::Remote.supports_volume_handle());
         assert!(DriveKind::Fixed.supports_volume_handle());
     }
 
-    /// The flag is read and reported, but it is deliberately not a
-    /// disqualifier: NTFS sets it on every volume, so acting on it would
-    /// disable server-side filtering everywhere.
+    /// The flag is reported but not acted on.
     #[test]
     fn case_sensitive_search_reflects_the_volume_flag() {
         let mut v = VolumeInfo {
@@ -396,14 +366,11 @@ mod tests {
         assert!(!VolumeInfo::default().case_sensitive_search());
     }
 
-    /// Guards the regression that prompted the change: an ordinary NTFS
-    /// volume reports the flag, and that must not read as a problem.
+    /// An ordinary NTFS volume reports the flag; nothing branches on it.
     #[test]
     fn an_ordinary_ntfs_volume_reports_the_flag_without_it_meaning_anything() {
         let info = volume_info(Path::new("C:\\"));
         assert_eq!(info.filesystem.as_deref(), Some("NTFS"));
-        // Whether it is set is the filesystem's business; the point is that
-        // nothing in the crate branches on it.
         let _ = info.case_sensitive_search();
     }
 
@@ -452,7 +419,7 @@ mod tests {
 
     #[test]
     fn interrogating_a_nonexistent_drive_reports_an_error_rather_than_panicking() {
-        // Q: is very unlikely to be mapped; either way this must not panic.
+        // Q: is unlikely to be mapped; either way this must not panic.
         let info = volume_info(Path::new("Q:\\"));
         assert_eq!(info.root, "Q:\\");
         assert!(info.kind.is_some());
@@ -467,12 +434,9 @@ mod tests {
         assert!(!info.is_subdirectory);
     }
 
-    /// The regression this change exists to prevent.
-    ///
-    /// `GetVolumeInformationW` and `GetDriveTypeW` only accept a volume root,
-    /// so interrogating a configured *subdirectory* used to lose the serial,
-    /// the filesystem flags and the drive type - which in turn disabled the
-    /// persisted index's only identity check and let a stale index be served.
+    /// `GetVolumeInformationW` and `GetDriveTypeW` accept only a volume root,
+    /// so a subdirectory must be resolved to its root to keep the serial,
+    /// flags and drive type.
     #[test]
     fn a_subdirectory_reports_the_same_volume_as_its_root() {
         let root = volume_info(Path::new("C:\\"));

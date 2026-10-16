@@ -1,38 +1,26 @@
-//! The editable search line.
+//! The editable search line: text, caret and selection.
 //!
-//! The query used to be a bare `String` that only ever grew at the end: the
-//! caret was not stored at all, it was *derived* from the length at render
-//! time. That made a typo in the middle of a code unfixable - the only repair
-//! was to hold Backspace until the mistake scrolled off.
-//!
-//! Everything here is a pure function of the struct. No clock, no I/O, no
-//! knowledge of the terminal, which is what lets the whole editing model be
-//! tested without one.
+//! Pure functions of the struct, with no clock or I/O.
 //!
 //! # Indices
 //!
-//! `caret` and `anchor` are **byte** offsets, and every operation derives them
-//! from `char_indices`, so they are always on a character boundary and slicing
-//! can never panic. Byte offsets rather than character counts because the text
-//! is sliced far more often than it is measured.
+//! `caret` and `anchor` are **byte** offsets derived from `char_indices`, so
+//! they always lie on a character boundary and slicing cannot panic.
 //!
-//! *Columns* are a separate idea: a column is a character count, because that
-//! is what the rest of the crate already uses to place things on screen. The
-//! two are converted explicitly at the edges, by [`Input::column_of`] and
-//! [`Input::byte_at_column`], rather than being silently interchanged.
+//! *Columns* are character counts, used for on-screen placement. Convert
+//! explicitly with [`Input::column_of`] and [`Input::byte_at_column`].
 
 use std::ops::Deref;
 
 /// The most text the line will hold.
 ///
-/// A job code is a dozen characters; this exists only so a pathological paste
-/// cannot turn every keystroke into a megabyte memmove.
+/// Bounds the cost of each edit after a pathological paste.
 pub const MAX_LEN: usize = 4096;
 
 /// The search text, with a caret and an optional selection anchor.
 ///
-/// The selection is the range between `anchor` and `caret` in either order -
-/// the anchor is where the drag started, not necessarily the lower bound.
+/// The selection spans `anchor` and `caret` in either order; the anchor is
+/// where the selection started, not necessarily the lower bound.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Input {
     text: String,
@@ -119,8 +107,7 @@ impl Input {
             return had_selection;
         }
         if self.text.len() + s.len() > MAX_LEN {
-            // Take what fits rather than refusing outright: a truncated paste
-            // is editable, a rejected one just looks broken.
+            // Insert what fits rather than refusing the whole paste.
             let room = MAX_LEN.saturating_sub(self.text.len());
             let fits = floor_boundary(s, room);
             if fits == 0 {
@@ -190,9 +177,8 @@ impl Input {
     // --- motion -----------------------------------------------------------
 
     pub fn move_left(&mut self, by_field: bool, extend: bool) {
-        // Collapsing to the near edge rather than stepping off it is what
-        // every other text field does: after selecting a run, Left puts you
-        // at its start, not one character before wherever the drag ended.
+        // Without `extend`, collapse an existing selection to its near edge,
+        // as standard text fields do.
         if !extend && let Some((lo, _)) = self.selection() {
             self.caret = lo;
             self.anchor = None;
@@ -236,10 +222,10 @@ impl Input {
         self.caret = self.clamp_boundary(byte);
     }
 
-    /// Selects the whole run of non-whitespace around `byte`, which for this
-    /// tool means the entire job code - the thing a double-click is actually
-    /// reaching for. Splitting on the dashes would hand back `11` from
-    /// `11-D-0704`, which is never what anyone means to copy.
+    /// Selects the run of non-whitespace around `byte`.
+    ///
+    /// Splits on whitespace only, so a double-click on `11-D-0704` selects the
+    /// whole code rather than `11`.
     pub fn select_word_at(&mut self, byte: usize) {
         let at = self.clamp_boundary(byte);
         let mut lo = at;
@@ -364,11 +350,10 @@ impl Input {
 
 /// Cleans text arriving from outside the program.
 ///
-/// A paste is the one way a control character can reach the search line, and a
-/// newline in the query would be invisible on screen while making the match
-/// fail - the worst combination there is. Multi-line text collapses to its
-/// content rather than being refused: someone pasting a code out of an email
-/// should get the code.
+/// Removes control characters from pasted text and trims it.
+///
+/// A newline in the query would be invisible yet make the match fail.
+/// Multi-line text collapses to its content rather than being refused.
 pub fn sanitize(text: &str) -> String {
     let cleaned: String = text
         .chars()
@@ -379,7 +364,7 @@ pub fn sanitize(text: &str) -> String {
 }
 
 /// Fields are runs of alphanumerics, so Ctrl+Left steps `11-D-0704` one
-/// dash-delimited field at a time rather than treating the code as one word.
+/// dash-delimited field at a time.
 fn is_field_char(c: char) -> bool {
     c.is_alphanumeric()
 }
@@ -393,8 +378,7 @@ fn floor_boundary(s: &str, at: usize) -> usize {
     at
 }
 
-/// Reading the line as a string is by far the commonest use, and every
-/// existing call site already did exactly that.
+/// Lets the line be read directly as a `&str`.
 impl Deref for Input {
     type Target = str;
 
@@ -445,8 +429,6 @@ mod tests {
 
     #[test]
     fn a_character_can_be_inserted_in_the_middle() {
-        // The whole point of the feature: fixing a typo without retyping the
-        // rest of the code.
         let mut input = typed("11-D-074");
         input.move_left(false, false);
         assert!(input.insert_char('0'));
@@ -538,8 +520,6 @@ mod tests {
 
     #[test]
     fn a_double_click_selects_the_whole_code_not_one_field() {
-        // Splitting on dashes would yield "11", which is never the thing
-        // someone means to copy.
         let mut input = typed("11-D-0704");
         input.select_word_at(4);
         assert_eq!(input.selected_text(), Some("11-D-0704"));
@@ -562,8 +542,7 @@ mod tests {
 
     #[test]
     fn the_caret_never_splits_a_multi_byte_character() {
-        // A pasted code can carry anything; a caret landing mid-character
-        // would panic the next time the line was sliced for rendering.
+        // A caret mid-character would panic the next time the line is sliced.
         let mut input = typed("café-Ω");
         for _ in 0..10 {
             input.move_left(false, false);

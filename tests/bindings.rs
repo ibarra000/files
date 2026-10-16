@@ -1,21 +1,12 @@
-//! Every key this program answers, written out as data.
+//! Tests every key binding against a hand-written table.
 //!
-//! By hand, and deliberately *not* generated from `keys.rs`. A table derived
-//! from the code agrees with the code by construction and proves nothing. This
-//! is the list of what the program is supposed to do; the tests below are the
-//! argument that it does.
+//! The table is written by hand rather than generated from `keys.rs`, so it
+//! can disagree with the code. It catches two silent failures:
 //!
-//! Two failures this is here to catch, both silent:
-//!
-//! - An arm that stops being reached. The arms in `keys.rs` are matched in
-//!   order, so a duplicate does not fail to compile - it shadows, and the
-//!   binding that lost is simply dead. That is how `Ctrl+W` once came to type
-//!   a literal `w`.
-//! - A shortcut that outlives the key it names. The actions menu is the only
-//!   documentation most people will read, and a row naming a binding that
-//!   has been renamed is worse than no row: it teaches a key that does
-//!   nothing, and the reader concludes the program is broken rather than the
-//!   menu.
+//! - A shadowed arm. Arms in `keys.rs` match in order, so a duplicate compiles
+//!   and the later binding is dead.
+//! - A stale shortcut. A row in the actions menu that names a key which no
+//!   longer does anything.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,17 +19,15 @@ use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use files::view::actions;
 
-/// Where the panel is when a key is pressed.
+/// The panel mode a key is pressed in.
 ///
-/// Two, where there used to be five. The text field always has the keyboard, so
-/// the only thing a key's meaning still depends on is whether the body is the
-/// result list or the drive picker - and the picker is reached from one key and
-/// left by three.
+/// The text field always has focus, so a key's meaning depends only on what
+/// the body shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Where {
-    /// Something typed, results on screen. The ordinary case.
+    /// A code typed and results on screen.
     Searching,
-    /// Nothing typed, so the body is the codes used before.
+    /// Browsing recent codes.
     Recent,
     /// `F5` has been pressed.
     Picking,
@@ -49,14 +38,13 @@ struct Binding {
     code: Key,
     mods: Mods,
     at: Where,
-    /// What it does, in the words the help panel would use.
+    /// A short description of what the key does.
     what: &'static str,
-    /// Deliberately answered whatever modifiers happen to be set.
+    /// Whether the binding fires regardless of modifiers.
     ///
-    /// Some terminals report a function key with SHIFT, and requiring NONE
-    /// makes such a key intermittently dead - which is a bug report nobody can
-    /// reproduce. The character bindings are the opposite: a bare letter is
-    /// text, and only the modified form is a command.
+    /// Only function keys do this, since some sources report them with SHIFT
+    /// set. A bare character is text, so character bindings require their
+    /// modifier.
     any_modifier: bool,
 }
 
@@ -132,14 +120,13 @@ fn table() -> Vec<Binding> {
         ),
         anymod(Key::F(4), Searching, "narrow to one kind of file"),
         anymod(Key::F(5), Searching, "choose a drive to update"),
-        // The drive picker, which is the one thing that borrows the body.
+        // The drive picker.
         anymod(Key::F(5), Picking, "close the drive list"),
         b(Key::Up, NONE, Picking, "previous drive"),
         b(Key::Down, NONE, Picking, "next drive"),
         b(Key::Enter, NONE, Picking, "update the chosen drive"),
         b(Key::Esc, NONE, Picking, "back to typing"),
-        // Editing. The caret keys are caret keys everywhere, which is the
-        // whole of what collapsing the focus bought.
+        // Editing.
         b(Key::Char('1'), NONE, Searching, "type a character"),
         b(Key::Backspace, NONE, Searching, "delete backwards"),
         b(Key::Delete, NONE, Searching, "delete forwards"),
@@ -154,7 +141,7 @@ fn table() -> Vec<Binding> {
         b(Key::PageUp, NONE, Searching, "a listful up"),
         b(Key::Enter, NONE, Searching, "open the selection"),
         b(Key::Esc, NONE, Searching, "clear the code"),
-        // The recent codes, which is what an empty field shows.
+        // Browsing recent codes.
         b(Key::Up, NONE, Recent, "an older code"),
         b(Key::Down, NONE, Recent, "a newer code"),
         b(Key::Enter, NONE, Recent, "use this code"),
@@ -192,8 +179,7 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
     );
 }
 
-/// The settings every test here starts from: the defaults, plus the viewer
-/// that used to be built in, configured the way somebody would write it.
+/// The default settings plus one configured viewer, `avwin`.
 fn with_avwin() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
@@ -203,17 +189,11 @@ fn with_avwin() -> Settings {
     }
 }
 
-/// A state already at `at`, reached the way the program reaches it rather than
-/// by assigning a field - so the fixture cannot describe a state the program
-/// cannot get into.
+/// Returns a state in mode `at`, reached through key events rather than by
+/// setting fields, so it is always a reachable state.
 ///
-/// Not summoned. There used to be a second fixture that was, because the
-/// hint bar drew a shorter set of chips on a summoned panel and that set was
-/// never contract-tested - which is how a panel shipped whose only route to
-/// the shortcut window was a key it advertised nowhere. The actions menu
-/// that replaced the chips offers the same rows either way, so there is one
-/// fixture again. What a *summoned* panel does differently is dismissal, and
-/// `tests/overlay.rs` is where that lives.
+/// The panel is not summoned; dismissal behaviour is tested in
+/// `tests/overlay.rs`.
 fn fixture(at: Where) -> (AppState, Instant) {
     let now = Instant::now();
     let mut s = AppState::new(with_avwin(), now);
@@ -222,23 +202,18 @@ fn fixture(at: Where) -> (AppState, Instant) {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), NONE)), now);
     }
     deliver(&mut s, 60, now);
-    // The caret goes into the middle of the code rather than staying at the
-    // end of it, so that Backspace and Delete both have something to do. A
-    // fixture where one of them is legitimately a no-op cannot tell a dead
-    // binding from a live one.
+    // Park the caret mid-code so Backspace and Delete both have an effect;
+    // a legitimate no-op would be indistinguishable from a dead binding.
     s.update(AppEvent::Key(KeyEvent::new(Key::Left, NONE)), now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Left, NONE)), now);
 
     match at {
         Where::Searching => {
-            // Off the first row, so Up has somewhere to go. A fixture where a
-            // binding is legitimately a no-op cannot tell a dead one from a
-            // live one - the same reason the caret above sits mid-code.
+            // Move off the first row so Up has an effect.
             s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
         }
         Where::Recent => {
-            // The recent codes are what an empty field shows, so the code goes
-            // first - and then one step onto an entry.
+            // Clear the line, then step onto the newest entry.
             s.update(AppEvent::Key(KeyEvent::new(Key::Char('u'), CTRL)), now);
             s.update(AppEvent::Key(KeyEvent::new(Key::Up, NONE)), now);
         }
@@ -251,7 +226,7 @@ fn fixture(at: Where) -> (AppState, Instant) {
     (s, now)
 }
 
-/// Where the fixture actually got to, read back off the state.
+/// Returns the mode the state is in.
 fn where_of(s: &AppState) -> Where {
     if s.picking_share {
         Where::Picking
@@ -262,7 +237,7 @@ fn where_of(s: &AppState) -> Where {
     }
 }
 
-/// Everything a keypress could visibly change.
+/// The state a keypress can visibly change.
 #[derive(Debug, PartialEq)]
 struct Snapshot {
     text: String,
@@ -294,10 +269,6 @@ fn snapshot(s: &AppState) -> Snapshot {
 
 // --- the tests ----------------------------------------------------------
 
-/// No key means two things in one mode.
-///
-/// The arms match in order, so a duplicate does not fail to compile: it
-/// shadows, and the loser is dead code that still has a hint pointing at it.
 #[test]
 fn no_key_is_bound_twice_in_the_same_mode() {
     let all = table();
@@ -313,12 +284,9 @@ fn no_key_is_bound_twice_in_the_same_mode() {
     }
 }
 
-/// Every binding in the table still answers.
+/// Every binding produces a redraw, a command, or an observable change.
 ///
-/// "Answers" is deliberately weak - a redraw, a command, or any observable
-/// change - because asserting *what* each key does is the job of the tests that
-/// name it. What this catches is an arm falling off the match, which is
-/// otherwise completely silent.
+/// What each key does is asserted elsewhere; this only detects dead arms.
 #[test]
 fn every_binding_in_the_table_still_answers() {
     for binding in table() {
@@ -340,19 +308,11 @@ fn every_binding_in_the_table_still_answers() {
     }
 }
 
-/// Every chord in the table is one the toolkit can actually deliver.
+/// Every Ctrl chord in the table survives `gui::input::translate`.
 ///
-/// The gap every other test in this file was blind to. They all build a
-/// `KeyEvent` by hand and hand it to the state machine, so the table could - and
-/// did - promise a binding that `gui::input::translate` drops on the floor. That
-/// is how `Ctrl+,` shipped: the arm in `keys.rs` was correct, the chip was
-/// correct, this table was correct, and `egui::Key::Comma` was in neither of the
-/// two lookup tables in `gui::input`, so no press ever reached any of them.
-///
-/// So this one starts where a keystroke really starts. The `egui::Key` for each
-/// character is written out below, which is a second list and earns it: its only
-/// purpose is to disagree with `gui::input::chord` when somebody adds a binding
-/// and forgets the half that receives it.
+/// The other tests build `KeyEvent`s directly, so they cannot detect a chord
+/// that the input layer drops. `pressed_with_ctrl` lists the `egui::Key` for
+/// each character by hand so it can disagree with `gui::input::chord`.
 #[test]
 fn every_chord_in_the_table_survives_the_input_layer() {
     for binding in table() {
@@ -363,10 +323,8 @@ fn every_chord_in_the_table_survives_the_input_layer() {
             continue;
         }
         let Some(event) = pressed_with_ctrl(c) else {
-            // Copy, cut and paste never arrive as a key at all - the toolkit
-            // turns them into their own events first, and `translate` puts the
-            // chord back from there. They are covered by `the_clipboard_keys_*`
-            // tests in `gui::input`.
+            // egui delivers copy, cut and paste as their own events; the
+            // `the_clipboard_keys_*` tests in `gui::input` cover them.
             continue;
         };
 
@@ -381,11 +339,8 @@ fn every_chord_in_the_table_survives_the_input_layer() {
     }
 }
 
-/// A bare comma is text, not a command.
-///
-/// The other half of the fix, and the failure the `chord` table is shaped to
-/// avoid: a printable key listed as a binding is typed twice, once from
-/// `Event::Text` and once from `Event::Key`.
+/// A bare comma is typed once, not once from `Event::Text` and again from
+/// `Event::Key`.
 #[test]
 fn a_bare_comma_is_typed_exactly_once() {
     let typed = translated(vec![
@@ -395,9 +350,10 @@ fn a_bare_comma_is_typed_exactly_once() {
     assert_eq!(typed, vec![KeyEvent::new(Key::Char(','), Mods::NONE)]);
 }
 
-/// The key that types `c`, for a chord the toolkit delivers as a key.
+/// Returns the egui Ctrl+key press for `c`.
 ///
-/// `None` for the three the toolkit intercepts before anything sees a key.
+/// Returns `None` for copy, cut and paste, which egui delivers as their own
+/// events.
 fn pressed_with_ctrl(c: char) -> Option<eframe::egui::Event> {
     use eframe::egui::Key as E;
     let key = match c {
@@ -429,7 +385,7 @@ fn raw_press(key: eframe::egui::Key, modifiers: eframe::egui::Modifiers) -> efra
     }
 }
 
-/// What the real input layer makes of a frame's worth of toolkit events.
+/// Runs one frame of egui events through `gui::input::translate`.
 fn translated(events: Vec<eframe::egui::Event>) -> Vec<KeyEvent> {
     let mut input = eframe::egui::InputState::default();
     input.events = events;
@@ -442,11 +398,7 @@ fn translated(events: Vec<eframe::egui::Event>) -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Every shortcut the menu advertises is a key that does something.
-///
-/// The menu is the only documentation most people will read. A row left
-/// pointing at a renamed binding teaches a key that does nothing, and the
-/// reader concludes the program is broken rather than the menu.
+/// Every shortcut shown in the actions menu has an effect.
 #[test]
 fn every_advertised_key_is_a_live_binding() {
     for at in [Where::Searching, Where::Recent, Where::Picking] {
@@ -468,8 +420,7 @@ fn every_advertised_key_is_a_live_binding() {
     }
 }
 
-/// And nothing is advertised that the table does not know about, which is the
-/// other direction of the same contract.
+/// Every shortcut shown in the actions menu is in the binding table.
 #[test]
 fn nothing_is_advertised_that_the_table_has_never_heard_of() {
     let all = table();
@@ -488,11 +439,6 @@ fn nothing_is_advertised_that_the_table_has_never_heard_of() {
     }
 }
 
-/// The actions menu is a mode, and Escape is how you get out of one.
-///
-/// Without this the only way back would be the key that opened it, and
-/// Escape - which everybody presses first - would take the whole panel with
-/// it.
 #[test]
 fn escape_shuts_the_actions_menu_rather_than_the_panel() {
     let (mut s, now) = fixture(Where::Searching);
@@ -508,8 +454,6 @@ fn escape_shuts_the_actions_menu_rather_than_the_panel() {
     );
 }
 
-/// And a second Ctrl+K shuts it, because a toggle that only opens is a key
-/// somebody presses twice and then reaches for the mouse.
 #[test]
 fn the_actions_key_is_a_toggle() {
     let (mut s, now) = fixture(Where::Searching);
@@ -518,10 +462,7 @@ fn the_actions_key_is_a_toggle() {
     assert!(!s.actions_open);
 }
 
-/// A shortcut pressed while the menu is up runs and puts the menu away.
-///
-/// The menu is a list of keys; leaving it open over the thing one of them
-/// just did would be a menu that has to be dismissed twice.
+/// A shortcut pressed while the menu is open runs and closes the menu.
 #[test]
 fn a_shortcut_pressed_in_the_menu_closes_it() {
     let (mut s, now) = fixture(Where::Searching);
@@ -535,12 +476,9 @@ fn a_shortcut_pressed_in_the_menu_closes_it() {
     );
 }
 
-/// Only the function keys ignore their modifiers, and that is a decision.
+/// Only function keys ignore modifiers, and they still work with SHIFT set.
 ///
-/// Some terminals report a function key with SHIFT set; requiring NONE there
-/// would make F2 and F5 intermittently dead. Every *character* binding is the
-/// opposite - a bare letter is text, and only the modified form is a command -
-/// so a character binding that answered any modifier would be eating input.
+/// A character binding that ignored modifiers would consume typed text.
 #[test]
 fn only_the_function_keys_ignore_their_modifiers() {
     for binding in table().iter().filter(|b| b.any_modifier) {
@@ -552,8 +490,7 @@ fn only_the_function_keys_ignore_their_modifiers() {
         let (mut s, now) = fixture(binding.at);
         let before = snapshot(&s);
         let r = s.update(AppEvent::Key(KeyEvent::new(binding.code, Mods::SHIFT)), now);
-        // A command counts as answering, and has to: `F1` opens a window, which
-        // is something the shell does and the state machine only asks for.
+        // A command counts: some keys only ask the shell to act.
         assert!(
             !r.cmds.is_empty() || snapshot(&s) != before,
             "{:?} was dead with SHIFT set, which some terminals always do",
@@ -562,12 +499,10 @@ fn only_the_function_keys_ignore_their_modifiers() {
     }
 }
 
-/// Browsing the recent codes owns exactly the keys the table says it owns, and
-/// hands every other one back to editing rather than swallowing it.
+/// Browsing handles only its own keys and passes the rest to editing.
 #[test]
 fn browsing_hands_back_every_key_it_does_not_own() {
-    // A character is the clearest case: it must reach the search box, keeping
-    // the previewed code rather than discarding it.
+    // A character ends browsing and edits the previewed code.
     let (mut s, now) = fixture(Where::Recent);
     let before = s.input.text().to_string();
     s.update(AppEvent::Key(KeyEvent::new(Key::Char('X'), NONE)), now);
@@ -582,8 +517,8 @@ fn browsing_hands_back_every_key_it_does_not_own() {
         "the previewed code should be kept and edited, not thrown away"
     );
 
-    // The fixture steps onto the newest entry, so Down is already past the end
-    // of the list - and past the end leaves recall with the field empty.
+    // The fixture is on the newest entry, so Down leaves browsing with an
+    // empty field.
     let (mut s, now) = fixture(Where::Recent);
     s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
     assert_eq!(s.input.text(), "", "Down past the newest empties the field");
@@ -593,19 +528,16 @@ fn browsing_hands_back_every_key_it_does_not_own() {
         "and leaves the list rather than staying in it"
     );
 
-    // And it *stays* empty however many times it is pressed. Down used to
-    // start recall exactly as Up does, so on an empty field the first press
-    // put the code just cleared straight back, the second cleared it and the
-    // third put it back - one key, two states, forever.
+    // Further presses of Down keep the field empty; Down never starts
+    // browsing.
     for _ in 0..4 {
         s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
         assert_eq!(s.input.text(), "", "Down put the cleared code back");
         assert_eq!(where_of(&s), Where::Searching);
     }
 
-    // Up steps further back, and F2 is deliberately not a way out of it:
-    // which program opens a file has nothing to do with which code is being
-    // looked at.
+    // Up steps further back, and F2 changes the viewer without leaving the
+    // list.
     for code in [Key::Up, Key::F(2)] {
         let (mut s, now) = fixture(Where::Recent);
         s.update(AppEvent::Key(KeyEvent::new(code, NONE)), now);
@@ -617,17 +549,10 @@ fn browsing_hands_back_every_key_it_does_not_own() {
     }
 }
 
-/// AltGr types a character rather than being swallowed as a binding.
+/// AltGr characters are typed rather than treated as Ctrl bindings.
 ///
-/// Windows reports AltGr as Ctrl+Alt, and on a German, Polish or French layout
-/// that is how `@`, `{`, `[` and the accented letters are typed. The guard that
-/// keeps `Ctrl+W` from typing a literal `w` was making a whole class of
-/// characters untypable, with nothing on screen to say why.
-///
-/// This has now been broken twice by two different toolkits - once by
-/// crossterm's key translation and once by egui suppressing `Event::Text`
-/// whenever ctrl is set - so it is asserted here, against the state machine,
-/// where neither of them can reach it.
+/// Windows reports AltGr as Ctrl+Alt, which is how `@`, `{`, `[` and accented
+/// letters are typed on German, Polish and French layouts.
 #[test]
 fn altgr_types_a_character_rather_than_being_swallowed() {
     let (mut s, now) = fixture(Where::Searching);
@@ -637,8 +562,7 @@ fn altgr_types_a_character_rather_than_being_swallowed() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::ALTGR)), now);
     }
 
-    // At the caret, which the fixture parks mid-code on purpose - so this
-    // checks they were typed, not where.
+    // Inserted at the mid-code caret, so only presence is checked.
     assert!(
         s.input.text().contains("@{[é"),
         "AltGr characters were swallowed as bindings: {:?}",
@@ -651,10 +575,7 @@ fn altgr_types_a_character_rather_than_being_swallowed() {
     );
 }
 
-/// A control combination this program does not have is not text.
-///
-/// Without the guard, the catch-all that handles typing turned `Ctrl+W` into a
-/// literal `w` in the search box.
+/// An unbound Ctrl or Alt combination does not type its letter.
 #[test]
 fn a_control_combination_this_program_does_not_have_types_nothing() {
     let (mut s, now) = fixture(Where::Searching);
@@ -670,9 +591,7 @@ fn a_control_combination_this_program_does_not_have_types_nothing() {
     );
 }
 
-/// Windows reports a press and a release for every keystroke. Without the
-/// guard every one of them is handled twice, which for a search box means
-/// every character is doubled.
+/// Key releases are ignored, so characters are not doubled.
 #[test]
 fn a_key_release_is_not_a_second_keystroke() {
     let now = Instant::now();
@@ -691,8 +610,7 @@ fn a_key_release_is_not_a_second_keystroke() {
     assert_eq!(s.input.text(), "11-D");
 }
 
-/// The menu is written for somebody who does not use a terminal by choice,
-/// so no row may be a bare key name with no verb in it.
+/// Every action has a descriptive label, not a bare key name.
 #[test]
 fn every_action_says_what_its_key_does() {
     for at in [Where::Searching, Where::Recent, Where::Picking] {
@@ -707,11 +625,10 @@ fn every_action_says_what_its_key_does() {
     }
 }
 
-/// Maps a shortcut string back to the key it stands for.
+/// Maps a shortcut string back to its key.
 ///
-/// Written out rather than parsed, and deliberately a second list: its only
-/// purpose is to disagree with `view::actions` when somebody changes a
-/// shortcut there and nowhere else.
+/// Written out by hand so it disagrees with `view::actions` if a shortcut
+/// changes only there.
 fn key_of(shortcut: &str) -> (Key, Mods) {
     match shortcut {
         "Enter" => (Key::Enter, NONE),

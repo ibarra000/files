@@ -1,10 +1,8 @@
-//! The shape of the window: pages, groups, and the blocks they hold.
+//! The structure of the settings window: pages, groups and the blocks they
+//! hold.
 //!
-//! The layer above [`super::Row`], added when the form stopped being one long
-//! column. It carries no wording of its own beyond the page titles - the
-//! words are in [`super::pages`] and [`super::lists`] - and it carries no
-//! appearance at all, which is the promise the whole of [`crate::view`]
-//! makes.
+//! Only page titles are worded here; the rest is in [`super::pages`] and
+//! [`super::lists`].
 
 use std::borrow::Cow;
 
@@ -12,11 +10,9 @@ use super::{ALIASES, DRIVES, Field, Row};
 use crate::view::status::Tone;
 use crate::view::{Emphasis, style};
 
-/// One entry in the list down the left.
+/// One entry in the navigation list.
 ///
-/// An id rather than a title and a picture, so this module keeps its promise
-/// to name meanings and never appearances. The renderer decides which mark a
-/// page is drawn with; see `gui::theme::icons`.
+/// The renderer chooses each page's icon; see `gui::theme::icons`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PageId {
     General,
@@ -30,9 +26,7 @@ pub enum PageId {
 }
 
 impl PageId {
-    /// In the order they are listed, which is roughly the order somebody
-    /// meets them: how the program behaves, what it looks like, where it
-    /// searches, what it opens, and finally what it is.
+    /// Every page, in navigation order.
     pub const ALL: [Self; 8] = [
         Self::General,
         Self::Appearance,
@@ -57,7 +51,7 @@ impl PageId {
         }
     }
 
-    /// For an egui id, and for nothing anybody reads.
+    /// A stable identifier for egui ids; never shown.
     pub const fn slug(self) -> &'static str {
         match self {
             Self::General => "general",
@@ -79,28 +73,20 @@ pub struct Page {
     pub groups: Vec<Group>,
 }
 
-/// A titled run of blocks.
+/// A run of blocks with an optional heading.
 ///
-/// The heading is optional, and that is not laziness. A page with a single
-/// group would otherwise repeat its own name straight back at the reader,
-/// which is what the old one-column form did every time a section held one
-/// row.
+/// A page's only group usually has no heading, to avoid repeating the page
+/// title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub heading: Option<&'static str>,
     pub blocks: Vec<Block>,
 }
 
-/// What a group is made of.
+/// One block within a group.
 ///
-/// An enum rather than a handful of optional fields, so a group cannot be in
-/// a state nobody drew - and so [`Page::prose`] can be exhaustive over it,
-/// which is the point.
-///
-/// The old form kept the wording for its lists in loose `pub mod` constants
-/// and hand-listed all eighteen of them in one test. That test checked the
-/// eighteen it named and would not have checked the nineteenth. This way the
-/// compiler asks.
+/// An enum so [`Page::prose`] can match it exhaustively; a new variant
+/// without prose handling fails to compile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
     Rows(Vec<Row>),
@@ -109,31 +95,25 @@ pub enum Block {
     /// Switches for things Windows keeps rather than the configuration file.
     /// See [`Switch`].
     Switches(Vec<Switch>),
-    /// The alias list. The words are [`ALIASES`]; the entries are read off
-    /// the live `Settings` by whoever is drawing, because a copy here would
-    /// be the second version of the truth this module exists to not hold.
+    /// The alias list. Wording is [`ALIASES`]; the renderer reads entries
+    /// from the live `Settings` rather than a copy here.
     Aliases,
-    /// And the drives, for the same reason. See [`DRIVES`].
+    /// The drive list, handled like [`Block::Aliases`]. See [`DRIVES`].
     Drives,
-    /// The `--doctor` report: read-only, monospaced, and taken once per
-    /// opening of the page because it touches the drives.
+    /// The `--doctor` report: read-only and monospaced. Taken once per page
+    /// opening because it touches the drives.
     Report {
         intro: &'static str,
     },
 }
 
-/// Something read out and not changed.
+/// A read-only labelled value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     pub label: &'static str,
-    /// `Cow` for the reason [`crate::view::Run`] uses one, and with a second
-    /// job here.
-    ///
-    /// A borrowed value is a line this program wrote and is held to the
-    /// house style. An owned one is a value read out of the configuration -
-    /// a path, a version, a drive name - and keeps whatever spelling it was
-    /// given. That is the exception `style::starts_capitalised` documents in
-    /// prose, made mechanical: see [`Page::prose`].
+    /// A borrowed value is program-written text, held to the house style. An
+    /// owned value (a path, version or drive name) keeps its own spelling and
+    /// is excluded by [`Page::prose`].
     pub value: Cow<'static, str>,
     pub emphasis: Emphasis,
 }
@@ -161,10 +141,9 @@ impl Fact {
 pub struct Action {
     pub id: ActionId,
     pub label: &'static str,
-    /// A sentence under the button, where pressing it deserves one.
+    /// An optional sentence shown under the button.
     pub help: Option<&'static str>,
-    /// A button that reports a problem when pressed is a button that should
-    /// not have been pressable.
+    /// Disabled when pressing it could only report a problem.
     pub enabled: bool,
 }
 
@@ -189,15 +168,11 @@ impl Action {
     }
 }
 
-/// A switch whose state lives outside `config.toml`.
+/// A switch whose state lives outside `config.toml`, such as the "Start with
+/// Windows" registry value that the installer and Task Manager also write.
 ///
-/// A [`Row`] is a setting, and every setting is a key in the file: the form's
-/// tests, the pin, and the save all hang off [`SettingKey`](crate::config::write::SettingKey). This is for the
-/// other kind - "Start with Windows" is a value in the registry that the
-/// installer and Task Manager also write, so a copy of it in the file would
-/// be a second truth. It is drawn like a row and it acts like a button: the
-/// shell is handed whichever [`ActionId`] moves it to the other state, and
-/// reads the state back afterwards rather than trusting the click.
+/// Drawn like a [`Row`] but acts like a button: the shell receives the
+/// [`ActionId`] for the other state, then reads the state back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
     pub label: &'static str,
@@ -224,17 +199,13 @@ impl Switch {
         }
     }
 
-    /// What flipping it asks for.
+    /// Returns the action that moves the switch to the other state.
     pub fn flipped(&self) -> ActionId {
         if self.on { self.turn_off } else { self.turn_on }
     }
 }
 
-/// Which button, for the shell to act on.
-///
-/// An id rather than a callback, so this module stays a description of the
-/// form rather than a participant in it. The same reason the renderer hands
-/// its caller a `Clicked` instead of reaching back into the shell.
+/// Identifies a button for the shell to act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionId {
     OpenConfigFile,
@@ -242,26 +213,20 @@ pub enum ActionId {
     CheckForUpdates,
     InstallUpdate,
     CopyReport,
-    /// Take the reading again now.
-    ///
-    /// An answer is kept for a minute, so that stepping to another page and
-    /// back does not re-run a multi-second network probe. This is the button
-    /// for the case the minute is wrong: somebody who has just plugged a
-    /// drive in wants the new answer, not the one from forty seconds ago.
+    /// Re-runs the report now. Reports are cached for a minute so switching
+    /// pages does not repeat a multi-second network probe.
     RefreshReport,
-    /// Write the `Run` value, so signing in starts files hidden in the tray.
+    /// Writes the `Run` value, so signing in starts files hidden in the tray.
     StartWithWindows,
-    /// And delete it.
+    /// Deletes the `Run` value.
     StopStartingWithWindows,
 }
 
 impl Page {
-    /// Every word on this page that this program wrote.
+    /// Returns every program-written string on this page.
     ///
-    /// Exhaustive over [`Block`], so a block added without prose is a
-    /// compile error rather than a corner of the form nobody checks. Values
-    /// read out of the configuration are left out by construction rather
-    /// than by a filter somebody has to remember: see [`Fact::value`].
+    /// Exhaustive over [`Block`]. Configured values are excluded by their
+    /// `Cow::Owned` type; see [`Fact::value`].
     pub fn prose(&self) -> Vec<Cow<'static, str>> {
         let mut out: Vec<Cow<'static, str>> = vec![Cow::Borrowed(self.id.title())];
         for group in &self.groups {
@@ -275,8 +240,7 @@ impl Page {
                             out.extend(row.caveat().map(Cow::Owned));
                             match &row.field {
                                 Field::Choice { options, .. } => {
-                                    // Only the labels this program wrote. An owned one is a
-                                    // name out of the configuration, as with a fact's value.
+                                    // Skip owned labels, which come from the configuration.
                                     out.extend(options.iter().filter_map(|o| match o.label {
                                         Cow::Borrowed(text) => Some(Cow::Borrowed(text)),
                                         Cow::Owned(_) => None,
@@ -319,17 +283,12 @@ impl Page {
     }
 }
 
-/// The whole corpus, for the house-style check.
+/// Returns every program-written string on every page.
 pub fn prose(pages: &[Page]) -> Vec<Cow<'static, str>> {
     pages.iter().flat_map(Page::prose).collect()
 }
 
 /// Asserts the house style over every word on every page.
-///
-/// Here rather than in the test module because it is the thing the page
-/// registry exists to make possible, and because `style::check_all` is
-/// itself outside `cfg(test)` for the same reason: the check belongs where
-/// the strings are.
 pub fn check_prose(pages: &[Page]) {
     let lines = prose(pages);
     style::check_all(

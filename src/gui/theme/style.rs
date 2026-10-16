@@ -1,8 +1,4 @@
-//! How the toolkit's own widgets are dressed.
-//!
-//! Split out of [`super`] for the reason its sibling `tests` was: the file
-//! outgrew the size this repository holds a module to. The palette is next
-//! door; this is the one place that hands it to egui.
+//! Styling for egui's built-in widgets, derived from the palette in [`super`].
 
 use eframe::egui::Color32;
 use eframe::egui::epaint::Shadow;
@@ -10,78 +6,44 @@ use eframe::egui::epaint::Shadow;
 use super::{RADIUS_MEDIUM, SCROLL_W, SIZE_BODY, SIZE_CAPTION, Theme, Weight, font, radius};
 use crate::view::status::Tone;
 
-/// The padding inside the tile a setting is drawn on. Its corner is
-/// [`super::RADIUS_MEDIUM`], like every other corner this size.
+/// Padding inside a settings tile. Its corner radius is [`super::RADIUS_MEDIUM`].
 pub const CARD_PAD: f32 = 12.0;
 
-/// Between one row and the next: two settings, or two results.
+/// Vertical gap between adjacent rows (settings tiles or results).
 ///
-/// Five, which is what Ueli gives a list of results and what a stack of
-/// setting tiles wanted independently. Rows that touch read as a table; five
-/// points of ground showing between them reads as a list of things, and is
-/// what makes a rounded corner visible at all.
+/// Large enough that rows read as separate items and rounded corners show.
 pub const ROW_GAP: f32 = 5.0;
-/// Between one group of settings and the next. Large, and that is the point:
-/// it is the only thing separating two groups, because a group heading is
-/// smaller than the labels under it.
+/// Gap between settings groups. It is the main group separator, since group
+/// headings are no larger than the labels under them.
 pub const GROUP_GAP: f32 = 40.0;
-/// The margin the settings window keeps around its content.
+/// Margin around the settings window content.
 pub const CONTENT_PAD: f32 = 20.0;
-/// How wide the list of pages is.
+/// Width of the settings nav column.
 pub const NAV_W: f32 = 260.0;
 
-/// The shortest a control may be, so a row's right-hand column does not change
-/// height with what is in it.
+/// Minimum control height, so a row's height does not depend on its control.
 pub const CONTROL_H: f32 = 28.0;
 
-/// Dresses egui's own widgets in this palette.
+/// Applies the palette to egui's built-in widgets.
 ///
-/// # Why there was no such function until now
+/// Only the settings window uses egui widgets; the panel paints everything by
+/// hand from [`Theme`]. Applying the style to the whole context is therefore
+/// safe, and `tests/panel.rs` with its image snapshots guards that.
 ///
-/// Because until now nothing needed one. The panel does not use a single egui
-/// widget: `gui::panel` and `gui::row` between them call
-/// `ui.interact` and then paint, and every colour they use comes from
-/// [`Theme`] directly. A `Style` would have configured nothing.
-///
-/// The settings window is the opposite. It is a form, it is made of buttons,
-/// boxes and drop-downs, and until this function existed every one of them was
-/// drawn in egui's stock blue-grey - which is why a window in this program did
-/// not look like this program.
-///
-/// # It is safe to apply to everything
-///
-/// Applied to the whole context rather than scoped to the settings viewport,
-/// and that is sound precisely because of the paragraph above: there is no
-/// egui widget on the panel for this to reach. `tests/panel.rs` and the image
-/// snapshots beside it are the standing proof. Scoping it would mean applying
-/// it inside the child viewport's own pass, which is a second place to keep in
-/// step for no benefit anybody can see.
-///
-/// Both themes, like [`crate::gui::fonts::sharpen`]: egui keeps a `Style` per
-/// light and dark and this program switches between them at runtime, so
-/// setting only the active one would dress the window until somebody changed
-/// theme.
+/// Sets both the light and dark styles, as `crate::gui::fonts::sharpen` does,
+/// because the theme can switch at runtime.
 pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
     use eframe::egui::{Margin, Stroke, TextStyle, Vec2};
 
     let hairline = Stroke::new(1.0, theme.stroke);
 
-    // A control's states, which differ in the fill and in how firm the outline
-    // is. The text on all of them is the same colour: a button whose label
-    // brightens under the pointer is a button that looks disabled until you
-    // touch it.
+    // Widget states differ in fill and outline; text colour stays constant so
+    // idle buttons do not look disabled.
     //
-    // `weak_bg_fill` and `bg_fill` are two different jobs and are given two
-    // different colours, which is the one thing about this struct that is easy
-    // to get wrong. `weak_bg_fill` is what a button and a drop-down paint.
-    // `bg_fill` is the slider rail, the *scroll-bar handle* and the box of a
-    // checkbox - so filling it with the control colour puts a scroll handle the
-    // same shade as a text box, which reads as a gutter rather than as a grip.
-    //
-    // The checkbox is the third of those and this deliberately does not suit
-    // it: the settings window draws switches, by hand, and calls `ui.checkbox`
-    // nowhere. Anybody who reaches for one will get a grey-filled box, and this
-    // paragraph is why.
+    // `weak_bg_fill` is the button and combo box fill. `bg_fill` is the slider
+    // rail, scroll-bar handle and checkbox box, so it gets the grip colour to
+    // keep the scroll handle distinct from text boxes. Checkboxes are not used
+    // (the settings window draws its own switches) and would render grey.
     let widget = |fill: Color32, grip: Color32, stroke: Stroke| {
         eframe::egui::style::WidgetVisuals {
             weak_bg_fill: fill,
@@ -89,22 +51,19 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
             bg_stroke: stroke,
             corner_radius: radius(RADIUS_MEDIUM),
             fg_stroke: Stroke::new(1.0, theme.text),
-            // Zero, deliberately. egui's default grows a hovered widget by a
-            // point; in a column of tiles that have to line up, that reads as
-            // jitter rather than as feedback.
+            // egui's default grows hovered widgets by a point, which makes
+            // aligned tiles jitter.
             expansion: 0.0,
         }
     };
 
     ctx.all_styles_mut(|style| {
-        // Widget text in the same typeface and at the same sizes as everything
-        // this program writes by hand. Without this a button is 14 pt and the
-        // label beside it is 15, which reads as a mistake because it is one.
+        // Match the typeface and sizes of hand-drawn text.
         style.text_styles = [
             (TextStyle::Small, font(SIZE_CAPTION, Weight::Regular)),
             (TextStyle::Body, font(SIZE_BODY, Weight::Regular)),
             (TextStyle::Button, font(SIZE_BODY, Weight::Regular)),
-            // A heading is `body1Strong`: the same size, a heavier weight.
+            // Fluent `body1Strong`: body size, heavier weight.
             (TextStyle::Heading, font(SIZE_BODY, Weight::Semibold)),
             (TextStyle::Monospace, font(SIZE_CAPTION, Weight::Regular)),
         ]
@@ -119,15 +78,9 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         spacing.combo_width = 140.0;
         spacing.text_edit_width = 240.0;
 
-        // Ueli's scrollbar, which is thinner than egui's and always there. A
-        // form this long needs a position indicator; it does not need a
-        // twelve-point gutter taken out of the reading column to get one.
-        //
-        // The four-point inner margin is for *this* window, where a bar hard
-        // against a column of prose reads as a mistake. The panel overrides
-        // it to zero, because the results band already has padding of its own
-        // and the two together would be a ten-point gutter. See
-        // `gui::panel::list`.
+        // A thin, always-visible scroll bar. The 4 pt inner margin suits the
+        // settings window; the panel overrides it to zero because the results
+        // band has its own padding. See `gui::panel::list`.
         let scroll = &mut spacing.scroll;
         scroll.bar_width = SCROLL_W;
         scroll.bar_inner_margin = 4.0;
@@ -136,53 +89,43 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
 
         let v = &mut style.visuals;
         v.dark_mode = theme.dark;
-        // Opaque, unlike the panel's. These windows are documents: they sit
-        // over other programs for minutes at a time, and text on a translucent
-        // ground is harder to read the longer you read it.
+        // Opaque, unlike the panel, because long-lived text windows read
+        // better on a solid background.
         v.panel_fill = theme.surface;
         v.window_fill = theme.surface;
         v.window_stroke = Stroke::new(1.0, theme.edge);
         v.window_corner_radius = radius(RADIUS_MEDIUM);
         v.menu_corner_radius = radius(RADIUS_MEDIUM);
         v.faint_bg_color = theme.card;
-        // The scroll-bar *track*, which is what this field actually is - the
-        // text box below only falls back to it when `text_edit_bg_color` is
-        // unset, and it is not. `NeutralBackground4`, which is the far side of
-        // the tile from the window: a groove in the page rather than another
-        // tile on it. It has to differ from the box below or egui draws the
-        // two as one surface, which is a test.
+        // The scroll-bar track (`NeutralBackground4`). Text boxes use
+        // `text_edit_bg_color` below; the two must differ or egui draws them
+        // as one surface, which a test checks.
         v.extreme_bg_color = theme.track;
-        // What a text box is sunk into. The same trough the search field uses,
-        // so a box in the settings window and the one on the panel are the
-        // same idea rather than two.
+        // The same well as the panel's search field.
         v.text_edit_bg_color = Some(theme.well);
         v.code_bg_color = theme.well;
-        // Selected *text*, which is what this is: egui uses it inside a
-        // `TextEdit` and behind a selectable label. The window's own "this
-        // one" is `accent_fill`, painted by hand where it is meant.
+        // Selected text in a `TextEdit` or selectable label. Selected items use
+        // `accent_fill`, painted by hand.
         v.selection = eframe::egui::style::Selection {
             bg_fill: theme.text_selection,
             stroke: Stroke::new(1.0, theme.strong),
         };
         v.text_cursor.stroke = Stroke::new(1.0, theme.caret);
-        // A pinned setting is drawn disabled rather than hidden, so its value
-        // has to stay readable while it is refused. egui's default fades
-        // harder than that.
+        // Pinned settings are drawn disabled and must stay readable; egui's
+        // default fades too much.
         v.disabled_alpha = 0.45;
         v.striped = false;
         v.warn_fg_color = theme.tone(Tone::Warn);
         v.error_fg_color = theme.tone(Tone::Bad);
         v.hyperlink_color = theme.accent;
         v.button_frame = true;
-        // Left to egui elsewhere, off here: a window this program draws has no
-        // shadow of its own, because the compositor already gives it one.
+        // The compositor already shadows top-level windows.
         v.window_shadow = Shadow::NONE;
         v.popup_shadow = Shadow::default();
 
         let w = &mut v.widgets;
-        // A label, a group heading, a panel separator: not interactive, so not
-        // outlined in anything firmer than a rule. Its `bg_stroke` is what
-        // `SidePanel` draws its dividing line with.
+        // Non-interactive elements. `bg_stroke` is also the `SidePanel`
+        // divider.
         w.noninteractive = widget(theme.card, theme.grip, Stroke::new(1.0, theme.edge));
         w.inactive = widget(theme.control, theme.grip, hairline);
         w.hovered = widget(theme.control_hover, theme.dim, Stroke::new(1.0, theme.dim));
@@ -193,12 +136,8 @@ pub fn apply_style(ctx: &eframe::egui::Context, theme: &Theme) {
         );
         w.open = widget(theme.control_active, theme.dim, hairline);
 
-        // Re-asserted rather than assumed. `gui::fonts::sharpen` turns this
-        // off once at startup, and this function runs after it and again on
-        // every theme change; it mutates a `Style` in place rather than
-        // replacing one, so the setting does survive - but "does survive"
-        // is a property of how this is written, and writing it down here
-        // costs a line and outlives whoever knew.
+        // Also set by `gui::fonts::sharpen` at startup; re-asserted here so it
+        // does not depend on this function mutating the style in place.
         style.visuals.text_options.subpixel_binning = false;
     });
 }

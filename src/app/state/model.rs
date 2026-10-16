@@ -1,8 +1,6 @@
-//! The vocabulary the interaction model is written in.
+//! Plain data types used by the interaction state machine.
 //!
-//! Plain data, split out from the transition itself so `mod.rs` stays about
-//! behaviour. Nothing here has any logic beyond a predicate or two, and
-//! nothing here knows about events, commands or the clock.
+//! Nothing here knows about events, commands or the clock.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -14,25 +12,12 @@ use crate::search::live::{LiveCoverage, LiveSkip};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryPhase {
     /// Nothing typed.
-    ///
-    /// There used to be a `TooShort` beside this, for a line under three
-    /// characters. The floor is one now, so "too short" and "nothing typed"
-    /// are the same state, and two names for one state is one of them that
-    /// nothing can ever reach.
     Idle,
     /// The line holds search syntax that could not be honoured.
     ///
-    /// Its own phase rather than a toast, because it is a property of what is
-    /// on the line right now: it has to clear itself the moment the line is
-    /// fixed, and a toast would sit there for its five seconds saying
-    /// otherwise.
+    /// A phase rather than a toast so it clears as soon as the line is fixed.
     BadQuery { detail: String },
-    /// Typed, but there is no share to search.
-    ///
-    /// Was "this does not look like a job code", back when a code had to match
-    /// a pattern before anything would look for it. Every share is indexed
-    /// now, so the only way a query reaches nothing is a configuration with no
-    /// enabled share in it.
+    /// Typed, but no enabled share is configured.
     NoShares,
     /// Dispatched to the matcher. Sub-millisecond, so rarely rendered.
     LocalPending,
@@ -52,15 +37,12 @@ impl QueryPhase {
         matches!(self, Self::Verifying { .. })
     }
 
-    /// Whether the verification has already spoken for this query.
+    /// Whether verification has already reported for this query.
     ///
-    /// The local match and the server check share one pause, so with equal
-    /// debounces both are dispatched on the same tick and either can answer
-    /// first - `run_verify` answers instantly with `Skipped(SeveralShares)`
-    /// whenever more than one share is configured, which is the shipped case.
-    /// The local answer is never news about the server, so it must not
-    /// overwrite what the server said, or a spinner blinks off mid-check and a
-    /// `Verified` lands on a phase nobody ever saw spin.
+    /// The local match and the server check are dispatched on the same tick
+    /// and either can answer first (`run_verify` answers immediately with
+    /// `Skipped(SeveralShares)` when several shares are configured). A local
+    /// result must not overwrite a server phase.
     pub fn server_has_spoken(&self) -> bool {
         matches!(
             self,
@@ -70,22 +52,18 @@ impl QueryPhase {
 }
 
 /// Whether the edit that produced a query was a keystroke or a whole query.
-///
-/// A parameter rather than a second function, so that no call site can forget
-/// to choose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
     /// Typed a character at a time. Waits out `SEARCH_DEBOUNCE`.
     Typed,
-    /// Arrived whole - pasted, recalled, read off the clipboard. Runs now.
+    /// Arrived whole (pasted, recalled, read from the clipboard). Runs now.
     Complete,
 }
 
 /// Why the result list is empty.
 ///
 /// The results widget takes this rather than an empty slice, so a blank list
-/// always carries a reason. The previous implementation could show nothing at
-/// all when the drive was unreachable.
+/// always carries a reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmptyReason {
     NoQuery,
@@ -99,11 +77,8 @@ pub enum EmptyReason {
     },
     /// Nothing matched in the part of a live share that could be reached.
     ///
-    /// Never collapsed into [`Self::NoMatches`]. A live share answers for the
-    /// folders one query had time to look in, and "there is no such file" is a
-    /// different claim from "it is not in the fourteen folders I asked about" -
-    /// which is the claim this program exists not to let somebody act on by
-    /// mistake.
+    /// Kept distinct from [`Self::NoMatches`]: a partial search must not be
+    /// reported as proof that the file does not exist.
     LiveIncomplete {
         name: String,
         searched: u32,
@@ -143,11 +118,10 @@ pub enum Severity {
 /// How long a transient message stays on screen.
 pub const TOAST_LIFETIME: Duration = Duration::from_secs(5);
 
-/// What the live shares are doing about the query on the line.
+/// Progress of the live shares on the current query.
 ///
-/// A field of its own rather than a [`QueryPhase`] variant, because the two are
-/// not on one line: the indexes have already answered while this is
-/// outstanding, and `QueryPhase` holds exactly one value at a time.
+/// Separate from [`QueryPhase`] because it runs concurrently with the
+/// already-answered index phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveProgress {
     pub since: Instant,
@@ -174,12 +148,9 @@ impl LiveProgress {
         self.outstanding > 0
     }
 
-    /// True when every share answered for everything the configured depth
-    /// names.
+    /// True when every share answered for the full configured depth.
     ///
-    /// The question the empty pane turns on: an empty list is only honestly
-    /// "no matches" when this is true. Anything less and the answer is "not in
-    /// the folders that were searched", which is a different sentence.
+    /// An empty list may be reported as "no matches" only when this is true.
     pub fn complete(&self) -> bool {
         self.outstanding == 0
             && self.skipped.is_empty()

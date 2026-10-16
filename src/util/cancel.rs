@@ -1,15 +1,10 @@
 //! Cooperative cancellation for work that has been superseded.
 //!
-//! Two independent generations are tracked by callers: one bumped whenever the
-//! query changes, one whenever a new index snapshot is published. A worker
-//! carries the generation it started with and abandons its work as soon as it
-//! is no longer current.
+//! Callers track generations (for example per query and per index snapshot).
+//! A worker keeps the generation it started with and stops once it is stale.
 //!
-//! `Relaxed` ordering is correct and deliberate: only the *value* matters. The
-//! data the generation guards - the query string, the snapshot `Arc` - travels
-//! through a mutex or a channel, which supplies the happens-before edge.
-//! Strengthening this to `SeqCst` would add a fence to the matcher's inner
-//! loop for no benefit.
+//! `Relaxed` ordering suffices: the guarded data (query string, snapshot `Arc`)
+//! travels through a mutex or channel, which provides the happens-before edge.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,9 +29,8 @@ impl Epoch {
 
     /// Moves the generation forward to `value`, never backwards.
     ///
-    /// Lets a worker share the caller's generation - the UI's query counter -
-    /// rather than keeping a private one, so a result can be matched against
-    /// the query that asked for it and cancelled by the same number.
+    /// Lets a worker follow the caller's counter (such as the UI's query
+    /// generation), so results and cancellation use the same number.
     pub fn advance_to(&self, value: u64) -> u64 {
         self.0.fetch_max(value, Ordering::Relaxed).max(value)
     }
@@ -56,12 +50,10 @@ impl Epoch {
     }
 }
 
-/// Checked periodically by long-running work.
+/// Cancellation flag checked periodically by long-running work.
 ///
-/// Cancellation is cooperative and coarse by design. A blocking SMB syscall
-/// cannot be interrupted at all, so the honest guarantee is "checked between
-/// units of work" - one rayon chunk in the matcher, one buffer refill in the
-/// enumerator.
+/// Checked between units of work (a rayon chunk in the matcher, a buffer
+/// refill in the enumerator); a blocking SMB call cannot be interrupted.
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken {
     epoch: Option<Epoch>,

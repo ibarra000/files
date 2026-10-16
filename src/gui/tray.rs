@@ -1,21 +1,11 @@
-//! The notification-area icon.
+//! The notification-area icon and its menu.
 //!
-//! The only part of the program that is always on screen, and the answer to the
-//! question a tray-resident application has to answer before anything else:
-//! *how do I get at it if I have forgotten the shortcut.*
+//! # Events use handlers, not polling
 //!
-//! # Why the events come back through a handler rather than a poll
-//!
-//! `tray-icon` and `muda` both publish their events on a global channel that a
-//! caller is expected to drain. Draining it from the frame loop would work only
-//! while there are frames - and this program's whole design is that a hidden
-//! panel asks for none at all, so a tray click would sit in that channel until
-//! something else happened to wake the process. Which is to say: until the user
-//! did the thing they were trying to avoid doing.
-//!
-//! So both crates are given a handler instead, and the handler does what every
-//! other producer in this program does - posts and then wakes. That is
-//! [`crate::app::event::Events`] again, for the same reason it exists at all.
+//! `tray-icon` and `muda` publish events on global channels. A hidden panel
+//! requests no frames, so a frame-loop poll would leave tray clicks undelivered.
+//! Both crates are therefore given handlers that post the action and wake the
+//! event loop, as other producers do via [`crate::app::event::Events`].
 
 #![cfg(windows)]
 
@@ -26,51 +16,47 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use super::{icon, taskbar};
 
-/// What the user picked.
+/// A tray action chosen by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayAction {
-    /// Bring the panel up. Also what a left-click on the icon means.
+    /// Shows the panel. Also triggered by a left-click on the icon.
     Show,
     Settings,
     Diagnostics,
-    /// Install the version the menu item names, and start again. Only on the
-    /// menu while there is one - see [`Tray::offer_update`].
+    /// Installs the offered version and restarts. On the menu only while an
+    /// update is offered; see [`Tray::offer_update`].
     InstallUpdate,
     Quit,
 }
 
-/// The icon, its menu, and the ids that say which item was chosen.
+/// The icon, its menu, and the item ids that map to actions.
 ///
-/// Held for the life of the process: dropping a `TrayIcon` removes it from the
-/// notification area, so a `let _ = ...` here would produce an icon that
-/// flickers into existence and disappears.
+/// Must be held for the life of the process: dropping a `TrayIcon` removes it
+/// from the notification area.
 pub struct Tray {
     icon: TrayIcon,
     menu: Menu,
-    /// "Install version X and restart", built once and put on the menu only
-    /// while an installable version is known. Built up front so its id is in
-    /// the handler's table from the start - the handler owns a copy of that
-    /// table and cannot be told about items added later.
+    /// The install item, created up front so its id is in the handler's table
+    /// (the handler owns a copy and cannot learn about later items). Inserted
+    /// into the menu only while an update is offered.
     install: MenuItem,
-    /// The version the menu currently offers, if any. Also what stops the
-    /// notification being shown twice for one version.
+    /// The version currently offered, if any. Also prevents repeat
+    /// notifications for the same version.
     offered: Option<crate::update::Version>,
-    /// The icon's identity to the shell, for the notification. `None` when
-    /// the icon had to be built without one - see [`Tray::new`].
+    /// The icon's shell GUID, used for notifications. `None` if the shell
+    /// rejected it; see [`Tray::new`].
     guid: Option<u128>,
-    /// Whether the icon is currently tinted for a dark taskbar.
+    /// Whether the icon is tinted for a dark taskbar.
     on_dark: bool,
-    /// Kept for the test below, which is the only thing that reads them: the
-    /// handler owns its own copy, because it outlives this struct's borrow.
+    /// Read only by tests; the handler owns its own copy.
     #[cfg_attr(not(test), allow(dead_code))]
     ids: Vec<(muda::MenuId, TrayAction)>,
 }
 
 impl Tray {
-    /// Builds the icon and starts listening.
+    /// Builds the icon and installs the event handlers.
     ///
-    /// `wake` is called after an event is recorded, and is the whole reason
-    /// this is not a poll - see the module note.
+    /// `wake` is called after each event is recorded; see the module docs.
     pub fn new(
         wake: impl Fn(TrayAction) + Send + Sync + 'static,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -79,7 +65,7 @@ impl Tray {
         let settings = MenuItem::new("Settings", true, None);
         let diagnostics = MenuItem::new("Diagnostics", true, None);
         let quit = MenuItem::new("Quit files", true, None);
-        let install = MenuItem::new("Install the new version and restart", true, None);
+        let install = MenuItem::new("Install update and restart", true, None);
         menu.append_items(&[
             &show,
             &PredefinedMenuItem::separator(),
@@ -97,12 +83,10 @@ impl Tray {
             (quit.id().clone(), TrayAction::Quit),
         ];
 
-        // A GUID, because it is the only handle on the icon `tray-icon` lets
-        // anything else hold, and the notification below needs one. Derived
-        // from where this executable is, because Windows binds an icon's GUID
-        // to the path that first registered it and refuses the same GUID from
-        // anywhere else - so a fixed one would make a development build and
-        // an installed copy fight over it, and the loser would have no icon.
+        // The notification needs a GUID. It is derived from the executable path
+        // because Windows binds an icon GUID to the path that first registered
+        // it and rejects it from any other, so a fixed GUID would conflict
+        // between development and installed builds.
         let guid = std::env::current_exe().ok().map(|exe| guid_for(&exe));
         let on_dark = taskbar::is_dark();
         let builder = |guid: Option<u128>| {
@@ -110,9 +94,7 @@ impl Tray {
                 .with_menu(Box::new(menu.clone()))
                 .with_tooltip(env!("CARGO_PKG_DESCRIPTION"))
                 .with_icon(tinted(on_dark)?)
-                // The menu belongs on the right button only. A left-click
-                // that opens a menu is a left-click that does not open the
-                // thing the icon is for.
+                // Menu on right-click only; left-click shows the panel.
                 .with_menu_on_left_click(false);
             let builder = match guid {
                 Some(guid) => builder.with_guid(guid),
@@ -120,9 +102,8 @@ impl Tray {
             };
             Ok::<_, Box<dyn std::error::Error>>(builder.build()?)
         };
-        // Without the GUID if it is refused: an icon that cannot announce an
-        // update is still an icon, and a missing one is a program that looks
-        // like it did not start.
+        // Retry without the GUID if it is rejected; an icon without
+        // notifications is better than no icon.
         let (icon, guid) = match builder(guid) {
             Ok(icon) => (icon, guid),
             Err(_) => (builder(None)?, None),
@@ -130,9 +111,7 @@ impl Tray {
 
         let wake = Arc::new(wake);
 
-        // A left-click, or a double-click, means "show me the panel" - the same
-        // as the shortcut, because somebody reaching for the tray icon has by
-        // definition not used the shortcut.
+        // A left-click or double-click shows the panel.
         {
             let wake = Arc::clone(&wake);
             TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
@@ -187,12 +166,10 @@ impl Tray {
         }
     }
 
-    /// Puts "Install version X and restart" on the menu, and says so once.
+    /// Adds the install item for `version` and shows a notification once.
     ///
-    /// Called every frame while an installable version is known, so it does
-    /// nothing unless the version is one it has not offered yet. The
-    /// notification is Windows' own, from this icon: somebody working in
-    /// another program all day is told without the panel having to be up.
+    /// Called every frame while an update is available; does nothing for a
+    /// version already offered.
     pub fn offer_update(&mut self, version: crate::update::Version) {
         if self.offered == Some(version) {
             return;
@@ -201,25 +178,24 @@ impl Tray {
         self.offered = Some(version);
         self.install
             .set_text(format!("Install version {version} and restart"));
-        // Second, under "Show files": the first item is what a right-click
-        // is usually for, and this is the thing that is new.
+        // Second position, directly under "Show files".
         if first {
             let _ = self.menu.insert(&self.install, 1);
         }
         self.notify(
             &format!("files {version} is available"),
-            "Right-click the files icon to install it. Nothing changes until you do.",
+            "Right-click the tray icon to install it.",
         );
     }
 
-    /// Takes the menu item away again, once there is nothing to install.
+    /// Removes the install item when no update is available.
     pub fn withdraw_update(&mut self) {
         if self.offered.take().is_some() {
             let _ = self.menu.remove(&self.install);
         }
     }
 
-    /// A notification from this icon, which Windows shows as a toast.
+    /// Shows a balloon notification (a toast on current Windows) from this icon.
     fn notify(&self, title: &str, body: &str) {
         use windows_sys::Win32::UI::Shell::{
             NIF_GUID, NIF_INFO, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_MODIFY, NOTIFYICONDATAW,
@@ -234,8 +210,8 @@ impl Tray {
             hWnd: self.icon.window_handle(),
             uFlags: NIF_INFO | NIF_GUID,
             guidItem: windows_sys::core::GUID::from_u128(guid),
-            // Quiet time is the first hour after a new account signs in, and
-            // presentation mode; neither is the moment for this.
+            // Suppressed during quiet time (the first hour after a new account
+            // signs in, and presentation mode).
             dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
             ..Default::default()
         };
@@ -246,26 +222,24 @@ impl Tray {
         unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
     }
 
-    /// How many items the menu offers. For the test below, and for nothing
-    /// else.
+    /// Returns the number of menu actions. Test-only.
     #[cfg(test)]
     fn len(&self) -> usize {
         self.ids.len()
     }
 }
 
-/// The tray icon, tinted for a dark or light taskbar.
+/// Returns the tray icon tinted for a dark or light taskbar.
 fn tinted(on_dark: bool) -> Result<Icon, tray_icon::BadIcon> {
     Icon::from_rgba(icon::pixels(on_dark), icon::SIZE, icon::SIZE)
 }
 
-/// A GUID that is the same every time for one executable path, and different
-/// for any other.
+/// Returns a GUID that is stable for one executable path (case-insensitive) and
+/// distinct for others.
 ///
-/// FNV-1a, twice with different offsets, rather than `DefaultHasher`, whose
-/// output the standard library is free to change between Rust releases - and
-/// an icon whose identity moved with the compiler would lose the user's
-/// "always show this icon" choice on every rebuild.
+/// Uses FNV-1a with two offsets rather than `DefaultHasher`, whose output may
+/// change between Rust releases and would reset the user's tray visibility
+/// choice on rebuild.
 fn guid_for(exe: &std::path::Path) -> u128 {
     let text = exe.to_string_lossy().to_lowercase();
     let fnv = |offset: u64| {
@@ -276,8 +250,7 @@ fn guid_for(exe: &std::path::Path) -> u128 {
     (u128::from(fnv(0xcbf2_9ce4_8422_2325)) << 64) | u128::from(fnv(0x8422_2325_cbf2_9ce4))
 }
 
-/// Copies `text` into a fixed, NUL-terminated UTF-16 field, cutting it short
-/// rather than overrunning it.
+/// Copies `text` into a fixed NUL-terminated UTF-16 field, truncating to fit.
 fn copy_truncated(field: &mut [u16], text: &str) {
     let room = field.len().saturating_sub(1);
     for (slot, unit) in field.iter_mut().zip(text.encode_utf16().take(room)) {
@@ -289,7 +262,6 @@ fn copy_truncated(field: &mut [u16], text: &str) {
 mod tests {
     use super::*;
 
-    /// The same path is the same icon, whatever case Windows reports it in.
     #[test]
     fn an_executable_keeps_its_icon_identity_and_another_gets_its_own() {
         let installed = std::path::Path::new(r"C:\Program Files\files\files.exe");
@@ -299,7 +271,6 @@ mod tests {
         assert_ne!(guid_for(installed), guid_for(dev));
     }
 
-    /// A notification that would not fit is cut short, and still ends.
     #[test]
     fn a_long_notification_is_cut_to_fit_and_terminated() {
         let mut field = [0xffffu16; 8];
@@ -308,19 +279,17 @@ mod tests {
             &field[..7],
             "far lon".encode_utf16().collect::<Vec<_>>().as_slice()
         );
-        // The last slot was never written, so it is whatever was there - and
-        // the real fields start zeroed, which is the terminator.
+        // The last slot is never written; real fields start zeroed, which
+        // provides the terminator.
         let mut zeroed = [0u16; 8];
         copy_truncated(&mut zeroed, "far longer than eight");
         assert_eq!(zeroed[7], 0);
     }
 
-    /// Every action has to be reachable, or it is a feature with no way in.
     #[test]
     fn the_menu_offers_every_action() {
-        // Built without a message loop, which on Windows is legal for the menu
-        // itself; if the notification area refuses the icon there is nothing to
-        // assert about and the test says so rather than failing.
+        // If the notification area rejects the icon (no message loop in tests),
+        // there is nothing to check.
         let Ok(tray) = Tray::new(|_| {}) else {
             return;
         };

@@ -1,19 +1,11 @@
-//! `--doctor` and `--bench`.
+//! `--doctor` and `--bench`: on-site diagnostics for share access.
 //!
-//! This is how the untestable half of the crate gets validated. Everything
-//! involving SMB was written against documentation and arithmetic, on a
-//! machine where neither drive exists; these two commands run on the machine
-//! where they do and report what is actually true.
-//!
-//! * **`--doctor`** is fast, read-only and safe to run at any time: drive
-//!   type, UNC target, volume serial, filesystem flags, SMB dialect,
-//!   round-trip time, and which strategies are usable.
-//! * **`--bench`** times every enumeration strategy against the same
-//!   directory and, more importantly, **cross-checks that they all return the
-//!   same entry count**. A disagreement is the signal to leave a fast path
-//!   switched off, and it is a signal obtainable no other way.
-//!
-//! The `[PASS]` / `[FAIL]` lines are the point of the exercise.
+//! * **`--doctor`** is fast and read-only: drive type, UNC target, volume
+//!   serial, filesystem flags, SMB dialect, round-trip time, and which
+//!   enumeration strategies are usable.
+//! * **`--bench`** times every enumeration strategy against one directory and
+//!   checks that they all return the same entry count. A disagreement means a
+//!   fast path must stay off.
 
 use std::io::Write;
 use std::path::Path;
@@ -32,44 +24,23 @@ use crate::util::cancel::CancelToken;
 use crate::util::humanize;
 use crate::util::rng::Rng;
 
-/// Probes are given a hard ceiling; a blocked SMB call cannot be cancelled,
-/// so the thread is abandoned and the report says so.
+/// Overall time budget for a `--doctor` report.
 ///
-/// This used to be a promise the module note made and nothing kept: the
-/// constant existed, `probe_timeout` returned it, and not one call site
-/// applied it to anything. A blocked share meant `--doctor` never finished,
-/// which on the command line is a hang somebody can Ctrl-C and in the
-/// settings window was a thread that never answered.
-///
-/// It is applied by [`within`], which is the only construction that can:
-/// `std::fs::metadata` against a dead SMB share sits in the kernel, there is
-/// no cancellation token to set, and the thread cannot be killed. So the
-/// work is done on a scratch thread and, past the deadline, the scratch
-/// thread is abandoned and the report says what it was waiting for.
+/// Applied through [`within`]: a blocked SMB call cannot be cancelled, so the
+/// probe thread is abandoned past the deadline and the report says so.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// How many uncached round trips the RTT estimate is averaged over.
+/// Number of uncached lookups averaged for the RTT estimate.
 ///
-/// Sixteen, halved from thirty-two. These are deliberately uncached - a
-/// fresh random name each time, because the redirector caches a negative
-/// lookup for about five seconds - so every one of them is a real round
-/// trip, and on a link with a 40 ms RTT thirty-two of them is more than a
-/// second per drive. Sixteen samples put the median within a millisecond or
-/// two of where thirty-two put it, which is well inside the precision
-/// anybody reads this number to.
+/// Each is a real round trip, so the count is kept low; 16 samples give a
+/// median within a millisecond or two of 32.
 const RTT_SAMPLES: usize = 16;
 
-/// Runs `work` on a thread of its own and gives up on it after `budget`.
+/// Runs `work` on its own thread and stops waiting after `budget`.
 ///
-/// The awkward shape is the point. A blocked SMB call cannot be interrupted:
-/// there is no timeout parameter, no cancellation token, and no safe way to
-/// kill a thread. The only thing a caller can do is stop waiting - so this
-/// leaks a thread, deliberately, in the case where the alternative is
-/// leaking the whole program.
-///
-/// The leak is bounded in practice: the call underneath is a filesystem
-/// operation that the redirector will eventually fail, usually inside a
-/// minute, after which the thread finds nobody listening and exits.
+/// A blocked SMB call cannot be interrupted, so on timeout the thread is
+/// leaked. It exits once the redirector fails the call, usually within a
+/// minute.
 fn within<T: Send + 'static>(
     budget: Duration,
     work: impl FnOnce() -> T + Send + 'static,
@@ -87,28 +58,26 @@ fn within<T: Send + 'static>(
     rx.recv_timeout(budget).ok()
 }
 
-/// How much of the budget is left, and whether there is any.
+/// The remaining time in the report's single `PROBE_TIMEOUT` budget.
 ///
-/// Threaded through the report rather than applied per call, because twenty
-/// seconds each for six sections is two minutes and the promise is twenty
-/// seconds for the reading.
+/// Shared across sections so the whole report, not each section, is bounded.
 #[derive(Debug, Clone, Copy)]
 pub struct Deadline(Instant);
 
 impl Deadline {
-    /// Starting now.
+    /// Starts a budget of `PROBE_TIMEOUT` from now.
     pub fn new() -> Self {
         Self(Instant::now() + PROBE_TIMEOUT)
     }
 
-    /// What is left, or `None` past the end.
+    /// Returns the remaining time, or `None` once expired.
     pub fn left(self) -> Option<Duration> {
         self.0
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
     }
 
-    /// Whether there is still time to ask something slow.
+    /// Returns whether any time remains.
     pub fn open(self) -> bool {
         self.left().is_some()
     }
@@ -120,10 +89,9 @@ impl Default for Deadline {
     }
 }
 
-/// Prints the resolved routing table, and where a code would be searched.
+/// Prints the resolved routing table and where a code would be searched.
 ///
-/// Deliberately touches nothing on the network: configuration gets edited on
-/// laptops with no drives mapped, which is exactly when it needs checking.
+/// Makes no network calls, so it works on a machine with no drives mapped.
 pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Write) {
     let routes = &settings.routes;
     let _ = writeln!(out, "config: {}", routes.source().describe());
@@ -134,10 +102,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         "#", "mapping", "kind", "enabled", "read"
     );
     for m in routes.all() {
-        // One column, two things, because they are the same question asked of
-        // the two kinds of share: when is this read? An indexed one answers
-        // with its refresh policy; a live one is read only when it is
-        // searched, and how far down is the only part of that worth a column.
+        // Indexed shares show their refresh policy; live shares show search depth.
         let read = if m.kind.is_live() {
             format!("depth {}", m.depth)
         } else {
@@ -155,11 +120,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         );
     }
 
-    // Kept, and deliberately boring. It used to answer "which folder will it
-    // look in, and why not the other share" - a real question when a pattern
-    // decided. Every share is searched now, so the honest answer is the list
-    // above, and saying so beats quietly dropping the flag people learned to
-    // reach for.
+    // Every enabled share is searched, so list them in order.
     if let Some(code) = query {
         let _ = writeln!(out);
         let targets = routes.targets();
@@ -196,9 +157,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         }
     );
 
-    // Reported because "why can I not find this file" is the question this
-    // setting causes, and the answer is invisible from the panel: a hidden
-    // file is not shown greyed out, it is simply not there.
+    // Hidden files are omitted from results entirely, so report the filter.
     let _ = writeln!(out);
     let hidden = &settings.hidden;
     if hidden.is_empty() {
@@ -222,9 +181,7 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
         }
     );
 
-    // Said here as well as in the panel, because the toast that reports it
-    // has five seconds and this does not: somebody asking why their file
-    // looks different is asking hours later.
+    // Repeated here because the panel only shows it briefly as a toast.
     if let Some(migrated) = &settings.migrated {
         let _ = writeln!(out);
         let _ = writeln!(
@@ -254,15 +211,11 @@ pub fn doctor(
     let _ = writeln!(out, "source: {}", source.name());
     let _ = writeln!(out);
 
-    // One budget for the whole reading, not one per section: twenty seconds
-    // each across six sections would be two minutes, and the twenty seconds
-    // the module note promises is for the report.
+    // One budget for the whole report, not one per section.
     let deadline = Deadline::new();
 
-    // Every configured mapping, rather than the two derived convenience
-    // fields. Those name the first flat and first job-folder mapping, so a
-    // configuration without one of those kinds - which the shipped one now is
-    // - would have silently reported an empty path as a root.
+    // Every enabled mapping, not only the derived flat and job-folder roots,
+    // which may be empty.
     for mapping in settings.routes.enabled() {
         report_root(&mapping.path, &source, deadline, out);
         let _ = writeln!(out);
@@ -281,14 +234,11 @@ pub fn doctor(
     report_recommendations(settings, out);
 }
 
-/// The global hotkey, and whether the window it would move can be found.
+/// Reports the global hotkey and whether its target window can be found.
 ///
-/// Worth its own section for the same reason as live updates: both failures
-/// here are silent. A chord another program already owns simply never fires,
-/// and under Windows Terminal the obvious answer to "which window is the
-/// terminal" is a hidden pseudo-console that accepts every instruction and
-/// acts on none of them. Neither has a symptom inside the running program, so
-/// this is the one place the questions get asked out loud.
+/// Both failure modes are silent at run time: a chord owned by another
+/// program never fires, and under Windows Terminal the obvious console window
+/// is a hidden pseudo-console that ignores move requests.
 fn report_quick_search(
     settings: &Settings,
     hotkey: Option<Result<(), String>>,
@@ -310,10 +260,7 @@ fn report_quick_search(
             return;
         }
     }
-    // Where the panel will actually come up, which stopped being a pure
-    // function of the screen the moment a drag could move it. Somebody
-    // reporting "it appears off the side of my screen" needs to know whether a
-    // remembered position is in play before anything else is worth checking.
+    // Report whether a remembered drag position overrides default placement.
     match settings
         .placement_path
         .as_deref()
@@ -336,9 +283,7 @@ fn report_quick_search(
         None => {}
     }
     match &probe.window {
-        // Naming *which* window is about to be moved is the single most
-        // diagnostic line here: it is the difference between working and
-        // quietly rearranging some other program.
+        // Naming the window distinguishes working from moving another program.
         Some(Ok(how)) => {
             let _ = writeln!(out, "  window:    found, as {how}");
         }
@@ -354,13 +299,10 @@ fn report_quick_search(
     }
 }
 
-/// Whether the tree root will actually accept a subtree watch.
+/// Reports whether each tree root accepts a subtree change watch.
 ///
-/// Worth its own section because the failure it looks for has no symptom at
-/// all: a server can accept `CHANGE_NOTIFY` and then never fire it, and a
-/// server that refuses it outright looks identical from inside the running
-/// application to one that is simply quiet. This is the one place the question
-/// gets asked directly.
+/// A server can accept `CHANGE_NOTIFY` and never fire it, which is
+/// indistinguishable at run time from a quiet share.
 fn report_live_updates(settings: &Settings, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(out, "LIVE UPDATES");
     let trees: Vec<_> = settings
@@ -377,8 +319,7 @@ fn report_live_updates(settings: &Settings, deadline: Deadline, out: &mut dyn Wr
     }
 }
 
-/// Asked of each tree separately, because each is a different server and one
-/// of them refusing says nothing about the others.
+/// Checks one tree; each may be on a different server.
 fn report_one_watch(settings: &Settings, m: &Mapping, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(
         out,
@@ -397,9 +338,8 @@ fn report_one_watch(settings: &Settings, m: &Mapping, deadline: Deadline, out: &
     }
     #[cfg(windows)]
     {
-        // On a scratch thread: opening a watch handle against a share that
-        // has gone away blocks in the kernel, and this section used to be
-        // where `--doctor` hung.
+        // On a scratch thread: opening a watch on a vanished share blocks in the
+        // kernel.
         let opened = {
             let asked = m.path.clone();
             deadline.left().and_then(|left| {
@@ -439,15 +379,13 @@ fn report_one_watch(settings: &Settings, m: &Mapping, deadline: Deadline, out: &
     }
 }
 
-/// What keeps this share current when the watcher does not.
+/// Describes what keeps the share current when the watcher does not.
 ///
-/// Policy-dependent, and saying so matters: promising a half-hourly re-read to
-/// a share that is only re-read on request would be exactly the kind of
-/// confident wrong answer this diagnostic exists to replace.
+/// Depends on the refresh policy, so the text must match it.
 fn fallback(m: &Mapping) -> String {
     if m.refresh.is_manual() {
-        return "nothing re-reads this share on a timer; it is updated with F5, \
-                and the status line says when it was last read"
+        return "no timed re-read; F5 updates it, and the status line shows \
+                when it was last read"
             .into();
     }
     format!(
@@ -459,13 +397,9 @@ fn fallback(m: &Mapping) -> String {
 fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out: &mut dyn Write) {
     let _ = writeln!(out, "ROOT  {}", root.display());
 
-    // Once, and read twice: the block below prints it, and the RTT estimate
-    // at the foot asks it whether this is a network share at all. It used to
-    // be called inside the block and again nowhere, and the RTT ran against
-    // local disks because nothing had asked.
-    //
-    // On a scratch thread, because `volume_info` opens a handle to the share
-    // and a dead share is where that blocks. See `within`.
+    // Queried once and used twice: by the block below and by the RTT estimate,
+    // which runs only for network shares. Runs on a scratch thread because
+    // `volume_info` blocks on a dead share; see [`within`].
     #[cfg(windows)]
     let volume = {
         let asked = root.to_path_buf();
@@ -484,10 +418,7 @@ fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out
     #[cfg(windows)]
     {
         let info = &volume;
-        // Volume-level queries only accept a root, so say which one was
-        // interrogated. Otherwise a configured subdirectory looks like it is
-        // reporting its own volume identity, and a failure looks like the
-        // share being broken rather than the path being deeper.
+        // Volume queries accept only a root, so name the root that was queried.
         if info.is_subdirectory {
             let _ = writeln!(
                 out,
@@ -518,10 +449,8 @@ fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out
                 let _ = writeln!(out, "  volume serial       unavailable");
             }
         }
-        // Reported, not acted on: NTFS sets this flag on every volume, and it
-        // describes what the filesystem supports rather than how names are
-        // resolved. Whether the server's pattern matching agrees with ours is
-        // decided by the superset check below, not by a flag.
+        // Informational only: NTFS always sets this flag. Pattern-matching
+        // agreement is decided by the superset check below.
         let _ = writeln!(
             out,
             "  case sensitive srch {}  (informational)",
@@ -559,9 +488,9 @@ fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out
         );
     }
 
-    // Reachability, twice: the first touch pays for session setup. Both on
-    // a scratch thread and under the same budget, because this is the other
-    // call that sits in the kernel against a share that has gone.
+    // Reachability, twice: the first touch pays for session setup. Both run on
+    // a scratch thread under the same budget, since this can block on a dead
+    // share.
     let probed = {
         let asked = root.to_path_buf();
         let source = Arc::clone(source);
@@ -597,10 +526,7 @@ fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out
         }
     }
 
-    // Not on a local disk. An uncached metadata lookup against an SSD is a
-    // page-cache miss measured in microseconds; printing it as an "estimated
-    // round-trip time" invites somebody to compare it with the number beside
-    // a network share, where it means something entirely different.
+    // Skipped on local disks, where the figure is a cache miss, not an RTT.
     let remote = {
         #[cfg(windows)]
         {
@@ -629,11 +555,10 @@ fn report_root(root: &Path, source: &Arc<dyn DirSource>, deadline: Deadline, out
     }
 }
 
-/// Times a metadata lookup on names that certainly do not exist.
+/// Times a metadata lookup on names that do not exist.
 ///
-/// A fresh random name each iteration is essential: the redirector caches
-/// negative lookups for about five seconds, so repeating one name measures
-/// the cache and reports an implausible zero.
+/// Each iteration uses a fresh random name because the redirector caches
+/// negative lookups for about five seconds.
 fn measure_rtt(root: &Path) -> Option<(Duration, Duration)> {
     let mut rng = Rng::from_entropy();
     let mut samples = Vec::with_capacity(RTT_SAMPLES);
@@ -661,9 +586,8 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
         let _ = writeln!(out, "  persistence         disabled");
         return;
     }
-    // Every indexed mapping, because each writes its own cache entry keyed by
-    // a hash of its path. Reporting only the first was how a configuration
-    // naming ten shares produced a diagnostic about one.
+    // Every indexed mapping, since each has its own cache entry keyed by path
+    // hash.
     for m in settings
         .routes
         .enabled()
@@ -682,18 +606,9 @@ fn report_index_cache(settings: &Settings, out: &mut dyn Write) {
     );
 }
 
-/// What the shares that are never indexed are holding.
+/// Reports what past searches have cached for each live (unindexed) share.
 ///
-/// Its own section rather than a line in `INDEX CACHE`, because almost every
-/// heading there is a question a live share does not answer: it was not read,
-/// so there is no age, no entry count from a pass, and nothing a stamp could
-/// confirm. What it does have is whatever past searches found, and how much of
-/// that there is turns out to be the thing somebody actually wants to know -
-/// it is the difference between "this drive is slow" and "this drive has not
-/// been asked about your job yet".
-///
-/// Prints nothing at all when no live share is configured, rather than a
-/// heading over an empty list.
+/// Prints nothing when no live share is configured.
 fn report_live_shares(settings: &Settings, out: &mut dyn Write) {
     if settings.routes.live().next().is_none() {
         return;
@@ -724,15 +639,14 @@ fn report_live_shares(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out);
 }
 
-/// How much of a live share past searches have left behind, if any.
+/// Describes how much of a live share past searches have cached, if any.
 fn remembered(settings: &Settings, m: &Mapping) -> Option<String> {
     let dir = settings.cache_dir.as_deref()?;
     if !settings.persist {
         return Some("not kept - persistence is disabled".into());
     }
     let key = persist::MappingKey::of(&m.path);
-    // The volume serial is deliberately not resolved: this section exists to
-    // describe a share without touching it.
+    // The volume serial is not resolved, so the share is not touched.
     let loaded = persist::load_tree(dir, key, persist::Expect::new(&m.path, None)).ok()?;
     Some(format!(
         "{} files in {} folders, from earlier searches",
@@ -747,11 +661,8 @@ fn report_one_cache(dir: &std::path::Path, m: &Mapping, out: &mut dyn Write) {
     let _ = writeln!(out, "  {} ({})", m.name, indexed.display());
     let _ = writeln!(out, "    cache key         {}", key.hex());
 
-    // Validated against the *real* volume serial, exactly as the running
-    // application does. Passing `None` here skipped the one check the app
-    // applies and nothing else does, so `--doctor` could report a perfectly
-    // healthy cache that every launch then threw away - which is the opposite
-    // of what a diagnostic is for.
+    // Validated against the real volume serial, as the application does, so the
+    // report matches what a launch will accept.
     let serial = volume_serial_of(indexed);
     let _ = writeln!(
         out,
@@ -785,8 +696,8 @@ fn report_one_cache(dir: &std::path::Path, m: &Mapping, out: &mut dyn Write) {
     }
 }
 
-/// A mapping root's volume serial, or `None` off Windows and when it cannot be
-/// resolved.
+/// Returns a mapping root's volume serial, or `None` off Windows or on
+/// failure.
 fn volume_serial_of(dir: &std::path::Path) -> Option<u32> {
     #[cfg(windows)]
     {
@@ -799,11 +710,7 @@ fn volume_serial_of(dir: &std::path::Path) -> Option<u32> {
     }
 }
 
-/// What happens when a result is opened.
-///
-/// Worth its own section: this is the only part of the program that hands work
-/// to software nobody here controls, and "Enter does nothing" is answered by
-/// exactly these four lines.
+/// Reports how opening a result is handled: viewers, open mode and merge folder.
 fn report_viewer(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out, "VIEWER");
     let _ = writeln!(
@@ -811,14 +718,13 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         "  viewer              {} ({})",
         settings.viewer.name(&settings.viewers),
         match settings.viewer.within(&settings.viewers) {
-            crate::config::ViewerKind::Auto => "each file opens in Windows OS registered default",
-            crate::config::ViewerKind::Pdf => "the pages of a code, merged into one document",
-            crate::config::ViewerKind::App(_) => "the one selected file, handed to that program",
+            crate::config::ViewerKind::Auto => "each file opens in its default app",
+            crate::config::ViewerKind::Pdf => "a code's pages, combined into one PDF",
+            crate::config::ViewerKind::App(_) => "the selected file, opened with that program",
         }
     );
 
-    // One line per configured viewer. None is built in, so a machine with no
-    // `[[viewer]]` has nothing to look for and says so.
+    // One line per configured viewer. None is built in.
     if settings.viewers.is_empty() {
         let _ = writeln!(out, "  viewers             (none configured)");
     }
@@ -836,8 +742,7 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         } else if in_use {
             "NOT FOUND - Enter will fail"
         } else {
-            // Not a complaint while another mode is in force: nothing reaches
-            // it unless F2 is pressed.
+            // Not an error unless F2 mode is active.
             "NOT FOUND (not in use - F2 would need it)"
         };
         let _ = writeln!(out, "  {:<19} {} \u{b7} {found}", app.name, app.program);
@@ -870,8 +775,7 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         }
     );
 
-    // Merged documents live here, and they are the one thing this program
-    // writes that a viewer keeps open afterwards.
+    // Merged documents are written here and stay open in the viewer.
     let _ = writeln!(
         out,
         "  merged documents    {}",
@@ -893,8 +797,7 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         }
     );
 
-    // Says why F2 will not stick, which is otherwise invisible - and which of
-    // the three reasons it is, because what to do about it differs.
+    // Explain which of the three reasons prevents F2 from persisting.
     if let Some(pin) = settings.pin(crate::config::write::SettingKey::Viewer) {
         let reason = match pin {
             crate::config::Pin::Environment(var) => format!("{var} outranks the file"),
@@ -906,18 +809,15 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out);
 }
 
-/// The most files this will count before giving up and saying so.
+/// Maximum files [`directory_size`] counts before stopping.
 ///
-/// A cache directory is expected to hold tens of files. One holding a
-/// hundred thousand is a fault in its own right, and walking all of them -
-/// with a `metadata` call each - to print an exact number nobody needs is
-/// the report making the problem worse. Past this the count is printed with
-/// a `+`.
+/// A cache directory normally holds tens of files; past this the count is
+/// printed with a `+`.
 const SIZE_CAP: usize = 5_000;
 
-/// Counts a directory's files and their total size, up to [`SIZE_CAP`].
+/// Counts a directory's files and total size, up to [`SIZE_CAP`].
 ///
-/// Best effort, and the `bool` is whether it stopped early.
+/// Best effort. The `bool` is whether counting stopped early.
 fn directory_size(dir: &Path) -> (usize, u64, bool) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (0, 0, false);
@@ -938,12 +838,9 @@ fn directory_size(dir: &Path) -> (usize, u64, bool) {
     (count, bytes, false)
 }
 
-/// Whether a newer version is published, and whether this machine can see it.
+/// Reports whether a newer version is published and reachable.
 ///
-/// Reads the share, which is why it is here and not on a timer: --doctor is
-/// already the place that touches every configured path and reports what it
-/// found. Silent when no update folder is configured, because then there is
-/// nothing to be right or wrong about.
+/// Silent when no update folder is configured.
 fn report_updates(settings: &Settings, out: &mut dyn Write) {
     let Some(source) = crate::update::Source::of(settings) else {
         return;
@@ -987,13 +884,11 @@ fn report_updates(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out);
 }
 
-/// The directories this program writes into, and whether they are there.
+/// Reports whether each directory this program writes to exists.
 ///
-/// Each is created on demand by whatever writes to it, so this is not what
-/// makes them exist - it is what makes their absence visible. A profile whose
-/// `%APPDATA%` is redirected to a share that is not mounted fails one write at
-/// a time, in a worker, hours apart, and every failure looks like a different
-/// bug. Asked all at once it is one line naming the folder nobody can write.
+/// Each is created on demand, so a missing or unwritable one (for example a
+/// redirected `%APPDATA%` that is not mounted) otherwise fails one write at a
+/// time in different workers.
 fn report_directories(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out, "DIRECTORIES");
     let places = [
@@ -1059,11 +954,11 @@ fn report_recommendations(settings: &Settings, out: &mut dyn Write) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Run `files --bench` to compare enumeration strategies on these drives,"
+        "Run `files-cli --bench` to compare enumeration strategies on these drives"
     );
     let _ = writeln!(
         out,
-        "and to confirm the server-side filter returns everything a full scan does."
+        "and confirm the server-side filter returns everything a full scan does."
     );
 }
 
@@ -1077,7 +972,7 @@ pub struct StrategyResult {
     pub error: Option<EnumError>,
 }
 
-/// Whether the strategies agree, which is the thing worth knowing.
+/// Returns whether all strategies that succeeded report the same count.
 pub fn counts_agree(results: &[StrategyResult]) -> bool {
     let mut counts = results.iter().filter_map(|r| r.entries);
     let Some(first) = counts.next() else {
@@ -1135,12 +1030,10 @@ pub fn bench_strategies(source: &dyn DirSource, dir: &Path, reps: usize) -> Vec<
     out
 }
 
-/// Full benchmark report.
 /// Walks every enabled mapping and reports the shape of each tree.
 ///
-/// Read-only, and the single measurement that decides whether indexing whole
-/// shares is affordable: the cost of a recursive walk is dominated by the
-/// *directory* count, which nothing but a walk can tell you.
+/// Read-only. Walk cost is dominated by the directory count, which only a
+/// walk can measure.
 pub fn bench_walk(
     settings: &Settings,
     source: Arc<dyn DirSource>,
@@ -1214,9 +1107,8 @@ fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
         report.dirs_visited as f64 / secs
     );
 
-    // What an index built from this walk would cost to hold. Directory paths
-    // are interned once rather than repeated per file, which is the whole
-    // reason the directory count is worth reporting separately.
+    // Estimated index memory. Directory paths are interned once, which is why
+    // the directory count is reported separately.
     let name_bytes = sink.name_bytes.load(Ordering::Relaxed);
     let dir_bytes = sink.max_rel_len.load(Ordering::Relaxed) * report.dirs_visited as u64 / 2;
     let projected =
@@ -1257,9 +1149,7 @@ fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
             let _ = writeln!(out, "         {shown}: {}", err.describe(shown));
         }
     }
-    // Reported without alarm: folders are created and deleted while a walk is
-    // running, and calling that a fault would train the reader to skip the
-    // warnings that matter.
+    // Reported without alarm: folders appear and vanish during a walk.
     if errors.vanished > 0 {
         let _ = writeln!(
             out,
@@ -1286,6 +1176,7 @@ fn report_walk(report: &WalkReport, sink: &WalkCounts, out: &mut dyn Write) {
     );
 }
 
+/// Runs the full benchmark report.
 pub fn bench(
     settings: &Settings,
     source: Arc<dyn DirSource>,
@@ -1293,9 +1184,8 @@ pub fn bench(
     allow_write: bool,
     out: &mut dyn Write,
 ) {
-    // The first enabled flat share, else the first indexed one. Named in the
-    // output rather than assumed, because with several configured "target"
-    // was previously whichever the derived path happened to hold.
+    // The first enabled flat share, else the first indexed one, named in the
+    // output.
     let Some(target) = settings
         .routes
         .flat()
@@ -1408,8 +1298,8 @@ fn bench_server_filter(source: &dyn DirSource, dir: &Path, query: &str, out: &mu
                 "  8.3 false positives {false_positives} (removed client-side)"
             );
 
-            // Compare against a full local enumeration: the server must never
-            // return less.
+            // Compare against a full local enumeration: the server must never return
+            // less.
             match scan_once(source, dir, &ListOpts::default()) {
                 Ok((snapshot, _)) => {
                     let needle = query.to_ascii_lowercase();
@@ -1464,15 +1354,10 @@ fn bench_server_filter(source: &dyn DirSource, dir: &Path, query: &str, out: &mu
 /// whole.
 ///
 /// `?` matches exactly one character, so `?`, `??`, ... `????????*` is a
-/// provably disjoint and complete partition - unlike first-character
-/// sharding, which cannot be complete because Win32 patterns have no
-/// character classes.
-///
-/// This is not used to enumerate faster (once buffers are large the work is
-/// bandwidth-bound, so sharding buys almost nothing while multiplying server
-/// CPU). It is here as an **oracle**: if the shards sum to the single-pass
-/// count, that is direct evidence on the real server that its pattern
-/// matching drops nothing - which is what makes the server-side filter safe.
+/// disjoint, complete partition (Win32 patterns have no character classes,
+/// so first-character sharding cannot be). This is an oracle, not a speedup:
+/// if the shards sum to the single-pass count, the server's pattern matching
+/// drops nothing, which is what makes the server-side filter safe.
 fn completeness_oracle(
     source: &dyn DirSource,
     dir: &Path,
@@ -1630,7 +1515,7 @@ fn time_it<T>(f: impl FnOnce() -> T) -> (Duration, T) {
     (started.elapsed(), value)
 }
 
-/// The probe ceiling, exposed so callers can describe it.
+/// The probe budget, exposed so callers can describe it.
 pub fn probe_timeout() -> Duration {
     PROBE_TIMEOUT
 }
@@ -1659,16 +1544,13 @@ mod tests {
         )
     }
 
-    /// A heading over an empty list is noise in a report somebody reads to
-    /// find one thing, and the shipped configuration names no live share.
+    /// The shipped configuration names no live share.
     #[test]
     fn the_live_share_section_is_absent_when_none_is_configured() {
         let report = text(|out| report_live_shares(&settings(), out));
         assert!(report.is_empty(), "got {report:?}");
     }
 
-    /// The two claims worth making about a share nothing reads: that nothing
-    /// reads it, and how far a search reaches into it.
     #[test]
     fn a_live_share_is_reported_as_never_read_and_with_its_depth() {
         use crate::paths::{ConfigSource, Mapping, MappingId, MappingKind, RefreshPolicy, Routes};
@@ -1793,7 +1675,7 @@ mod tests {
         );
     }
 
-    /// The check that decides whether the feature may be switched on at all.
+    /// The server filter must not be enabled if it returns fewer entries.
     #[test]
     fn bench_fails_loudly_when_the_server_filter_under_returns() {
         let src = FakeDirSource::new()
@@ -1825,8 +1707,7 @@ mod tests {
         assert!(report.contains("not applicable"), "{report}");
     }
 
-    /// A diagnostic that validates the cache differently from the application
-    /// is worse than none: it reports a healthy index the app then discards.
+    /// The cache report must validate against the volume serial, as the app does.
     #[test]
     fn the_cache_report_states_the_volume_identity_it_checked_against() {
         let mut s = settings();

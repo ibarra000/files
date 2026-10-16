@@ -1,28 +1,11 @@
-//! The panel, drawn, and then read back.
+//! Renders the panel through `egui_kittest` and asserts on what it draws.
 //!
-//! The safety net the rewrite dropped. The terminal build rendered into a
-//! `TestBackend` buffer and asserted on the characters *and the styles* in it,
-//! so a selection highlight that quietly stopped being painted failed a test.
-//! When the window replaced it, `gui::panel::show` - the one function that
-//! paints the whole panel - arrived with no way to check anything at all, and
-//! stayed that way. The toast band went missing through exactly that gap: the
-//! messages were still raised, still expired on a timer, and were drawn
-//! nowhere, and nothing anywhere could tell.
+//! Assertions read the accessibility tree, which is derived from the layout
+//! pass and needs no GPU. Pixel snapshots are behind `--features ui-snapshots`
+//! because they need a GPU adapter.
 //!
-//! [`egui_kittest`] closes it. It builds a real [`egui::Context`], runs the
-//! real `show`, and hands back the accessibility tree - which is not a
-//! rendering but is derived from one, and is the same tree Narrator reads. So
-//! "is this on screen" becomes a question with an answer, without a GPU.
-//!
-//! The pictures are behind `--features ui-snapshots`, because rendering them
-//! needs an adapter to render *through* and a build machine may not have one.
-//!
-//! # What this drives, and what it does not
-//!
-//! `gui::panel::show` and `gui::frame::Frame`, over an `AppState` built by
-//! hand. Not `gui::Shell`, which owns threads, a tray icon and a window: the
-//! panel is a pure function of state, a theme and a `Content`, and that is
-//! exactly the seam worth testing.
+//! Drives `gui::panel::show` and `gui::frame::Frame` over a hand-built
+//! `AppState`, not `gui::Shell`, which owns threads, a tray icon and a window.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -45,8 +28,8 @@ use files::search::query::Query;
 /// One frame at sixty a second.
 const DT: f32 = 1.0 / 60.0;
 
-/// The outer margin `egui_kittest` frames its `Ui` in. Not a property of the
-/// panel; the window is grown by it so that it is not one.
+/// The outer margin `egui_kittest` adds around its `Ui`; the window is grown by
+/// it so the panel gets its real size.
 const HARNESS_MARGIN: f32 = 8.0;
 
 // --- fixtures --------------------------------------------------------------
@@ -60,12 +43,10 @@ fn hit(name: &str) -> Hit {
     }
 }
 
-/// Puts `hits` on screen for `code`, the way the matcher would.
+/// Types `code` and delivers `hits` as the matcher's result.
 ///
-/// `matched` is what the index *found*, which is not the same as what came
-/// back: the search is capped, and the panel has room for eight rows of
-/// whatever survived that. Keeping the two apart is the whole point of the
-/// count in the footer.
+/// `matched` is the total the index found, which can exceed `hits.len()`
+/// because the search is capped.
 fn with_results(state: &mut AppState, code: &str, hits: Vec<Hit>, matched: u32, now: Instant) {
     for c in code.chars() {
         state.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
@@ -110,58 +91,39 @@ impl Panel {
         Self {
             state,
             frame,
-            // Pinned rather than followed from the system, so a machine in
-            // dark mode and a machine in light mode agree about the pictures.
+            // Pinned so snapshots do not depend on the system theme.
             theme: Theme::light(),
-            // A fixed wall clock, because the status line renders an age from
-            // it and "updated 4s ago" is not a stable snapshot.
+            // Fixed so the status line's age text is stable.
             wall: SystemTime::UNIX_EPOCH,
             fonts_ready: false,
         }
     }
 }
 
-/// Builds a harness around the real panel, settled and at rest.
+/// Builds a harness around the real panel, run past its entrance animation.
 ///
-/// `Backdrop` is `None` - the path a Windows without acrylic takes, and the
-/// one where the panel paints its own surface, which is what there is to look
-/// at.
+/// The backdrop is `None`, so the panel paints its own surface.
 fn harness(state: AppState) -> Harness<'static, Panel> {
     let mut harness = Harness::builder()
-        // The harness frames whatever it is given in an eight-point outer
-        // margin. `eframe::App::ui` hands over a `Ui` with no margin at all,
-        // so the window is grown to match and the panel gets exactly the
-        // rectangle it gets in the real program.
+        // Compensates for the harness margin so the panel gets the same
+        // rectangle as in the real program.
         .with_size(egui::vec2(
             theme::PANEL_W + HARNESS_MARGIN * 2.0,
             theme::PANEL_H + HARNESS_MARGIN * 2.0,
         ))
-        // Points, not pixels: the panel is laid out in points and a snapshot
-        // taken at whatever the machine's scaling happens to be is a snapshot
-        // of the machine.
+        // Fixed scale so snapshots do not depend on the machine's DPI.
         .with_pixels_per_point(1.0)
         .with_step_dt(DT)
         .build_ui_state(
             |ui, panel: &mut Panel| {
-                // `theme::font` asks for `FontFamily::Name("segoe")` and egui
-                // panics on a family it was never given, so the families have
-                // to exist before anything is laid out. Bound to egui's own
-                // font rather than to whatever Segoe UI this machine has, so
-                // the pictures are of the panel and not of the machine.
-                //
-                // Here rather than before the first frame because new
-                // definitions are picked up at the *start* of a frame, and the
-                // builder runs one on the way out. So the first frame installs
-                // them and draws nothing, and every frame after is the panel.
+                // egui panics on an unregistered font family, so the bundled
+                // fonts are installed before any layout. Font definitions take
+                // effect at the start of the next frame, so the first frame
+                // only installs them and draws nothing.
                 if !panel.fonts_ready {
                     files::gui::fonts::install_bundled(ui.ctx());
-                    // And the style, which these pictures went without for
-                    // as long as they have existed. Nothing the panel paints
-                    // by hand reads it - but the scroll-bar down the results
-                    // is an egui widget, and without this it was drawn from
-                    // egui's defaults: floating, over the content, twice the
-                    // width. So the snapshots were of a scrollbar the program
-                    // does not ship.
+                    // The results scrollbar is an egui widget and reads the
+                    // style; without this it uses egui's defaults.
                     files::gui::theme::apply_style(ui.ctx(), &panel.theme);
                     panel.fonts_ready = true;
                     return;
@@ -172,13 +134,12 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
             Panel::new(state),
         );
 
-    // Past the entrance, so nothing here is a test of a half-arrived panel.
+    // Run past the entrance animation.
     harness.run_steps(40);
     harness
 }
 
-/// The settings every test here starts from: the defaults, plus the viewer
-/// that used to be built in, configured the way somebody would write it.
+/// The default settings plus one configured viewer, `avwin`.
 fn with_avwin() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
@@ -193,12 +154,10 @@ fn state() -> (AppState, Instant) {
     (AppState::new(with_avwin(), now), now)
 }
 
-/// A state with nothing at all to say: nothing typed, and an index that has
-/// reported in healthy.
+/// A state with nothing typed and a healthy index, so the status line is
+/// empty.
 ///
-/// `state()` is not that. A fresh one has no index yet, which is a standing
-/// notice - "No file list yet" - and that notice is a real screen somebody
-/// sees. This fixture is for the other half.
+/// A fresh `state()` has no index and shows the "No file list yet" notice.
 fn quiet_state() -> (AppState, Instant) {
     let (mut s, now) = state();
     let status = IndexStatus {
@@ -214,9 +173,7 @@ fn quiet_state() -> (AppState, Instant) {
         }),
         now,
     );
-    // Read off the line the footer would draw, which is the only public
-    // answer to "has this panel anything to say" now that `is_quiet` has
-    // gone with `Content::Quiet`.
+    // The footer's status text is the public way to check for a notice.
     let said = files::view::status::render(&s, SystemTime::UNIX_EPOCH).text;
     assert!(
         said.is_empty(),
@@ -225,10 +182,7 @@ fn quiet_state() -> (AppState, Instant) {
     (s, now)
 }
 
-/// Everything the panel put on screen, as one string.
-///
-/// The accessibility tree rather than the pixels: it is derived from the same
-/// layout pass, it is what a screen reader is handed, and it needs no GPU.
+/// Returns every label and value in the accessibility tree, one per line.
 fn on_screen(harness: &Harness<'_, Panel>) -> String {
     let root = harness.root();
     std::iter::once(root)
@@ -245,11 +199,7 @@ fn on_screen(harness: &Harness<'_, Panel>) -> String {
 
 // --- what the panel says ---------------------------------------------------
 
-/// The thirteen messages that were raised, given an expiry, kept on the frame
-/// clock so the loop would wake to retire them - and drawn nowhere.
-/// Raises a toast the way the program does: Enter on a code with nothing under
-/// it. Driven through a real keystroke rather than by reaching into the state,
-/// so the path a user takes is the path under test.
+/// Raises a toast by pressing Enter on a code with no results.
 fn toasted(now: Instant) -> AppState {
     let (mut s, _) = state();
     with_results(&mut s, "11-D-0704", Vec::new(), 0, now);
@@ -268,8 +218,6 @@ fn a_toast_is_actually_on_screen() {
     );
 }
 
-/// And it goes away on its own, rather than sitting on the status line for the
-/// rest of the session.
 #[test]
 fn a_toast_gives_the_line_back_when_it_expires() {
     let now = Instant::now();
@@ -284,13 +232,6 @@ fn a_toast_gives_the_line_back_when_it_expires() {
     );
 }
 
-/// Six rows on screen, three hundred results, and every one of them
-/// reachable by scrolling. The count is what says there are more than fit.
-///
-/// This used to read "1-6 of 300", because the panel drew a fixed window over
-/// the list and the other 294 could not be got at. The band scrolls now, so
-/// the scrollbar answers where in them you are and the footer answers how
-/// many there are.
 #[test]
 fn the_footer_says_how_many_the_code_found() {
     let (mut s, now) = state();
@@ -304,7 +245,7 @@ fn the_footer_says_how_many_the_code_found() {
     );
 }
 
-/// And says nothing at all when there is nothing to say, rather than a zero.
+/// With no results the footer shows no count and no default-action button.
 #[test]
 fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
     let (s, _) = state();
@@ -314,31 +255,20 @@ fn the_footer_counts_nothing_when_there_is_nothing_to_count() {
         !screen.contains("Results"),
         "a caption over a list that is not there:\n{screen}"
     );
-    // And offers no way to open anything, because there is nothing to open.
-    // The button that names the default action is what carries that now: it
-    // is simply not drawn.
     assert!(
         !screen.contains("\u{b7} Enter"),
         "the footer offered to open nothing:\n{screen}"
     );
-    // The gear and the menu are still there. They are about the program
-    // rather than about the list, so they do not come and go with one - and
-    // between them they are the only thing left advertising F5 and Ctrl+,.
+    // The settings and actions buttons stay; they do not depend on results.
     assert!(screen.contains("Settings"), "{screen}");
 }
 
-/// F2 changes what Enter does, and the footer says so in words.
-///
-/// It used to be a chip reading `Viewer: PDF`, at `Priority::Normal` - so at
-/// the shipped width it was the first thing the hint bar dropped, and the one
-/// key whose whole job is to change a mode gave no sign of which mode it was
-/// in. It is the label on the button Enter runs now, which cannot be dropped
-/// because it is the button.
+/// The default-action button names what Enter does for the current viewer.
 #[test]
 fn the_footer_says_what_enter_will_do() {
     for (viewer, label) in [
         (ViewerKind::Auto, "Open"),
-        (ViewerKind::Pdf, "Open as one document"),
+        (ViewerKind::Pdf, "Open as combined PDF"),
         (ViewerKind::App(0), "Open with avwin"),
     ] {
         let (mut s, now) = state();
@@ -353,8 +283,7 @@ fn the_footer_says_what_enter_will_do() {
     }
 }
 
-/// A machine with no viewer configured is offered none, and `Ctrl+E` is
-/// advertised nowhere: there is nothing for it to open with.
+/// With no viewer configured, neither "Open with" nor `Ctrl+E` appears.
 #[test]
 fn with_no_viewers_the_menu_offers_none() {
     let now = Instant::now();
@@ -366,11 +295,9 @@ fn with_no_viewers_the_menu_offers_none() {
     let screen = on_screen(&h);
     assert!(!screen.contains("Open with"), "{screen}");
     assert!(!screen.contains("Ctrl E"), "{screen}");
-    assert!(screen.contains("Open as one document"), "{screen}");
+    assert!(screen.contains("Open as combined PDF"), "{screen}");
 }
 
-/// And Ctrl+K opens the rest of them, which is the whole reason the footer
-/// can be two buttons rather than a row of chips.
 #[test]
 fn the_actions_menu_lists_everything_else() {
     let (mut s, now) = state();
@@ -381,12 +308,12 @@ fn the_actions_menu_lists_everything_else() {
     let screen = on_screen(&h);
     for offered in [
         "Open \u{b7} Enter",
-        "Open as one document \u{b7} Ctrl D",
+        "Open as combined PDF \u{b7} Ctrl D",
         "Open with avwin \u{b7} Ctrl E",
-        "Show it in Explorer \u{b7} Ctrl O",
-        "Copy the path \u{b7} Ctrl C",
-        "Copy the name",
-        "Read a drive again \u{b7} F5",
+        "Show in Explorer \u{b7} Ctrl O",
+        "Copy path \u{b7} Ctrl C",
+        "Copy name",
+        "Refresh drive \u{b7} F5",
         "Settings \u{b7} Ctrl ,",
     ] {
         assert!(
@@ -396,8 +323,7 @@ fn the_actions_menu_lists_everything_else() {
     }
 }
 
-/// With nothing found it offers nothing to do with a file, and still offers
-/// the two that are about the program.
+/// With no results the menu omits file actions but keeps program actions.
 #[test]
 fn the_actions_menu_with_nothing_selected_offers_no_file() {
     let (mut s, _) = state();
@@ -405,14 +331,13 @@ fn the_actions_menu_with_nothing_selected_offers_no_file() {
 
     let h = harness(s);
     let screen = on_screen(&h);
-    assert!(!screen.contains("Copy the path"), "{screen}");
-    assert!(!screen.contains("Show it in Explorer"), "{screen}");
-    assert!(screen.contains("Read a drive again"), "{screen}");
+    assert!(!screen.contains("Copy path"), "{screen}");
+    assert!(!screen.contains("Show in Explorer"), "{screen}");
+    assert!(screen.contains("Refresh drive"), "{screen}");
 }
 
-/// Choosing the viewer that is not installed used to fail silently, at the
-/// moment somebody wanted a drawing. The probe was taken at startup and
-/// discarded.
+/// Selecting a viewer that is not installed shows a notice naming the
+/// executable and the F2 fix.
 #[test]
 fn a_missing_viewer_is_reported_before_it_is_needed() {
     let (mut s, now) = state();
@@ -426,16 +351,8 @@ fn a_missing_viewer_is_reported_before_it_is_needed() {
     assert!(screen.contains("F2"), "and says how to fix it:\n{screen}");
 }
 
-/// Browsing the remembered codes puts the code on the line, and the list
-/// itself says what it is.
-///
-/// The status line used to carry "Codes you used before - 2 of 3", on the
-/// argument that browsing a list without knowing where you are in it is what
-/// the terminal build's " History (2 of 3) " title existed to prevent. It is
-/// gone with the rest of the panel's prose: the list is at most a handful of
-/// codes and is on screen, the group heading over it already names what it
-/// is, and the status line is the one place reserved for things somebody has
-/// to act on.
+/// Browsing history shows the code and the "Recent codes" heading, and the
+/// status line stays silent.
 #[test]
 fn browsing_the_recent_codes_puts_the_code_on_the_line() {
     let (mut s, now) = state();
@@ -444,8 +361,7 @@ fn browsing_the_recent_codes_puts_the_code_on_the_line() {
         "P12345-001".into(),
         "22-A-1".into(),
     ]);
-    // Twice: the first Up steps onto the newest code, the second onto the one
-    // behind it. A Down from the newest leaves browsing altogether.
+    // The first Up selects the newest code, the second the one before it.
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     assert!(s.history.is_browsing(), "the fixture is not browsing");
@@ -460,12 +376,6 @@ fn browsing_the_recent_codes_puts_the_code_on_the_line() {
     );
 }
 
-/// The first screen anybody sees is a search box and nothing else.
-///
-/// It used to teach three things - what to type, what a code looks like, and
-/// that there was more to find - across five lines of body text and four
-/// chips. That is a page of instructions in front of somebody who summoned a
-/// search box to search, every time they summon it.
 #[test]
 fn the_first_screen_is_a_search_box_and_nothing_else() {
     let (s, _) = quiet_state();
@@ -488,12 +398,10 @@ fn the_first_screen_is_a_search_box_and_nothing_else() {
     }
 }
 
-/// A standing notice brings the footer back, because that is what the footer
-/// is for. The panel is quiet when there is nothing to say - not when nothing
-/// may be said.
+/// A standing notice shows the footer even with nothing typed.
 #[test]
 fn something_worth_saying_brings_the_footer_back() {
-    // No index yet, which is the one standing notice a fresh start has.
+    // A fresh state has no index, which raises a standing notice.
     let (s, _) = state();
     let h = harness(s);
     let screen = on_screen(&h);
@@ -504,12 +412,10 @@ fn something_worth_saying_brings_the_footer_back() {
     );
 }
 
-/// The taller rows show fewer of themselves, which is the whole of what the
-/// setting does to the list.
+/// Detailed rows are taller, so fewer fit on screen.
 ///
-/// Counted off the accessibility tree rather than off the arithmetic: the
-/// rows past the clip rectangle are culled before they are laid out, so how
-/// many are in the tree *is* how many are on screen.
+/// Rows outside the clip rectangle are culled before layout, so the count in
+/// the accessibility tree is the count on screen.
 #[test]
 fn detailed_rows_fit_fewer_to_a_screen() {
     let drawn = |layout| {
@@ -540,9 +446,8 @@ fn detailed_rows_fit_fewer_to_a_screen() {
     );
 }
 
-/// Whichever layout is on, a row says the whole truth about itself to a
-/// reader. Compact does not draw the folder, and a screen reader that was
-/// given only what was drawn would be worse off than the tooltip.
+/// A compact row does not draw its folder but still exposes it to screen
+/// readers.
 #[test]
 fn a_compact_row_still_names_the_folder_it_is_in() {
     let (mut s, now) = state();
@@ -557,7 +462,6 @@ fn a_compact_row_still_names_the_folder_it_is_in() {
     );
 }
 
-/// The list is a group with a caption over it, which is Ueli's shape.
 #[test]
 fn the_results_are_captioned() {
     let (mut s, now) = state();
@@ -568,16 +472,10 @@ fn the_results_are_captioned() {
     assert!(screen.contains("Results"), "no caption:\n{screen}");
 }
 
-/// A row the arrows walked to is brought into view, by as little as it takes.
+/// Moving the selection scrolls it into view, by the minimum distance.
 ///
-/// The whole reason the content band is a scroller. The panel used to draw a
-/// twelve-row window that the state machine moved; the rows past it were not
-/// laid out at all, and a selection beyond the window left the highlight
-/// frozen on the last row while `Enter` opened a file that was not on screen.
-///
-/// Read off the accessibility tree rather than off a scroll offset, because
-/// a row outside the clip rectangle is culled before it is given a label -
-/// so its presence in the tree *is* the claim that it is on screen.
+/// Rows outside the clip rectangle are culled, so presence in the
+/// accessibility tree means the row is on screen.
 #[test]
 fn walking_down_a_long_list_carries_the_view_with_it() {
     let (mut s, now) = state();
@@ -601,18 +499,14 @@ fn walking_down_a_long_list_carries_the_view_with_it() {
         screen.contains("11-D-0704-50.pdf"),
         "the selection walked off the bottom and the view stayed put:\n{screen}"
     );
-    // And by as little as it takes: `block: "nearest"` puts the row at the
-    // foot of the band, so the ones just above it are still there. A scroller
-    // that centred the selection would have thrown them away.
+    // Nearest-edge scrolling leaves the row at the bottom with its
+    // predecessor still visible.
     assert!(
         screen.contains("11-D-0704-49.pdf"),
         "it scrolled further than it had to:\n{screen}"
     );
 }
 
-/// The box is a text box, so the pointer over it says so the way every other
-/// one on this machine does - and over the list it goes back to an arrow,
-/// because a row is something to click rather than to type into.
 #[test]
 fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
     let (mut s, now) = state();
@@ -642,9 +536,6 @@ fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
     );
 }
 
-/// And the wheel moves the view without moving the selection, which is the
-/// reason it was unbound in the first place: it used to walk the cursor
-/// through somebody's results whenever a hand rested on the mouse.
 #[test]
 fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
     let (mut s, now) = state();
@@ -654,9 +545,8 @@ fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
     let before = h.state().state.selected_row();
     assert!(before.is_some(), "the fixture selected nothing");
 
-    // The pointer over the middle of the list, then a long way down it.
-    // egui hands a wheel event to whichever scroller is under the pointer, so
-    // the hover is not decoration.
+    // egui routes wheel events to the scroller under the pointer, so hover
+    // over the list first.
     h.hover_at(egui::pos2(
         HARNESS_MARGIN + theme::PANEL_W / 2.0,
         HARNESS_MARGIN + theme::HEADER_H + theme::CONTENT_H / 2.0,
@@ -684,8 +574,7 @@ fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
 
 // --- what the panel does not do --------------------------------------------
 
-/// The jitter budget, checked through a real layout pass rather than through
-/// `measure`. A keystroke must not take the results off the screen.
+/// A keystroke keeps the previous results on screen until new ones arrive.
 #[test]
 fn a_keystroke_does_not_blank_the_result_list() {
     let (mut s, now) = state();
@@ -695,8 +584,7 @@ fn a_keystroke_does_not_blank_the_result_list() {
     let before = on_screen(&h);
     assert!(before.contains("11-D-0704-00.pdf"), "{before}");
 
-    // One more character, and the frame that is drawn before the matcher can
-    // possibly have answered.
+    // One more character, then a frame drawn before any search result.
     h.state_mut().state.update(
         AppEvent::Key(KeyEvent::new(Key::Char('4'), Mods::NONE)),
         now,
@@ -709,14 +597,12 @@ fn a_keystroke_does_not_blank_the_result_list() {
         "the list went away while the next one was in flight:\n{during}"
     );
     assert!(
-        !during.contains("Looking for it\u{2026}"),
+        !during.contains("Searching\u{2026}"),
         "and the empty state took its place:\n{during}"
     );
 }
 
-/// A pasted string longer than the field must not run out of the panel, taking
-/// the caret with it. The terminal build had a whole module for this and it has
-/// no successor.
+/// A pasted string longer than the field stays within the panel's bounds.
 #[test]
 fn a_very_long_code_stays_inside_the_panel() {
     let long = "11-D-0704-".repeat(30);
@@ -726,11 +612,8 @@ fn a_very_long_code_stays_inside_the_panel() {
 
     let h = harness(s);
 
-    // The field announces the whole code however little of it is on screen -
-    // a reader has no column width to be truncated to - so the tree is not
-    // where the overflow would show. What can be checked is that every node
-    // the panel laid out is inside the panel, which is what stopped being
-    // true when a pasted code ran off the edge and took the caret with it.
+    // The field's accessible value is the full text regardless of clipping,
+    // so check node bounds instead.
     let panel = egui::Rect::from_min_size(
         egui::pos2(HARNESS_MARGIN, HARNESS_MARGIN),
         egui::vec2(theme::PANEL_W, theme::PANEL_H),
@@ -749,26 +632,15 @@ fn a_very_long_code_stays_inside_the_panel() {
     assert!(on_screen(&h).contains(&long), "{}", on_screen(&h));
 }
 
-/// The bands never move, so nothing that belongs in one may be drawn in
-/// another. A row overlapping the footer is a row with the status line written
-/// through it.
+/// Every drawn result row starts inside the content band.
 #[test]
 fn a_full_list_of_results_does_not_run_into_the_footer() {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
 
     let h = harness(s);
-    // The band the rows are given, in the harness's coordinates. Arithmetic
-    // off the fixed panel: the window is always four hundred points tall, so
-    // the footer is always in the same place and a row that *starts* below
-    // the band is a row the scroller never clipped.
-    //
-    // Where a row *ends* is deliberately not asserted. The list is a scroller
-    // now, and the row straddling its bottom edge is cut off by the clip
-    // rectangle rather than by arithmetic - which is what a scroller is. The
-    // failure this guards against is the one that actually happened: rows
-    // picking up three points of spacing each and a full list standing
-    // twenty-four points taller than the band it was given.
+    // The content band in harness coordinates. Only row tops are checked: the
+    // row straddling the bottom edge is legitimately clipped by the scroller.
     let content_top = HARNESS_MARGIN + theme::HEADER_H + theme::DIVIDER;
     let content_bottom = content_top + theme::CONTENT_H;
 
@@ -789,11 +661,8 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
             bounds.y0
         );
     }
-    // Without this the loop can pass by matching nothing at all, which is how
-    // the first version of this test passed while the rows really did overlap.
-    // A screenful, at least: the rows past the clip rectangle are culled
-    // before they are laid out, so the exact number is the scroller's
-    // business rather than this test's.
+    // Guards against the loop passing vacuously. Rows past the clip are
+    // culled, so only a lower bound is asserted.
     assert!(
         seen >= files::config::VISIBLE_ROWS,
         "only {seen} rows were drawn, of a screenful of {}",
@@ -801,7 +670,7 @@ fn a_full_list_of_results_does_not_run_into_the_footer() {
     );
 }
 
-/// Where each result row landed, read off the accessibility tree.
+/// Returns each result row's label and bounds from the accessibility tree.
 fn result_boxes(h: &Harness<'_, Panel>) -> Vec<(String, egui::Rect)> {
     h.root()
         .children_recursive()
@@ -819,9 +688,8 @@ fn result_boxes(h: &Harness<'_, Panel>) -> Vec<(String, egui::Rect)> {
         .collect()
 }
 
-/// Two columns are two columns: every row starts at one of two lefts, the
-/// best match is top left with the second beside it, and no row reaches into
-/// the column next to it.
+/// Rows start at one of two left edges, fill left to right, and do not
+/// overlap the neighbouring column.
 #[test]
 fn two_columns_lay_the_results_out_side_by_side() {
     let (mut s, now) = state();
@@ -866,7 +734,6 @@ fn two_columns_lay_the_results_out_side_by_side() {
     );
 }
 
-/// More columns, more of the list at once: the reason for the setting.
 #[test]
 fn three_columns_show_more_results_than_one() {
     let drawn = |columns| {
@@ -884,13 +751,10 @@ fn three_columns_show_more_results_than_one() {
 
 // --- the pictures ----------------------------------------------------------
 
-/// Everything above says what is on the panel. This says what it looks like -
-/// which is the half that catches a rule drawn in the wrong place, a highlight
-/// that stopped being painted, and a column that overlaps its neighbour.
-/// One test per picture. `egui_kittest` collects the results of a run so it
-/// can update them all at once, and two harnesses in one test have two
-/// collections and no way to merge them - so a snapshot per test is what the
-/// library is built for, and it also means a failure names itself.
+/// Defines a pixel snapshot test of the panel built from the given state.
+///
+/// One snapshot per test: `egui_kittest` collects results per harness and
+/// cannot merge two harnesses in one test.
 macro_rules! snapshot {
     ($name:ident, $build:expr) => {
         #[test]
@@ -908,10 +772,8 @@ snapshot!(looks_right_with_results, || {
     s
 });
 
-// The first screen, and the whole of it: a search box, nothing under it, and
-// no footer. Built from `quiet_state` rather than `state` because a fresh one
-// has no index yet and therefore has something to say - which is a real screen
-// somebody sees, and a different one from this.
+// The first screen: a search box and no footer. Uses `quiet_state` because a
+// fresh state shows the missing-index notice.
 snapshot!(looks_right_when_quiet, || {
     let (s, _) = quiet_state();
     s
@@ -922,16 +784,13 @@ snapshot!(looks_right_with_a_toast, || toasted(Instant::now()));
 snapshot!(looks_right_showing_recent_codes, || {
     let (mut s, now) = state();
     s.seed_history(vec!["11-D-0704".into(), "P12345-001".into()]);
-    // Pressed, not merely seeded. The list used to be what an empty field
-    // showed, so this fixture photographed it without touching a key - which
-    // now photographs the first-run block and duplicates the picture above.
+    // Recent codes appear only while browsing, so press Up.
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     assert!(s.history.is_browsing(), "the fixture is not browsing");
     s
 });
 
-// The drive picker: the one body that had never been photographed, along with
-// the hover and text-selection colours it is the only place to see.
+// The drive picker, including its hover and text-selection colours.
 snapshot!(looks_right_picking_a_drive, || {
     let (mut s, now) = state();
     s.update(AppEvent::Key(KeyEvent::new(Key::F(5), Mods::NONE)), now);
@@ -939,8 +798,7 @@ snapshot!(looks_right_picking_a_drive, || {
     s
 });
 
-// More results than the panel has room for, which is the state the count in
-// the footer exists for.
+// More results than fit on screen.
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(300), 300, now);
@@ -962,8 +820,7 @@ snapshot!(looks_right_in_three_columns, || {
     s
 });
 
-// What an empty box shows when there is anything to show on it: Ueli's
-// favourites, which here are the shortcuts somebody configured.
+// An empty search box with configured shortcuts listed below it.
 snapshot!(looks_right_showing_the_shortcuts, || {
     let (mut s, _) = quiet_state();
     s.settings.aliases = Arc::new(files::alias::Aliases::new(vec![
@@ -981,8 +838,7 @@ snapshot!(looks_right_showing_the_shortcuts, || {
     s
 });
 
-// The one key that replaced the whole hint bar, and the only place the
-// program teaches its own chords now.
+// The actions menu, which lists every action with its shortcut.
 snapshot!(looks_right_with_the_actions_menu_open, || {
     let (mut s, now) = state();
     with_results(&mut s, "11-D-0704", many(6), 47, now);
@@ -990,9 +846,7 @@ snapshot!(looks_right_with_the_actions_menu_open, || {
     s
 });
 
-// The other row layout: the folder under the name, a larger mark, and four of
-// them where there were six. The one setting on the Appearance page whose
-// effect cannot be described in words as well as it can be shown.
+// The detailed row layout: the folder under the name and a larger icon.
 snapshot!(looks_right_with_detailed_rows, || {
     let (mut s, now) = state();
     s.settings.result_layout = ResultLayout::Detailed;

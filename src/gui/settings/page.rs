@@ -1,9 +1,6 @@
-//! One page of the form, drawn from the blocks [`crate::view::settings`]
-//! describes.
-//!
-//! Every branch here is a `match` on a [`Block`], so a block added to the
-//! model without a way of drawing it is a compile error rather than a page
-//! with a hole in it.
+//! Draws one settings page from the blocks [`crate::view::settings`]
+//! describes. Dispatch is an exhaustive `match` on [`Block`], so a new block
+//! kind without a renderer fails to compile.
 
 use eframe::egui;
 
@@ -14,7 +11,7 @@ use crate::config::write::Typed;
 use crate::gui::theme::{self, Theme, Weight};
 use crate::view::settings::{ActionId, Block, Field, Page, Row as FormRow};
 
-/// Everything one frame of a page produced or carried over.
+/// Per-frame state a page reads and the edits it produces.
 pub struct Form<'a> {
     pub editing: &'a mut Option<(crate::config::write::SettingKey, String)>,
     pub draft: &'a mut lists::AliasDraft,
@@ -24,14 +21,9 @@ pub struct Form<'a> {
     pub actions: &'a mut Vec<ActionId>,
     pub aliases: Option<Vec<crate::alias::Alias>>,
     pub mappings: Option<Vec<crate::paths::Mapping>>,
-    /// Whether each configured drive is really there.
-    ///
-    /// Here rather than asked at the point of drawing, because asking is a
-    /// `stat` and on an unreachable network drive a `stat` is a call that
-    /// has to time out - sixty times a second, against the share that is
-    /// already not answering. See [`super::exists`].
+    /// Cached drive existence checks; see [`super::exists`].
     pub exists: &'a mut super::exists::DirCache,
-    /// One reading of the clock for the whole frame.
+    /// The clock, read once per frame.
     pub now: std::time::Instant,
 }
 
@@ -45,8 +37,7 @@ pub fn show(
     form: &mut Form<'_>,
 ) {
     for (i, group) in page.groups.iter().enumerate() {
-        // Between groups and not before the first, so a page does not open
-        // with forty points of nothing.
+        // Gap between groups only, not above the first.
         if i > 0 {
             widgets::group_gap(ui);
         }
@@ -80,16 +71,10 @@ pub fn show(
                                 })
                                 .inner;
                             if pressed {
-                                // Copying is the one action that needs
-                                // nothing but the text this function was
-                                // handed, so it is done here rather than
-                                // sent out and handled a frame later by
-                                // something that would have to be given the
-                                // report all over again.
+                                // Copy is handled here because it needs only
+                                // the report text already in hand.
                                 if action.id == ActionId::CopyReport {
-                                    // Whatever there is. A reading that has
-                                    // not arrived copies nothing, which is
-                                    // better than copying the word "empty".
+                                    // Copies nothing while the report is pending.
                                     if let super::report::View::Ready(text)
                                     | super::report::View::Stale(text) = report
                                     {
@@ -142,7 +127,7 @@ pub fn show(
     }
 }
 
-/// One setting, drawn as whatever kind of control it needs.
+/// Draws one setting with the control its field type needs.
 fn control(ui: &mut egui::Ui, theme: &Theme, row: &FormRow, form: &mut Form<'_>) {
     use widgets::width;
 
@@ -166,21 +151,15 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &FormRow, form: &mut Form<'_>)
         label: row.label,
         help: row.help,
         caveat: caveat.as_deref(),
-        // A setting the environment or a flag is holding is drawn disabled
-        // rather than hidden. Hiding it would answer "why can I not change
-        // the theme?" with silence; this way the setting is there, its value
-        // is there, and the line underneath names what is holding it.
+        // A setting pinned by the environment or a flag is shown disabled,
+        // with a caveat naming what pins it.
         enabled: row.pin.is_none(),
         control_w,
     };
 
     widgets::setting_row(ui, theme, spec, |ui| match &row.field {
-        // A drop-down, where this used to show every option at once. That
-        // was the right answer in a 620-point column with the controls in a
-        // 190-point gutter: three words side by side cost nothing and saved
-        // a click. It is the wrong answer in a tile whose right-hand column
-        // is a fixed width, because three options of unequal length make
-        // three rows that line up with nothing.
+        // A drop-down fits the fixed-width control column; inline options of
+        // unequal length would not align.
         Field::Choice { options, current } => {
             let labels: Vec<&str> = options.iter().map(|o| o.label.as_ref()).collect();
             let salt = format!("files-setting-{}", row.key.name());
@@ -194,11 +173,8 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &FormRow, form: &mut Form<'_>)
                 push(Typed::Flag(value));
             }
         }
-        // Committed when the box gives up the keyboard, which is Enter and
-        // clicking away and is *not* Escape. Not per keystroke: every
-        // character of a path would otherwise be a write to a file on a
-        // network share, and half of them would name a program that does not
-        // exist yet.
+        // Committed on Enter or click-away, not per keystroke, so partial
+        // paths are never written to the config file. Escape discards.
         Field::Text { value, placeholder } => {
             let mut text = match &editing {
                 Some((key, buffer)) if *key == row.key => buffer.clone(),
@@ -213,19 +189,14 @@ fn control(ui: &mut egui::Ui, theme: &Theme, row: &FormRow, form: &mut Form<'_>)
             } else if typed.response.has_focus() {
                 *editing = Some((row.key, text));
             } else if typed.response.lost_focus() {
-                // Escape. The draft is dropped and the box goes back to what
-                // the file says, which is the whole point of having a way
-                // out of a half-typed path.
+                // Escape: drop the draft and revert to the saved value.
                 *editing = None;
             }
         }
     });
 }
 
-/// Whether this page needs the `doctor` report taken.
-///
-/// Asked of the model rather than hard-coded against a page id, so a report
-/// added to a second page does not silently show a stale one.
+/// Returns whether `page` contains a `doctor` report block.
 pub fn wants_report(page: &Page) -> bool {
     page.groups
         .iter()
@@ -233,7 +204,7 @@ pub fn wants_report(page: &Page) -> bool {
         .any(|b| matches!(b, Block::Report { .. }))
 }
 
-/// The page with this id, if the registry has one.
+/// Returns the page with this id, if any.
 pub fn find(pages: &[Page], id: crate::view::settings::PageId) -> Option<&Page> {
     pages.iter().find(|p| p.id == id)
 }

@@ -2,11 +2,10 @@
 name = "files"
 version = "0.2.0"
 edition = "2024"
-# Read by the installer, by Apps & Features, and by the version block `build.rs`
-# embeds. Absent until there was something to install.
+# Read by the installer, Apps & Features, and the version block `build.rs` embeds.
 description = "files - nfs & smb indexer"
-# Where the update check looks for new releases, unless `update_from` names a
-# share instead. Read at compile time by `update::github::Repo::ours`.
+# Release source for the update check unless `update_from` names a share.
+# Read at compile time by `update::github::Repo::ours`.
 repository = "https://github.com/ibarra000/files"
 authors = ["files"]
 
@@ -18,54 +17,28 @@ path = "src/lib.rs"
 name = "files"
 path = "src/main.rs"
 
-# The console half. See its module note for why this is a second executable
-# rather than a flag on the first: the subsystem bit in the PE header is what
-# decides whether a shell waits for the output, and it is set per binary.
+# Console front end. A separate binary because the PE subsystem bit, which
+# decides whether a shell waits for output, is set per executable.
 [[bin]]
 name = "files-cli"
 path = "src/bin/files-cli.rs"
 
 [dependencies]
-# The desktop shell. `glow` rather than `wgpu`, which is the reverse of what
-# this said until 0.3 and is a correction rather than a preference.
-#
-# A transparent window on Windows gets its alpha from
-# `DwmEnableBlurBehindWindow`, which winit calls on our behalf when
-# `with_transparent` is set, and which makes DWM honour the alpha of the
-# window's *redirection bitmap*. A `wgpu` flip-model swapchain never writes to
-# that bitmap - it hands DWM a surface of its own - so the alpha winit enabled
-# applied to a surface nothing drew into. OpenGL presents through the window
-# DC, which *is* the redirection surface. That was measured on the overlay
-# first; `src/gpu.rs` recorded that the wgpu-side fix changed the colour the
-# window covered the desktop with and nothing else.
-#
-# Nothing here wants a compositor backdrop either: `gui::mod::WANT_BACKDROP` is
-# `Painted`, which asks DWM for `DWMSBT_NONE` and paints its own translucent
-# surface. So the one thing wgpu was kept for is not in use.
-#
-# `accesskit` stays: it costs nothing and is what makes the panel readable by
-# Narrator and by a magnifier - something a grid of characters never could be.
-# `default_fonts` has gone. It embedded 1.41 MB of TTFs (Hack, NotoEmoji,
-# Ubuntu-Light, emoji-icon-font) in every binary here to back a fallback that
-# `gui::fonts` now reads out of `C:\Windows\Fonts` instead, shipping no bytes
-# at all. `test-fonts` turns it back on, because a layout measured here and a
-# layout measured on a build agent have to be the same layout.
+# Desktop shell. `glow`, not `wgpu`: window transparency on Windows comes from
+# the redirection bitmap, which only OpenGL presentation draws into.
+# `default_fonts` is off (see the `test-fonts` feature); `accesskit` exposes the
+# panel to Narrator and magnifiers.
 eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
     "glow",
 ] }
 
-# Reading the panel's `HWND` back out of the toolkit, once, in `gui::hwnd_of`.
+# Reads the panel's `HWND` from the toolkit in `gui::hwnd_of`.
 raw-window-handle = "0.6"
 
-# The facade `eframe`, `winit` and `glutin` report through, and `src/log.rs` is
-# the forty lines that give them somewhere to report to. One filter covers this
-# program and the toolkit under it. See that module for why it is not
-# `env_logger`.
+# Logging facade shared with `eframe`, `winit` and `glutin`; sink in `src/log.rs`.
 log = "0.4"
-# Direct since 0.2, and since 0.3 the only route to it: it used to arrive
-# transitively via `nucleo`, which was carried for a fuzzy matcher that was
-# never wired up and has gone.
+# Byte search for the matcher.
 memchr = "2.8"
 rayon = "1.10"
 parking_lot = "0.12"
@@ -77,19 +50,12 @@ bytemuck = { version = "1", default-features = false }
 smallvec = "1"
 lru = "0.12"
 
-# Deliberately not `toml` + serde derive: every value carries a byte span, so a
-# bad config reports `config.toml:34:15` rather than a shrug, and it keeps `syn`
-# out of the build. `display` is on because F2 writes the chosen viewer back,
-# and a format-preserving rewrite is the only kind that may touch a file the
-# user is invited to hand-edit. It pulls in `toml_write` and nothing else.
+# Span-aware parsing for `file:line:col` config errors without serde or `syn`;
+# `display` enables format-preserving writes to the hand-edited config.
 toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
 
-# The only heavyweight dependency here, and taken deliberately. A drawing set is
-# stored one PDF per page, so opening a job means merging N documents into one -
-# which is parsing and rewriting the xref table, object graph and page tree.
-# Hand-rolling that is a PDF parser, and a subtly wrong one renders blank pages
-# rather than failing. `chrono-clock` is dropped because the only thing it does
-# here is stamp `/CreationDate`; `rayon` is already a direct dependency.
+# Merges per-page PDFs into one document. `chrono-clock` is off because it only
+# stamps `/CreationDate`.
 lopdf = { version = "0.45", default-features = false, features = ["rayon"] }
 
 [target.'cfg(windows)'.dependencies.windows-sys]
@@ -102,87 +68,61 @@ features = [
     "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_System_WindowsProgramming",
-    # The named pipe the settings window talks to the panel over. Message
-    # mode, so the codec in `src/ipc/wire.rs` is one line per message rather
-    # than a length prefix and a state machine. See `src/ipc`.
+    # Message-mode named pipe between the settings window and the panel.
+    # See `src/ipc/wire.rs`.
     "Win32_System_Pipes",
-    # `ProcessIdToSessionId`, so that pipe's name is per-session: a
-    # `\.\pipe\` name is machine-global, and on a terminal server two
-    # people signed in at once would otherwise share one.
+    # `ProcessIdToSessionId`, to make the machine-global pipe name per-session.
     "Win32_System_RemoteDesktop",
     # The `Run` value behind "Start with Windows". See `src/autostart.rs`.
     "Win32_System_Registry",
     "Win32_NetworkManagement_WNet",
-    # WinHTTP, for the update check against GitHub. The operating system's
-    # own client and TLS stack rather than a crate - see `src/update/http.rs`.
+    # WinHTTP for the update check. See `src/update/http.rs`.
     "Win32_Networking_WinHttp",
     "Win32_Security",
-    # BCrypt, for the SHA-256 of a staged installer. The operating system
-    # already has one; a crate for it would be a dependency to check one file
-    # once, at the moment somebody presses a button.
+    # BCrypt SHA-256 for verifying a staged installer.
     "Win32_Security_Cryptography",
-    # ShellExecuteW, so a merged PDF opens in whatever the user has registered
-    # for .pdf rather than a program this app picked for them.
+    # `ShellExecuteW`, to open a merged PDF in the user's registered viewer.
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_Com",
-    # The panel's backdrop, its rounded corners and its dark frame. Every one of
-    # them is a no-op on a Windows that predates it, reported by return value -
-    # so there is no version check anywhere in `gui::window`.
+    # Backdrop, rounded corners and dark frame. Each call fails harmlessly on
+    # older Windows, so `gui::window` needs no version check.
     "Win32_Graphics_Dwm",
     # `MARGINS`, which `DwmExtendFrameIntoClientArea` is gated on.
     "Win32_UI_Controls",
     # `RegisterHotKey`, and `ToUnicodeEx` for the AltGr path in `gui::input`.
     "Win32_UI_Input_KeyboardAndMouse",
-    # Attaching to the console that launched us, and the message box that says
-    # so when there is none.
+    # Attaches to the launching console, or reports that there is none.
     "Win32_System_Console",
     "Win32_System_Diagnostics_ToolHelp",
-    # `OutputDebugStringW`, so the toolkit's warnings reach a debugger. The
-    # window binary has no console to print to. See `src/log.rs`.
+    # `OutputDebugStringW`; the window binary has no console. See `src/log.rs`.
     "Win32_System_Diagnostics_Debug",
-    # `MonitorFromWindow`, so the panel lands on the screen it was summoned on
-    # rather than on the primary one.
+    # `MonitorFromWindow`, to place the panel on the monitor it was summoned on.
     "Win32_Graphics_Gdi",
-    # `GetDpiForWindow`, so a docked panel's height - and a floating one's
-    # size after it has been docked - is worked out in the monitor's pixels.
+    # `GetDpiForWindow`, to size the panel in the monitor's pixels.
     "Win32_UI_HiDpi",
 ]
 
-# The notification-area icon and its menu. Windows-only, because the tray is:
-# scoping them here keeps GTK and X11 out of the dependency graph entirely.
+# Tray icon and menu. Windows-only, which keeps GTK and X11 out of the graph.
 [target.'cfg(windows)'.dependencies]
 tray-icon = { version = "0.25", default-features = false }
 muda = { version = "0.20", default-features = false }
 
 [build-dependencies]
-# The icon, the version block and the manifest. See `build.rs` for why each of
-# them cannot be arranged at run time.
+# Embeds the icon, version block and manifest. See `build.rs`.
 winresource = "0.1"
 
 [features]
-# A typeface that is the same on every machine, so a layout measured here and
-# one measured on a build agent are the same layout. This is
-# `eframe/default_fonts` - 1.41 MB of embedded TTFs - which is exactly what the
-# shipping build drops, so it is behind a feature rather than in the dependency
-# line. See `gui::fonts::install_bundled`.
+# Embeds `eframe/default_fonts` (1.41 MB of TTFs, omitted from release builds)
+# so layouts are identical on every machine. See `gui::fonts::install_bundled`.
 test-fonts = ["eframe/default_fonts"]
-# Image snapshots need a GPU adapter to render through, which a build machine
-# may not have, and the font above. The accessibility-tree half of
-# `tests/panel.rs` needs neither and runs unconditionally; the pictures are
-# behind this.
+# Enables image snapshot tests, which need a GPU adapter and `test-fonts`.
+# The accessibility-tree tests in `tests/panel.rs` run without it.
 ui-snapshots = ["test-fonts"]
 
 [dev-dependencies]
-# Drives the real `gui::overlay::show` with synthetic keys and reads back both
-# the accessibility tree and the pixels. Pinned to the same 0.36 as `eframe`
-# above, because it builds an `egui::Context` and hands it to our code.
-#
-# This replaces something that was lost rather than adding something new: the
-# terminal build rendered into a `TestBackend` buffer and asserted on the
-# characters *and the styles* in it, so a selection highlight that stopped
-# being painted failed a test. Nothing has been able to make that claim since
-# the window replaced it.
+# Drives the panel UI with synthetic input and checks the accessibility tree
+# and pixels. Must match the `eframe` version, since it shares `egui::Context`.
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 proptest = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
@@ -196,12 +136,10 @@ harness = false
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-# `strip = "debuginfo"` keeps symbol NAMES so a RUST_BACKTRACE report from a
-# machine we cannot debug on is still actionable.
+# Keeps symbol names so `RUST_BACKTRACE` reports from the field stay readable.
 strip = "debuginfo"
-# `panic` is deliberately left at the default "unwind": handle cleanup relies on
-# Drop running, and `src/hotkey` is built around defining no `extern "system"`
-# callback precisely so that unwinding can never cross the foreign boundary.
+# `panic` stays "unwind": handle cleanup relies on `Drop`, and `src/hotkey`
+# defines no `extern "system"` callback so unwinding never crosses FFI.
 
 [profile.release-dbg]
 inherits = "release"

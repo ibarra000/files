@@ -1,31 +1,18 @@
-//! Bounded top-K selection.
+//! Bounded top-K selection over packed ranking keys.
 //!
-//! Only the retained rows are ever displayed, so sorting every match - as the
-//! original implementation did - is wasted work that scales with the match
-//! count rather than the result count.
+//! Only the retained rows are displayed, so a full sort of every match would
+//! scale with the match count rather than the result count.
 //!
 //! # Why a heap
 //!
-//! This was a fixed sorted `[Key; K]` array, which is the right structure at
-//! K=15: the accept path is one fully-predicted `copy_within` of at most 112
-//! bytes. That argument inverts as K grows, and the module said so - "a heap
-//! only starts winning around K >= 64".
-//!
-//! The decisive cost is not the accept path but the *empty* one. A sweep of a
-//! large index builds one selection per rayon chunk - hundreds of them - and
-//! the overwhelming majority of chunks match nothing at all. An array pays to
-//! fill K slots with `Key::MAX` for every one of those, then moves the whole
-//! struct by value through the reduce tree. A `BinaryHeap` allocates nothing
-//! until something is actually retained, so an empty chunk costs a pointer.
-//!
-//! The reject path - which is still where essentially every candidate goes -
-//! is unchanged: one comparison against the heap root, which is the worst key
-//! retained and therefore exactly the admission threshold.
+//! Most rayon chunks of a large sweep match nothing. A `BinaryHeap` allocates
+//! nothing until a key is retained, so an empty chunk is cheap to build and to
+//! move through the reduce tree. The reject path is one comparison against the
+//! root, which is the worst retained key and therefore the admission threshold.
 //!
 //! # The packed key
 //!
-//! The ranking key is packed into one `u64` so every comparison is a single
-//! integer compare:
+//! Every comparison is a single integer compare on one `u64`:
 //!
 //! ```text
 //! bit  63      0 = the name matched, 1 = its folder did  (a name wins)
@@ -34,19 +21,10 @@
 //! bits 31..0   entry index                     (directory order wins)
 //! ```
 //!
-//! The top bit is what keeps a tree's results explicable. A code can match a
-//! file's own name or the name of the folder it sits in, and "the file is
-//! called `11-D-0704`" should always beat "the file is inside a folder called
-//! `11-D-0704`" - otherwise one matching folder's entire contents outranks an
-//! exactly-named file somewhere else, which is not what anyone scanning the
-//! list expects. Putting it in the highest bit makes that ordering free.
-//!
-//! Including the entry index matters beyond tie-breaking. The original code
-//! used `sort_by`, which is *stable*, so equal `(pos, len)` pairs kept
-//! directory order. Making the key unique turns the ordering into a strict
-//! total order, which means the unstable parallel merge below produces output
-//! identical to the serial version instead of merely equivalent - no
-//! run-to-run reshuffling of tied results.
+//! The top bit ranks a file named after the code above files that are only
+//! inside a matching folder. The entry index makes keys unique, so ordering is
+//! a strict total order and the parallel merge gives the same output as a
+//! serial sweep, with no run-to-run reshuffling of ties.
 
 use std::collections::BinaryHeap;
 
@@ -56,9 +34,8 @@ pub const K: usize = crate::config::MAX_RESULTS;
 /// Packed ranking key. Lower compares better.
 pub type Key = u64;
 
-/// Largest match position the key can hold. Positions above this saturate,
-/// which degrades ranking between two very deep matches and never
-/// correctness - a name long enough to reach it is already unreadable.
+/// Largest match position the key can hold. Larger positions saturate, which
+/// only affects ranking between two very deep matches.
 pub const MAX_POS: u32 = 0x7FFF;
 
 /// Set on a key whose *folder* matched rather than its own name.
@@ -66,23 +43,23 @@ const INHERITED: Key = 1 << 63;
 
 /// Builds a ranking key for a name that matched in its own right.
 ///
-/// Position and length saturate; both are bounded well below the saturation
-/// point by the snapshot builder.
+/// Position and length saturate; the snapshot builder keeps both well below
+/// the saturation point.
 #[inline]
 pub fn key(match_pos: u32, name_len: u32, index: u32) -> Key {
     ((match_pos.min(MAX_POS) as u64) << 48) | ((name_len.min(0xFFFF) as u64) << 32) | (index as u64)
 }
 
-/// Builds a ranking key for a file pulled in because its folder matched.
+/// Builds a ranking key for a file included because its folder matched.
 ///
-/// `match_pos` is the position within the *folder* name, so folders whose name
+/// `match_pos` is the position within the folder name, so folders whose name
 /// begins with the code still beat folders that merely contain it.
 #[inline]
 pub fn key_inherited(match_pos: u32, name_len: u32, index: u32) -> Key {
     key(match_pos, name_len, index) | INHERITED
 }
 
-/// True when this key was pulled in by its folder rather than its own name.
+/// Returns true when this key was included by its folder rather than its name.
 #[inline]
 pub fn key_is_inherited(k: Key) -> bool {
     k & INHERITED != 0
@@ -105,8 +82,8 @@ pub fn key_name_len(k: Key) -> u32 {
 
 /// The best `K` keys seen.
 ///
-/// A bounded max-heap, so the root is the *worst* key retained - which is
-/// precisely the admission threshold a candidate must beat.
+/// A bounded max-heap, so the root is the worst key retained and is the
+/// admission threshold a candidate must beat.
 #[derive(Clone, Debug, Default)]
 pub struct TopK {
     heap: BinaryHeap<Key>,
@@ -118,9 +95,8 @@ const _: () = assert!(K > 0);
 
 impl TopK {
     pub fn new() -> Self {
-        // Deliberately does not reserve: most chunks of a large sweep retain
-        // nothing, and the whole point of the heap is that those cost no
-        // allocation at all.
+        // No reserve: most chunks of a large sweep retain nothing and should
+        // cost no allocation.
         Self {
             heap: BinaryHeap::new(),
         }
@@ -141,10 +117,10 @@ impl TopK {
         self.heap.len() == K
     }
 
-    /// The worst key currently retained, or `Key::MAX` when not yet full.
+    /// Returns the worst key retained, or `Key::MAX` when not yet full.
     ///
-    /// Once full this is the admission threshold, and callers can use it to
-    /// skip work for candidates that cannot possibly place.
+    /// Once full this is the admission threshold, which callers use to skip work
+    /// for candidates that cannot place.
     #[inline]
     pub fn threshold(&self) -> Key {
         if self.heap.len() == K {
@@ -161,9 +137,8 @@ impl TopK {
             self.heap.push(k);
             return;
         }
-        // Rejects the overwhelming majority in one comparison. Overwriting the
-        // root sifts down once; `pop` followed by `push` would sift down and
-        // then back up to reach the same place.
+        // Rejects most candidates in one comparison. Overwriting the root sifts
+        // down once; `pop` then `push` would sift down and back up.
         let mut worst = self.heap.peek_mut().expect("K > 0 and the heap is full");
         if k < *worst {
             *worst = k;
@@ -172,11 +147,9 @@ impl TopK {
 
     /// Folds another selection into this one, consuming it.
     ///
-    /// By value because rayon's `reduce` already owns the right-hand side, and
-    /// pushing the smaller side into the larger halves the work. That
-    /// reordering is safe: the K smallest keys of a union do not depend on
-    /// which side they arrived from, which is exactly the associativity the
-    /// parallel sweep relies on.
+    /// Takes `other` by value because rayon's `reduce` owns it, and pushes the
+    /// smaller side into the larger. This is safe because the K smallest keys of
+    /// a union do not depend on which side they came from.
     pub fn merge(&mut self, other: TopK) {
         let mut other = other;
         if other.heap.len() > self.heap.len() {
@@ -187,16 +160,14 @@ impl TopK {
         }
     }
 
-    /// The retained keys, best first.
+    /// Returns the retained keys, best first.
     ///
-    /// Consuming, because a heap's internal order is not display order and
-    /// handing back a sorted slice would mean carrying a second copy of it for
-    /// the whole sweep to serve the one caller that renders.
+    /// Consumes the heap, since its internal order is not display order.
     pub fn into_sorted(self) -> Vec<Key> {
         self.heap.into_sorted_vec()
     }
 
-    /// The retained entry indices, best first.
+    /// Returns the retained entry indices, best first.
     pub fn into_indices(self) -> impl Iterator<Item = u32> {
         self.into_sorted().into_iter().map(key_index)
     }
@@ -214,7 +185,7 @@ mod tests {
         t
     }
 
-    /// Reference: sort everything, take K. This is what the original code did.
+    /// Reference implementation: sort everything and take K.
     fn reference(keys: &[Key]) -> Vec<Key> {
         let mut v = keys.to_vec();
         v.sort_unstable();
@@ -249,7 +220,7 @@ mod tests {
         );
     }
 
-    /// A file that matched by name beats every file pulled in by its folder,
+    /// A file matched by name beats every file included by its folder,
     /// however good the folder's match was.
     #[test]
     fn a_name_of_its_own_outranks_an_inherited_folder_match() {
@@ -328,8 +299,8 @@ mod tests {
         }
     }
 
-    /// The property that makes parallel chunking correct: merging per-chunk
-    /// selections yields the same answer as selecting over everything at once.
+    /// Merging per-chunk selections yields the same answer as selecting over
+    /// everything at once.
     #[test]
     fn merging_partitions_equals_selecting_over_the_whole_set() {
         let all: Vec<Key> = (0..1000u32).map(|i| key(i % 37, i % 11, i)).collect();
@@ -360,8 +331,8 @@ mod tests {
         assert_eq!(ab.into_sorted(), ba.into_sorted());
     }
 
-    /// Merging the larger side into the smaller must give the same answer,
-    /// since `merge` swaps them to do less work.
+    /// Merging the larger side into the smaller gives the same answer, since
+    /// `merge` swaps them.
     #[test]
     fn merging_a_large_selection_into_a_small_one_is_symmetric() {
         let big = collect(&(0..K as u32 * 4).map(|i| key(i, 0, i)).collect::<Vec<_>>());

@@ -1,36 +1,23 @@
 //! Recursive directory walking.
 //!
-//! The index knows where a file is because a regex said which folder to look
-//! in. Any file whose folder does not follow the naming rule is therefore
-//! invisible - not "no results", silently absent - and that is the bug this
-//! exists to remove: walk the share and *know*.
+//! Walks the whole share so files are found regardless of folder naming.
 //!
-//! # What it costs
+//! # Cost
 //!
-//! On SMB the bill is round trips, and for a recursive walk the **directory
-//! count** dominates, not the file count. A directory costs roughly three
-//! round trips - open, query, end-of-data - however few files it holds, so a
-//! tree of 300,000 directories is around 900,000 round trips: some seven
-//! minutes at a 0.5 ms RTT if done one at a time. Walking several directories
-//! at once is therefore not an optimisation, it is the difference between
-//! usable and not.
+//! On SMB the cost is round trips, dominated by directory count: each
+//! directory takes about three (open, query, end-of-data) regardless of size.
+//! 300,000 directories is about 900,000 round trips, roughly seven minutes at
+//! 0.5 ms RTT if serial, so directories are read concurrently.
 //!
-//! # Why not `walkdir` or `jwalk`
-//!
-//! Both sit on `std::fs::read_dir`, whose ~4 KB buffer costs ~45,000 round
-//! trips per million entries against ~150 for the handle-based enumerator this
-//! crate already has (see [`super::win_enum`]). On SMB that is a ~300x
-//! regression, which is why the walk is built on [`DirSource`] instead.
+//! `walkdir` and `jwalk` use `std::fs::read_dir`, whose ~4 KB buffer needs
+//! ~45,000 round trips per million entries versus ~150 for
+//! [`super::win_enum`], so the walk is built on [`DirSource`] instead.
 //!
 //! # Shape
 //!
-//! A shared LIFO frontier and N worker threads. Depth-first because breadth
-//! -first over a wide tree holds the whole of its widest level in memory:
-//! eight independent depth-first spines keep the frontier at a few thousand
-//! entries rather than a hundred thousand.
-//!
-//! Failure of one directory is recorded and never fatal. An unreadable folder
-//! in the middle of a share must not cost the other 299,999.
+//! A shared LIFO frontier and N worker threads. Depth-first keeps the frontier
+//! at a few thousand entries; breadth-first would hold the widest level of
+//! the tree. A failed directory is recorded and never fatal.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -49,30 +36,28 @@ use crate::util::cancel::CancelToken;
 
 /// Consecutive transient failures before the walk concludes the share is gone.
 ///
-/// Without it, an unplugged VPN turns a 300,000-directory walk into 300,000
-/// serialised twenty-second SMB timeouts - around twenty hours, which is not
-/// something anyone can wait out or interpret. Thirty-two in a row is not
-/// ambiguous.
+/// Prevents an unreachable share from costing one SMB timeout (about twenty
+/// seconds) per directory.
 const ABORT_AFTER_CONSECUTIVE_TRANSIENT: u32 = 32;
 
-/// Per-directory failures kept verbatim. Bounded, because a broken share must
-/// not be able to allocate a list proportional to its directory count.
+/// Maximum per-directory failures kept verbatim, so a broken share cannot
+/// grow the list with its directory count.
 const MAX_RECORDED_ERRORS: usize = 64;
 
-/// How the walk is bounded.
+/// Limits and options for a walk.
 #[derive(Debug, Clone)]
 pub struct WalkOpts {
     pub concurrency: usize,
-    /// Depth below the root. A cycle through a followed junction cannot
-    /// outrun this even if the id-based guard is unavailable.
+    /// Maximum depth below the root. Also bounds a cycle through a followed
+    /// junction.
     pub max_depth: u16,
     pub max_dirs: usize,
     pub max_entries: usize,
     /// Off by default. See [`is_walkable_dir`].
     pub follow_reparse: bool,
     pub buffer_bytes: usize,
-    /// Drop files Windows marks hidden or system. Never folders - see
-    /// [`crate::index::enumerate::is_listable_file_with`] for why.
+    /// Drop files Windows marks hidden or system, never folders. See
+    /// [`crate::index::enumerate::is_listable_file_with`].
     pub hide_system: bool,
 }
 
@@ -106,28 +91,22 @@ impl WalkOpts {
 #[derive(Debug, Clone, Default)]
 pub struct WalkErrors {
     pub recorded: Vec<(String, EnumError)>,
-    /// Folders that could not be read. These are coverage holes: the files
-    /// are on the share and absent from the index.
+    /// Folders that could not be read. These are coverage holes: their files
+    /// exist but are absent from the index.
     pub denied: u32,
-    /// Folders that were gone by the time the walk reached them.
+    /// Folders deleted between being queued and being read.
     ///
-    /// Counted apart from the rest, and deliberately **not** a coverage hole.
-    /// A walk queues a directory and reads it a moment later, and on a share
-    /// people are working on, folders are deleted in between all day. Folding
-    /// this in with the genuine failures would leave a perfectly healthy busy
-    /// share permanently labelled degraded - which is a status line nobody
-    /// reads after the first week, and the warnings that matter go with it.
+    /// Not a coverage hole: this is normal churn on a busy share, and counting
+    /// it as a failure would leave a healthy share permanently "degraded".
     pub vanished: u32,
     pub transient: u32,
     pub other: u32,
 }
 
-/// Whether this failure leaves part of the share unsearchable.
+/// Returns whether this failure leaves part of the share unsearchable.
 ///
-/// The complement of "the folder has gone", which is ordinary churn. Exposed
-/// because an incremental update has to tell the two apart per folder: a
-/// vanished folder is deleted from the index, an unreadable one is left
-/// exactly as it was.
+/// False for a folder that has gone. An incremental update uses this to delete
+/// vanished folders from the index while leaving unreadable ones untouched.
 pub fn is_hole(err: EnumError) -> bool {
     !matches!(
         err,
@@ -136,14 +115,13 @@ pub fn is_hole(err: EnumError) -> bool {
 }
 
 impl WalkErrors {
-    /// Failures that leave part of the share unsearchable.
-    ///
-    /// [`Self::vanished`] is excluded on purpose; see the field.
+    /// Returns the failures that leave part of the share unsearchable.
+    /// Excludes [`Self::vanished`].
     pub fn holes(&self) -> u32 {
         self.denied + self.transient + self.other
     }
 
-    /// Every per-directory failure, including the harmless ones.
+    /// Returns every per-directory failure, including vanished folders.
     pub fn total(&self) -> u32 {
         self.holes() + self.vanished
     }
@@ -155,9 +133,8 @@ impl WalkErrors {
             EnumError::Transient(_) | EnumError::TimedOut => self.transient += 1,
             _ => self.other += 1,
         }
-        // A vanished folder is not worth an example slot: there is nothing to
-        // go and look at, and sixty-four of them would crowd out the ones
-        // somebody can actually act on.
+        // Vanished folders do not take example slots; there is nothing to
+        // inspect and they would crowd out actionable errors.
         if self.recorded.len() < MAX_RECORDED_ERRORS && !matches!(err, EnumError::PathNotFound(_)) {
             self.recorded.push((rel.to_string(), err));
         }
@@ -179,19 +156,17 @@ pub struct WalkReport {
     pub cancelled: bool,
     /// A limit stopped the walk, so this is a partial view of the tree.
     pub truncated: bool,
-    /// The walk gave up because the share stopped answering at all.
+    /// The walk gave up because the share stopped answering.
     pub aborted: Option<EnumError>,
     pub errors: WalkErrors,
 }
 
 impl WalkReport {
-    /// True when the walk reached the end of the tree and read every folder
-    /// that was still there to read.
+    /// Returns true when the walk reached the end of the tree and read every
+    /// folder that still existed.
     ///
-    /// Anything else is a partial index, and the difference has to reach the
-    /// user: results missing because a subtree was unreadable look exactly
-    /// like results that do not exist. Folders that vanished mid-walk do not
-    /// count against this - see [`WalkErrors::vanished`].
+    /// Otherwise the index is partial and the user must be told. Vanished
+    /// folders do not count; see [`WalkErrors::vanished`].
     pub fn complete(&self) -> bool {
         !self.cancelled && !self.truncated && self.aborted.is_none() && self.errors.holes() == 0
     }
@@ -199,32 +174,32 @@ impl WalkReport {
 
 /// Receives one completed directory at a time.
 ///
-/// Called from a worker thread, so an implementation must be cheap and must
-/// not touch the network.
+/// Called from worker threads, so implementations must be cheap and must not
+/// touch the network.
 pub trait TreeSink: Send + Sync {
     /// `rel` is relative to the walk root, `\`-separated, with no leading or
     /// trailing separator; the root itself is `""`. Returning false stops the
-    /// walk, which is how an index reports that it is full.
+    /// walk (for example when an index is full).
     fn push_dir(&self, rel: &str, files: &[String]) -> bool;
 
-    /// A directory could not be read. Never fatal.
+    /// Reports a directory that could not be read. Never fatal.
     fn push_error(&self, _rel: &str, _err: &EnumError) {}
 
-    /// Rate-limited progress, for the status line.
+    /// Reports rate-limited progress, for the status line.
     fn progress(&self, _dirs_done: usize, _queued: usize, _files: usize) {}
 }
 
-/// Counts a walk without keeping any of it, for `--bench --walk`.
+/// Counts a walk without keeping it, for `--bench --walk`.
 ///
-/// Distinct from `enumerate::CountingSink`, which counts one directory; this
-/// accumulates across a whole tree and from several threads at once.
+/// Unlike `enumerate::CountingSink`, accumulates across a whole tree from
+/// several threads.
 #[derive(Debug, Default)]
 pub struct WalkCounts {
     pub dirs: AtomicU64,
     pub files: AtomicU64,
     pub name_bytes: AtomicU64,
-    /// Longest relative directory path, which sizes the interned directory
-    /// table a real index would build.
+    /// Longest relative directory path, which sizes the directory table a
+    /// real index would build.
     pub max_rel_len: AtomicU64,
 }
 
@@ -249,10 +224,9 @@ struct Pending {
 
 /// The shared frontier.
 ///
-/// LIFO on purpose: breadth-first over a wide tree holds its widest level in
-/// the queue at once, whereas N depth-first spines keep it at O(depth x
-/// fanout). Termination is `stack empty && in_flight == 0`, which is the only
-/// condition under which no worker can still produce more work.
+/// LIFO so N depth-first spines keep it at O(depth x fanout). The walk ends
+/// when `stack` is empty and `in_flight == 0`, the only state in which no
+/// worker can produce more work.
 #[derive(Debug, Default)]
 struct FrontierInner {
     stack: Vec<Pending>,
@@ -324,15 +298,13 @@ impl Frontier {
 
 /// One directory's entries, split into files kept and subdirectories queued.
 ///
-/// Reused across directories by each worker, so a large walk does not allocate
-/// a fresh vector per folder.
+/// Reused across directories by each worker to avoid per-folder allocation.
 #[derive(Debug, Default)]
 struct DirEntries {
     files: Vec<String>,
     subdirs: Vec<String>,
     reparse: u32,
-    /// Descend into junctions as well. Still counted, so the report says how
-    /// many were crossed either way.
+    /// Descend into junctions as well. They are counted either way.
     follow_reparse: bool,
     hide_system: bool,
 }
@@ -352,20 +324,17 @@ impl EntrySink for DirEntries {
 
     fn push_str(&mut self, name: &str, meta: EntryMeta) -> bool {
         if is_listable_file(meta.attributes) {
-            // Tested inside the file arm rather than as its condition: a
-            // hidden file is still a file, and letting it fall through would
-            // reach the junction arm below and report it as a skipped subtree.
-            // It is dropped here and counted as nothing.
+            // Checked inside the file arm so a hidden file is dropped here
+            // rather than falling through to the junction arm and being
+            // counted as a skipped subtree.
             if is_listable_file_with(meta.attributes, self.hide_system) {
                 self.files.push(name.to_string());
             }
         } else if is_walkable_dir(meta.attributes) {
             self.subdirs.push(name.to_string());
         } else {
-            // A junction. Counted either way, so a skipped subtree is visible
-            // rather than silent, and only descended into when asked for -
-            // where `max_depth` is the only thing standing between a cycle and
-            // a walk that never ends.
+            // A junction. Always counted so a skipped subtree is visible;
+            // descended only when asked, with `max_depth` as the cycle guard.
             self.reparse += 1;
             if self.follow_reparse {
                 self.subdirs.push(name.to_string());
@@ -399,8 +368,7 @@ fn join_rel(rel: &str, name: &str) -> String {
 /// Walks `root` recursively, handing each completed directory to `sink`.
 ///
 /// Returns when the tree is exhausted, the token fires, a limit is reached, or
-/// the share stops answering. A directory that cannot be read is recorded and
-/// the walk carries on.
+/// the share stops answering. Unreadable directories are recorded and skipped.
 pub fn walk_tree(
     source: &dyn DirSource,
     root: &Path,
@@ -413,18 +381,16 @@ pub fn walk_tree(
 
 /// Walks only the named subtrees of `root`.
 ///
-/// This is what turns a change notification into work proportional to what
-/// changed. A notification names a file; the directory holding it is dirty,
-/// and so is everything beneath it - because a new job folder arrives as one
-/// event on its parent and a hundred files nobody was told about.
+/// Turns a change notification into work proportional to the change. Each
+/// seed's whole subtree is walked, since a new folder arrives as one event on
+/// its parent.
 ///
-/// `seeds` are relative to `root`, spelled as the index spells them, and an
-/// empty string means the root itself - so a dirty root degenerates to a full
-/// walk, which is the honest answer.
+/// `seeds` are relative to `root` in the index's spelling; `""` is the root
+/// itself, which makes this a full walk.
 ///
-/// Depth restarts at zero for each seed. `max_depth` is a runaway guard, not a
-/// statement about where a subtree sits, and measuring it from the share root
-/// would make a deep folder unrefreshable rather than merely deep.
+/// Depth restarts at zero for each seed, because `max_depth` is a runaway
+/// guard and measuring from the share root would make deep folders
+/// unrefreshable.
 pub fn walk_subtrees(
     source: &dyn DirSource,
     root: &Path,
@@ -436,13 +402,10 @@ pub fn walk_subtrees(
     walk_from(source, root, &prune_seeds(seeds), opts, sink, cancel)
 }
 
-/// Drops seeds already covered by another, and collapses the set to the root
-/// if the root is in it.
+/// Drops seeds covered by another seed, collapsing to the root if present.
 ///
-/// Without this, a batch naming both `11d` and `11d84` would read the
-/// second one twice and hand the sink the same directory twice - which the run
-/// table records as two directories with the same name, so a folder match
-/// would return its contents doubled.
+/// Otherwise overlapping seeds would read a directory twice and the sink
+/// would record it twice, doubling a folder match's results.
 fn prune_seeds(seeds: &[String]) -> Vec<String> {
     if seeds.iter().any(|s| s.is_empty()) {
         return vec![String::new()];
@@ -462,10 +425,9 @@ fn prune_seeds(seeds: &[String]) -> Vec<String> {
     out
 }
 
-/// Whether `rel` is `ancestor` or sits beneath it.
+/// Returns whether `rel` is `ancestor` or beneath it.
 ///
-/// The separator check is what stops `11d2` being treated as a child of
-/// `11d`, which would silently drop a whole folder from a refresh.
+/// The separator check stops `11d2` from being treated as a child of `11d`.
 pub fn is_within(rel: &str, ancestor: &str) -> bool {
     if ancestor.is_empty() || rel == ancestor {
         return true;
@@ -519,15 +481,14 @@ fn worker(
     shared: &Shared,
 ) {
     let list_opts = ListOpts {
-        // The whole point: subdirectories have to come back, or there is
-        // nothing to recurse into.
+        // Subdirectories must be returned so the walk can recurse.
         files_only: false,
         buffer_bytes: opts.buffer_bytes,
         max_entries: usize::MAX,
         deadline: None,
         force: None,
-        // The walk asks for everything and sorts it out in `DirEntries`,
-        // which has to see a hidden *directory* in order to descend into it.
+        // Filtering happens in `DirEntries`, which must see hidden
+        // directories in order to descend into them.
         hide_system: false,
     };
     let mut entries = DirEntries {
@@ -599,11 +560,8 @@ fn worker(
                 {
                     let mut s = shared.stats.lock();
                     s.errors.record(&pending.rel, err);
-                    // The root failing is categorically different from a
-                    // subfolder failing. A subfolder that has gone is churn on
-                    // a share people are working on; the *root* going means
-                    // there is no share, and a walk that read nothing at all
-                    // must never be reported as having read everything.
+                    // A failed root means there is no share; a walk that read
+                    // nothing must never be reported as complete.
                     if pending.rel.is_empty() {
                         s.aborted = Some(err);
                         shared.stop.store(true, Ordering::Relaxed);
@@ -667,10 +625,9 @@ mod tests {
         assert_eq!(files, vec!["sheet.pdf"]);
     }
 
-    /// A dropped file is dropped, not reclassified. The junction counter feeds
-    /// `WalkReport::skipped_reparse`, which is how the program says a subtree
-    /// was left unsearched - so counting hidden files there would report
-    /// missing folders that do not exist.
+    /// A dropped file is not reclassified as a junction, which would make
+    /// `WalkReport::skipped_reparse` report unsearched folders that do not
+    /// exist.
     #[test]
     fn a_dropped_file_is_not_counted_as_a_skipped_subtree() {
         let (files, subdirs, reparse) = sorted(
@@ -685,8 +642,8 @@ mod tests {
         assert_eq!(reparse, 1, "the hidden file was counted as a junction");
     }
 
-    /// The one thing this must never do. A server that marks a whole share
-    /// system would otherwise make the share disappear.
+    /// A folder marked system or hidden is still walked, so a share marked
+    /// system does not disappear.
     #[test]
     fn a_marked_folder_is_still_descended_into() {
         let (_, subdirs, _) = sorted(

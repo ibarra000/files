@@ -1,62 +1,49 @@
-//! An HTTPS GET, through the operating system.
+//! HTTPS GET via WinHTTP.
 //!
-//! WinHTTP rather than a crate, for the reason `apply` hashes with BCrypt:
-//! the program needs one small file and, a few times a year, one installer,
-//! and the operating system already ships an HTTP client with a TLS stack
-//! behind it that Windows Update keeps patched. A crate would be the largest
-//! dependency in the manifest, for two requests every four hours.
-//!
-//! It also gets the proxy right without being told.
-//! `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` uses whatever the machine's proxy
-//! configuration says, auto-detection and PAC scripts included - which on an
-//! office network is the difference between working and a timeout nobody can
-//! explain.
-//!
-//! Behind [`Fetch`], so the decisions made about what comes back can be tested
-//! without a network, and so there is exactly one place that talks to one.
+//! Uses the OS client to avoid an HTTP/TLS dependency; its TLS stack is
+//! patched by Windows Update. `WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY` honours
+//! the machine's proxy configuration, including auto-detection and PAC.
+//! Access goes through [`Fetch`] so callers can be tested without a network.
 
 use std::fmt;
 use std::path::Path;
 
-/// Why a request came to nothing.
+/// Why a request failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpError {
-    /// The server answered, with something other than 200.
+    /// A non-200 status.
     Status(u32),
-    /// More than the caller was willing to read.
+    /// The body exceeded the caller's limit in bytes.
     TooLarge(u64),
-    /// It never got that far: no network, no name, a refused connection, a
-    /// certificate that did not check out, or a file that could not be
-    /// written. Already in words.
+    /// A network, TLS or file error, already described in words.
     Failed(String),
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Status(404) => f.write_str("there is nothing there (404)"),
-            Self::Status(code) => write!(f, "the server answered {code}"),
-            Self::TooLarge(limit) => write!(f, "it is larger than {limit} bytes"),
+            Self::Status(404) => f.write_str("not found (404)"),
+            Self::Status(code) => write!(f, "the server returned {code}"),
+            Self::TooLarge(limit) => write!(f, "larger than {limit} bytes"),
             Self::Failed(detail) => f.write_str(detail),
         }
     }
 }
 
-/// The two things the update check asks of the network.
+/// Network operations used by the update check.
 pub trait Fetch {
-    /// The body at `url`, if it is 200 and at most `limit` bytes.
+    /// Returns the body at `url` if the status is 200 and it is at most
+    /// `limit` bytes.
     fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, HttpError>;
 
-    /// The body at `url`, written to `to`, which is created or truncated.
+    /// Streams the body at `url` into `to`, which is created or truncated.
     ///
-    /// Streamed rather than read into memory first, because an installer is
-    /// tens of megabytes. On any failure `to` may hold part of the body; the
-    /// caller writes to a scratch name and renames on success for exactly
-    /// that reason.
+    /// On failure `to` may hold a partial body, so callers write to a scratch
+    /// name and rename on success.
     fn download(&self, url: &str, to: &Path, limit: u64) -> Result<(), HttpError>;
 }
 
-/// The operating system's HTTP client.
+/// The WinHTTP client.
 pub struct WinHttp;
 
 impl Fetch for WinHttp {
@@ -79,11 +66,10 @@ impl Fetch for WinHttp {
     }
 }
 
-/// The host and the path of an `https://` URL, and nothing else.
+/// Splits an `https://` URL into host and path.
 ///
-/// Deliberately narrow: every URL this program fetches is one it built itself,
-/// on `github.com`, so anything that is not plain HTTPS to a host is a bug to
-/// refuse rather than a case to support. No port, no user, no plain HTTP.
+/// Rejects ports, user info and plain HTTP: every fetched URL is built by this
+/// program, so anything else indicates a bug.
 fn split_https(url: &str) -> Option<(&str, &str)> {
     let rest = url.strip_prefix("https://")?;
     let (host, path) = match rest.find('/') {
@@ -112,15 +98,13 @@ mod imp {
 
     use super::HttpError;
 
-    /// How long each stage may take, in milliseconds: resolving the name,
-    /// connecting, sending, and each wait for more of the body.
+    /// Per-stage timeouts in milliseconds: resolve, connect, send, receive.
     ///
-    /// Short for the first two, because a machine with no route to GitHub
-    /// should find out in seconds; longer for the last, because an installer
-    /// over a slow VPN arrives in chunks with gaps between them.
+    /// Resolve and connect are short so an offline machine fails fast; receive
+    /// is long to tolerate gaps on a slow VPN.
     const TIMEOUTS: (i32, i32, i32, i32) = (10_000, 10_000, 30_000, 60_000);
 
-    /// A WinHTTP handle, closed when it goes.
+    /// A WinHTTP handle, closed on drop.
     struct Handle(*mut c_void);
 
     impl Drop for Handle {
@@ -134,19 +118,18 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// The last WinHTTP error, in words somebody reading the About page can
-    /// use. WinHTTP's own messages live in `winhttp.dll` rather than the
-    /// system table, so `io::Error` would render most of them as "unknown".
+    /// Describes the last WinHTTP error. Its messages live in `winhttp.dll`,
+    /// not the system table, so `io::Error` would render most as "unknown".
     fn last_error() -> HttpError {
         // SAFETY: no preconditions.
         let code = unsafe { GetLastError() };
         let words = match code {
-            12002 => "it took too long to answer",
-            12007 => "the name could not be looked up, so there may be no network",
+            12002 => "the server did not respond in time",
+            12007 => "the server name could not be resolved; check the network connection",
             12029 => "the connection was refused",
             12030 => "the connection was dropped",
             12038 | 12037 | 12044 | 12045 | 12175 => {
-                "its certificate could not be checked, so nothing was downloaded"
+                "the certificate could not be verified; nothing was downloaded"
             }
             _ => "",
         };
@@ -181,8 +164,8 @@ mod imp {
         let agent = wide(&format!("files/{}", env!("CARGO_PKG_VERSION")));
         let (host, path, verb) = (wide(host), wide(path), wide("GET"));
 
-        // Dropped in reverse order of opening, which is the order WinHTTP
-        // wants them closed: request, then connection, then session.
+        // Handles drop in reverse order (request, connection, session), as
+        // WinHTTP requires.
         //
         // SAFETY for every call below: each string is NUL-terminated and
         // outlives the call; each handle is one opened just above and still
@@ -201,9 +184,8 @@ mod imp {
         let connection = opened(unsafe {
             WinHttpConnect(session.0, host.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0)
         })?;
-        // Redirects are followed by default, HTTPS to HTTPS only - which is
-        // what a release asset needs, since github.com answers with a 302 to
-        // the host the file is actually stored on.
+        // HTTPS-to-HTTPS redirects are followed by default; release assets
+        // redirect to a storage host.
         let request = opened(unsafe {
             WinHttpOpenRequest(
                 connection.0,
@@ -295,8 +277,6 @@ mod tests {
         assert_eq!(split_https("https://github.com"), Some(("github.com", "/")));
     }
 
-    /// Everything this program fetches is an address it built, so anything
-    /// else is refused rather than half-supported.
     #[test]
     fn anything_but_plain_https_to_a_host_is_refused() {
         assert_eq!(split_https("http://github.com/x"), None);
@@ -308,18 +288,14 @@ mod tests {
 
     #[test]
     fn a_missing_file_says_so_in_words() {
-        assert_eq!(
-            HttpError::Status(404).to_string(),
-            "there is nothing there (404)"
-        );
+        assert_eq!(HttpError::Status(404).to_string(), "not found (404)");
         assert_eq!(
             HttpError::Status(503).to_string(),
-            "the server answered 503"
+            "the server returned 503"
         );
     }
 
-    /// The real client against the real GitHub. Ignored by default, because
-    /// a test suite that needs the internet is one that fails on a train.
+    /// Live test against github.com; ignored by default as it needs a network.
     #[cfg(windows)]
     #[test]
     #[ignore = "needs the internet"]

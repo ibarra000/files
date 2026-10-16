@@ -1,40 +1,18 @@
-//! When to probe, when to enumerate, and when to do nothing.
+//! Decides when to probe, when to enumerate, and when to do nothing.
 //!
-//! This module is the answer to a field report of "random indexing reloads":
-//! the share was being re-enumerated every ~60 seconds instead of once an
-//! hour, and the +/-10% jitter on the probe cadence is what made the timing
-//! look arbitrary.
+//! Pure: the caller supplies `now` and performs the work. Nothing here reads
+//! a clock, touches the filesystem, or seeds from entropy, so a day of
+//! operation can be simulated in microseconds (see `tests/index_schedule.rs`).
 //!
-//! # Why it is a separate, pure module
-//!
-//! The decision used to live inline in [`super::actor`]'s loop, interleaved
-//! with `Instant::now()`, `SystemTime::now()`, `Rng::from_entropy()` and the
-//! I/O itself. That made it untestable in the most literal sense: the probe
-//! interval is 60 seconds and the rescan floor is an hour, so **no
-//! timer-driven refresh had ever fired in a test**. The only way a test could
-//! make the actor act was to send it an explicit refresh.
-//!
-//! Here the caller supplies `now` and performs the work; this module only
-//! decides. Nothing in this file reads a clock, touches the filesystem, or
-//! seeds itself from entropy. A day of operation can therefore be simulated
-//! exhaustively in microseconds, which is what `tests/index_schedule.rs` does.
-//!
-//! # The two invariants that stop a reload storm
-//!
-//! Both are enforced here, once, rather than being re-derived at each of the
-//! places that used to decide independently:
+//! # Invariants that prevent a reload storm
 //!
 //! 1. **A failed probe never causes an enumeration.** Not knowing whether the
-//!    directory changed is not evidence that it did. The previous code
-//!    returned "changed" whenever it had nothing to compare against, which
-//!    turned one failed probe into a permanent per-minute full scan.
+//!    directory changed is not evidence that it did.
 //! 2. **No two enumerations start closer together than
-//!    [`Cadence::min_scan_spacing`]**, except an explicit F5 - which the user
-//!    asked for and is entitled to.
+//!    [`Cadence::min_scan_spacing`]**, except an explicit F5.
 //!
-//! When change detection is genuinely unavailable, the schedule falls back to
-//! [`Cadence::rescan_floor`], which is the behaviour the actor's own
-//! documentation and `--doctor` have always claimed.
+//! When change detection is unavailable, the schedule falls back to
+//! [`Cadence::rescan_floor`].
 
 use std::time::{Duration, Instant};
 
@@ -49,43 +27,35 @@ use crate::config::{FLOOR_SPREAD_PERCENT, PERSIST_SPACING};
 use crate::util::backoff::{Backoff, jitter};
 use crate::util::rng::Rng;
 
-/// Smallest gap the scheduler will ever ask the actor to wait.
+/// Smallest wait the scheduler ever returns.
 ///
-/// Every terminal decision lands at least this far in the future, which is
-/// what makes "the index thread cannot busy-spin" a property rather than a
-/// hope. It matters because the backoff is *full* jitter and can legitimately
-/// return a delay of zero.
+/// Every terminal decision lands at least this far in the future so the
+/// index thread cannot busy-spin, even when the full-jitter backoff returns
+/// zero.
 const TICK: Duration = Duration::from_millis(1);
 
 /// How often the actor does each kind of work.
 ///
-/// Injected rather than read from [`crate::config`] constants directly, so a
-/// test can run a simulated day in milliseconds and so a misbehaving share can
-/// be paced differently in the field without a rebuild.
+/// Injected rather than read from [`crate::config`] directly, so tests can run
+/// a simulated day quickly and the cadence can be overridden in the field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cadence {
     /// Gap between cheap directory-stamp probes when everything is healthy.
     pub probe_interval: Duration,
-    /// Longest the index may go without a full enumeration, for a server that
-    /// does not move the directory stamp when entries are added or removed.
+    /// Longest the index may go without a full enumeration, for servers that
+    /// do not move the directory stamp when entries change.
     pub rescan_floor: Duration,
     /// Hard lower bound on the gap between two enumerations.
     pub min_scan_spacing: Duration,
     /// Shortest gap between two writes of the index to disk.
     ///
-    /// A patch is cheap over the network and expensive on the disk: it touches
-    /// a handful of folders but the cache file is written whole, some hundred
-    /// megabytes of it. Writing on every two-second watch batch would cost far
-    /// more than the patch saves, so saves are paced and a few minutes of
-    /// patches are allowed to ride in memory.
+    /// A patch touches a few folders but the cache file is rewritten whole, so
+    /// saves are paced and recent patches are held in memory.
     pub persist_spacing: Duration,
     /// Hard lower bound on the gap between two incremental updates.
     ///
-    /// Its own floor, and far shorter than [`Self::min_scan_spacing`], because
-    /// a patch reads the folders that changed rather than the share: seconds
-    /// of round trips against minutes. Pacing both by one number would mean
-    /// either re-walking every five minutes or learning about a new file half
-    /// an hour late, and neither is the behaviour anybody asked for.
+    /// Much shorter than [`Self::min_scan_spacing`] because a patch reads only
+    /// the changed folders: seconds of round trips rather than minutes.
     pub patch_spacing: Duration,
     /// Jitter applied to `probe_interval`, in percent.
     pub jitter_percent: u32,
@@ -126,18 +96,13 @@ impl Cadence {
 
     /// The schedule for a walked tree.
     ///
-    /// A tree never probes - no directory timestamp can stand for three
-    /// hundred thousand directories - so it lives permanently on the floor,
-    /// and the floor is correspondingly shorter and the spacing between passes
-    /// correspondingly longer, because a pass costs minutes rather than
-    /// seconds.
+    /// A tree never probes (no single timestamp covers every directory), so
+    /// it runs on the floor, with a shorter floor and longer spacing because a
+    /// pass costs minutes.
     ///
-    /// `probe_interval` carries the spacing rather than a probe interval,
-    /// which is not a trick: [`Self::normalised`] clamps `min_scan_spacing`
-    /// to at most `probe_interval`, so leaving the probe interval at a minute
-    /// would quietly clamp a five-minute spacing back down to one. The field
-    /// is unused by a tree, so it is free to hold the value that keeps the
-    /// clamp honest.
+    /// `probe_interval` holds the spacing value because [`Self::normalised`]
+    /// clamps `min_scan_spacing` to at most `probe_interval`; the field is
+    /// otherwise unused for a tree.
     pub const fn tree() -> Self {
         Self {
             probe_interval: TREE_MIN_SCAN_SPACING,
@@ -153,9 +118,8 @@ impl Cadence {
         }
     }
 
-    /// Milliseconds instead of minutes, so an integration test can watch an
-    /// "hour" go by. Scaled as a whole, so the ratios that actually matter -
-    /// probe to floor, backoff to spacing - are the shipped ones.
+    /// A millisecond-scale cadence for integration tests, keeping the shipped
+    /// ratios between probe, floor, backoff and spacing.
     pub const fn fast() -> Self {
         Self {
             probe_interval: Duration::from_millis(20),
@@ -171,13 +135,8 @@ impl Cadence {
         }
     }
 
-    /// Layers `FILES_PROBE_INTERVAL` / `FILES_RESCAN_FLOOR` (whole seconds)
-    /// over `self`.
-    ///
-    /// Readable from the environment for the same reason every other strategy
-    /// switch in this crate is: none of this can be exercised against the real
-    /// network shares on the machine it is written on, so the cadence has to
-    /// be adjustable in the field - and compressible during a diagnosis.
+    /// Applies `FILES_PROBE_INTERVAL` / `FILES_RESCAN_FLOOR` (whole seconds)
+    /// over `self`, for field tuning and diagnosis.
     pub fn from_env(mut self) -> Self {
         if let Some(v) = env_secs("FILES_PROBE_INTERVAL") {
             self.probe_interval = v;
@@ -188,18 +147,16 @@ impl Cadence {
         self.normalised()
     }
 
-    /// Reconciles the four intervals with each other.
+    /// Reconciles the intervals with each other.
     ///
     /// Separate from [`Cadence::from_env`] so it can be tested without the
     /// process environment, which `cargo test` shares across threads.
     pub fn normalised(mut self) -> Self {
         // Probing less often than rescanning would make the probe pointless.
         self.probe_interval = self.probe_interval.min(self.rescan_floor);
-        // The spacing backstop has to scale with the rest, or compressing the
-        // cadence to reproduce a problem in minutes silently suppresses the
-        // very rescan being reproduced. At the shipped values this changes
-        // nothing: thirty seconds is already below both half an hour and a
-        // minute.
+        // Scale the spacing backstop with the floor, so a compressed cadence
+        // used for diagnosis does not suppress the rescan being reproduced.
+        // No effect at the shipped values.
         self.min_scan_spacing = self
             .min_scan_spacing
             .min(self.rescan_floor / 2)
@@ -208,7 +165,7 @@ impl Cadence {
     }
 }
 
-/// Whether the source can tell us the directory changed.
+/// Whether the source can report that the directory changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StampHealth {
     /// Nothing has been probed yet.
@@ -216,8 +173,8 @@ pub enum StampHealth {
     Unknown,
     /// A stamp has been read, so change detection works here.
     Working,
-    /// This share will not answer the probe. The rescan floor is now the only
-    /// freshness guarantee, which is exactly what it is for.
+    /// This share does not answer the probe. The rescan floor is the only
+    /// freshness guarantee.
     Blind { failures: u32 },
 }
 
@@ -237,9 +194,8 @@ impl StampHealth {
 
 /// Why a full enumeration happened.
 ///
-/// Carried into the status line and the decision log, because "the index
-/// rebuilt and I do not know why" is the actual bug report this module came
-/// from. A rebuild the user can attribute is a rebuild they can live with.
+/// Shown in the status line and the decision log so every rebuild has a
+/// visible reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanReason {
     /// No listing at all yet.
@@ -252,8 +208,8 @@ pub enum ScanReason {
     Floor,
     /// Change detection is unavailable here, so the floor is all there is.
     Blind,
-    /// The watcher reported changes it could not describe, so nothing short of
-    /// a full pass can say what the share now holds.
+    /// The watcher reported changes it could not describe, so only a full
+    /// pass can establish the share's contents.
     Changed,
 }
 
@@ -271,7 +227,7 @@ impl ScanReason {
     }
 }
 
-/// What the actor feeds back after doing what it was told.
+/// What the actor feeds back after performing a step.
 #[derive(Debug, Clone, Copy)]
 pub enum Input {
     /// The persisted index was restored. `captured_age` is how old that
@@ -285,16 +241,13 @@ pub enum Input {
     /// The result of a [`Step::Probe`].
     Probed(Result<DirStamp, EnumError>),
     /// The result of a [`Step::FullScan`]. `Ok(stamp)` carries the stamp
-    /// captured alongside the listing, which is `None` when even that probe
-    /// failed.
+    /// captured with the listing, or `None` if that probe failed.
     Scanned(Result<Option<DirStamp>, EnumError>),
-    /// The watcher has changes pending. `full` means it could not say what
-    /// they were - an overflowed buffer, or more dirty folders than re-reading
-    /// one at a time could pay for.
+    /// The watcher has changes pending. `full` means it could not describe
+    /// them (buffer overflow, or too many dirty folders).
     ///
-    /// This is what a directory stamp supplies for a flat listing and cannot
-    /// supply for a tree: no single timestamp speaks for three hundred
-    /// thousand directories, so the notification has to.
+    /// For a tree this replaces the directory stamp, since no single
+    /// timestamp covers every directory.
     Changed { full: bool },
     /// The result of a [`Step::ApplyChanges`].
     Applied(Result<(), EnumError>),
@@ -310,10 +263,8 @@ pub enum Step {
     /// Re-read the dirty subtrees and patch them into the index, reporting
     /// back with [`Input::Applied`].
     ///
-    /// A separate step from `FullScan` because the two differ by three orders
-    /// of magnitude in cost - a handful of round trips against nine hundred
-    /// thousand - and pacing them by one rule would either re-walk the share
-    /// every few minutes or make a live update as rare as the floor.
+    /// Separate from `FullScan` because it is orders of magnitude cheaper and
+    /// is paced by its own spacing.
     ApplyChanges,
     /// Nothing moved: mark the listing confirmed-current, then wait.
     ConfirmFresh,
@@ -322,8 +273,8 @@ pub enum Step {
 }
 
 impl Step {
-    /// True when the actor should wait rather than immediately feed a result
-    /// back in. Only terminal steps carry a meaningful `next_action`.
+    /// Returns true when the actor should wait rather than act immediately.
+    /// Only terminal steps carry a meaningful `next_action`.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::ConfirmFresh | Self::Wait)
     }
@@ -340,27 +291,26 @@ impl Step {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Decision {
     pub step: Step,
-    /// For a terminal step, strictly in the future. For `Probe` and
-    /// `FullScan`, `now` - the actor acts at once and then decides again.
+    /// Strictly in the future for a terminal step; `now` for `Probe` and
+    /// `FullScan`, which the actor performs at once before deciding again.
     pub next_action: Instant,
 }
 
-/// Running totals for one session, so "how often does this actually rebuild?"
-/// has a number rather than an impression.
+/// Running totals for one session, for the decision log and `--doctor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counters {
     pub full_scans: u32,
     pub probes: u32,
     pub probe_failures: u32,
     pub scan_failures: u32,
-    /// Times the stamp moved, i.e. the directory genuinely changed.
+    /// Times the stamp moved, i.e. the directory changed.
     pub stamp_moves: u32,
     /// Times an enumeration was suppressed by [`Cadence::min_scan_spacing`].
-    /// Non-zero here means something upstream is asking too often.
+    /// Non-zero means something upstream is asking too often.
     pub deferred_scans: u32,
     /// Incremental updates applied from change notifications.
     pub patches: u32,
-    /// Times one was suppressed by [`Cadence::patch_spacing`].
+    /// Times an update was suppressed by [`Cadence::patch_spacing`].
     pub deferred_patches: u32,
 }
 
@@ -382,15 +332,10 @@ pub struct Scheduler {
     /// [`Scheduler::on_demand_only`].
     timed_scans: bool,
     last_full_scan: Option<Instant>,
-    /// This client's share of the floor spread, drawn once per pass.
-    ///
-    /// Stored rather than drawn on demand because the floor is asked about
-    /// from four places, and a deadline that answered differently each time
-    /// would wobble the wake it is computed for.
+    /// This client's share of the floor spread, drawn once per pass so every
+    /// floor query agrees on the deadline.
     floor_slack: Duration,
-    /// Attempts, not successes. This is what paces retries after a *failed*
-    /// scan; keying off successes is what let the old code retry a
-    /// million-entry enumeration under a second after it failed.
+    /// Attempts, not successes, so retries after a failed scan are paced.
     last_scan_attempt: Option<Instant>,
     last_patch_attempt: Option<Instant>,
     probe_attempt: u32,
@@ -401,9 +346,8 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// `seed` of `None` seeds the jitter from entropy, which is what the
-    /// running application wants; a test passes `Some` and gets a fixed
-    /// schedule.
+    /// Creates a scheduler. `seed` of `None` seeds the jitter from entropy;
+    /// tests pass `Some` for a fixed schedule.
     pub fn new(cadence: Cadence, seed: Option<u64>) -> Self {
         Self {
             cadence,
@@ -426,25 +370,19 @@ impl Scheduler {
 
     /// Declares that this share can never produce a directory stamp.
     ///
-    /// True of a walked tree, and not a transient condition: no single
-    /// timestamp can stand for three hundred thousand directories, so
-    /// `walk_and_publish` returns `Ok(None)` every time by design. The
-    /// scheduler has to know the difference between "no stamp yet" and "no
-    /// stamp, ever", because the remedy for the first - scan once and
-    /// establish one - never terminates for the second.
+    /// True of a walked tree: `walk_and_publish` always returns `Ok(None)`.
+    /// The scheduler must distinguish "no stamp yet" from "no stamp ever",
+    /// because scanning to establish a stamp never terminates for the latter.
     pub fn without_stamps(mut self) -> Self {
         self.stamps_possible = false;
         self
     }
 
-    /// Stops the floor from ever starting a pass on its own.
+    /// Stops the floor from starting a pass on its own.
     ///
-    /// Everything else is unchanged: the first run still builds an index
-    /// because there must be something to serve, a forced refresh still runs
-    /// because the user asked, and live updates still patch folders in as the
-    /// watcher names them. What stops is the unconditional periodic pass -
-    /// which for a share of three hundred thousand directories, multiplied by
-    /// a few hundred clients on the same timer, is the entire problem.
+    /// The first run, forced refreshes and live patches still happen; only
+    /// the periodic full pass stops, which for a large share across many
+    /// clients is the main load.
     pub fn on_demand_only(mut self) -> Self {
         self.timed_scans = false;
         self
@@ -488,24 +426,14 @@ impl Scheduler {
     // --- inputs ------------------------------------------------------------
 
     /// A restored listing counts against the rescan floor from when its data
-    /// was captured, not from now.
+    /// was captured, not from now, so a warm start can probe instead of
+    /// enumerating.
     ///
-    /// That is what lets a warm start probe the stamp and skip the
-    /// enumeration. Previously `last_full_scan` began as `None`, the floor was
-    /// therefore immediately due, and every single launch re-enumerated the
-    /// whole share no matter how good the cache was - which made the disk
-    /// cache worth only the few seconds before the scan superseded it.
-    ///
-    /// A cache with no stamp cannot be proven current, so where a stamp *is*
-    /// obtainable it deliberately does not satisfy the floor: one scan brings
-    /// it up to date and establishes a stamp for next time.
-    ///
-    /// That remedy needs a share where scanning can establish a stamp. A tree
-    /// is not one: the walk returns `Ok(None)` every time, so the next launch
-    /// is in exactly the same position and reads three hundred thousand
-    /// directories again - for as long as the program is installed. Where no
-    /// stamp will ever exist, the capture time is the only freshness evidence
-    /// there can be, and the floor is measured from it.
+    /// A cache without a stamp cannot be proven current, so where stamps are
+    /// obtainable it does not satisfy the floor: one scan establishes a stamp.
+    /// Where stamps are impossible (a tree), the capture time is the only
+    /// evidence and the floor is measured from it; otherwise every launch
+    /// would re-walk.
     fn on_disk_loaded(
         &mut self,
         now: Instant,
@@ -532,14 +460,12 @@ impl Scheduler {
             return self.scan(now, ScanReason::FirstRun);
         }
         if !self.timed_scans {
-            // Nothing here starts a pass on a timer. Waking on the floor
-            // anyway would be a wake-up that can only ever decide to do
-            // nothing, so the next action is left to whatever else asks -
-            // a watch batch, or the user.
+            // No timed passes: wait on the floor and let a watch batch or the
+            // user trigger the next action.
             return self.wait(now, now + self.cadence.rescan_floor);
         }
         if self.stamp_health.is_blind() || self.recorded_stamp.is_none() {
-            // Change detection is unavailable. The floor is the whole
+            // Change detection is unavailable. The floor is the only
             // guarantee, and probing again would only burn round trips.
             return if self.floor_elapsed(now) {
                 self.scan(now, ScanReason::Blind)
@@ -559,21 +485,20 @@ impl Scheduler {
 
     /// The watcher has something pending.
     ///
-    /// A batch it could describe is patched in; one it could not is a full
-    /// pass, paced by `min_scan_spacing` exactly as any other scan - which is
-    /// what stops an overflowing share from re-walking itself continuously.
+    /// A described batch is patched in; an undescribed one is a full pass,
+    /// paced by `min_scan_spacing` so an overflowing share cannot re-walk
+    /// continuously.
     fn on_changed(&mut self, now: Instant, full: bool, have_snapshot: bool) -> Decision {
-        // Nothing to patch into. The first pass has to happen anyway, and
-        // running it as a scan is what records the floor the rest depends on.
+        // Nothing to patch into. The first pass is a scan so the floor is
+        // recorded.
         if !have_snapshot {
             return self.scan(now, ScanReason::FirstRun);
         }
         if full {
-            // Events were lost, so only a full pass can say what the share now
-            // holds. On an on-demand share that pass is the user's to ask for:
-            // one person copying a large folder in must not set every client
-            // walking at once, which is the burst this policy exists to
-            // prevent. The actor marks the share stale instead.
+            // Events were lost, so only a full pass can say what the share
+            // holds. On an on-demand share that pass is left to the user, so a
+            // bulk copy does not set every client walking; the actor marks the
+            // share stale instead.
             if !self.timed_scans {
                 return self.wait(now, now + self.cadence.rescan_floor);
             }
@@ -594,13 +519,11 @@ impl Scheduler {
         }
     }
 
-    /// A patch finished, well or badly.
+    /// A patch finished, successfully or not.
     ///
-    /// Either way the schedule is unchanged: a patch is not a full pass, so it
-    /// neither satisfies the floor nor - when it fails - justifies backing the
-    /// floor off. The floor is the guarantee that a missed notification costs
-    /// at most half an hour, and a failing watcher is precisely when that
-    /// guarantee is load-bearing.
+    /// The schedule is unchanged either way: a patch neither satisfies the
+    /// floor nor, on failure, backs it off. The floor bounds the cost of a
+    /// missed notification, which matters most when the watcher is failing.
     fn on_applied(&mut self, now: Instant, _result: Result<(), EnumError>) -> Decision {
         let at = self.floor_due_at(now);
         self.wait(now, at)
@@ -642,9 +565,8 @@ impl Scheduler {
                     self.unanswerable_streak = 0;
                 }
 
-                // Crucially NOT a scan. Backing off keeps the cheap probe
-                // cheap, and the floor still bounds how stale the index can
-                // get.
+                // Not a scan. Back off the cheap probe; the floor still bounds
+                // staleness.
                 self.probe_attempt = self.probe_attempt.saturating_add(1);
                 let delay = self
                     .cadence
@@ -675,12 +597,9 @@ impl Scheduler {
                         self.wait(now, at)
                     }
                     None => {
-                        // The scan worked but the stamp did not. Without a
-                        // stamp there is nothing to compare next time, so
-                        // probing is pointless and the floor takes over. The
-                        // old code instead re-enumerated on every probe
-                        // interval, for the rest of the session - the bug this
-                        // module exists to make unrepresentable.
+                        // The scan worked but captured no stamp, so there is
+                        // nothing to compare against. Fall back to the floor
+                        // rather than rescanning on every probe interval.
                         self.unanswerable_streak = self.unanswerable_streak.max(1);
                         self.stamp_health = StampHealth::Blind {
                             failures: self.unanswerable_streak,
@@ -693,9 +612,8 @@ impl Scheduler {
             Err(_) => {
                 self.counters.scan_failures = self.counters.scan_failures.saturating_add(1);
                 self.scan_attempt = self.scan_attempt.saturating_add(1);
-                // `delay` is full jitter, so it can return almost zero. The
-                // spacing floor is what stops that becoming a tight loop of
-                // million-entry enumerations.
+                // `delay` is full jitter and can be near zero; the spacing
+                // floor stops a tight loop of full enumerations.
                 let delay = self
                     .cadence
                     .scan_backoff
@@ -734,8 +652,7 @@ impl Scheduler {
     /// Records a completed pass and draws this client's spread for the next
     /// one.
     ///
-    /// The draw happens here, once per pass, so `floor_elapsed` and
-    /// `floor_due_at` cannot disagree about when the floor is due.
+    /// Drawn once per pass so `floor_elapsed` and `floor_due_at` agree.
     fn note_full_scan(&mut self, at: Option<Instant>) {
         self.last_full_scan = at;
         let spread = self.cadence.rescan_floor / 100 * self.cadence.floor_spread_percent;
@@ -793,20 +710,14 @@ fn not_before(now: Instant, at: Instant) -> Instant {
     at.max(now + TICK)
 }
 
-/// True when the error says *this share cannot answer the probe*, as opposed
-/// to *the share is unreachable right now*.
+/// Returns true when the error means this share cannot answer the probe, as
+/// opposed to the share being unreachable right now.
 ///
-/// The distinction decides two things: whether change detection gets disabled
-/// or merely retried, and whether the user is told their drive is unreachable
-/// or that freshness checking is unavailable. Only one of those is true at a
-/// time, and telling them the wrong one sends them to check a network that is
-/// working.
-///
-/// Deliberately a whitelist of definite answers about the capability - the
-/// same shape as the job-cache miss whitelist in
-/// [`crate::index::store::IndexStore::publish_job_miss`], and for the same
-/// reason. A network blip must never disable the mechanism that exists to
-/// avoid a million-entry enumeration.
+/// Decides whether change detection is disabled or merely retried, and which
+/// message the user sees. A whitelist of definite answers, like the job-cache
+/// miss whitelist in
+/// [`crate::index::store::IndexStore::publish_job_miss`], so a network blip
+/// never disables change detection.
 pub fn is_probe_refusal(err: EnumError) -> bool {
     matches!(
         err,
@@ -825,16 +736,14 @@ mod tests {
 
     /// The longest the floor can be once this client's spread is added.
     ///
-    /// The tests below advance past *this* rather than past the bare floor,
-    /// because the floor is now "at least `rescan_floor`, plus up to
-    /// `floor_spread_percent` of it" - the whole point being that three
-    /// hundred clients do not pick the same instant.
+    /// Tests advance past this rather than the bare floor, since the floor is
+    /// `rescan_floor` plus up to `floor_spread_percent` of it.
     fn max_floor() -> Duration {
         FULL_RESCAN_FLOOR + FULL_RESCAN_FLOOR / 100 * FLOOR_SPREAD_PERCENT
     }
 
-    /// Well clear of the monotonic clock's origin, so the tests that need to
-    /// talk about the past can subtract without risking an underflow.
+    /// Well clear of the monotonic clock's origin, so tests can subtract
+    /// without underflow.
     fn base() -> Instant {
         Instant::now() + Duration::from_secs(100_000)
     }
@@ -843,8 +752,8 @@ mod tests {
         DirStamp::new(n, n)
     }
 
-    /// Brings a scheduler to the steady state the application spends almost
-    /// all of its time in: one snapshot, a working stamp, floor not due.
+    /// Brings a scheduler to the steady state: one snapshot, a working stamp,
+    /// floor not due.
     fn settled(now: Instant) -> Scheduler {
         let mut s = Scheduler::new(Cadence::shipped(), Some(SEED));
         let d = s.on(now, Input::Woke { forced: false }, false);
@@ -922,13 +831,9 @@ mod tests {
         assert_eq!(d.step, Step::FullScan(ScanReason::Floor));
     }
 
-    /// The fleet property, and the reason the spread exists.
-    ///
-    /// Jitter used to be applied only to the probe interval, and a full pass
-    /// is never decided at a probe - a tree does not probe at all. So three
-    /// hundred clients that started together re-walked together, and stayed
-    /// together, because the floor is measured from the previous pass and
-    /// each cycle re-synchronised them.
+    /// Clients started together must not re-walk at the same moment. The
+    /// floor is measured from the previous pass and a tree never probes, so
+    /// without the spread they would stay synchronised.
     #[test]
     fn two_clients_do_not_pick_the_same_moment_to_re_walk() {
         let now = base();
@@ -957,9 +862,8 @@ mod tests {
         assert_ne!(a, b, "two clients must not re-walk in lockstep");
     }
 
-    /// One-sided, deliberately: the floor is a promise about the longest an
-    /// index may go unchecked, so spreading a client earlier would break that
-    /// promise to buy nothing.
+    /// The spread is one-sided: the floor is the longest an index may go
+    /// unchecked, so it may only delay a pass.
     #[test]
     fn the_spread_only_ever_delays_a_pass_never_advances_one() {
         let now = base();
@@ -986,9 +890,8 @@ mod tests {
 
     // --- the reload storm --------------------------------------------------
 
-    /// RC1. A share that will not answer the probe used to be re-enumerated on
-    /// every probe interval, forever, because "nothing to compare against" was
-    /// read as "it changed".
+    /// A share that cannot answer the probe falls back to the floor instead of
+    /// rescanning on every probe interval.
     #[test]
     fn a_share_that_cannot_answer_the_probe_falls_back_to_the_floor() {
         let now = base();
@@ -1016,7 +919,7 @@ mod tests {
         let mut wakes = 0;
         while at < now + FULL_RESCAN_FLOOR {
             // Bare floor, not `max_floor`: nothing may scan before the floor
-            // even at zero spread, which is the property under test.
+            // even at zero spread.
             let d = s.on(at, Input::Woke { forced: false }, true);
             if matches!(d.step, Step::FullScan(_)) {
                 scans += 1;
@@ -1034,8 +937,7 @@ mod tests {
         assert_eq!(d.step, Step::FullScan(ScanReason::Blind));
     }
 
-    /// The same trap reached from the other direction: a scan whose own stamp
-    /// capture failed leaves nothing to compare against.
+    /// A scan whose own stamp capture failed also falls back to the floor.
     #[test]
     fn a_scan_that_captured_no_stamp_waits_for_the_floor() {
         let now = base();
@@ -1072,9 +974,8 @@ mod tests {
         assert_eq!(s.counters().full_scans, 1, "only the initial scan");
     }
 
-    /// RC2. `last_full_scan` was only set on success, so a failing scan left
-    /// the floor permanently "due" and every full-jitter retry - uniform in
-    /// `0..=ceiling` - attempted another million-entry enumeration.
+    /// Retries after a failing scan are paced by attempts, so full-jitter
+    /// backoff never starts enumerations closer than the spacing floor.
     #[test]
     fn a_failing_scan_is_never_retried_faster_than_the_spacing_floor() {
         let now = base();
@@ -1299,9 +1200,8 @@ mod tests {
         );
     }
 
-    /// Compressing the cadence is how a freshness problem gets reproduced in
-    /// minutes instead of hours. A fixed thirty-second spacing backstop would
-    /// suppress exactly the rescan being reproduced.
+    /// A compressed cadence must scale the spacing backstop, or it would
+    /// suppress the rescan being reproduced.
     #[test]
     fn compressing_the_cadence_scales_the_spacing_backstop_with_it() {
         let c = Cadence {

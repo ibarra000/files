@@ -1,18 +1,13 @@
-//! Comparing this build against a published one.
+//! `major.minor.patch` versions for update comparison.
 //!
-//! Three numbers, and deliberately no more. A general semantic-version parser
-//! handles pre-release tags and build metadata, whose ordering rules are
-//! subtle and whose only use here would be to let somebody publish something
-//! this could not compare - so the crate that implements them is not worth
-//! carrying, and the syntax they need is not worth accepting.
+//! Pre-release tags and build metadata are not supported, which avoids a
+//! semver dependency and its subtle ordering rules.
 
 use std::fmt;
 
 /// A released version, as `major.minor.patch`.
 ///
-/// `Ord` is derived, and the field order is what makes that correct: Rust
-/// compares a struct field by field in declaration order, which is exactly
-/// precedence for a version number.
+/// The derived `Ord` relies on the field declaration order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Version {
     pub major: u32,
@@ -29,22 +24,16 @@ impl Version {
         }
     }
 
-    /// What this executable is.
-    ///
-    /// Read from the same `Cargo.toml` field the installer reads, so the
-    /// running program, the MSI and the manifest cannot claim three different
-    /// things. Falls back to zero rather than panicking: a version that
-    /// somehow would not parse should disable updating, not stop the program.
+    /// Returns this build's version from `Cargo.toml`, the same source the
+    /// installer uses. Falls back to `0.0.0` rather than panicking.
     pub fn current() -> Self {
         Self::parse(env!("CARGO_PKG_VERSION")).unwrap_or_default()
     }
 
-    /// Exactly three dot-separated numbers, and nothing else.
+    /// Parses exactly three dot-separated numbers.
     ///
-    /// A trailing `-beta` or `+build` is refused rather than ignored.
-    /// Ignoring it would make `0.3.0-beta` and `0.3.0` compare equal, so a
-    /// machine on the release would be offered the beta and told it was the
-    /// same version.
+    /// A `-beta` or `+build` suffix is rejected, since ignoring it would make
+    /// a pre-release compare equal to its release.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = text.trim().split('.');
         let mut next = || parts.next()?.parse::<u32>().ok();
@@ -83,8 +72,6 @@ mod tests {
         assert_eq!(Version::parse("  1.2.3\n"), Some(Version::new(1, 2, 3)));
     }
 
-    /// Refused rather than ignored: ignoring the tag would make a pre-release
-    /// compare equal to the release it precedes.
     #[test]
     fn anything_that_is_not_three_numbers_is_refused() {
         for text in [
@@ -110,17 +97,12 @@ mod tests {
         }
     }
 
-    /// The case that matters most: an unchanged share must not offer an
-    /// update every time it is read.
     #[test]
     fn the_same_version_is_not_newer_than_itself() {
         let running = Version::new(0, 2, 0);
         assert!(!running.is_newer_than(running));
     }
 
-    /// A share rolled back to an older build must not be installed over a
-    /// newer one - the installer refuses a downgrade anyway, and offering it
-    /// would be a prompt that cannot be satisfied.
     #[test]
     fn an_earlier_version_is_not_newer() {
         let running = Version::new(0, 3, 0);
@@ -129,7 +111,7 @@ mod tests {
         }
     }
 
-    /// Ordering is by field, not by the string: 10 is after 9.
+    /// Ordering is numeric per field, not lexical.
     #[test]
     fn a_two_digit_part_sorts_after_a_one_digit_part() {
         let nine = Version::parse("0.9.0").unwrap();
@@ -145,8 +127,6 @@ mod tests {
         }
     }
 
-    /// The build has to be able to say what it is, or nothing can be compared
-    /// against it.
     #[test]
     fn this_build_knows_its_own_version() {
         assert_ne!(Version::current(), Version::default());

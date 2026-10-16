@@ -1,53 +1,31 @@
-//! Installing what the share offered.
+//! Installing a downloaded or shared update.
 //!
-//! # Why this program cannot install its own update
+//! A running executable cannot be replaced, so the install is handed to a copy
+//! of `files-cli.exe` staged outside the installation (see [`stage`]). It waits
+//! for this process to exit before starting `msiexec`, avoiding Restart Manager
+//! prompts and reboots.
 //!
-//! Windows Installer replaces the files a package owns, and two of those are
-//! `files.exe` and `files-cli.exe`. A running executable cannot be replaced,
-//! so an installer started by the program it is upgrading finds its own caller
-//! in the way: at best the Restart Manager asks the user to close an
-//! application they did not knowingly open, at worst the upgrade completes
-//! only after a reboot nobody wanted.
-//!
-//! So the work is handed to a copy of `files-cli.exe` placed outside the
-//! installation - see [`stage`] - which waits for this process to exit before
-//! it starts `msiexec`. With nothing of ours running there is no file in use,
-//! no Restart Manager prompt and no reboot.
-//!
-//! # Why elevation is not asked for here
-//!
-//! The package is `perMachine` and installs into Program Files, so applying it
-//! needs administrator rights. `msiexec` obtains them itself when it needs
-//! them, which is one standard consent dialog naming Windows Installer rather
-//! than a second one naming us.
-//!
-//! # What is not attempted
-//!
-//! No rollback. `MajorUpgrade` in `wix/files.wxs` already removes the previous
-//! version and restores it if the new one fails to install, and Windows
-//! Installer is far better at that than anything written here would be. If it
-//! fails, what is on the machine is what was on it before.
+//! Elevation is left to `msiexec`, which prompts once for the per-machine
+//! install. Rollback is left to `MajorUpgrade` in `wix/files.wxs`.
 
 use std::path::{Path, PathBuf};
 
 use crate::update::Manifest;
 
-/// Where a staged installer and its helper are put.
-///
-/// Under `%LOCALAPPDATA%`, not `%APPDATA%`: this is a scratch copy of bytes
-/// that already exist on a share, so it should not roam between machines.
+/// Subdirectory of the (non-roaming, `%LOCALAPPDATA%`) cache that holds the
+/// staged installer and helper.
 pub(crate) const STAGE_DIR: &str = "update";
 
 /// Why an update could not be applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
     NoCacheDir,
-    /// The installer named by the manifest is not beside it.
+    /// The installer named by the manifest is missing.
     MissingInstaller(PathBuf),
-    /// What was copied is not what the manifest described.
+    /// The copied installer does not match the manifest's digest.
     WrongDigest,
     Io(String),
-    /// The helper could not be found to copy.
+    /// `files-cli.exe` was not found to copy.
     NoHelper,
     CouldNotStart(String),
 }
@@ -55,24 +33,22 @@ pub enum Problem {
 impl Problem {
     pub fn detail(&self) -> String {
         match self {
-            Self::NoCacheDir => "there is nowhere to put the installer".into(),
-            Self::MissingInstaller(p) => format!("{} is not there", p.display()),
+            Self::NoCacheDir => "no cache folder is available for the installer".into(),
+            Self::MissingInstaller(p) => format!("{} not found", p.display()),
             Self::WrongDigest => {
                 "the installer did not copy correctly \u{b7} try again in a moment".into()
             }
             Self::Io(e) => e.clone(),
-            Self::NoHelper => "files-cli.exe could not be found beside this program".into(),
+            Self::NoHelper => "files-cli.exe was not found next to files.exe".into(),
             Self::CouldNotStart(e) => format!("the installer would not start: {e}"),
         }
     }
 }
 
-/// Copies the installer and the helper somewhere the upgrade will not replace.
+/// Copies the installer and the helper outside the installation.
 ///
-/// The installer is copied off the share rather than run from it, so that a
-/// laptop leaving the building mid-install does not take the file with it -
-/// and so that the digest is checked against the bytes that will actually be
-/// installed rather than against a second read of a file that may have moved.
+/// The installer is copied locally so the install survives losing the share,
+/// and the digest is checked against the exact bytes that will be installed.
 pub fn stage(manifest: &Manifest, msi: &Path, cache_dir: Option<&Path>) -> Result<Staged, Problem> {
     if !msi.is_file() {
         return Err(Problem::MissingInstaller(msi.to_path_buf()));
@@ -86,15 +62,13 @@ pub fn stage(manifest: &Manifest, msi: &Path, cache_dir: Option<&Path>) -> Resul
     if let Some(want) = &manifest.sha256 {
         let got = sha256_of(&staged_msi).map_err(|e| Problem::Io(e.to_string()))?;
         if &got != want {
-            // Removed rather than left to be found later and wondered about.
+            // Do not leave a bad copy behind.
             let _ = std::fs::remove_file(&staged_msi);
             return Err(Problem::WrongDigest);
         }
     }
 
-    // The helper must not live inside the installation, or the upgrade would
-    // be replacing the executable driving it - which is the whole problem this
-    // module exists to avoid, reintroduced one directory along.
+    // The helper must run from outside the installation it replaces.
     let helper = helper_source().ok_or(Problem::NoHelper)?;
     let staged_helper = dir.join("files-update.exe");
     std::fs::copy(&helper, &staged_helper).map_err(|e| Problem::Io(e.to_string()))?;
@@ -112,11 +86,8 @@ pub struct Staged {
     pub helper: PathBuf,
 }
 
-/// `files-cli.exe`, beside whatever is running.
-///
-/// The console half of this program is the helper, rather than a third
-/// executable: it already ships, it is already signed by whatever signs the
-/// rest, and it already has a command-line parser to hang a flag on.
+/// Returns `files-cli.exe` beside the running executable, which serves as the
+/// update helper.
 fn helper_source() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let beside = exe.with_file_name("files-cli.exe");
@@ -125,16 +96,12 @@ fn helper_source() -> Option<PathBuf> {
 
 /// Starts the helper and returns, leaving it to wait for this process to end.
 ///
-/// Detached deliberately. The helper outlives its parent by design - that is
-/// the entire point of it - so nothing here waits on it or holds a handle to
-/// it.
+/// The helper is detached because it must outlive this process.
 #[cfg(windows)]
 pub fn hand_over(staged: &Staged) -> Result<(), Problem> {
     use std::os::windows::process::CommandExt;
 
-    // No window, and not tied to this process's console. `files-cli` is a
-    // console program, and without this the upgrade would flash a black
-    // rectangle on the way past.
+    // `files-cli` is a console program; these flags prevent a console window.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
 
@@ -146,10 +113,8 @@ pub fn hand_over(staged: &Staged) -> Result<(), Problem> {
         .arg("--wait-pid")
         .arg(std::process::id().to_string());
 
-    // Where to start again afterwards: this executable, at the path it is at
-    // now. `MajorUpgrade` installs over the same folder, so the new version
-    // lands exactly here - and asking the running program where it lives beats
-    // any guess at where the installer will put things.
+    // Relaunch from the current path; `MajorUpgrade` installs into the same
+    // folder.
     if let Ok(exe) = std::env::current_exe() {
         command.arg("--relaunch").arg(exe);
     }
@@ -168,25 +133,18 @@ pub fn hand_over(_staged: &Staged) -> Result<(), Problem> {
     ))
 }
 
-/// How long the helper waits for the program that started it to exit.
-///
-/// Generous, because the alternative to waiting is starting an installer
-/// while the files it replaces are still open. Bounded, because a program
-/// wedged on a network call must not leave a helper resident forever.
+/// How long the helper waits for its parent to exit. Bounded so a wedged
+/// parent cannot leave the helper resident forever.
 const EXIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// The helper: waits for the caller to exit, installs, and starts it again.
+/// Helper entry point: waits for the parent to exit, installs, and relaunches.
 ///
-/// Runs in `files-cli.exe`, from a copy outside the installation. Everything
-/// here happens after the program that asked for it has gone, so there is
-/// nothing to report to and nowhere to report it - the outcome is the state
-/// of the machine afterwards, and `msiexec` speaks for itself while it works.
+/// Runs in a staged copy of `files-cli.exe` after the parent has exited, so
+/// there is no UI to report to beyond `msiexec`'s own.
 pub fn run_helper(msi: &Path, wait_pid: u32, relaunch: Option<&Path>) -> Result<(), String> {
     wait_for_exit(wait_pid, EXIT_TIMEOUT);
 
-    // `/qb` rather than `/quiet`: a progress bar is what tells somebody the
-    // thing they asked for is happening, and this is the window in which the
-    // panel has vanished and not yet come back.
+    // `/qb` shows a basic progress bar while the app is closed.
     let status = std::process::Command::new("msiexec")
         .arg("/i")
         .arg(msi)
@@ -195,13 +153,12 @@ pub fn run_helper(msi: &Path, wait_pid: u32, relaunch: Option<&Path>) -> Result<
         .map_err(|e| format!("msiexec would not start: {e}"))?;
 
     if !status.success() {
-        // Deliberately not restarted. Windows Installer has already rolled
-        // back to what was there before, and starting the old version now
-        // would make a failed upgrade look like a successful one.
+        // Not relaunched: the installer rolled back, and relaunching would
+        // make the failed upgrade look successful.
         return Err(format!("the installer stopped: {status}"));
     }
 
-    // The staged copy is tens of megabytes that will never be wanted again.
+    // The staged installer is no longer needed.
     let _ = std::fs::remove_file(msi);
 
     if let Some(exe) = relaunch {
@@ -214,9 +171,7 @@ pub fn run_helper(msi: &Path, wait_pid: u32, relaunch: Option<&Path>) -> Result<
 
 /// Blocks until the process exits, or until the timeout.
 ///
-/// By handle rather than by polling for the PID: a PID is reused, and a helper
-/// that waited on a recycled one would either return at once or wait on a
-/// stranger.
+/// Waits on a process handle rather than polling the PID, which can be reused.
 #[cfg(windows)]
 fn wait_for_exit(pid: u32, timeout: std::time::Duration) {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -240,12 +195,8 @@ fn wait_for_exit(pid: u32, timeout: std::time::Duration) {
 #[cfg(not(windows))]
 fn wait_for_exit(_pid: u32, _timeout: std::time::Duration) {}
 
-/// SHA-256 of a file, through the operating system's own implementation.
-///
-/// BCrypt rather than a crate. The digest is wanted for one file, once, at the
-/// moment somebody clicks a button - so what a hand-written or imported
-/// implementation would buy is nothing measurable, against a dependency in a
-/// manifest that argues for each one it has.
+/// Returns the lowercase hex SHA-256 of a file, computed with Windows BCrypt to
+/// avoid a hashing dependency.
 #[cfg(windows)]
 pub(crate) fn sha256_of(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
@@ -295,9 +246,7 @@ pub(crate) fn sha256_of(path: &Path) -> std::io::Result<String> {
             return Err(std::io::Error::other("SHA-256 is unavailable"));
         }
 
-        // A fixed buffer rather than the whole file: an installer is tens of
-        // megabytes, and there is no reason for all of it to be resident at
-        // once to be summed.
+        // Hash in fixed-size chunks rather than loading the whole installer.
         let mut buf = vec![0u8; 64 << 10];
         let result = loop {
             match file.read(&mut buf) {
@@ -345,8 +294,7 @@ mod tests {
         }
     }
 
-    /// The empty input, which is the one SHA-256 value everybody can check
-    /// against a reference without trusting this code.
+    /// Checks against the published SHA-256 of empty input.
     #[cfg(windows)]
     #[test]
     fn the_digest_agrees_with_the_published_value_for_no_bytes_at_all() {
@@ -373,8 +321,7 @@ mod tests {
         );
     }
 
-    /// Longer than one read of the buffer, so the incremental path is what is
-    /// being measured rather than a single call.
+    /// Spans several reads, exercising the incremental path.
     #[cfg(windows)]
     #[test]
     fn a_file_larger_than_the_read_buffer_is_summed_the_same_way() {
@@ -406,8 +353,6 @@ mod tests {
         assert_eq!(stage(&manifest(None), &msi, None), Err(Problem::NoCacheDir));
     }
 
-    /// A truncated copy is the hazard this guards, and it must not be left
-    /// behind to be found and wondered about later.
     #[cfg(windows)]
     #[test]
     fn a_copy_that_does_not_match_the_manifest_is_refused_and_removed() {

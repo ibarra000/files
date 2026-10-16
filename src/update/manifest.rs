@@ -1,6 +1,4 @@
-//! What the share says is available.
-//!
-//! One small TOML file beside the installers:
+//! The `latest.toml` update manifest, published beside the installer:
 //!
 //! ```toml
 //! version = "0.3.0"
@@ -9,19 +7,11 @@
 //! notes   = "Scrollable results, editable settings."
 //! ```
 //!
-//! Parsed with `toml_edit`, which is already carried for the configuration, so
-//! this costs no dependency and no TLS stack. The publisher is
-//! `tools/make_msi.ps1`, which writes this from the same `Cargo.toml` version
-//! it builds with, so the manifest and the installer beside it cannot disagree.
+//! `tools/make_msi.ps1` writes it from the same `Cargo.toml` version it builds.
 //!
-//! # What the digest is and is not for
-//!
-//! It guards against a copy that was truncated or a file that was replaced
-//! half-written - a real hazard when the source is a file share somebody may
-//! be writing to while somebody else reads it. It is **not** authentication:
-//! anyone who can write the MSI can write the manifest naming it, so a hash
-//! either matching or not says nothing about who put it there. What keeps a
-//! stranger's installer off the share is the share's own permissions.
+//! The digest detects truncated or half-written copies. It is not
+//! authentication: whoever can write the MSI can write the manifest. Share
+//! permissions control who can publish.
 
 use crate::update::version::Version;
 
@@ -29,9 +19,8 @@ use crate::update::version::Version;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub version: Version,
-    /// The installer's file name, within the same folder as the manifest.
-    ///
-    /// A bare name, never a path - see [`Problem::MsiIsNotABareName`].
+    /// The installer's bare file name in the manifest's folder (see
+    /// [`Problem::MsiIsNotABareName`]).
     pub msi: String,
     pub sha256: Option<String>,
     pub notes: Option<String>,
@@ -44,13 +33,9 @@ pub enum Problem {
     MissingVersion,
     BadVersion(String),
     MissingMsi,
-    /// The name would leave the folder the manifest was read from.
-    ///
-    /// Refused because the name is joined onto a configured directory and then
-    /// handed to `msiexec`. A name containing a separator, a drive letter or
-    /// `..` would let whatever wrote the manifest choose a file anywhere the
-    /// user can reach, which is a much larger thing than choosing which
-    /// version of this program to install.
+    /// The name contains a separator, drive or `..`. It is joined onto the
+    /// update folder and passed to `msiexec`, so it must not escape that
+    /// folder.
     MsiIsNotABareName(String),
     BadDigest(String),
 }
@@ -60,7 +45,7 @@ impl Problem {
         match self {
             Self::NotToml(e) => format!("the update manifest could not be read: {e}"),
             Self::MissingVersion => "the update manifest names no version".into(),
-            Self::BadVersion(v) => format!("{v:?} is not a version this understands"),
+            Self::BadVersion(v) => format!("{v:?} is not a valid version"),
             Self::MissingMsi => "the update manifest names no installer".into(),
             Self::MsiIsNotABareName(name) => {
                 format!("{name:?} is not a file name in the update folder")
@@ -104,19 +89,16 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
     })
 }
 
-/// Whether this names a file *in* the update folder and nowhere else.
+/// Whether `name` is a plain file name within the update folder.
 ///
-/// An allowlist of the shapes that are certainly safe rather than a search for
-/// the ones that are not, for the reason `search::pattern` gives about NT
-/// expressions: enumerating what is dangerous is how a case gets missed.
+/// Rejects anything outside a conservative set of safe shapes.
 fn is_bare_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', ':'])
-        // Windows strips a trailing dot or space before the path reaches the
-        // filesystem, so a name that ends in one is not the name that will be
-        // opened.
+        // Windows strips a trailing dot or space, so such a name would open a
+        // different file.
         && !name.ends_with('.')
         && !name.ends_with(' ')
         && !name.chars().any(|c| c.is_control())
@@ -130,8 +112,7 @@ fn is_digest(text: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Windows PowerShell 5.1 writes UTF-8 with a byte-order mark, and a
-    /// manifest published from it must still be read.
+    /// Windows PowerShell 5.1 writes UTF-8 with a byte-order mark.
     #[test]
     fn a_manifest_with_a_byte_order_mark_is_still_read() {
         let text = "\u{feff}version = \"0.3.0\"\nmsi = \"files-0.3.0-x64.msi\"\n";
@@ -161,8 +142,7 @@ notes   = "Scrollable results."
         assert_eq!(m.notes, None);
     }
 
-    /// A key a later version publishes must not stop an older copy reading
-    /// the version number - that is how a fleet gets stuck.
+    /// Unknown keys are ignored so older builds can still read newer manifests.
     #[test]
     fn a_key_from_the_future_is_ignored_rather_than_refused() {
         let m = parse("version = \"1.0.0\"\nmsi = \"a.msi\"\nsignature = \"x\"\n").unwrap();
@@ -184,8 +164,6 @@ notes   = "Scrollable results."
         );
     }
 
-    /// The name is joined onto a configured folder and handed to msiexec, so
-    /// it has to name something in that folder and nowhere else.
     #[test]
     fn an_installer_name_that_would_leave_the_update_folder_is_refused() {
         for name in [
@@ -214,9 +192,7 @@ notes   = "Scrollable results."
         }
     }
 
-    /// Space around a value is whitespace in the file, not part of the name.
-    /// Stripped before the name is judged, so a tidily aligned manifest reads
-    /// the same as a cramped one.
+    /// Values are trimmed before validation.
     #[test]
     fn space_around_a_value_is_not_part_of_it() {
         let m = parse("version = \"  1.0.0 \"\nmsi = \"  files.msi  \"\n").unwrap();

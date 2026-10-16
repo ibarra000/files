@@ -1,22 +1,10 @@
-//! The pieces a settings page is built from.
+//! Widgets for settings pages. Some are egui widgets styled by
+//! [`crate::gui::theme::apply_style`]; the rest are painted here.
 //!
-//! Each one takes a `Ui` and a [`Theme`] and returns a `Response`, so they
-//! compose the way egui's own widgets do. Some are egui widgets wearing the
-//! style [`crate::gui::theme::apply_style`] set; the rest are painted here,
-//! and each says which it is and why.
-//!
-//! # A switch, not a checkbox
-//!
-//! The one place this file spends real effort. egui has no switch, and a
-//! checkbox is the wrong control for a setting that takes effect the moment
-//! it moves: a tick box reads as a choice that will be applied later, which
-//! is exactly the promise this window does not make. So the switch is
-//! painted.
-//!
-//! What is *not* re-implemented is what it tells a screen reader. It reports
-//! itself as a checkbox through [`egui::WidgetInfo::selected`], because that
-//! is the role Narrator and the accessibility tree already understand, and
-//! because `tests/panel.rs` reads that tree rather than the pixels.
+//! The switch is painted because egui has none and a checkbox implies a
+//! deferred apply. It still reports itself as a checkbox via
+//! [`egui::WidgetInfo::selected`], which screen readers and `tests/panel.rs`
+//! rely on.
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontId, Layout, Rect, Response, Sense, Stroke, StrokeKind,
@@ -27,22 +15,18 @@ use super::{measure, report};
 use crate::gui::theme::{self, Icon, Theme, Weight};
 use crate::view::status::Tone;
 
-/// How tall a switch is, and how wide. Two-to-one, which is the proportion
-/// every platform's switch has and the one that reads as a switch.
+/// Switch height and width, in the standard 1:2 proportion.
 const SWITCH_H: f32 = 20.0;
 const SWITCH_W: f32 = 40.0;
 
-/// How tall one entry in the list of pages is.
+/// Height of a nav entry.
 const NAV_H: f32 = 32.0;
 
-/// A small button with no frame until you touch it.
+/// Size of a frameless icon button.
 const ICON_BTN: f32 = 24.0;
 
-/// The tile one setting is drawn on.
-///
-/// A stock `Frame`, flat: a fill one step off the page, a four-point corner,
-/// no border and no shadow. See the module note in [`super`] for why this is
-/// not `theme::raise`.
+/// Draws a flat card tile with no border or shadow. See [`super`] for why
+/// this does not use `theme::raise`.
 pub fn card<R>(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Frame::new()
         .fill(theme.card)
@@ -52,13 +36,8 @@ pub fn card<R>(ui: &mut Ui, theme: &Theme, body: impl FnOnce(&mut Ui) -> R) -> R
         .inner
 }
 
-/// The heading over a run of settings.
-///
-/// Smaller than the labels it heads, which looks wrong written down and is
-/// right on screen: it is a signpost rather than a title, and the labels
-/// under it are what somebody is actually reading for. Ueli's is 12 pt
-/// semibold over 14 pt regular, and this is the same relationship in this
-/// program's sizes.
+/// Draws a group heading: caption size, semibold, smaller than the labels
+/// beneath it.
 pub fn group_heading(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.label(
         egui::RichText::new(text)
@@ -68,40 +47,26 @@ pub fn group_heading(ui: &mut Ui, theme: &Theme, text: &str) {
     ui.add_space(measure::LABEL_GAP);
 }
 
-/// What a setting row needs to know about itself.
-///
-/// A struct rather than six arguments, because four of them are strings and
-/// a call site with four bare strings in it is a call site nobody can read.
+/// Describes one setting row.
 pub struct Row<'a> {
     pub label: &'a str,
     /// One sentence on what the setting does.
     pub help: &'a str,
-    /// Why it will not save, or when it will apply. Drawn under the help in
-    /// the warning tone, because both of those are disappointments.
+    /// Why it will not save, or when it will apply; drawn in the warning tone.
     pub caveat: Option<&'a str>,
-    /// False when something outranks the file and the value cannot be
-    /// written. The control is drawn disabled rather than hidden: hiding it
-    /// would answer "why can I not change this?" with silence.
+    /// False when the value is pinned and cannot be written; the control is
+    /// then drawn disabled.
     pub enabled: bool,
-    /// How much room the control would *like*. Declared rather than
-    /// measured, because the prose is laid out against what is left and
-    /// something has to be decided first. See [`super::measure`].
-    ///
-    /// A want and not a width: in a narrow window
-    /// [`super::measure::control_width`] takes some of it back. What the
-    /// control is actually given is the rectangle it is built into, and a
-    /// control that ignores that rectangle - which is every egui widget with
-    /// a `desired_width`, and `ComboBox` in particular - will draw straight
-    /// through the prose beside it.
+    /// The control's preferred width. [`super::measure::control_width`] may
+    /// shrink it in a narrow window, so controls must stay within the rect
+    /// they are given.
     pub control_w: f32,
 }
 
-/// One setting: a label, a sentence, and a control to the right of both.
+/// Draws one setting: label and help on the left, control on the right.
 ///
-/// Measured and then painted rather than laid out with a container, and
-/// [`super::measure`]'s module note is the argument for that. The short
-/// version: the control is centred against the whole of the prose, and no
-/// egui container can express it.
+/// Measured then painted, so the control can be centred on the whole tile;
+/// see [`super::measure`].
 pub fn setting_row<R>(
     ui: &mut Ui,
     theme: &Theme,
@@ -109,15 +74,12 @@ pub fn setting_row<R>(
     control: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     let avail = ui.available_width();
-    // The control first, because it is the one that gives way. See
-    // `measure::control_width` - this pair of lines is the overlap fix.
+    // Control first, since it is the column that shrinks.
     let control_w = measure::control_width(avail, row.control_w);
     let prose_w = measure::prose_width(avail, control_w);
     let painter = ui.painter().clone();
 
-    // One line, ellipsised. A label that wraps turns every tile into a
-    // different height for no gain: the sentence under it is where the
-    // detail is meant to go.
+    // Single line with ellipsis, so tile heights stay consistent.
     let label = truncated(
         &painter,
         row.label,
@@ -157,11 +119,8 @@ pub fn setting_row<R>(
     let mut at = measure::prose_origin(tile);
     painter.galley(at, label.clone(), theme.text);
     at.y += label.rect.height() + measure::LABEL_GAP;
-    // The help's own height, taken before the galley is handed over, and
-    // *not* the caveat's. Advancing by the height of the line about to be
-    // drawn rather than the one just drawn painted the caveat on top of the
-    // second line of the help - which is legible in a picture and invisible
-    // in a one-line description, so the snapshot is what caught it.
+    // Advance by the help's height (read before the galley is moved), not
+    // the caveat's, or the caveat overlaps multi-line help.
     let help_h = help.rect.height();
     painter.galley(at, help, theme.dim);
     if let Some(caveat) = caveat {
@@ -169,16 +128,9 @@ pub fn setting_row<R>(
         painter.galley(at, caveat, theme.tone(Tone::Warn));
     }
 
-    // The whole row reads as one thing to a screen reader, because that is
-    // what it is: a label that says nothing without the sentence under it.
-    // The same argument `gui::row` makes for a result.
-    // The caveat is part of the name, not decoration. It is the line that
-    // says the setting will not save or will not apply yet, and somebody
-    // reading this window aloud needs it more than somebody looking at it,
-    // not less.
-    // Joined with a space rather than a stop: the help is a whole sentence
-    // and already ends in one, so a second gives a screen reader "either
-    // way.. Applies when files next starts".
+    // The row is one accessible node: label, help, and caveat together.
+    // The caveat is joined with a space because the help already ends in a
+    // full stop.
     let spoken = match row.caveat {
         Some(caveat) => format!("{}. {} {caveat}", row.label, row.help),
         None => format!("{}. {}", row.label, row.help),
@@ -192,16 +144,9 @@ pub fn setting_row<R>(
             .max_rect(slot)
             .layout(Layout::right_to_left(Align::Center)),
     );
-    // The second half of the overlap fix, and the one that bites at *every*
-    // window width rather than only at narrow ones.
-    //
-    // `ComboBox::width` is a minimum and not a width - egui says so in a
-    // comment beside it - so a drop-down holding a long label grows past
-    // whatever slot it was measured against and runs under the sentence to
-    // its left. Truncating here sets the policy on the child `Ui` that every
-    // control in this window is built into, so it holds for the drop-downs,
-    // the buttons and anything added later, rather than needing a
-    // `.truncate()` remembered at each call site.
+    // `ComboBox::width` is only a minimum, so a long option would grow past
+    // the slot into the prose. Truncating on the child `Ui` applies to every
+    // control built in it.
     child.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
     if !row.enabled {
         child.disable();
@@ -209,55 +154,37 @@ pub fn setting_row<R>(
     control(&mut child)
 }
 
-/// One entry in a list: a drive, or an alias.
-///
-/// The sibling of [`Row`], for the two blocks in this window that are not
-/// settings. A setting has one value and one control; an entry has three or
-/// four facts about a thing, side by side, and a button that takes it away.
+/// Describes one list entry (a drive or an alias).
 pub struct Entry<'a> {
-    /// A drive letter or an alias name. Short, Semibold, and the column the
-    /// eye scans down.
+    /// A drive name or alias name.
     pub name: &'a str,
-    /// What it stands for: a path, or a job code. Elided from the *left*,
-    /// because the tail of a path is what tells two of them apart.
+    /// A path or job code. Elided from the left, since a path's tail is what
+    /// distinguishes it.
     pub detail: &'a str,
-    /// A kind, or somebody's note about why the alias exists.
+    /// A drive kind, or an alias note.
     pub note: Option<&'a str>,
-    /// Why this entry will not do what it says. Drawn under the row in the
-    /// warning tone - the same place and the same colour a setting puts its
-    /// caveat, because it is the same kind of disappointment.
+    /// A warning drawn under the row in the warning tone.
     pub caveat: Option<&'a str>,
-    /// Room for a control before the name: the checkbox that turns a drive
-    /// off. Zero where there is none.
+    /// Width reserved for a leading control (the drive checkbox); zero if
+    /// none.
     pub lead_w: f32,
-    /// And room for the ones after the note.
+    /// Width reserved for trailing controls.
     pub control_w: f32,
 }
 
-/// The name column, which does not grow.
-///
-/// A drive letter is two characters and the longest alias anybody has is
-/// about eight, so a name column that took a share of a widening window
-/// would be a column of air with a word at the front of it.
+/// Fixed width of the name column; names are short.
 const NAME_W: f32 = 84.0;
 
-/// The narrowest the two flexible columns may be squeezed to.
-///
-/// A path at 120 still shows a folder and a half after the ellipsis, which
-/// is what distinguishes two rows; a note at 60 shows a word.
+/// Minimum widths of the flexible detail and note columns.
 const MIN_DETAIL_W: f32 = 120.0;
 const MIN_NOTE_W: f32 = 60.0;
 
-/// Between one column of a list row and the next.
+/// Gap between list row columns.
 const CELL_GAP: f32 = 8.0;
 
-/// One row of a list: the entry, a control before it, and controls after.
-///
-/// Measured with [`measure::row_cells`] rather than with a run of hard pixel
-/// widths, which is what the two lists used to do - twelve of them between
-/// them, none of which ever read `available_width`, which is why the window
-/// was resizable and resizing it changed nothing. Two of the five columns
-/// are flexible and the rest are what they are.
+/// Draws one list row: optional leading control, entry columns, and trailing
+/// controls. Columns are sized with [`measure::row_cells`]; detail and note
+/// flex, the rest are fixed.
 pub fn list_row<R>(
     ui: &mut Ui,
     theme: &Theme,
@@ -268,9 +195,7 @@ pub fn list_row<R>(
     let avail = ui.available_width();
     let inner = (avail - measure::CARD_PAD * 2.0).max(0.0);
 
-    // The note is the column that goes first. A drive whose kind is not
-    // shown is a drive missing a fact; a drive whose *path* is not shown is
-    // a row about nothing.
+    // The note column is dropped first when space runs out.
     let with_note = entry.note.is_some();
     let cells = |note: bool| {
         let mut v = vec![
@@ -289,9 +214,8 @@ pub fn list_row<R>(
         Some(w) => (false, w),
         None => match measure::row_cells(inner, CELL_GAP, &cells(false)) {
             Some(w) => (false, w),
-            // Narrower than the minimums. Everything gets its least and the
-            // row is as wide as it is - which at this point is a window
-            // below `MIN_SIZE`, i.e. a window Windows will not make.
+            // Below the minimums, which only happens under the window's
+            // `MIN_SIZE`; use each column's minimum.
             None => (
                 false,
                 cells(false).iter().map(|c| c.least()).collect::<Vec<_>>(),
@@ -340,8 +264,6 @@ pub fn list_row<R>(
     let (tile, response) = ui.allocate_exact_size(vec2(avail, height), Sense::hover());
     painter.rect_filled(tile, theme::radius(theme::RADIUS_MEDIUM), theme.card);
 
-    // Left to right along the top line, whatever the tile ended up being
-    // tall enough for.
     let top = measure::prose_origin(tile).y;
     let mut x = measure::prose_origin(tile).x;
     let slot = |x: f32, w: f32, h: f32| {
@@ -355,9 +277,7 @@ pub fn list_row<R>(
     } else {
         tile.center().y - line_h / 2.0
     };
-    // Each galley centred on the line rather than hung from its top. The
-    // note is set two points smaller than the name beside it, and three
-    // galleys sharing one `y` puts the small one visibly high.
+    // Centre each galley on the line, since the note uses a smaller font.
     let centred = |g: &std::sync::Arc<egui::Galley>| text_y + (line_h - g.rect.height()) / 2.0;
     painter.galley(pos2(x, centred(&name)), name, theme.text);
     x += widths[1] + CELL_GAP;
@@ -380,8 +300,7 @@ pub fn list_row<R>(
         );
     }
 
-    // One thing to a screen reader, like a setting row: a drive letter on its
-    // own says nothing and a path on its own says nothing about which drive.
+    // One accessible node for the whole row, like a setting row.
     let spoken = [
         Some(entry.name),
         Some(entry.detail),
@@ -412,7 +331,7 @@ pub fn list_row<R>(
     trailing(&mut child)
 }
 
-/// A label laid out to one line, with an ellipsis where it ran out.
+/// Lays out `text` on one line, ending in an ellipsis if it overflows.
 fn truncated(
     painter: &egui::Painter,
     text: &str,
@@ -427,10 +346,7 @@ fn truncated(
     painter.layout_job(job)
 }
 
-/// A boolean, as a switch.
-///
-/// Painted. See the module note for why it is not `ui.checkbox`, and for why
-/// it nevertheless reports itself as one.
+/// Draws a toggle switch. See the module note for its accessibility role.
 pub fn switch(ui: &mut Ui, theme: &Theme, on: &mut bool, label: &str) -> Response {
     let (rect, mut response) = ui.allocate_exact_size(vec2(SWITCH_W, SWITCH_H), Sense::click());
     if response.clicked() {
@@ -447,12 +363,8 @@ pub fn switch(ui: &mut Ui, theme: &Theme, on: &mut bool, label: &str) -> Respons
         return response;
     }
 
-    // The panel has no motion in it, and `gui::anim` records why: the panel
-    // *is* the window, so every tween frame was a `SetWindowPos` and a
-    // swapchain reconfigure. None of that is true here - this is a
-    // fixed-size ordinary window and a moving knob costs one repaint of a
-    // static surface. A switch that teleports is the one control that reads
-    // worse without it.
+    // Animated here, unlike the panel (see `gui::anim`): in this ordinary
+    // window a tween costs only a repaint.
     let t = ui.ctx().animate_bool_responsive(response.id, value);
 
     let visuals = ui.style().interact(&response);
@@ -462,9 +374,7 @@ pub fn switch(ui: &mut Ui, theme: &Theme, on: &mut bool, label: &str) -> Respons
 
     let painter = ui.painter();
     painter.rect_filled(rect, radius, gray(ui, track));
-    // Only while off. A filled track needs no outline, and fading the
-    // outline out with the fill is what stops the two reading as separate
-    // events.
+    // The outline fades out as the fill fades in.
     if t < 1.0 {
         painter.rect_stroke(
             rect,
@@ -492,12 +402,10 @@ pub fn switch(ui: &mut Ui, theme: &Theme, on: &mut bool, label: &str) -> Respons
     response
 }
 
-/// `SWITCH_H` as an expression the corner radius can be built from without
-/// tripping the const-evaluation rules. Named rather than inlined so the two
-/// radii below cannot drift apart.
+/// Alias of `SWITCH_H` used for the track's corner radius.
 const SHT: f32 = SWITCH_H;
 
-/// Mixes two colours. `t` of zero is the first, one is the second.
+/// Linearly mixes two colours; `t = 0` gives `from`, `t = 1` gives `to`.
 fn blend(from: Color32, to: Color32, t: f32) -> Color32 {
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
     Color32::from_rgba_premultiplied(
@@ -512,10 +420,7 @@ fn fade(colour: Color32, alpha: f32) -> Color32 {
     theme::faded(colour, alpha)
 }
 
-/// Greys a colour out where the control is disabled.
-///
-/// A pinned setting is drawn rather than hidden, so its value has to stay
-/// readable while it is refused. egui already knows how far to fade.
+/// Greys out `colour` when the `Ui` is disabled, keeping the value readable.
 fn gray(ui: &Ui, colour: Color32) -> Color32 {
     if ui.is_enabled() {
         colour
@@ -524,12 +429,8 @@ fn gray(ui: &Ui, colour: Color32) -> Color32 {
     }
 }
 
-/// One entry in the list of pages.
-///
-/// Painted, for the indicator bar. The bar is the same three points
-/// `theme::MARKER_W` gives the selected result row, and that is not a
-/// coincidence worth losing: the panel and this window should say "this one"
-/// the same way.
+/// Draws one nav entry. The selection bar uses `theme::MARKER_W` to match the
+/// panel's selected result row.
 pub fn nav_item(
     ui: &mut Ui,
     theme: &Theme,
@@ -561,17 +462,13 @@ pub fn nav_item(
             pos2(rect.left() + 2.0 + theme::MARKER_W / 2.0, rect.center().y),
             vec2(theme::MARKER_W, NAV_H * 0.5),
         );
-        // `accent`, not `accent_fill`. A bar is read against the ground it
-        // sits on rather than against text drawn on top of it, and in the
-        // dark theme `CompoundBrandBackground` is 2.5:1 on a tile - under the
-        // 3:1 WCAG asks of a boundary. `BrandForeground1` clears it in both.
-        // The same value the panel's selected-row bar uses, which is the
-        // point: they are the same mark.
+        // `accent` (`BrandForeground1`) rather than `accent_fill`: in the
+        // dark theme `CompoundBrandBackground` is 2.5:1 on a tile, under
+        // WCAG's 3:1 for boundaries. Matches the panel's selected-row bar.
         painter.rect_filled(bar, theme::radius(theme::RADIUS_LARGE), theme.accent);
     }
 
-    // The gutter closes up entirely where there is no icon font, rather than
-    // standing empty. See `theme::icons`.
+    // Without the icon font the gutter collapses. See `theme::icons`.
     let text_x = if icons {
         let colour = if selected { theme.strong } else { theme.dim };
         painter.text(
@@ -586,9 +483,7 @@ pub fn nav_item(
         rect.left() + 14.0
     };
 
-    // Weight as well as colour. The palette is greys, and `theme::weight`
-    // records that brightness alone carries about three steps before two of
-    // them stop being two.
+    // Selection is marked by weight as well as colour; see `theme::weight`.
     let weight = if selected {
         Weight::Semibold
     } else {
@@ -605,10 +500,8 @@ pub fn nav_item(
     response
 }
 
-/// A button with no frame until it is touched, holding one mark.
-///
-/// The tooltip is also the accessible name, because a button with no text has
-/// nothing else to offer a screen reader - so it is never optional.
+/// Draws a frameless icon button. The tooltip is required because it is also
+/// the accessible name.
 pub fn subtle_icon_button(ui: &mut Ui, theme: &Theme, icon: Icon, tooltip: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ICON_BTN, ICON_BTN), Sense::click());
     let name = tooltip.to_owned();
@@ -636,7 +529,7 @@ pub fn subtle_icon_button(ui: &mut Ui, theme: &Theme, icon: Icon, tooltip: &str)
     response.on_hover_text(tooltip)
 }
 
-/// A button that is the obvious thing to press.
+/// Draws an accent-filled primary button.
 pub fn primary_button(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
     ui.add(
         egui::Button::new(
@@ -650,17 +543,13 @@ pub fn primary_button(ui: &mut Ui, theme: &Theme, text: &str) -> Response {
     )
 }
 
-/// And one that is not.
+/// Draws a standard button.
 pub fn button(ui: &mut Ui, text: &str) -> Response {
     ui.add(egui::Button::new(text).min_size(vec2(0.0, theme::CONTROL_H)))
 }
 
-/// A line that says something went wrong, or is about to.
-///
-/// A tinted band is what Fluent would draw here and it is refused on the
-/// palette's own rule: colour is never the only carrier. So this is an
-/// ordinary tile with the tone's glyph in front of the words, which is the
-/// same pair the status line has used since the terminal build.
+/// Draws a status message on a card, prefixed by the tone's glyph so colour
+/// is not the only signal.
 pub fn message_bar(ui: &mut Ui, theme: &Theme, tone: Tone, text: &str) {
     card(ui, theme, |ui| {
         ui.horizontal(|ui| {
@@ -681,23 +570,17 @@ pub fn message_bar(ui: &mut Ui, theme: &Theme, tone: Tone, text: &str) {
     });
 }
 
-/// The `doctor` report: read-only, monospaced and selectable.
+/// Draws the `doctor` report as a read-only, monospaced, selectable box.
 ///
-/// A `TextEdit` rather than a `Label` because the point of this box is to end
-/// up in an email, and a label cannot be selected with the mouse. Not
-/// interactive, so it takes no focus and answers no keystroke.
-///
-/// Takes a [`report::View`] rather than a string, because there are three
-/// things to draw and only one of them is a box. A reading that has not
-/// arrived is a spinner and no box at all - an empty box is a report that
-/// found nothing, which is the opposite of what is true.
+/// Uses a non-interactive `TextEdit` so the text can be mouse-selected. While
+/// waiting, shows a spinner instead of an empty box.
 pub fn report_box(ui: &mut Ui, theme: &Theme, view: report::View<'_>) {
     let report = match view {
         report::View::Waiting => {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(
-                    egui::RichText::new("Taking a reading\u{2026}")
+                    egui::RichText::new("Running diagnostics\u{2026}")
                         .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                         .color(theme.dim),
                 );
@@ -708,7 +591,7 @@ pub fn report_box(ui: &mut Ui, theme: &Theme, view: report::View<'_>) {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(
-                    egui::RichText::new("Taking a fresh reading\u{2026}")
+                    egui::RichText::new("Refreshing diagnostics\u{2026}")
                         .font(theme::font(theme::SIZE_CAPTION, Weight::Regular))
                         .color(theme.dim),
                 );
@@ -729,7 +612,7 @@ pub fn report_box(ui: &mut Ui, theme: &Theme, view: report::View<'_>) {
     );
 }
 
-/// A label that is read and not changed.
+/// Draws a read-only label and value on a card.
 pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color32) {
     let label_text = label.to_owned();
     let value_text = value.to_owned();
@@ -755,10 +638,8 @@ pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color3
     let height = measure::tile_height(prose_h, 0.0);
     let (tile, response) = ui.allocate_exact_size(vec2(avail, height), Sense::hover());
 
-    // Painted text is not in the accessibility tree by itself - only a
-    // widget is - so without this a version number, a path and a status
-    // line are on screen and unreadable to anything that is not a pair of
-    // eyes. The whole pair reads as one thing, the way a setting row does.
+    // Painted text is not in the accessibility tree, so expose the pair as
+    // one labelled node.
     let spoken = format!("{label_text}. {value_text}");
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, &spoken));
 
@@ -769,13 +650,12 @@ pub fn fact(ui: &mut Ui, theme: &Theme, label: &str, value: &str, colour: Color3
     painter.galley(at, value, colour);
 }
 
-/// Room between one group of settings and the next.
+/// Adds the vertical gap between setting groups.
 pub fn group_gap(ui: &mut Ui) {
     ui.add_space(theme::GROUP_GAP);
 }
 
-/// A drop-down, sized to its widest option so the column does not step in and
-/// out as the value changes.
+/// Draws a drop-down of fixed `width`; returns the newly picked index, if any.
 pub fn dropdown(
     ui: &mut Ui,
     salt: &str,
@@ -799,15 +679,13 @@ pub fn dropdown(
     picked
 }
 
-/// A single-line box, with an optional small button inside its right edge.
+/// The result of [`text_field`].
 ///
-/// Committed when the box gives up the keyboard, which is both Enter and
-/// clicking away - and *not* on Escape, which reverts. That distinction is
-/// the point: Escape is how somebody abandons a half-typed path, and a box
-/// that saved it anyway would be a box nobody could back out of.
+/// A value commits when the box loses focus via Enter or click-away, but not
+/// via Escape, which reverts.
 pub struct Typed {
     pub response: Response,
-    /// Whether the value should be written now.
+    /// Whether the value should be saved now.
     pub commit: bool,
     /// Whether the trailing button was pressed.
     pub trailing: bool,
@@ -845,10 +723,8 @@ pub fn text_field(
         pressed = subtle_icon_button(ui, theme, icon, tooltip).clicked();
     }
 
-    // egui drops widget focus on an un-consumed Escape, so a box that lost
-    // focus on the same frame Escape was pressed was abandoned rather than
-    // finished. Asked here, where the box is, because by the time the window
-    // reads the key the distinction is gone.
+    // egui drops focus on an unconsumed Escape, so losing focus on the same
+    // frame as Escape means abandoned. Checked here, before the key is gone.
     let abandoned = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
 
     Typed {
@@ -858,8 +734,7 @@ pub fn text_field(
     }
 }
 
-/// How wide a control of each kind is, so [`Row::control_w`] and the widget
-/// that fills it cannot disagree.
+/// Control widths, shared by [`Row::control_w`] and the widgets themselves.
 pub mod width {
     pub const SWITCH: f32 = super::SWITCH_W;
     pub const DROPDOWN: f32 = 150.0;
@@ -868,19 +743,12 @@ pub mod width {
     pub const TEXT_WITH_BUTTON: f32 = TEXT + super::ICON_BTN + 4.0;
 }
 
-/// Asks before doing something that cannot be undone.
+/// Shows a modal confirmation for an irreversible action (used only for
+/// removing a drive).
 ///
-/// The only one in this window, and deliberately: a form that confirms
-/// everything trains people to dismiss the question without reading it.
-/// Removing a drive earns it because the path is the part nobody remembers,
-/// and because the configuration file loses its comments around the drive
-/// list when it is rewritten.
-///
-/// Returns `Some(true)` when the user went ahead, `Some(false)` when they
-/// backed out, and `None` while the question is still up. Escape and a click
-/// on the backdrop both count as backing out - `egui::Modal` consumes the key
-/// itself, which is also what stops it reaching the window behind and
-/// closing that instead.
+/// Returns `Some(true)` to proceed, `Some(false)` to cancel, and `None` while
+/// open. Escape and a backdrop click cancel; `egui::Modal` consumes Escape so
+/// it does not reach the window behind.
 pub fn confirm(
     ctx: &egui::Context,
     theme: &Theme,
@@ -905,16 +773,14 @@ pub fn confirm(
                     .color(theme.text),
             );
             ui.add_space(16.0);
-            // The two buttons on the right, which is where a dialog puts
-            // them and the one place `Sides` is exactly the right tool: both
-            // halves are one line tall, so the objection in
-            // `super::measure` does not apply.
+            // Buttons right-aligned. `Sides` works here because both halves
+            // are one line tall (see `super::measure`).
             egui::Sides::new()
                 .show(
                     ui,
                     |_| {},
                     |ui| {
-                        // Right to left, so the primary ends up rightmost.
+                        // Laid out right to left, so the primary is rightmost.
                         let went = primary_button(ui, theme, go).clicked();
                         let backed = button(ui, cancel).clicked();
                         (went, backed)
@@ -937,22 +803,16 @@ pub fn confirm(
 mod tests {
     use super::*;
 
-    /// A control's declared width and the widget that fills it have to agree,
-    /// or the prose column is measured against one number and the control
-    /// drawn at another - which overflows the tile by the difference.
     #[test]
     fn a_switch_is_as_wide_as_a_row_is_told_it_is() {
         assert_eq!(width::SWITCH, SWITCH_W);
     }
 
-    /// The trailing button has to be paid for out of the declared width
-    /// rather than added to it.
     #[test]
     fn a_box_with_a_button_in_it_asks_for_room_for_the_button() {
         assert_eq!(width::TEXT_WITH_BUTTON, width::TEXT + ICON_BTN + 4.0);
     }
 
-    /// A switch is a switch and not a square.
     #[test]
     fn a_switch_is_twice_as_wide_as_it_is_tall() {
         assert_eq!(SWITCH_W, SWITCH_H * 2.0);

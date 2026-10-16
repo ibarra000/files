@@ -1,67 +1,49 @@
-//! What the panel and the settings window say to each other, as text.
+//! Text codec for messages between the panel and the settings window.
 //!
-//! One message per line, each a verb and then its fields, separated by
-//! spaces. `show diagnostics`. `live 100,200 hotkey=taken:the%20chord%20is%20
-//! held%20by%20another%20program`. `closing`.
+//! One message per line: a verb, then space-separated fields. Fields are
+//! percent-escaped so they contain no spaces or control characters.
 //!
-//! # Why text, and why by hand
+//! ```text
+//! show diagnostics
+//! live 100,200 no:Ctrl+Shift+Space%20is%20taken
+//! live - yes
+//! closing
+//! ```
 //!
-//! There is a serialisation crate for this and it is not used, for the same
-//! reason `Cargo.toml` gives for keeping `syn` out of the build: this is a
-//! dozen messages with at most three fields each, and a derive macro would
-//! be a proc-macro dependency and a compile-time cost to save sixty lines.
+//! Hand-written to avoid a serialisation dependency (see `Cargo.toml`), and
+//! text so the protocol is readable in logs and debuggers.
 //!
-//! Text rather than a packed struct because of what goes wrong. A protocol
-//! between two processes is debugged by looking at it - in a debugger, in a
-//! log, in a hex dump of a pipe - and `show diagnostics` is legible in all
-//! three where `0x03 0x07` is not. It is also what makes the round-trip test
-//! below worth anything: a format whose failure mode is "the bytes meant
-//! something else" is one where a test that encodes and decodes proves only
-//! that the two halves agree with each other.
-//!
-//! # The parser may not panic
-//!
-//! Anything can connect to a named pipe. The settings window is not a
-//! trusted peer merely because this program wrote it - a crash here takes
-//! the panel down with somebody's search open, which is a worse hole than
-//! the one the pipe was opened for. So every field is parsed with `Option`
-//! and a malformed line is `None` rather than an index out of range, and
-//! there is a test that throws every byte string at it.
+//! Any process can connect to the pipe, so decoding must never panic: every
+//! field is parsed through `Option`, and a malformed line decodes to `None`.
 
 use crate::view::settings::PageId;
 
-/// What the panel tells the settings window.
+/// Messages from the panel to the settings window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToSettings {
-    /// Come to the front, on this page.
+    /// Bring the window to the front on this page.
     Show(PageId),
-    /// Go away. What the tray menu's toggle does when the window is up.
+    /// Close the window (tray menu toggle).
     Close,
-    /// The facts only the running panel knows.
-    ///
-    /// Not the whole of `AppState`, and this is the part that made the split
-    /// affordable: the settings window reads exactly two things it cannot
-    /// work out for itself. Everything else on the form comes from the
-    /// configuration file, which both processes can read.
+    /// Runtime state only the panel knows; everything else comes from the
+    /// configuration file.
     Live(Live),
-    /// The configuration file has changed underneath you. Read it again.
+    /// The configuration file changed; reload it.
     Reload,
-    /// The panel is shutting down. Anything that needs it is about to stop
-    /// working; say so on the form rather than failing when pressed.
+    /// The panel is shutting down; disable actions that need it.
     Exiting,
 }
 
-/// And what the settings window tells the panel.
+/// Messages from the settings window to the panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToPanel {
-    /// The configuration file has been written. Read it again.
+    /// The configuration file was written; reload it.
     Changed,
-    /// Install the update the About page found.
+    /// Install the update found by the About page.
     ///
-    /// A message rather than something the settings process does itself.
-    /// `update::apply::hand_over` bakes in `std::process::id()` and
-    /// `current_exe()`, so a settings process running it would wait on its
-    /// own pid and relaunch itself instead of the panel.
+    /// Must run in the panel: `update::apply::hand_over` uses the current
+    /// process id and executable, so the settings process would relaunch
+    /// itself.
     InstallUpdate,
     /// Forget the remembered panel position.
     ForgetPlacement,
@@ -69,41 +51,35 @@ pub enum ToPanel {
     Closing,
 }
 
-/// The facts only the running panel knows.
+/// Runtime state only the running panel knows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Live {
-    /// Where the panel has been dragged to, if anywhere.
+    /// The remembered panel position, if any.
     pub placement: Option<(i32, i32)>,
     /// Whether the panel holds the global chord.
     pub hotkey: Held,
 }
 
-/// Whether the global chord is claimed, as the panel's listener reported it.
+/// Whether the panel's hotkey listener holds the global chord.
 ///
-/// Carried rather than probed, because `RegisterHotKey` is per-thread: a
-/// settings process asking Windows whether the chord is free would be told
-/// it is taken, by the panel, which is the answer that matters least. See
-/// [`crate::hotkey::Probe`].
+/// Sent by the panel because a probe from the settings process would find the
+/// chord taken by the panel itself. See [`crate::hotkey::Probe`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Held {
-    /// The listener has not said, which for a hotkey that is switched off is
-    /// for ever.
+    /// Not reported yet; permanent when the hotkey is off.
     #[default]
     Unknown,
-    /// This program holds it.
+    /// The panel holds it.
     Yes,
-    /// It could not be claimed, and why.
+    /// Registration failed, with the reason.
     No(String),
 }
 
 // -- encoding ---------------------------------------------------------------
 
-/// Percent-encodes the characters that would break a line into fields.
+/// Percent-encodes `%`, space and control characters below U+0020.
 ///
-/// Space, percent itself, and anything below it. Deliberately not a general
-/// URL encoder: the only strings that go on the wire are error messages this
-/// program produced, so what is needed is a rule that round-trips, not one
-/// that satisfies a specification.
+/// Not a general URL encoder; it only needs to round-trip.
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -117,7 +93,7 @@ fn escape(text: &str) -> String {
     out
 }
 
-/// And the other way. `None` on a malformed escape rather than a guess.
+/// Reverses [`escape`]; returns `None` on a malformed escape.
 fn unescape(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut bytes = text.chars();
@@ -173,7 +149,7 @@ impl Live {
 }
 
 impl ToSettings {
-    /// One line, with no terminator. The transport adds that.
+    /// Encodes as one line without a terminator; the transport adds it.
     pub fn encode(&self) -> String {
         match self {
             Self::Show(page) => format!("show {}", page_slug(*page)),
@@ -184,8 +160,7 @@ impl ToSettings {
         }
     }
 
-    /// `None` on anything that is not one of these, which includes anything
-    /// that is not this program.
+    /// Decodes one line; returns `None` for anything malformed or unknown.
     pub fn decode(line: &str) -> Option<Self> {
         let mut parts = line.split(' ');
         match parts.next()? {
@@ -204,7 +179,7 @@ impl ToSettings {
         }
     }
 
-    /// Every variant, for the round-trip test and for anybody adding one.
+    /// Representative values of every variant, for the round-trip test.
     #[cfg(test)]
     pub fn all() -> Vec<Self> {
         let mut out = vec![Self::Close, Self::Reload, Self::Exiting];
@@ -258,11 +233,6 @@ impl ToPanel {
 mod tests {
     use super::*;
 
-    /// Every message this program can send comes back as itself.
-    ///
-    /// Over a `const`-ish list rather than a handful of examples, so a
-    /// variant added without an encoding is a failing test rather than a
-    /// message that silently decodes as `None` on the other side.
     #[test]
     fn every_message_survives_the_round_trip() {
         for msg in ToSettings::all() {
@@ -279,8 +249,6 @@ mod tests {
         }
     }
 
-    /// A line is a line: nothing encodes to something with a newline in it,
-    /// or one message would arrive as two.
     #[test]
     fn nothing_encodes_to_more_than_one_line() {
         for line in ToSettings::all().iter().map(ToSettings::encode) {
@@ -290,8 +258,6 @@ mod tests {
         }
     }
 
-    /// A space inside an error message would be read as a field separator,
-    /// so it is escaped - and the escape survives.
     #[test]
     fn a_message_with_spaces_in_it_stays_one_field() {
         let msg = ToSettings::Live(Live {
@@ -303,8 +269,6 @@ mod tests {
         assert_eq!(ToSettings::decode(&line), Some(msg));
     }
 
-    /// The escape covers itself, which is the one case a percent encoder
-    /// gets wrong by forgetting.
     #[test]
     fn a_percent_sign_survives() {
         for text in ["100%", "%20", "%", "%%", "a % b", "\u{1}\u{7f}"] {
@@ -314,7 +278,6 @@ mod tests {
         }
     }
 
-    /// Nothing that is not one of these decodes as one of these.
     #[test]
     fn a_line_this_program_did_not_write_is_refused() {
         for line in [
@@ -341,13 +304,8 @@ mod tests {
         }
     }
 
-    /// The property that matters most, because anything at all can connect
-    /// to a named pipe: no byte string takes the parser down.
-    ///
-    /// Exhaustive over short inputs rather than random, which for a parser
-    /// this small is both cheaper and stronger - every one- and two-token
-    /// line built from the alphabet the format uses, plus a sweep of raw
-    /// bytes.
+    /// Exhaustive over lines of up to three tokens from the format's alphabet,
+    /// plus every single byte.
     #[test]
     fn no_input_panics_the_parser() {
         let pieces = [
@@ -387,8 +345,7 @@ mod tests {
                 }
             }
         }
-        // And a sweep of every single byte, because a `char` boundary is the
-        // other way a parser like this falls over.
+        // Every single byte, to exercise `char` boundary handling.
         for byte in 0u8..=255 {
             let s = String::from_utf8_lossy(&[byte]).into_owned();
             let _ = ToSettings::decode(&s);
@@ -398,9 +355,6 @@ mod tests {
         }
     }
 
-    /// A negative position is a real one: a second monitor to the left of
-    /// the first has negative coordinates, and a parser that took an
-    /// unsigned integer here would put the window back on the wrong screen.
     #[test]
     fn a_window_on_a_monitor_to_the_left_round_trips() {
         let msg = ToSettings::Live(Live {

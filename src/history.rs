@@ -1,29 +1,13 @@
-//! Codes typed before, recalled with the Up arrow.
+//! Search history recalled with the Up arrow.
 //!
-//! Two halves that deliberately do not know about each other: [`History`] is a
-//! pure in-memory list with a browsing cursor, driven from the state machine
-//! and testable without a filesystem; the free functions at the bottom load
-//! and store it.
+//! [`History`] is a pure in-memory list with a browsing cursor; the free
+//! functions below load and store it.
 //!
-//! # Why it is written eagerly
-//!
-//! There is no keyboard quit - the window's close button is how the program
-//! ends - so there is no clean shutdown to flush anything at. The process is
-//! simply terminated. A history saved on exit would therefore be a history
-//! that is never saved, so every commit writes the whole (tiny) file.
-//!
-//! # Where it lives
-//!
-//! `%APPDATA%\files\history.txt`, next to the config rather than beside the
-//! index in `%LOCALAPPDATA%`. The index is a rebuildable cache of one
-//! machine's drives and must not roam; the codes someone works on are theirs
-//! and should follow them, exactly like their settings.
-//!
-//! # Failure
-//!
-//! Best effort throughout, matching the index cache: if the file cannot be
-//! read or written the program runs normally and simply forgets between
-//! sessions. Losing a convenience must never cost someone a search.
+//! The process has no clean shutdown (it is terminated), so every commit
+//! rewrites the whole file rather than saving on exit. The file lives in
+//! `%APPDATA%\files\history.txt` so it roams with the config, unlike the
+//! machine-local index. All I/O is best effort: on failure, history is simply
+//! not persisted.
 
 use std::fmt;
 use std::fs::File;
@@ -34,25 +18,17 @@ use std::thread::JoinHandle;
 
 use crate::util::latest_slot::LatestSlot;
 
-/// How many codes are remembered.
-///
-/// Recall is a list someone scrolls, not an archive: past a couple of hundred
-/// the Up arrow is the wrong tool and the file is still under 4 KB.
+/// Maximum number of remembered codes.
 pub const MAX_ENTRIES: usize = 200;
 
-/// The longest line accepted from disk, so a corrupted file cannot be loaded
-/// into the search box.
+/// Longest entry accepted, in bytes, so a corrupt file cannot flood the
+/// search box.
 const MAX_ENTRY_LEN: usize = 512;
 
 /// Previously used codes, newest first, plus the browsing cursor.
 ///
-/// The cursor is the whole of "the user asked for this list": it is `Some` from
-/// the Up arrow that starts browsing until something ends it, and nothing else
-/// on screen may show these codes while it is `None`.
-///
-/// There used to be a `draft` beside it, holding whatever was half-typed when
-/// browsing started so Esc could put it back. Browsing can only start from an
-/// empty field, so what it held was always the empty string.
+/// The cursor is `Some` only while the user is browsing; nothing on screen may
+/// show these codes while it is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
     entries: Vec<String>,
@@ -64,17 +40,14 @@ impl History {
         Self::default()
     }
 
-    /// Builds from loaded lines, applying the same dedupe and cap as `record`
-    /// so a hand-edited file cannot produce a list the program would never
-    /// have written.
+    /// Builds from loaded lines, applying the same dedupe and cap as `record`.
     pub fn from_entries<I, S>(entries: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         let mut history = Self::new();
-        // Reversed: the file is newest-first, and `record` pushes to the
-        // front, so replaying it in order would invert the list.
+        // Reversed: the file is newest-first and `record` pushes to the front.
         let loaded: Vec<String> = entries.into_iter().map(Into::into).collect();
         for entry in loaded.into_iter().rev() {
             history.record(&entry);
@@ -94,7 +67,7 @@ impl History {
         self.entries.is_empty()
     }
 
-    /// Which entry is highlighted, while browsing.
+    /// Index of the highlighted entry while browsing.
     pub fn cursor(&self) -> Option<usize> {
         self.cursor
     }
@@ -103,40 +76,27 @@ impl History {
         self.cursor.is_some()
     }
 
-    /// Remembers a code. Returns whether the list changed.
+    /// Records a code at the front of the list. Returns whether the list
+    /// changed.
     ///
-    /// Matching is case-insensitive because the shares are: `11-D-0704` and
-    /// `11-d-0704` are the same job, and keeping both would fill the list with
-    /// the same code in different clothes. The newest spelling wins, since
-    /// that is the one just confirmed to work.
+    /// Duplicates are removed case-insensitively, matching the shares; the
+    /// newest spelling is kept.
     pub fn record(&mut self, entry: &str) -> bool {
         let entry = entry.trim();
         if entry.is_empty() || entry.len() > MAX_ENTRY_LEN {
             return false;
         }
 
-        // Exact match, not case-insensitive: a code re-entered in different
-        // case is the same job but a different spelling, and the one just
-        // confirmed to work is the one worth keeping. Comparing loosely here
-        // would leave the old spelling in place forever.
+        // Exact comparison, so a re-entry in different case still replaces the
+        // stored spelling below.
         if self.entries.first().is_some_and(|e| e == entry) {
             return false;
         }
 
-        // A code typed on the way to a longer one supersedes it rather than
-        // joining it. `11-D` at the head, then `11-D-0704`, is one job being
-        // typed - not two jobs looked up - and a list that keeps both is a
-        // list with three quarters of the same code in it.
-        //
-        // Head-only, deliberately. The entry this can replace is the one
-        // recorded immediately before, which is the only one a chain of
-        // keystrokes can have produced; a `11-D` looked up yesterday sits
-        // further down and is never touched.
-        //
-        // The reverse - backspacing from `11-D-0704` to `11-D` and stopping -
-        // is *not* collapsed. Losing a shorter code somebody deliberately
-        // shortened to is more surprising than keeping it, and unlike the
-        // forward case it is not something typing produces by accident.
+        // A longer code extending the head replaces it, so `11-D` followed by
+        // `11-D-0704` leaves one entry. Only the head is checked, since only
+        // the previous entry can be part of the same typing sequence.
+        // Shortening a code is intentional and keeps both entries.
         if self.supersedes_head(entry) {
             self.entries[0] = entry.to_string();
             self.cursor = None;
@@ -147,16 +107,12 @@ impl History {
         self.entries.insert(0, entry.to_string());
         self.entries.truncate(MAX_ENTRIES);
 
-        // A list that just moved under the cursor would leave the highlight
-        // pointing at a different code than the one being looked at.
+        // The list shifted, so the cursor would point at the wrong entry.
         self.cursor = None;
         true
     }
 
-    /// Whether `entry` is the head entry with more typed onto the end of it.
-    ///
-    /// Case-insensitive for the same reason the dedup below it is: the shares
-    /// do not distinguish `11-d` from `11-D`, so neither does this.
+    /// Whether `entry` extends the head entry (ASCII case-insensitive).
     fn supersedes_head(&self, entry: &str) -> bool {
         let Some(head) = self.entries.first() else {
             return false;
@@ -165,11 +121,10 @@ impl History {
             && entry.as_bytes()[..head.len()].eq_ignore_ascii_case(head.as_bytes())
     }
 
-    /// Starts browsing at the newest code, which is what the first Up does.
+    /// Starts browsing at the newest code. Returns `None` when history is
+    /// empty.
     ///
-    /// Returns the entry to show, or `None` when there is no history at all.
-    /// There is nothing to remember on the way in: browsing only ever starts
-    /// from an empty field, which is what retired the `draft` this used to take.
+    /// Browsing only starts from an empty field, so no draft is saved.
     pub fn begin(&mut self) -> Option<&str> {
         if self.entries.is_empty() {
             return None;
@@ -178,9 +133,7 @@ impl History {
         self.entries.first().map(String::as_str)
     }
 
-    /// Steps one entry further back. Stops at the oldest rather than wrapping:
-    /// wrapping in a recall list means silently jumping from the code someone
-    /// wanted to one from last week.
+    /// Steps one entry older, stopping at the oldest without wrapping.
     pub fn older(&mut self) -> Option<&str> {
         let cursor = self.cursor?;
         let next = (cursor + 1).min(self.entries.len().saturating_sub(1));
@@ -188,11 +141,8 @@ impl History {
         self.entries.get(next).map(String::as_str)
     }
 
-    /// Steps one entry towards the newest.
-    ///
-    /// Past the newest it returns `None` and stops browsing, which the caller
-    /// turns into leaving the list with an empty field - the same thing a shell
-    /// does.
+    /// Steps one entry newer. Past the newest, returns `None` and stops
+    /// browsing, as a shell does.
     pub fn newer(&mut self) -> Option<&str> {
         let cursor = self.cursor?;
         if cursor == 0 {
@@ -204,7 +154,7 @@ impl History {
         self.entries.get(next).map(String::as_str)
     }
 
-    /// Jumps straight to an entry, as clicking one in the panel does.
+    /// Moves the cursor to `index`, as clicking an entry does.
     pub fn select(&mut self, index: usize) -> Option<&str> {
         if index >= self.entries.len() {
             return None;
@@ -213,23 +163,17 @@ impl History {
         self.entries.get(index).map(String::as_str)
     }
 
-    /// The entry currently highlighted.
+    /// Returns the highlighted entry.
     pub fn current(&self) -> Option<&str> {
         self.entries.get(self.cursor?).map(String::as_str)
     }
 
-    /// Stops browsing, keeping whatever was recalled.
-    ///
-    /// The only way out. There used to be a `cancel` beside this that handed
-    /// back the half-typed code; with no draft to hand back it was this
-    /// function under a second name, and two names for one transition is how a
-    /// caller comes to believe they differ.
+    /// Stops browsing, keeping the recalled code.
     pub fn accept(&mut self) {
         self.cursor = None;
     }
 
-    /// A copy for the writer thread. Cheap: a few hundred short strings, built
-    /// at most once per confirmed search.
+    /// Returns a copy of the entries for the writer thread.
     pub fn snapshot(&self) -> Vec<String> {
         self.entries.clone()
     }
@@ -238,7 +182,7 @@ impl History {
 /// Why history could not be stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HistoryError {
-    /// No `%APPDATA%`, so there is nowhere to put it.
+    /// `%APPDATA%` is unset or empty.
     NoLocation,
     Io(String),
 }
@@ -260,10 +204,9 @@ impl fmt::Display for HistoryError {
 
 impl std::error::Error for HistoryError {}
 
-/// `%APPDATA%\files\history.txt`.
+/// Returns `%APPDATA%\files\history.txt`.
 ///
-/// Derived the same way as the config path rather than shared with it, so the
-/// two cannot be silently coupled if either moves.
+/// Derived independently of the config path so the two are not coupled.
 pub fn default_path() -> Option<PathBuf> {
     let appdata = std::env::var_os("APPDATA")?;
     let dir = PathBuf::from(appdata);
@@ -275,8 +218,8 @@ pub fn default_path() -> Option<PathBuf> {
 
 /// Reads the stored codes, newest first.
 ///
-/// Never fails: a missing, unreadable, or partly corrupt file yields the
-/// entries that could be read, which is empty in the worst case.
+/// Never fails: an unreadable file yields nothing and invalid lines are
+/// skipped.
 pub fn load(path: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -286,9 +229,7 @@ pub fn load(path: &Path) -> Vec<String> {
         .filter(|line| {
             !line.is_empty()
                 && line.len() <= MAX_ENTRY_LEN
-                // A control character here means the file was damaged, or was
-                // never a history file. Dropping the line is better than
-                // loading something that would corrupt the display.
+                // Control characters indicate a damaged or foreign file.
                 && !line.chars().any(char::is_control)
         })
         .map(str::to_string)
@@ -298,10 +239,9 @@ pub fn load(path: &Path) -> Vec<String> {
 
 /// Writes the codes, newest first.
 ///
-/// Temp file, `sync_all`, then rename over the destination - the same shape as
-/// the index's pointer file. Renaming over it is safe precisely because this
-/// file is never memory-mapped, which is the constraint that forces the index
-/// itself to use versioned names instead.
+/// Writes a temp file, calls `sync_all`, then renames over the destination.
+/// Renaming over is safe because this file is never memory-mapped (unlike the
+/// index, which uses versioned names).
 pub fn save(path: &Path, entries: &[String]) -> Result<(), HistoryError> {
     let parent = path.parent().ok_or(HistoryError::NoLocation)?;
     std::fs::create_dir_all(parent).map_err(|e| HistoryError::Io(e.to_string()))?;
@@ -319,8 +259,7 @@ pub fn save(path: &Path, entries: &[String]) -> Result<(), HistoryError> {
                 file.write_all(entry.as_bytes())?;
                 file.write_all(b"\n")?;
             }
-            // Without this a power loss can leave a renamed but empty file,
-            // which reads back as "no history" rather than as a failure.
+            // Without this, a power loss can leave a renamed but empty file.
             file.sync_all()
         })()
         .map_err(|e| {
@@ -335,13 +274,10 @@ pub fn save(path: &Path, entries: &[String]) -> Result<(), HistoryError> {
     })
 }
 
-/// The thread that owns the history file.
+/// Handle to the thread that owns the history file.
 ///
-/// Fed through a [`LatestSlot`] for the same reason the search worker is: two
-/// commits in quick succession should produce one write of the newer list, not
-/// two writes racing to rename over each other. Whole snapshots make that
-/// safe: the loser is simply a list one entry out of date, and it can never
-/// land after the winner because there is only one writer.
+/// Fed through a [`LatestSlot`] so rapid commits coalesce into one write of
+/// the newest snapshot; a single writer keeps writes in order.
 pub struct Writer {
     slot: Arc<LatestSlot<Arc<Vec<String>>>>,
     handle: Option<JoinHandle<()>>,
@@ -355,9 +291,8 @@ impl Writer {
 
     /// Stops the thread, waiting for a write in progress.
     ///
-    /// The wait is unbounded, unlike the network-facing workers: this is a few
-    /// kilobytes to a local disk, and the alternative is losing the very code
-    /// that was just used.
+    /// The wait is unbounded: the write is small and local, and abandoning it
+    /// would lose the latest entry.
     pub fn shutdown(&mut self) {
         self.slot.close();
         if let Some(handle) = self.handle.take() {
@@ -380,9 +315,7 @@ pub fn spawn_writer(path: PathBuf) -> std::io::Result<Writer> {
         .name("files-history".into())
         .spawn(move || {
             while let Some(entries) = worker.take_blocking() {
-                // Best effort, exactly like the index cache: a profile that
-                // cannot be written to costs recall next session and nothing
-                // else.
+                // Best effort: a failed write only loses recall next session.
                 let _ = save(&path, &entries);
             }
         })?;
@@ -418,19 +351,13 @@ mod tests {
 
     #[test]
     fn the_same_code_in_different_case_is_the_same_job() {
-        // The shares are case-insensitive, so keeping both spellings would
-        // fill the list with duplicates of one job.
         let mut h = history(&["11-D-0704"]);
         h.record("11-d-0704");
         assert_eq!(h.entries(), ["11-d-0704"], "newest spelling wins");
         assert_eq!(h.len(), 1);
     }
 
-    /// The chain a pause in the middle of typing leaves behind.
-    ///
-    /// The quiet period is the first defence and it is not a complete one:
-    /// somebody reading a code off a drawing really does stop for two seconds
-    /// in the middle of it. This is what catches the prefix that gets through.
+    /// Covers prefixes recorded when typing pauses past the quiet period.
     #[test]
     fn a_code_typed_on_the_way_to_a_longer_one_is_superseded_by_it() {
         let mut h = History::new();
@@ -441,8 +368,6 @@ mod tests {
         assert_eq!(h.len(), 1, "the list kept the walk as well as the code");
     }
 
-    /// Head-only. A code looked up earlier has moved down the list and is not
-    /// something the next few keystrokes can reach.
     #[test]
     fn only_the_entry_just_recorded_can_be_superseded() {
         let mut h = history(&["P12345-001", "11-D"]);
@@ -450,7 +375,6 @@ mod tests {
         assert_eq!(h.entries(), ["11-D-0704", "P12345-001", "11-D"]);
     }
 
-    /// Case-insensitively, because the shares are.
     #[test]
     fn a_prefix_in_the_other_case_is_still_a_prefix() {
         let mut h = history(&["11-d"]);
@@ -458,10 +382,6 @@ mod tests {
         assert_eq!(h.entries(), ["11-D-0704"]);
     }
 
-    /// The reverse is deliberately *not* collapsed. Backspacing to a shorter
-    /// code and stopping there is something somebody did on purpose, and
-    /// unlike the forward case it is not something typing produces by
-    /// accident.
     #[test]
     fn shortening_a_code_keeps_both() {
         let mut h = history(&["11-D-0704"]);
@@ -469,11 +389,7 @@ mod tests {
         assert_eq!(h.entries(), ["11-D", "11-D-0704"]);
     }
 
-    /// A different code that happens to start with the same characters is
-    /// still a different code - but it is also exactly what typing one
-    /// produces, so this is the case the rule is knowingly wrong about. It is
-    /// the right trade: the list holds two hundred codes and the alternative
-    /// is three quarters of them being halves of each other.
+    /// Known trade-off: a distinct code that extends the head still replaces it.
     #[test]
     fn a_longer_code_sharing_a_prefix_replaces_it() {
         let mut h = history(&["11-D-07"]);
@@ -554,8 +470,6 @@ mod tests {
 
     #[test]
     fn recording_while_browsing_drops_the_cursor() {
-        // The list is about to shift underneath it, so a kept cursor would
-        // point at a different code than the one on screen.
         let mut h = history(&["b", "a"]);
         h.begin();
         h.record("new");

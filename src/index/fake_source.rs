@@ -1,20 +1,13 @@
 //! An in-memory [`DirSource`] for tests.
 //!
-//! The valuable behaviours here are not "returns data". They are **fails with
-//! a network error** and **blocks for a minute**, because those are the
-//! conditions the real drives will produce and that no test on this machine
-//! can otherwise reach. The call log additionally makes prefetch de-duplication
-//! and cache-bypass behaviour assertable without any I/O at all.
-//!
-//! # The stamp seams, and why they are separate from the listing ones
+//! Besides returning data, it can fail with network errors, hang until
+//! cancelled, and record every call, so error paths, prefetch de-duplication
+//! and cache bypass are testable without I/O.
 //!
 //! [`FakeDirSource::set_stamp_error`] and
-//! [`FakeDirSource::set_stamp_supported`] fail the freshness probe *without*
-//! failing enumeration. Until they existed there was no way to reach the
-//! "this share will not tell me whether it changed" path from a test - the old
-//! test for it said so out loud and asserted against `IndexStore` directly
-//! instead. That path was where the index quietly re-enumerated a
-//! million-entry share every sixty seconds, so the missing seam was the bug.
+//! [`FakeDirSource::set_stamp_supported`] fail the freshness probe without
+//! failing enumeration, covering shares that cannot report whether they
+//! changed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,19 +21,16 @@ use super::enumerate::{DirSource, EntryMeta, EntrySink, ListOpts, ListStats};
 use super::errors::EnumError;
 use crate::util::cancel::CancelToken;
 
-/// Case-insensitive wildcard match, mirroring the semantics the file server
-/// applies to a search pattern.
+/// Case-insensitive wildcard match with file-server semantics.
 ///
-/// `*` matches zero or more characters (including `.`, unlike the legacy DOS
-/// star) and `?` matches **exactly one**. Getting `?` right matters: the
-/// completeness oracle in `--bench` partitions a directory by name length
-/// using `?`, `??`, ... and asserts the shards sum to the whole. A fake that
-/// ignored `?` would make that check report a false failure.
+/// `*` matches zero or more characters (including `.`, unlike the DOS star)
+/// and `?` matches exactly one. The `--bench` completeness oracle partitions a
+/// directory by name length with `?`, `??`, ..., so `?` must be exact.
 pub fn wildcard_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.to_lowercase().chars().collect();
     let n: Vec<char> = name.to_lowercase().chars().collect();
 
-    // Classic two-cursor glob match with backtracking on the last star.
+    // Two-cursor glob match, backtracking to the last star.
     let (mut pi, mut ni) = (0usize, 0usize);
     let (mut star, mut resume) = (None, 0usize);
 
@@ -79,19 +69,19 @@ pub enum Call {
 struct Behaviour {
     latency: Duration,
     fail_with: Option<EnumError>,
-    /// Blocks until cancelled or the deadline passes, to prove the UI stays
-    /// responsive when the network does not.
+    /// Blocks until cancelled or the deadline passes, to test that the UI
+    /// stays responsive.
     hang: bool,
     stamp: Option<DirStamp>,
     /// Fails `probe_stamp` only, leaving `list` and `query` working.
     stamp_error: Option<EnumError>,
-    /// When false, `probe_stamp` reports `Unsupported`, as a share that will
-    /// not answer `FileBasicInfo` does.
+    /// When false, `probe_stamp` reports `Unsupported`, like a share that does
+    /// not answer `FileBasicInfo`.
     stamp_supported: bool,
     /// Makes `query` report `Unsupported`, as a non-Windows source would.
     query_unsupported: bool,
-    /// Drops matches whose index is in this set, simulating a server-side
-    /// pattern matcher that under-returns - the case the audit must catch.
+    /// Match positions to omit, simulating a server-side matcher that
+    /// under-returns.
     drop_from_query: Vec<usize>,
 }
 
@@ -110,8 +100,7 @@ impl Default for Behaviour {
     }
 }
 
-/// Decrements the in-flight count however the call leaves, including the early
-/// returns for cancellation and scripted failures.
+/// Decrements the in-flight count on drop, including early returns.
 struct InFlight<'a>(&'a Mutex<(usize, usize)>);
 
 impl Drop for InFlight<'_> {
@@ -120,12 +109,8 @@ impl Drop for InFlight<'_> {
     }
 }
 
-/// One entry in a fake directory.
-///
-/// Carries the attribute word because that is exactly what a tree walk reads:
-/// whether to list an entry as a file, and whether to descend into it. The
-/// fake could previously only produce files, which made a walker untestable on
-/// a machine with no network drives - that is, untestable at all.
+/// One entry in a fake directory, with its attribute word so a tree walk can
+/// tell files, directories and junctions apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FakeEntry {
     pub name: String,
@@ -139,7 +124,7 @@ impl FakeEntry {
     pub const HIDDEN: u32 = 0x0000_0002;
     pub const SYSTEM: u32 = 0x0000_0004;
 
-    /// A file Windows marks hidden - `Thumbs.db`, a `~$` Office lock file.
+    /// A file Windows marks hidden, such as `Thumbs.db` or a `~$` lock file.
     pub fn hidden_file(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -147,8 +132,7 @@ impl FakeEntry {
         }
     }
 
-    /// A folder a file server marked system. Listed and walked regardless,
-    /// which is the behaviour worth holding the walker to.
+    /// A folder marked system. Must still be listed and walked.
     pub fn system_dir(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -170,8 +154,8 @@ impl FakeEntry {
         }
     }
 
-    /// A junction or directory symlink. Listed as neither a file nor something
-    /// to descend into, which is the behaviour a walker has to be held to.
+    /// A junction or directory symlink: neither listed as a file nor
+    /// descended into.
     pub fn junction(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -190,14 +174,12 @@ pub struct FakeDirSource {
     dirs: Arc<Mutex<HashMap<PathBuf, Vec<FakeEntry>>>>,
     behaviour: Arc<Mutex<Behaviour>>,
     calls: Arc<Mutex<Vec<Call>>>,
-    /// Per-directory failures, for the access-denied-subtree case that cannot
-    /// be reproduced any other way here.
+    /// Per-directory failures, for testing unreadable subtrees.
     dir_errors: Arc<Mutex<HashMap<PathBuf, EnumError>>>,
     /// Junction path rewrites: link -> target, applied as a prefix.
     junctions: Arc<Mutex<HashMap<PathBuf, PathBuf>>>,
-    /// Concurrent `list` calls, now and at their peak. A walker's concurrency
-    /// limit is otherwise only observable by timing, which is no way to write
-    /// a test.
+    /// Concurrent `list` calls: (current, peak). Makes a walker's concurrency
+    /// limit observable without timing.
     in_flight: Arc<Mutex<(usize, usize)>>,
 }
 
@@ -215,11 +197,10 @@ impl FakeDirSource {
         self
     }
 
-    /// Registers a directory whose entries carry attributes of their own.
+    /// Registers a directory whose entries carry their own attributes.
     ///
-    /// [`Self::with_dir`] makes every name an ordinary file, which is what
-    /// almost every test wants. This is for the ones about what an attribute
-    /// means - hidden, system, a junction.
+    /// Use for tests about hidden, system or junction entries;
+    /// [`Self::with_dir`] makes every name an ordinary file.
     pub fn with_entries(self, dir: impl Into<PathBuf>, entries: Vec<FakeEntry>) -> Self {
         self.dirs.lock().insert(dir.into(), entries);
         self
@@ -234,13 +215,11 @@ impl FakeDirSource {
         self
     }
 
-    /// Declares a file at `path`, creating every ancestor directory and the
-    /// directory entry each one needs inside its parent.
+    /// Declares a file at `path`, creating every ancestor directory and its
+    /// entry in the parent.
     ///
-    /// The only tree-building primitive, deliberately: declaring a directory's
-    /// entry in its parent and its own listing as two separate steps is how a
-    /// fake ends up internally inconsistent, and a walker proved correct
-    /// against a tree that could not exist has been proved nothing.
+    /// The only tree-building primitive, so the fake tree is always
+    /// internally consistent.
     pub fn with_file(self, path: impl AsRef<Path>) -> Self {
         self.add_path(path.as_ref());
         self
@@ -249,8 +228,8 @@ impl FakeDirSource {
     /// Declares many files at once, each relative to `root`.
     pub fn with_tree(self, root: impl AsRef<Path>, rel_paths: &[&str]) -> Self {
         let root = root.as_ref();
-        // The root exists even if it holds nothing, or a walk of an empty
-        // share would report "no such directory".
+        // Register the root even if empty, so walking an empty share does not
+        // report "no such directory".
         self.dirs.lock().entry(root.to_path_buf()).or_default();
         for rel in rel_paths {
             self.add_path(&root.join(rel));
@@ -286,8 +265,7 @@ impl FakeDirSource {
         else {
             return;
         };
-        // A volume root's parent is itself in spirit; stop rather than
-        // inventing an entry for `V:\` inside `V:\`.
+        // Stop at a volume root rather than adding `V:\` inside `V:\`.
         if parent.as_os_str().is_empty() || parent == dir {
             return;
         }
@@ -295,10 +273,8 @@ impl FakeDirSource {
         self.put(parent, FakeEntry::dir(name));
     }
 
-    /// Declares `name` inside `dir` as a junction pointing at `target`, and
-    /// registers the target too - so a walker that wrongly descends actually
-    /// loops and the test notices, instead of the fake quietly making the bug
-    /// unreachable.
+    /// Declares `name` inside `dir` as a junction to `target`, registering the
+    /// target too, so a walker that wrongly descends actually loops.
     pub fn with_junction(
         self,
         dir: impl AsRef<Path>,
@@ -307,10 +283,8 @@ impl FakeDirSource {
     ) -> Self {
         self.add_dirs(dir.as_ref());
         self.put(dir.as_ref(), FakeEntry::junction(name));
-        // Recorded as a path rewrite rather than a copy of the target's
-        // listing. A copy aliases one level only, so a junction pointing at an
-        // ancestor would dead-end instead of looping - and a cycle that cannot
-        // happen is a cycle the walker cannot be held to surviving.
+        // Stored as a path rewrite rather than a copy of the target's listing,
+        // so a junction to an ancestor forms a real cycle.
         self.junctions
             .lock()
             .insert(dir.as_ref().join(name), target.as_ref().to_path_buf());
@@ -319,9 +293,8 @@ impl FakeDirSource {
 
     /// Rewrites any junction prefix of `dir`, as the server would.
     ///
-    /// Bounded rather than looped to a fixed point: a junction chain that
-    /// never settles is a real thing to model, and hanging the fake is not the
-    /// way to model it.
+    /// Bounded to 64 rewrites so a chain that never settles cannot hang the
+    /// fake.
     fn resolve(&self, dir: &Path) -> PathBuf {
         let junctions = self.junctions.lock();
         if junctions.is_empty() {
@@ -349,7 +322,7 @@ impl FakeDirSource {
         self.dir_errors.lock().insert(dir.into(), err);
     }
 
-    /// The most `list` calls that were ever in flight at once.
+    /// Returns the most `list` calls ever in flight at once.
     pub fn peak_in_flight(&self) -> usize {
         self.in_flight.lock().1
     }
@@ -392,9 +365,6 @@ impl FakeDirSource {
     }
 
     /// Advances the stamp, as adding or removing an entry would.
-    ///
-    /// Shorthand for the common case, so a test that means "the directory
-    /// changed" does not have to invent timestamp numbers.
     pub fn bump_stamp(&self) {
         let mut b = self.behaviour.lock();
         let next = b.stamp.map_or(2, |s| s.last_write.saturating_add(1));
@@ -406,8 +376,8 @@ impl FakeDirSource {
         self.behaviour.lock().stamp_error = err;
     }
 
-    /// Makes the share refuse the probe outright, the way one that will not
-    /// answer `FileBasicInfo` does.
+    /// Makes the share refuse the probe, like one that does not answer
+    /// `FileBasicInfo`.
     pub fn set_stamp_supported(&self, supported: bool) {
         self.behaviour.lock().stamp_supported = supported;
     }
@@ -433,8 +403,7 @@ impl FakeDirSource {
         self.calls.lock().clear();
     }
 
-    /// How many times `dir` was enumerated. The de-duplication assertion, and
-    /// the closest thing the crate has to a rebuild counter.
+    /// Returns how many times `dir` was enumerated.
     pub fn list_count(&self, dir: impl AsRef<Path>) -> usize {
         let dir = dir.as_ref();
         self.calls
@@ -444,10 +413,7 @@ impl FakeDirSource {
             .count()
     }
 
-    /// How many times `dir`'s stamp was probed.
-    ///
-    /// The counterpart to `list_count`: a healthy session should show many of
-    /// these and almost none of those.
+    /// Returns how many times `dir`'s stamp was probed.
     pub fn stamp_count(&self, dir: impl AsRef<Path>) -> usize {
         let dir = dir.as_ref();
         self.calls
@@ -477,8 +443,8 @@ impl FakeDirSource {
         };
 
         if hang {
-            // A real blocked SMB call cannot be interrupted either; the honest
-            // model is that it returns only when someone stops caring.
+            // Like a blocked SMB call, returns only on cancellation, deadline,
+            // or a 60 s cap.
             let started = Instant::now();
             loop {
                 if cancel.is_cancelled() {
@@ -510,9 +476,8 @@ impl FakeDirSource {
 impl DirSource for FakeDirSource {
     fn probe_stamp(&self, dir: &Path) -> Result<DirStamp, EnumError> {
         self.record(Call::Stamp(dir.to_path_buf()));
-        // Checked before `gate`, so a share can be scripted to answer
-        // enumerations while refusing the probe - the combination the real
-        // failure took.
+        // Checked before `gate`, so a share can answer enumerations while
+        // refusing the probe.
         {
             let b = self.behaviour.lock();
             if !b.stamp_supported {
@@ -539,12 +504,10 @@ impl DirSource for FakeDirSource {
         self.record(Call::List(dir.to_path_buf()));
         let started = Instant::now();
 
-        // Counted around everything below, so a walker's concurrency limit is
-        // observable directly rather than inferred from timing.
+        // Held for the whole call so peak concurrency is observable.
         let _guard = self.enter();
 
-        // Before the global gate: a scripted per-directory failure is about
-        // this directory, not about the share.
+        // Per-directory failures take precedence over the global gate.
         if let Some(err) = self.dir_errors.lock().get(dir).cloned() {
             return Err(err);
         }
@@ -561,9 +524,8 @@ impl DirSource for FakeDirSource {
             if cancel.is_cancelled() {
                 return Err(EnumError::Cancelled);
             }
-            // The real enumerators filter on attributes before the sink sees
-            // anything; a fake that skipped this would let a walker pass here
-            // and miss every subdirectory against a real share.
+            // Filter on attributes as the real enumerators do, so walker tests
+            // see the same entries a real share would produce.
             if opts.files_only
                 && !super::enumerate::is_listable_file_with(entry.attributes, opts.hide_system)
             {
@@ -618,9 +580,8 @@ impl DirSource for FakeDirSource {
         let mut complete = true;
         let mut seen = 0usize;
         for entry in &names {
-            // A server-side wildcard returns directories too; the caller
-            // filters. Matching the real thing keeps `--bench`'s completeness
-            // oracle honest about what it is comparing against.
+            // A server-side wildcard also returns directories; filter them as
+            // the real source does.
             if opts.files_only
                 && !super::enumerate::is_listable_file_with(entry.attributes, opts.hide_system)
             {
@@ -712,9 +673,8 @@ mod tests {
         ));
     }
 
-    /// The fake has to filter exactly as the real enumerators do, or a walker
-    /// proved correct against it has been proved nothing - which is the same
-    /// reason it filters on the directory bit.
+    /// The fake filters hidden and system files exactly as the real
+    /// enumerators do.
     #[test]
     fn marked_files_are_listed_only_when_the_caller_allows_them() {
         let s = FakeDirSource::new().with_entries(
@@ -813,8 +773,8 @@ mod tests {
         assert!(!wildcard_matches("????????*", "abcdefg"));
     }
 
-    /// Partitioning by name length must be disjoint and complete, which is
-    /// exactly what the oracle asserts against the real server.
+    /// Partitioning by name length must be disjoint and complete, as the
+    /// oracle asserts against the real server.
     #[test]
     fn a_length_partition_covers_every_name_exactly_once() {
         let names = ["a", "bb", "ccc", "dddd", "eeeeeeee", "ffffffffffff"];
@@ -887,7 +847,7 @@ mod tests {
 
     #[test]
     fn a_query_can_be_scripted_to_under_return() {
-        // The exact failure the server-filter audit exists to detect.
+        // The failure the server-filter audit must detect.
         let s = src();
         s.set_query_drops(vec![0]);
         let mut sink = VecSink::default();
@@ -902,8 +862,7 @@ mod tests {
         assert_eq!(sink.names, vec!["alpha_two.pdf"], "one match was dropped");
     }
 
-    /// The seam whose absence hid the reload bug: a share that enumerates
-    /// fine but will not answer the freshness probe.
+    /// A share can enumerate normally while refusing the freshness probe.
     #[test]
     fn the_probe_can_fail_while_enumeration_still_works() {
         let s = src();

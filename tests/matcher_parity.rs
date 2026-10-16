@@ -1,19 +1,9 @@
-//! Proof that the new matcher ranks exactly like the old one.
+//! Parity tests between the SIMD matcher and a simple reference ranking.
 //!
-//! This is the highest-value test in the project. The rewrite replaced a
-//! per-entry `str::find` plus a full sort with a SIMD sweep over a contiguous
-//! arena, a galloping byte-to-entry mapping, parallel chunking and a bounded
-//! top-K merge. Every one of those steps is an opportunity for an
-//! off-by-one - and an off-by-one here does not crash, it quietly displays
-//! *plausible-looking wrong filenames shifted by one row*, which a user may
-//! never recognise as a bug.
-//!
-//! [`reference`] below is a direct transcription of the original
-//! `rank_matches`, kept as an oracle. The new implementation is asserted to
-//! produce byte-identical output: same order, same match count, same total.
-//!
-//! None of this needs the network drives, which is precisely why it carries
-//! so much of the verification burden.
+//! [`reference`] is a straightforward `str::find` and sort, kept as an oracle.
+//! The matcher must produce identical output: same order, match count and
+//! total. Off-by-one errors in the arena mapping or top-K merge would show
+//! plausible but wrong filenames rather than failing loudly.
 
 use std::path::Path;
 
@@ -28,12 +18,8 @@ use proptest::prelude::*;
 
 /// The oracle's own copy of the display cap.
 ///
-/// Deliberately a separate constant, because the oracle is a frozen
-/// transcription and should not quietly follow the implementation it is
-/// checking. The assertion below is what keeps that honest: if the real cap
-/// moves and this does not, the oracle truncates at a different point from
-/// the matcher and every parity assertion here silently becomes a tautology.
-/// Failing to compile is the only safe way to notice.
+/// Kept separate so the oracle does not follow the implementation; the
+/// assertion below fails to compile if the two caps drift apart.
 const MAX_RESULTS: usize = 300;
 const _: () = assert!(
     MAX_RESULTS == files::config::MAX_RESULTS,
@@ -42,10 +28,7 @@ const _: () = assert!(
 
 const PREFIX: &str = "V:\\";
 
-/// The original implementation, transcribed verbatim.
-///
-/// Entries are `(lowercased name, full path)`, exactly as the previous
-/// `get_dir_listing` produced them.
+/// The reference ranking. Entries are `(lowercased name, full path)`.
 fn reference(names: &[String], query: &str) -> (Vec<String>, usize, usize) {
     let entries: Vec<(String, String)> = names
         .iter()
@@ -99,7 +82,7 @@ fn run(names: &[String], query: &str, kind: MatcherKind) -> SearchOutcome {
     .expect("query should be acceptable")
 }
 
-/// Asserts both implementations agree, in every field.
+/// Asserts both implementations agree in every field.
 fn assert_parity(names: &[String], query: &str) {
     let (want_paths, want_total, want_matched) = reference(names, query);
 
@@ -144,9 +127,9 @@ fn parity_when_breaking_ties_by_name_length() {
     assert_parity(&names, "abc");
 }
 
-/// The original sort was *stable*, so identical keys kept directory order.
-/// The new key includes the entry index precisely so an unstable parallel
-/// merge reproduces that.
+/// The reference sort is stable, so equal keys keep directory order. The
+/// matcher's key includes the entry index so its unstable parallel merge
+/// does the same.
 #[test]
 fn parity_when_every_key_is_identical() {
     let names: Vec<String> = (0..50).map(|_| "abc.txt".to_string()).collect();
@@ -203,8 +186,7 @@ fn parity_when_the_query_is_the_whole_name() {
 
 #[test]
 fn parity_across_many_rayon_chunks() {
-    // Comfortably more than one chunk, so the parallel merge is exercised
-    // against the serial oracle.
+    // More than one chunk, so the parallel merge is exercised.
     let names: Vec<String> = (0..40_000)
         .map(|i| format!("job_{i:06}_report.pdf"))
         .collect();
@@ -234,9 +216,8 @@ fn parity_with_punctuation_heavy_names() {
 
 // --- non-ASCII -------------------------------------------------------------
 
-/// The length-preserving fold matches the original for every case that
-/// folds to an equal-length form, which is all of Latin-1, Latin Extended-A,
-/// Cyrillic and Greek.
+/// The length-preserving fold matches the reference for Latin-1, Latin
+/// Extended-A, Cyrillic and Greek.
 #[test]
 fn parity_on_ordinary_non_ascii_names() {
     let names = ["Écoles-Été.pdf", "ПРИВЕТ.txt", "ΣΙΓΜΑ.doc", "Ünïcödé.dat"].map(String::from);
@@ -245,13 +226,8 @@ fn parity_on_ordinary_non_ascii_names() {
     }
 }
 
-/// The documented divergence, asserted so it stays deliberate rather than
-/// becoming a surprise.
-///
-/// U+212A KELVIN SIGN lowercases to `k`, which changes byte length, so the
-/// fold declines it. The fast path therefore misses - and the Unicode
-/// fallback exists to rescue exactly this, which means the observable
-/// behaviour still matches the original.
+/// U+212A KELVIN SIGN lowercases to `k`, which changes byte length, so the fast
+/// path misses it. The Unicode fallback must still produce the reference result.
 #[test]
 fn length_changing_folds_are_rescued_by_the_unicode_fallback() {
     let names = ["kelvin_report.pdf".to_string()];
@@ -284,8 +260,7 @@ fn query_strategy() -> impl Strategy<Value = String> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
-    /// The core property: whatever the listing and whatever the query, the
-    /// new matcher agrees with the original in every observable respect.
+    /// For any listing and query, the matcher agrees with the reference.
     #[test]
     fn matcher_agrees_with_the_original_implementation(
         names in proptest::collection::vec(name_strategy(), 0..60),
@@ -300,7 +275,7 @@ proptest! {
         prop_assert_eq!(got_paths, want_paths);
     }
 
-    /// The parallel path and the straightforward path must never disagree.
+    /// The parallel and serial paths agree.
     #[test]
     fn the_simd_and_naive_matchers_agree(
         names in proptest::collection::vec(name_strategy(), 0..80),
@@ -313,8 +288,8 @@ proptest! {
         prop_assert_eq!(simd.hits, naive.hits);
     }
 
-    /// Structural invariants must hold for any listing at all, including
-    /// empty names and duplicates.
+    /// Structural invariants hold for any listing, including empty names and
+    /// duplicates.
     #[test]
     fn snapshots_are_always_structurally_sound(
         names in proptest::collection::vec(name_strategy(), 0..120),
@@ -330,8 +305,8 @@ proptest! {
         }
     }
 
-    /// Folding must never change the byte length, since one offsets table
-    /// addresses both arenas.
+    /// Folding never changes byte length, since one offsets table addresses
+    /// both arenas.
     #[test]
     fn folding_preserves_byte_length(text in ".{0,64}") {
         let mut out = Vec::new();
@@ -340,8 +315,7 @@ proptest! {
     }
 
     /// A folded haystack contains a folded needle exactly when the original
-    /// contains it case-insensitively. Divergence here would be a silent
-    /// zero-match that is impossible to reproduce on a developer machine.
+    /// contains it case-insensitively.
     #[test]
     fn folded_containment_matches_case_insensitive_containment(
         haystack in "[a-zA-Z0-9 _.-]{0,40}",

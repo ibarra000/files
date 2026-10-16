@@ -1,9 +1,5 @@
-//! Low-level Windows plumbing shared by the enumerators.
-//!
-//! Kept separate from the enumeration loops themselves so each file stays
-//! about one thing: this one is about turning Rust paths into what the API
-//! wants, owning kernel handles safely, and providing a correctly aligned
-//! buffer for the kernel to write records into.
+//! Windows helpers shared by the enumerators: path conversion to UTF-16,
+//! RAII handle wrappers, and an aligned buffer for kernel-written records.
 
 use std::path::Path;
 
@@ -16,8 +12,8 @@ use crate::config::DIR_BUFFER_MIN;
 
 /// Converts a path to a NUL-terminated UTF-16 buffer.
 ///
-/// `keep_trailing_sep` matters: a volume root must be given as `V:\`, while a
-/// subdirectory must be given without a trailing separator.
+/// A volume root must keep its trailing separator (`V:\`); a subdirectory
+/// must not have one.
 pub fn wide_path(path: &Path, keep_trailing_sep: bool) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     let mut v: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -69,9 +65,8 @@ impl Drop for OwnedHandle {
 
 /// A find handle, released on drop.
 ///
-/// Distinct from [`OwnedHandle`] because find handles require `FindClose`,
-/// not `CloseHandle`; the two are not interchangeable. Leaking one holds a
-/// server-side open and a directory lease on a share other people are using.
+/// Find handles require `FindClose`, not `CloseHandle`. A leaked one holds a
+/// server-side open and a directory lease on the share.
 pub(crate) struct FindHandle(pub(crate) HANDLE);
 
 impl Drop for FindHandle {
@@ -84,9 +79,9 @@ impl Drop for FindHandle {
 /// An 8-byte-aligned heap buffer.
 ///
 /// The kernel aligns each record to 8 bytes, but a `Vec<u8>` only guarantees
-/// one. Allocating with the right alignment makes the `u16` name slices
-/// provably aligned; headers are additionally read with `read_unaligned`, so
-/// a mis-sized future record layout still cannot cause undefined behaviour.
+/// 1-byte alignment. This makes the `u16` name slices aligned; headers are
+/// still read with `read_unaligned` so a mis-sized record layout cannot cause
+/// undefined behaviour.
 #[repr(C, align(8))]
 struct Align8(#[allow(dead_code)] [u8; 8]);
 
@@ -152,8 +147,6 @@ mod tests {
         assert_eq!(String::from_utf16_lossy(&w[..w.len() - 1]), r"V:\");
     }
 
-    /// An interior NUL would otherwise silently truncate the path at the API
-    /// boundary, so the truncation is done deliberately and exactly once.
     #[test]
     fn wide_path_ends_with_exactly_one_terminator() {
         let w = wide_path(Path::new(r"V:\folder"), true);

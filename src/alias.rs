@@ -1,59 +1,23 @@
-//! Short names for the codes somebody types every day.
+//! User-defined short names that expand to a search line (`pw` -> `11-D-0704`).
 //!
-//! A job code is a thing to be read off a drawing rather than remembered,
-//! which is fine for the one in front of you and poor for the six opened every
-//! morning. An alias gives one of those a name its owner chose: `pw` finds
-//! `11-D-0704`, on the second keystroke.
+//! An alias expands to an ordinary query, run through the normal matcher and
+//! ranking; nothing in the search knows aliases exist, so the oracle in
+//! `tests/matcher_parity.rs` is unaffected. The expansion may carry syntax
+//! (`ext:pdf 11-D-0704`).
 //!
-//! # An alias expands, it does not match
+//! An alias fires only when the whole line equals its name (ASCII case-
+//! insensitive). Prefix or substring matching would hide results for longer
+//! codes that contain the name. The expansion is shown on screen so an
+//! unintended match is visible.
 //!
-//! What an alias produces is a *query*, run through the ordinary matcher over
-//! the ordinary index and ranked by the ordinary comparator. Nothing here
-//! reaches into the search: there is no alias bit in the ranking key and no
-//! second route a result can arrive by. That is deliberate, and it is what
-//! makes this cheap to trust - the frozen oracle in `tests/matcher_parity.rs`
-//! never has to learn that this module exists.
-//!
-//! It also means an alias may carry syntax. `ext:pdf 11-D-0704` is a perfectly
-//! good expansion, because the thing being stored is a line to type and not a
-//! code to look up.
-//!
-//! # The whole line, and exactly
-//!
-//! An alias fires only when the entire line is one, case aside. Not a prefix
-//! and not a substring: either would let an alias hide the results for a
-//! longer code that happens to contain it, which is a program quietly
-//! searching for something other than what was typed. That is the failure the
-//! rule engine was deleted for - see [`crate::paths`] - and it is not worth
-//! reintroducing for the sake of saving a keystroke.
-//!
-//! The expansion is put on screen for the same reason. An alias is a shortcut
-//! its owner wrote down, so watching it fire is confirmation; watching it fire
-//! when it was not meant to is the only way anybody finds out.
-//!
-//! # A name is not a search
-//!
-//! `code` is checked when the file is read, against the same
-//! [`Query::check`](crate::search::query::Query::check) the matcher uses, so
-//! a line that reaches the index through an alias is held to exactly what a
-//! line typed by hand is held to. Nothing here lowers that bar and nothing
-//! here raises it.
-//!
-//! This paragraph used to be about length. The search floor was three
-//! characters, and the argument was that a short *name* is the entire point
-//! of an alias while a short *search* is the thing the floor exists to
-//! prevent - two questions that stop being the same one the moment an alias
-//! expands into a search. The floor is one character now, so length is no
-//! longer what separates them. What is left is the part that was always the
-//! real content: one validator, shared, so a code the loader would refuse is
-//! a code the settings window refuses in the same words - and a code with
-//! nothing in it to search for, `ext:pdf` and its kind, is still refused.
+//! Codes are validated with
+//! [`Query::check`](crate::search::query::Query::check), the same check the
+//! matcher applies to a typed line.
 
-/// Why a name or a code cannot be used.
+/// Why a name or code cannot be used as an alias.
 ///
-/// Shared by the loader and by the settings window, so that a thing the file
-/// refuses is a thing the window refuses, in the same words. Two validators
-/// that must agree is two validators that eventually will not.
+/// Shared by the config loader and the settings window so both reject the
+/// same input with the same message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invalid {
     NoName,
@@ -61,31 +25,27 @@ pub enum Invalid {
     NameHasASpace,
     DuplicateName,
     NoCode,
-    /// The code is not something the search could ever run.
+    /// The code is not a runnable search.
     UnsearchableCode(crate::search::query::QueryReject),
 }
 
 impl Invalid {
-    /// A fragment, for the error line under the control or beside the key.
+    /// Returns a lowercase error fragment for display beside the field or key.
     pub fn detail(&self) -> String {
         match self {
             Self::NoName => "an alias needs a name".into(),
             Self::NameIsNotAscii => "an alias name must be ASCII".into(),
             Self::NameHasASpace => "an alias name cannot contain a space".into(),
             Self::DuplicateName => "that name is already an alias".into(),
-            Self::NoCode => "an alias needs something to search for".into(),
+            Self::NoCode => "an alias needs a code".into(),
             Self::UnsearchableCode(reject) => {
-                format!("it could not be searched for: {}", reject.detail())
+                format!("the code is not a valid search: {}", reject.detail())
             }
         }
     }
 }
 
-/// Whether this pair could be an alias, given the ones that already exist.
-///
-/// The rules exist to make one promise: an alias that was accepted is an alias
-/// that will work. See the note at the top of this module about why the code
-/// is judged by the matcher's own test rather than by a length of its own.
+/// Checks whether `name` and `code` form a valid alias alongside `existing`.
 pub fn check(name: &str, code: &str, existing: &[Alias]) -> Result<(), Invalid> {
     let name = name.trim();
     let code = code.trim();
@@ -113,32 +73,27 @@ pub fn check(name: &str, code: &str, existing: &[Alias]) -> Result<(), Invalid> 
 /// One configured alias.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alias {
-    /// What is typed. ASCII, no whitespace, unique case-insensitively - all
-    /// three enforced by the loader.
+    /// The typed name: ASCII, no whitespace, unique case-insensitively
+    /// (enforced by the loader).
     pub name: Box<str>,
-    /// The search line it stands for.
+    /// The search line the name expands to.
     pub code: Box<str>,
-    /// What it is, for the person reading their own list a year later.
+    /// Optional user description.
     pub note: Option<Box<str>>,
 }
 
 impl Alias {
-    /// How the expansion is written wherever it is shown.
-    ///
-    /// One spelling, in one place, because the status line and the settings
-    /// list saying it two different ways is how a user comes to believe they
-    /// are two different things.
+    /// Returns the display form (`name · code`) used by the status line and
+    /// the settings list.
     pub fn describe(&self) -> String {
         format!("{} \u{b7} {}", self.name, self.code)
     }
 }
 
-/// The alias table. Immutable once loaded, shared by every thread.
+/// The alias table, immutable once loaded and shared across threads.
 ///
-/// A slice rather than a map. These lists are tens of entries, the lookup runs
-/// once per keystroke against a string already in cache, and configuration
-/// order is worth keeping: it is the order the user wrote and the order their
-/// own list reads back in.
+/// A slice rather than a map: lists are small, lookup runs once per keystroke,
+/// and configuration order is preserved for display.
 #[derive(Debug, Default)]
 pub struct Aliases {
     entries: Box<[Alias]>,
@@ -163,12 +118,10 @@ impl Aliases {
         self.entries.len()
     }
 
-    /// The alias this line is, if it is one.
+    /// Returns the alias whose name equals the trimmed line, if any.
     ///
-    /// Trimmed, because a trailing space is a typist finishing a word and not
-    /// a different alias. ASCII case folding, which is sound because the
-    /// loader refuses a name that is not ASCII: a name whose case depends on
-    /// the locale is a name that fires on one machine and not on the next.
+    /// ASCII case folding is sufficient because the loader rejects non-ASCII
+    /// names, which keeps matching locale-independent.
     pub fn resolve(&self, line: &str) -> Option<&Alias> {
         let line = line.trim();
         if line.is_empty() {
@@ -211,14 +164,12 @@ mod tests {
         }
     }
 
-    /// A trailing space is somebody finishing a word, not a different alias.
     #[test]
     fn surrounding_space_does_not_stop_an_alias_resolving() {
         assert!(table().resolve("  pw ").is_some());
     }
 
-    /// The whole line or nothing. A prefix that expanded would make every
-    /// longer code containing it unreachable.
+    /// Only a whole-line match expands; prefixes and substrings do not.
     #[test]
     fn a_line_that_merely_starts_with_an_alias_is_not_one() {
         assert!(table().resolve("pwx").is_none());
@@ -240,7 +191,6 @@ mod tests {
         assert!(none.resolve("pw").is_none());
     }
 
-    /// An alias stores a line, not a code, so syntax survives it.
     #[test]
     fn an_alias_may_expand_to_a_line_carrying_syntax() {
         assert_eq!(

@@ -1,7 +1,6 @@
 //! Human-readable formatting for the status line.
 //!
-//! Pure functions, so the exact strings the UI renders can be asserted in
-//! tests without a terminal.
+//! Pure functions, so rendered strings can be asserted in tests.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,13 +17,11 @@ pub fn age(d: Duration) -> String {
     }
 }
 
-/// How long until [`age`] would render a different string.
+/// Returns how long until [`age`] would render a different string.
 ///
-/// Exists so the main loop can wake exactly when the readout changes rather
-/// than once a second forever: against a day-old cached index that is one
-/// wakeup a day, not eighty-six thousand. Its bucket edges mirror `age`'s, and
-/// `next_age_change_is_the_exact_distance_to_a_different_label` is what stops
-/// the two drifting apart.
+/// Lets the main loop wake only when the label changes. The bucket edges must
+/// match `age`'s; `next_age_change_is_the_exact_distance_to_a_different_label`
+/// checks this.
 pub fn next_age_change(d: Duration) -> Duration {
     let secs = d.as_secs();
     let edge = match secs {
@@ -35,8 +32,7 @@ pub fn next_age_change(d: Duration) -> Duration {
         3600..=86_399 => secs - secs % 3600 + 3600,
         _ => secs - secs % 86_400 + 86_400,
     };
-    // `edge` is strictly greater than `secs`, so this is never zero - which
-    // matters, because a zero here would be a deadline that never advances.
+    // `edge > secs`, so this is never zero (a zero deadline would not advance).
     Duration::from_secs(edge).saturating_sub(d)
 }
 
@@ -97,20 +93,11 @@ pub fn spinner(d: Duration) -> char {
     FRAMES[(d.as_millis() / 100) as usize % FRAMES.len()]
 }
 
-/// Spinner frame for a wall clock, for an animation with no start instant.
+/// Spinner frame derived from the wall clock, for animations with no start
+/// instant.
 ///
-/// [`spinner`] needs something to measure from, and the index states have
-/// nothing: `Activity` records what a share is doing, never when it began. The
-/// status line reached for `now.elapsed()`, where `now` is the instant the
-/// frame started - sampled microseconds earlier, so the frame index was zero
-/// every time and the spinner watched through a three-minute walk never
-/// turned.
-///
-/// The wall clock is the only phase a pure renderer can read that advances
-/// *between* frames rather than within one. It can jump - NTP, a timezone
-/// change - and the cost of that is one spinner frame out of order, which
-/// nobody can see. That is cheaper than carrying a start instant through the
-/// index actor for the sake of an animation.
+/// `Activity` does not record when work began, so [`spinner`] has nothing to
+/// measure from. A clock jump only puts one frame out of order.
 pub fn spinner_at(wall: SystemTime) -> char {
     let since_epoch = wall.duration_since(UNIX_EPOCH).unwrap_or_default();
     FRAMES[(since_epoch.as_millis() / 100) as usize % FRAMES.len()]
@@ -158,7 +145,7 @@ mod tests {
         assert_eq!(next_age_change(d), Duration::from_millis(500));
     }
 
-    /// The whole contract, so the two bucket tables cannot drift apart.
+    /// Keeps the bucket edges of `age` and `next_age_change` in sync.
     #[test]
     fn next_age_change_is_the_exact_distance_to_a_different_label() {
         for secs in [

@@ -1,58 +1,35 @@
-//! Taking one search line apart into a term, a match mode and a type filter.
+//! Parses one search line into a term, a match mode and a type filter.
 //!
-//! # Why the syntax lives in the line
+//! # Syntax lives in the line
 //!
-//! The alternative was a set of toggles held beside the query. A toggle is
-//! state that lives somewhere other than where the person is looking: it
-//! survives a history recall it was never part of, it needs room on a footer
-//! that is already short of it, and "why is this list so short" becomes a
-//! question about a chip nobody noticed. Syntax in the line is on screen by
-//! construction, is recalled with the line, is copied with the line, and
-//! needs no footer at all. F3 and F4 do not introduce a second source of
-//! truth - they edit the line, so what will run is always what is shown.
+//! Mode and type are written into the search line rather than held as
+//! toggles, so they are visible, recalled with history and copied with the
+//! line. F3 and F4 edit the line, so what runs is always what is shown.
 //!
-//! # Why only characters Windows forbids in a name
+//! # Only characters Windows forbids in a name
 //!
-//! Windows refuses `" * ? < > | : \ /` in a filename, so syntax spelled with
-//! them can never be ambiguous with the thing being searched for. Only `*`
-//! and `:` are used here, and neither can occur in any name this program will
-//! ever index.
+//! Windows refuses `" * ? < > | : \ /` in a filename, so syntax built from
+//! them cannot collide with a search term. Only `*` and `:` are used. `^` and
+//! `$` are legal in names and so cannot be anchors. Quotes are avoided because
+//! a paired delimiter leaves the line invalid while it is being typed; every
+//! token here is a valid query at every keystroke.
 //!
-//! `^` and `$` were considered for the anchors and rejected on exactly that
-//! test: both are legal in a name, so `^draft` could not be searched for
-//! literally - the query would quietly become a prefix search instead. That
-//! is the class of silent wrongness this crate is built against.
+//! # A bare `.pdf` is not a type filter
 //!
-//! A whole-stem `"..."` form was considered and dropped along with the mode it
-//! spelled. Quotes fail twice over: everywhere else they mean "take this
-//! literally", so `"11-D-0704"` would return nothing where the person meant
-//! everything; and they are a *paired* delimiter in a box that searches on
-//! every keystroke, so the line sits in the unusable state `"11-D-070` for as
-//! long as it takes to type the term. Every token here is instead a valid
-//! query at every keystroke on the way to it.
+//! `.pdf` is a legal substring of a name (`report .pdf.bak`), so it stays part
+//! of the term. `ext:` cannot occur in a name.
 //!
-//! # Why a bare `.pdf` is not a type filter
+//! # The term is never split on whitespace
 //!
-//! `.pdf` is a legal substring of a name - `report .pdf.bak` is a real file -
-//! so reading it as syntax would make searching for it impossible. `ext:`
-//! cannot occur in a name at all, which is the entire point.
+//! Filenames on these shares contain spaces (`11-D-0704 survey.pdf`), so the
+//! term is the line minus the byte ranges of the filter tokens, never a list
+//! of words.
 //!
-//! # Why the term is never split on whitespace
+//! # Parsing cannot fail
 //!
-//! Filenames on these shares are full of spaces: `11-D-0704 survey.pdf`,
-//! `0704 big`. `11-D-0704 survey` is a good query today and has to stay one.
-//! So the term is the line minus the byte ranges of the filter tokens found
-//! in it, and nothing else - never a list of words.
-//!
-//! # Why parsing cannot fail
-//!
-//! The line is re-parsed on every keystroke, and half the states it passes
-//! through on the way to being finished are states no parser can honour:
-//! `ext:` with nothing after it, a `*` that is about to be the start of
-//! something. A parse returning an error instead of a query would be a
-//! results pane going blank while somebody is still typing into it. So
-//! [`Query::parse`] is total, and anything it could not honour rides along on
-//! the result as a [`Problem`].
+//! The line is re-parsed on every keystroke and passes through incomplete
+//! states such as a bare `ext:`. [`Query::parse`] is total, and anything it
+//! cannot honour is attached to the result as a [`Problem`].
 
 use crate::config::MIN_TERM_LEN;
 use crate::config::hidden::Hidden;
@@ -60,10 +37,8 @@ use crate::util::fold;
 
 /// Where the term has to sit within the name.
 ///
-/// The anchored forms are about the *stem* - the name without its final
-/// extension - because the extension is what [`TypeFilter`] is for. Anchoring
-/// on the whole name instead would make [`Self::Suffix`] useless: almost every
-/// name ends in `.pdf` or `.dwg`, not in anything anybody would type.
+/// Anchored forms apply to the stem (the name without its final extension),
+/// since [`TypeFilter`] handles extensions and almost every name ends in one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MatchMode {
     /// `report`, or `*report*`. Anywhere in the name.
@@ -106,9 +81,8 @@ impl MatchMode {
 
 /// Longest extension a filter will hold.
 ///
-/// `sldprt` and `jpeg` fit with room over. Anything longer is not something
-/// anyone narrows by, and a fixed bound is what lets an extension sit inline
-/// with no allocation anywhere on the match path.
+/// A fixed bound lets an extension sit inline with no allocation on the
+/// match path.
 pub const MAX_EXT_LEN: usize = 8;
 
 /// One extension a query admits: folded, and without its dot.
@@ -119,16 +93,13 @@ pub struct Ext {
 }
 
 impl Ext {
-    /// `None` for anything no file can have as an extension.
+    /// Returns `None` for anything no file can have as an extension.
     ///
-    /// One leading dot is accepted and dropped, so `ext:.pdf` and `ext:pdf`
-    /// ask the same thing - which is what anyone who thinks of an extension as
-    /// `.pdf` will type.
+    /// One leading dot is accepted and dropped, so `ext:.pdf` equals `ext:pdf`.
     ///
-    /// Non-ASCII is refused for the reason [`Hidden::new`] refuses it: the
-    /// arena is folded by [`crate::util::fold`], which declines the folds that
-    /// would change a byte length, so a non-ASCII extension would compare one
-    /// way against the arena and another against an original name.
+    /// Non-ASCII is refused for the reason [`Hidden::new`] refuses it: the arena
+    /// fold declines folds that change byte length, so a non-ASCII extension
+    /// would compare differently against the arena and the original name.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
         let s = s.strip_prefix('.').unwrap_or(s);
@@ -162,27 +133,18 @@ impl Ext {
 
 /// The extensions a query admits.
 ///
-/// Empty means *every* extension, not *no* extension. That asymmetry is what
-/// lets `ext:` with nothing after it yet - which exists for as long as it
-/// takes to type `pdf` - mean "no filter" rather than emptying the pane
-/// mid-word.
+/// Empty means every extension, so a bare `ext:` while typing means "no
+/// filter" rather than emptying the results.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TypeFilter {
-    /// `None` rather than an empty list, and behind a *thin* pointer.
+    /// `None` for no filter, behind a thin pointer.
     ///
-    /// Every `AppEvent` now carries a [`Query`], and `AppEvent` travels
-    /// through a bounded channel the whole application shares, so anything
-    /// stored inline here is paid for by every event - including the ones that
-    /// hold no query at all. An unfiltered query is overwhelmingly the common
-    /// case, and this way it costs eight bytes and a null check.
-    ///
-    /// `Box<Vec<_>>` rather than `Box<[_]>` because the latter is a *fat*
-    /// pointer: sixteen bytes, which is enough to push `VerifyMsg` over the
-    /// size at which the whole event becomes worth boxing. The extra
-    /// indirection is read once per candidate only when a filter is present,
-    /// and `is_none` short-circuits before it when one is not.
-    // The thin pointer is the point; see above. Clippy reads this shape as an
-    // accidental double indirection, which it usually is.
+    /// Every `AppEvent` carries a [`Query`], so inline storage here costs every
+    /// event in the shared channel. The common unfiltered case costs eight
+    /// bytes. `Box<[_]>` would be a 16-byte fat pointer, enough to make
+    /// `VerifyMsg` worth boxing.
+    // The thin pointer is intentional; Clippy flags this shape as accidental
+    // double indirection.
     #[allow(clippy::box_collection)]
     exts: Option<Box<Vec<Ext>>>,
 }
@@ -191,8 +153,7 @@ impl TypeFilter {
     /// Builds a filter from extension names, dropping the ones no file could
     /// have.
     ///
-    /// Duplicates are removed: one costs a comparison per candidate for
-    /// nothing, and a hand-typed list is exactly where one turns up.
+    /// Duplicates are removed, since each costs a comparison per candidate.
     pub fn new<S: AsRef<str>>(names: &[S]) -> Self {
         let mut exts: Vec<Ext> = Vec::new();
         for n in names {
@@ -224,13 +185,11 @@ impl TypeFilter {
         self.exts.iter().flat_map(|e| e.iter())
     }
 
-    /// Whether a folded name whose extension starts at `ext_start` is one of
-    /// these types.
+    /// Returns whether a folded name whose extension starts at `ext_start` is
+    /// one of these types.
     ///
-    /// `ext_start` is the name's length for a name with no dot in it, which
-    /// yields an empty extension - and no [`Ext`] is ever empty, so a dotless
-    /// name is refused by any non-empty filter. That is right: somebody who
-    /// asked for PDFs did not ask for `README`.
+    /// For a dotless name `ext_start` is the name's length, giving an empty
+    /// extension; no [`Ext`] is empty, so a non-empty filter refuses it.
     #[inline]
     pub fn admits(&self, name: &[u8], ext_start: usize) -> bool {
         let Some(exts) = &self.exts else {
@@ -240,7 +199,7 @@ impl TypeFilter {
         exts.iter().any(|e| e.as_bytes() == ext)
     }
 
-    /// The same question of a name whose stem has not been located yet.
+    /// The same check for a name whose stem has not been located yet.
     #[inline]
     pub fn admits_name(&self, name: &[u8]) -> bool {
         if self.exts.is_none() {
@@ -250,13 +209,12 @@ impl TypeFilter {
     }
 }
 
-/// The end of the stem, and where the extension starts.
+/// Returns the end of the stem, where the extension starts.
 ///
-/// The *last* dot splits, uniformly: `11-D-0704.rev2.pdf` has the stem
-/// `11-D-0704.rev2`. `README` has an empty extension and is therefore refused
-/// by every type filter, which is right. `.gitignore` has an empty *stem* and
-/// so can never be a suffix match - a consequence of the rule rather than a
-/// policy, and pinned by a test so it stays deliberate.
+/// The last dot splits: `11-D-0704.rev2.pdf` has the stem `11-D-0704.rev2`.
+/// `README` has an empty extension and is refused by every type filter.
+/// `.gitignore` has an empty stem and so never matches a suffix; a test pins
+/// this.
 #[inline]
 pub fn split_stem(name: &[u8]) -> (usize, usize) {
     match memchr::memrchr(b'.', name) {
@@ -270,10 +228,8 @@ pub fn split_stem(name: &[u8]) -> (usize, usize) {
 pub enum Problem {
     /// A `*` somewhere other than the very start or the very end.
     ///
-    /// Refused rather than read as literal text. `*` cannot occur in a Windows
-    /// filename, so a literal reading is a guaranteed empty list with nothing
-    /// on screen to explain it - which looks exactly like the file having gone
-    /// missing.
+    /// Refused rather than read literally: `*` cannot occur in a Windows
+    /// filename, so a literal reading would silently return nothing.
     InteriorStar,
     /// `ext:` naming something no file can have as an extension.
     BadExtension,
@@ -282,34 +238,26 @@ pub enum Problem {
 impl Problem {
     pub fn detail(self) -> &'static str {
         match self {
-            Self::InteriorStar => "a * only works at the start or the end",
-            Self::BadExtension => "that is not a file extension",
+            Self::InteriorStar => "* is only allowed at the start or end",
+            Self::BadExtension => "not a valid file extension",
         }
     }
 }
 
 /// Why a query was not run at all.
 ///
-/// Lives here rather than in [`crate::search::matcher`] because every variant
-/// is a property of what was typed rather than of any index - which is the
-/// same reason the judgement is made once for the whole search instead of once
-/// per share.
+/// Every variant is a property of the input rather than of an index, so the
+/// check is made once per search rather than per share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryReject {
     /// There is no term at all.
     ///
-    /// The *term*, not the line: `ext:pdf` is a seven-character line with
-    /// nothing to search for, and `  ` is a line with nothing on it. This
-    /// used to be `TooShort { need }` and to fire at anything under three
-    /// characters, which was the whole of the search floor. The floor is one
-    /// now, so the only remaining case is nothing - and "keep typing" is the
-    /// wrong sentence for a line that has syntax on it and no term.
+    /// Counted on the term, not the line: `ext:pdf` has nothing to search for.
     Empty,
     /// Contains a NUL byte.
     ///
-    /// Rejected rather than stripped: stripping would let `a\0bc` match `abc`,
-    /// which is silently wrong. This check is also what upholds the guarantee
-    /// that a match can never span two arena entries.
+    /// Rejected rather than stripped, which would let `a\0bc` match `abc`. This
+    /// also guarantees a match can never span two arena entries.
     ContainsNul,
     /// The line holds syntax that could not be honoured.
     Syntax(Problem),
@@ -318,8 +266,8 @@ pub enum QueryReject {
 impl QueryReject {
     pub fn detail(&self) -> String {
         match self {
-            Self::Empty => "there is nothing on the line to search for".into(),
-            Self::ContainsNul => "that is not a code this can look for".into(),
+            Self::Empty => "nothing to search for".into(),
+            Self::ContainsNul => "contains a character that cannot be searched".into(),
             Self::Syntax(p) => p.detail().into(),
         }
     }
@@ -330,25 +278,19 @@ const EXT_PREFIX: &str = "ext:";
 
 /// The types F4 cycles through, in order.
 ///
-/// Two, because these shares hold drawings: a job is a PDF document or a DWG
-/// drawing, and everything else on the share is something somebody put beside
-/// them. Anything outside this list is still reachable by typing `ext:` and
-/// the extension, which is the point of the syntax being in the line - a key
-/// that cycles a short list and a line that can say anything are not in
-/// competition.
+/// These shares hold PDF documents and DWG drawings. Any other extension is
+/// reachable by typing `ext:`.
 pub const CYCLE_EXTENSIONS: &[&str] = &["pdf", "dwg"];
 
-/// One search line, taken apart.
+/// One search line, parsed.
 ///
-/// The term is as literal as the line it came from: the parser only ever
-/// recognises syntax spelled with characters Windows forbids in a name, and
-/// hands everything else through untouched. [`crate::search::pattern`] leans
-/// on that when it decides whether a query may be given to the file server.
+/// The parser only recognises syntax spelled with characters Windows forbids
+/// in a name and passes everything else through, so the term is literal.
+/// [`crate::search::pattern`] relies on this.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Query {
-    /// `Box<str>`, not `String`: a parsed query is never appended to, and the
-    /// eight bytes of spare capacity a `String` carries are eight bytes on
-    /// every `AppEvent` in the channel.
+    /// `Box<str>` rather than `String`: a parsed query is never appended to, and
+    /// the spare capacity field would cost eight bytes on every `AppEvent`.
     term: Box<str>,
     mode: MatchMode,
     types: TypeFilter,
@@ -356,7 +298,7 @@ pub struct Query {
 }
 
 impl Query {
-    /// A plain substring search, for the callers that only ever wanted one.
+    /// A plain substring search.
     pub fn contains(term: impl AsRef<str>) -> Self {
         Self {
             term: term.as_ref().into(),
@@ -364,7 +306,7 @@ impl Query {
         }
     }
 
-    /// Takes a search line apart. Total: see the module note.
+    /// Parses a search line. Total: see the module docs.
     pub fn parse(line: &str) -> Self {
         let mut exts: Vec<Ext> = Vec::new();
         let mut problem = None;
@@ -378,9 +320,8 @@ impl Query {
                 term.push_str(token);
                 continue;
             };
-            // Skipping empty pieces is what makes `ext:`, `ext:,` and
-            // `ext:pdf,` all mean the same thing as the filter they are on the
-            // way to becoming.
+            // Skipping empty pieces makes `ext:`, `ext:,` and `ext:pdf,` mean the
+            // same as the filter being typed.
             for piece in value.split(',').filter(|p| !p.trim().is_empty()) {
                 match Ext::parse(piece) {
                     Some(e) if !exts.contains(&e) => exts.push(e),
@@ -390,8 +331,7 @@ impl Query {
             }
         }
 
-        // Anchors, stripped one at a time so `*report*` asks the same thing as
-        // `report` rather than a third thing.
+        // Anchors are stripped one at a time so `*report*` equals `report`.
         let mut rest = term.as_str();
         let lead = rest.starts_with('*');
         if lead {
@@ -434,11 +374,10 @@ impl Query {
         self.problem
     }
 
-    /// Whether anything beyond a plain substring search was asked for.
+    /// Returns whether anything beyond a plain substring search was asked for.
     ///
-    /// The sweep branches on this once, so that an unfiltered search - which
-    /// is every search until somebody presses F3 - does exactly the work it
-    /// did before any of this existed.
+    /// The sweep branches on this once so an unfiltered search takes the plain
+    /// path.
     #[inline]
     pub fn is_filtered(&self) -> bool {
         self.mode != MatchMode::Contains || !self.types.is_empty()
@@ -458,7 +397,7 @@ impl Query {
         Ok(())
     }
 
-    /// Whether this is worth dispatching at all.
+    /// Returns whether this is worth dispatching at all.
     pub fn is_searchable(&self) -> bool {
         self.check().is_ok()
     }
@@ -482,11 +421,8 @@ impl Query {
     /// The next step of F4: no filter, then each of [`CYCLE_EXTENSIONS`], then
     /// no filter again.
     ///
-    /// A filter the key cannot have produced - anything typed, or more than
-    /// one extension - cycles back to no filter rather than to the next entry.
-    /// Guessing where somebody's hand-typed `ext:sldprt` sits in a list that
-    /// does not contain it would be inventing an answer; clearing it is the
-    /// one step that is always what it looks like.
+    /// A filter F4 could not have produced (typed by hand, or several
+    /// extensions) cycles back to no filter.
     pub fn next_types(&self) -> TypeFilter {
         let at = match self.types.len() {
             0 => 0,
@@ -507,9 +443,8 @@ impl Query {
 
     /// This query written back out as a search line.
     ///
-    /// Round-trips through [`Self::parse`]. That is what lets F3 and F4 edit
-    /// the line rather than keeping a second copy of the filter beside it: the
-    /// line stays the only place the query lives.
+    /// Round-trips through [`Self::parse`], so F3 and F4 can edit the line and
+    /// the line stays the only place the query lives.
     pub fn to_line(&self) -> String {
         let mut out = String::with_capacity(self.term.len() + 16);
         if self.mode == MatchMode::Suffix {
@@ -534,8 +469,7 @@ impl Query {
 
     /// How the narrowing reads in a sentence, for the empty-results pane.
     ///
-    /// `None` when nothing was narrowed, so the caller adds no line at all
-    /// rather than one saying everything was looked at.
+    /// `None` when nothing was narrowed, so the caller adds no line.
     pub fn describe(&self) -> Option<String> {
         let types: Vec<&str> = self.types.iter().map(Ext::as_str).collect();
         match (self.mode, types.as_slice()) {
@@ -551,12 +485,10 @@ impl Query {
     }
 }
 
-/// `ext:` at the head of a token, whatever its case. `None` when the token is
-/// ordinary text.
+/// Returns the rest of the token after a leading `ext:` in any case, or
+/// `None` for ordinary text.
 ///
-/// Matched as a whole token rather than anywhere in the line, so `context:`
-/// and `next:pdf` stay part of the term - they are things somebody could
-/// reasonably be searching for.
+/// Matched as a whole token, so `context:` and `next:pdf` stay in the term.
 fn strip_ext_prefix(token: &str) -> Option<&str> {
     let head = token.get(..EXT_PREFIX.len())?;
     head.eq_ignore_ascii_case(EXT_PREFIX)
@@ -575,18 +507,15 @@ fn join(items: &[&str]) -> String {
     }
 }
 
-/// Whether a folded name satisfies a query's mode and type filter, and if so
-/// which occurrence of the needle justified it.
+/// Returns whether a folded name satisfies a query's mode and type filter,
+/// and if so which occurrence of the needle justified it.
 ///
-/// A free function rather than only a [`Sieve`] method because three callers
-/// need exactly this question and none of them may answer it differently: the
-/// sweep, [`crate::search::verify`]'s audit oracle, and
-/// [`crate::search::pattern::confirms`], which narrows a deliberately loose
-/// server answer back to what was asked for. A second implementation is how
-/// the audit comes to disagree with the index it is auditing, and three
-/// disagreements switch server-side filtering off for the rest of the process.
+/// The sweep, [`crate::search::verify`]'s audit oracle and
+/// [`crate::search::pattern::confirms`] must all use this one function: a
+/// second implementation would let the audit disagree with the index and
+/// switch server-side filtering off.
 ///
-/// `pos` is the *leftmost* occurrence of `needle` in `name`. See
+/// `pos` is the leftmost occurrence of `needle` in `name`. See
 /// [`Sieve::admits`] for why the trailing form does not trust it.
 #[inline]
 pub fn admits(
@@ -613,10 +542,8 @@ pub fn admits(
 
 /// Everything a candidate row must satisfy beyond holding the needle.
 ///
-/// One type rather than a hidden-list parameter beside a query parameter,
-/// because the sweep asks one question per candidate and every answer should
-/// come from one place. Two predicates threaded separately is how the two come
-/// to disagree.
+/// Combines the query and hidden-file rules so the sweep asks one question
+/// per candidate, answered in one place.
 pub struct Sieve<'a> {
     hidden: &'a Hidden,
     needle: &'a [u8],
@@ -634,8 +561,8 @@ impl<'a> Sieve<'a> {
         }
     }
 
-    /// Whether `name` is admitted, and if so which occurrence of the needle
-    /// justified it.
+    /// Returns whether `name` is admitted, and if so which occurrence of the
+    /// needle justified it.
     ///
     /// `name` is one entry's folded bytes without its separator, and `pos` is
     /// the leftmost occurrence of the needle in it, which the sweep already
@@ -643,16 +570,10 @@ impl<'a> Sieve<'a> {
     ///
     /// # Why the leftmost occurrence is not the one tested
     ///
-    /// The sweep records only the leftmost occurrence per entry: on the first
-    /// hit the cursor jumps past the whole entry, which is what makes
-    /// `matched` count entries rather than hits. For a prefix that is exactly
-    /// the right occurrence - if any occurrence sits at zero then the leftmost
-    /// one does. For a suffix it is the wrong one. `report_report.pdf` matches
-    /// `report` at offset zero first, and testing *that* against the end of
-    /// the stem would drop a file whose stem does end in `report`: a false
-    /// negative with no symptom on screen at all. So the suffix form re-checks
-    /// the stem's own tail instead of whichever occurrence the sweep happened
-    /// to stop at.
+    /// The sweep records only the leftmost occurrence per entry. That is correct
+    /// for a prefix, but not for a suffix: `report_report.pdf` matches `report`
+    /// at offset zero first, and testing that against the stem's end would drop
+    /// a valid match. The suffix form therefore re-checks the stem's tail.
     #[inline]
     pub fn admits(&self, name: &[u8], pos: u32) -> Option<u32> {
         if self.hidden.hides_folded(name) {
@@ -661,19 +582,15 @@ impl<'a> Sieve<'a> {
         admits(name, self.needle, pos, self.mode, self.types)
     }
 
-    /// The same question asked on the slow, fully Unicode-correct path.
+    /// The same check on the slow, fully Unicode-correct path.
     ///
-    /// That path lowercases each name into a *separate* string rather than
-    /// reading the folded arena, and `to_lowercase` is not byte-length
-    /// preserving - which is the whole reason it exists. So the offsets the
-    /// fast path works in do not apply, and both the stem and the needle have
-    /// to be found again in `lower`.
+    /// That path lowercases each name into a separate string, and
+    /// `to_lowercase` does not preserve byte length, so the stem and needle are
+    /// located again in `lower`.
     ///
     /// `name` is the original, for [`Hidden::hides`], which folds ASCII case
-    /// itself. The type filter is compared against `lower`, so an extension
-    /// that is not ASCII is not matched here - the same conservative refusal
-    /// [`Ext::parse`] already makes, and harmless because this path only runs
-    /// when the fast one found nothing at all.
+    /// itself. The type filter is compared against `lower`, so a non-ASCII
+    /// extension is not matched, consistent with [`Ext::parse`].
     #[inline]
     pub fn admits_lossy(&self, name: &str, lower: &str, needle: &str, pos: u32) -> Option<u32> {
         if self.hidden.hides(name) {
@@ -695,21 +612,19 @@ impl<'a> Sieve<'a> {
         }
     }
 
-    /// Whether a file pulled in by its *folder* matching is admitted.
+    /// Returns whether a file included because its folder matched is admitted.
     ///
-    /// The mode is deliberately not applied: this file's own name did not
-    /// match and was never expected to. Testing it would empty the folder that
-    /// is the whole reason the row is there.
+    /// The mode is not applied, since the file's own name did not match; only
+    /// the type and hidden filters apply.
     #[inline]
     pub fn admits_inherited(&self, name: &[u8]) -> bool {
         !self.hidden.hides_folded(name) && self.types.admits_name(name)
     }
 
-    /// Whether a *folder* name satisfies the mode.
+    /// Returns whether a folder name satisfies the mode.
     ///
-    /// A folder has no extension, so the type filter does not apply to it and
-    /// the whole name is its stem. Splitting `11.5 revisions` on its dot would
-    /// be nonsense.
+    /// A folder has no extension, so the type filter does not apply and the
+    /// whole name is the stem.
     #[inline]
     pub fn admits_folder(&self, name: &[u8], pos: u32) -> Option<u32> {
         match self.mode {
@@ -762,9 +677,8 @@ mod tests {
         assert_eq!(Query::parse("*report*"), Query::parse("report"));
     }
 
-    /// `*` cannot occur in a Windows filename, so reading it literally is a
-    /// guaranteed empty list with nothing on screen to explain it - which is
-    /// indistinguishable from the file having gone missing.
+    /// `*` cannot occur in a Windows filename, so a literal reading would
+    /// silently return nothing.
     #[test]
     fn a_star_in_the_middle_is_refused_rather_than_searched_for_literally() {
         let q = Query::parse("re*port");
@@ -772,9 +686,7 @@ mod tests {
         assert_eq!(q.check(), Err(QueryReject::Syntax(Problem::InteriorStar)));
     }
 
-    /// Filenames on these shares are full of spaces - `11-D-0704 survey.pdf`
-    /// is one of them. A parser that split the line into words would turn that
-    /// query into two terms and find nothing.
+    /// Filenames contain spaces, so the line is not split into words.
     #[test]
     fn a_term_with_spaces_in_it_survives_the_filter_being_lifted_out() {
         let q = Query::parse("11-D-0704 survey ext:pdf");
@@ -782,8 +694,7 @@ mod tests {
         assert_eq!(q.types().len(), 1);
     }
 
-    /// The overwhelmingly common case has to be provably what the line did
-    /// before this module existed, not merely equivalent to it.
+    /// The plain case parses to exactly a plain substring search.
     #[test]
     fn a_line_with_no_syntax_in_it_is_its_own_term() {
         for line in ["11-D-0704", "report a1", "a.b.c", "(rev 2)"] {
@@ -813,8 +724,7 @@ mod tests {
         assert_eq!(Query::parse("abc EXT:PDF"), Query::parse("abc ext:pdf"));
     }
 
-    /// `context:` and `next:pdf` are things somebody could reasonably be
-    /// searching for, so the keyword only counts as a whole token.
+    /// The keyword only counts as a whole token.
     #[test]
     fn the_filter_keyword_is_recognised_only_as_a_whole_token() {
         for line in ["abc context:pdf", "abc next:pdf", "abc myext:pdf"] {
@@ -823,9 +733,7 @@ mod tests {
         }
     }
 
-    /// Typed a character at a time, `ext:` exists for as long as it takes to
-    /// reach the p. Reading it as "admit nothing" empties the results pane
-    /// mid-word, which reads as the program having broken.
+    /// A bare `ext:` while typing does not empty the results.
     #[test]
     fn an_ext_token_with_nothing_after_it_is_no_filter_at_all() {
         for line in ["report ext:", "report ext:,", "report ext:pdf,"] {
@@ -837,8 +745,7 @@ mod tests {
         assert_eq!(Query::parse("report ext:pdf,").types().len(), 1);
     }
 
-    /// Pins the choice against prefix-matching the extension, which would make
-    /// `ext:doc` quietly admit `.docx`.
+    /// Extensions match exactly, so `ext:doc` does not admit `.docx`.
     #[test]
     fn a_half_typed_extension_filters_on_exactly_what_was_typed() {
         let q = Query::parse("abc ext:pd");
@@ -864,10 +771,7 @@ mod tests {
 
     // --- what counts as nothing ---------------------------------------------
 
-    /// The floor is counted on the *term* and not on the line, which used to
-    /// matter for a three-character minimum and still matters for a
-    /// one-character one: a line can be long and have nothing on it to
-    /// search for.
+    /// The floor is counted on the term, not on the line.
     #[test]
     fn the_minimum_length_applies_to_the_term_and_not_to_the_line() {
         assert_eq!(Query::parse("  ext:pdf").check(), Err(QueryReject::Empty));
@@ -877,16 +781,13 @@ mod tests {
         );
     }
 
-    /// "Every PDF on the share" is three hundred rows in directory order
-    /// ranked by nothing, and an arena sweep with no needle to make it fast.
-    /// That was the argument for a three-character floor and it is still the
-    /// argument against a filter with no term at all.
+    /// A filter with no term is not a search.
     #[test]
     fn a_line_that_is_nothing_but_a_filter_is_empty_rather_than_everything() {
         assert_eq!(Query::parse("ext:pdf").check(), Err(QueryReject::Empty));
     }
 
-    /// And one character is now a search, which is the change.
+    /// A single character is a search.
     #[test]
     fn one_character_is_a_search() {
         assert!(Query::parse("a").check().is_ok());
@@ -918,8 +819,7 @@ mod tests {
         assert!(TypeFilter::default().admits_name(b"README"));
     }
 
-    /// A consequence of splitting on the last dot rather than a policy. Pinned
-    /// so that it stays deliberate.
+    /// A consequence of splitting on the last dot, pinned by this test.
     #[test]
     fn a_leading_dot_leaves_an_empty_stem() {
         assert_eq!(split_stem(b".gitignore").0, 0);
@@ -936,23 +836,21 @@ mod tests {
         assert_eq!(s.admits(b"a_report.pdf", 2), None);
     }
 
-    /// The headline test of the feature. `report_report.pdf` matches `report`
-    /// at offset zero first, and the sweep records only that leftmost hit.
-    /// Testing it against the end of the stem would drop a file whose stem
-    /// does end in `report` - a false negative with no symptom on screen.
+    /// `report_report.pdf` matches `report` at offset zero first, and the sweep
+    /// records only that hit; the suffix check must still admit it.
     #[test]
     fn a_suffix_search_finds_the_trailing_occurrence_not_the_leftmost_one() {
         let h = Hidden::none();
         let q = Query::parse("*report");
         let s = sieve(&h, b"report", &q);
-        // The sweep hands us pos = 0, the leftmost occurrence.
+        // The sweep passes pos = 0, the leftmost occurrence.
         assert_eq!(s.admits(b"report_report.pdf", 0), Some(7));
         assert_eq!(s.admits(b"report_a.pdf", 0), None);
         assert_eq!(s.admits(b"a_report.pdf", 2), Some(2));
     }
 
-    /// The dual: if any occurrence sits at zero then the leftmost one does,
-    /// which is why a prefix costs a comparison and a suffix costs a memcmp.
+    /// If any occurrence sits at zero then the leftmost one does, so a prefix
+    /// needs only a comparison.
     #[test]
     fn a_prefix_search_may_trust_the_leftmost_occurrence() {
         let h = Hidden::none();
@@ -981,9 +879,8 @@ mod tests {
         assert_eq!(s.admits(b"a_report.bak", 2), None, "hidden");
     }
 
-    /// The file's own name did not match; the folder did. Testing it against
-    /// the mode would empty the folder that is the whole reason the row is
-    /// there.
+    /// The file's own name did not match; the folder did. The mode is not
+    /// applied to it.
     #[test]
     fn a_file_pulled_in_by_its_folder_is_not_judged_against_the_mode() {
         let h = Hidden::none();
@@ -1018,7 +915,7 @@ mod tests {
         }
     }
 
-    /// F3 has to come back to where it started, or the key is a trap.
+    /// Cycling F3 returns to the starting mode.
     #[test]
     fn cycling_the_mode_three_times_returns_to_the_mode_it_started_in() {
         for m in MatchMode::ALL {
