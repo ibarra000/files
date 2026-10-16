@@ -73,7 +73,7 @@ pub fn render(state: &AppState, wall: SystemTime) -> StatusLine {
 
     // One line for every kind of index work. Counts and progress figures are
     // on the Diagnostics page; what matters here is that the list is
-    // incomplete, so a missing code may not really be missing.
+    // incomplete, so a missing file may not really be missing.
     if state.index.activity != Activity::Idle {
         return StatusLine {
             text: "Indexing\u{2026}".into(),
@@ -249,7 +249,11 @@ mod tests {
     /// A state with one share. Several-share tests are at the end.
     fn state_at(now: Instant) -> AppState {
         AppState::new(
-            Settings::for_mapping("custompro", crate::config::CUSTPRO_PATH, MappingKind::Flat),
+            Settings::for_mapping(
+                "shared",
+                crate::config::FLAT_FIXTURE_PATH,
+                MappingKind::Flat,
+            ),
             now,
         )
     }
@@ -302,8 +306,8 @@ mod tests {
         }
     }
 
-    fn type_code(s: &mut AppState, now: Instant) {
-        for c in "11-D-0704".chars() {
+    fn type_search(s: &mut AppState, now: Instant) {
+        for c in "AB-C-0704".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
     }
@@ -351,7 +355,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(1_284_551, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 1_284_551);
 
         let line = render(&s, EPOCH + Duration::from_secs(180)).text;
@@ -380,7 +384,7 @@ mod tests {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
         let line = render(&s, EPOCH);
-        assert_ne!(line.text, "not a recognised job code");
+        assert_ne!(line.text, "not a recognised search");
         assert_eq!(s.phase, QueryPhase::LocalPending);
     }
 
@@ -392,7 +396,7 @@ mod tests {
         let settings = Settings::with_routes(std::sync::Arc::new(routes), |s| s);
 
         let mut s = AppState::new(settings, now);
-        for c in "11-D-0704".chars() {
+        for c in "AB-C-0704".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
         let line = render(&s, EPOCH);
@@ -405,7 +409,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         let many: Vec<_> = (0..300).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 300, 9_000);
 
@@ -425,7 +429,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         let many: Vec<_> = (0..40).map(|i| hit(&format!("a{i}.pdf"))).collect();
         give_results(&mut s, now, many, 4321, 9_000);
 
@@ -437,7 +441,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         give_results(&mut s, now, vec![hit("a"), hit("b")], 2, 9_000);
 
         assert_eq!(found(&s), "2 items");
@@ -449,7 +453,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(9_000, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         give_results(&mut s, now, vec![], 0, 9_000);
 
         assert_eq!(render(&s, EPOCH).text, "");
@@ -532,7 +536,7 @@ mod tests {
         let now = Instant::now();
         let mut s = state_at(now);
         with_index(&mut s, now, healthy_status(100, Duration::ZERO));
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         assert_eq!(render(&s, EPOCH).text, "", "a search was announced");
 
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 100);
@@ -571,7 +575,7 @@ mod tests {
                 since: now,
             };
         });
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 10);
 
         let line = render(&s, EPOCH);
@@ -624,7 +628,7 @@ mod tests {
             line.text
         );
         assert!(
-            !line.text.contains("custpro"),
+            !line.text.contains(r"V:\shared"),
             "naming the wrong share is the bug: {}",
             line.text
         );
@@ -691,11 +695,15 @@ mod tests {
                 since: now,
             };
         });
-        type_code(&mut s, now);
+        type_search(&mut s, now);
         give_results(&mut s, now, vec![hit("a.pdf")], 1, 20);
 
         let line = render(&s, EPOCH);
-        assert!(line.text.contains("jobs: no live updates"), "{}", line.text);
+        assert!(
+            line.text.contains("projects: no live updates"),
+            "{}",
+            line.text
+        );
     }
 
     #[test]
@@ -720,7 +728,7 @@ mod tests {
     }
 
     fn typed_with_results(s: &mut AppState, now: Instant, total: u32) {
-        type_code(s, now);
+        type_search(s, now);
         give_results(s, now, vec![hit("a.pdf")], 1, total);
     }
 
@@ -736,7 +744,7 @@ mod tests {
         typed_with_results(&mut s, now, 20);
 
         let line = render(&s, EPOCH);
-        assert!(line.text.contains("jobs"), "{}", line.text);
+        assert!(line.text.contains("projects"), "{}", line.text);
         assert!(line.text.contains("changes were missed"), "{}", line.text);
         assert!(line.text.contains("F5"), "{}", line.text);
     }
@@ -790,7 +798,11 @@ mod tests {
         let now = Instant::now();
         let quiet = Settings {
             stale_notices: false,
-            ..Settings::for_mapping("custompro", crate::config::CUSTPRO_PATH, MappingKind::Flat)
+            ..Settings::for_mapping(
+                "shared",
+                crate::config::FLAT_FIXTURE_PATH,
+                MappingKind::Flat,
+            )
         };
         let mut s = AppState::new(quiet, now);
         publish(&mut s, MappingId(0), now, |st| {
@@ -833,7 +845,7 @@ mod tests {
         // The viewer that cannot be launched.
         let mut no_viewer = state_at(now);
         no_viewer.settings.viewers = std::sync::Arc::new(crate::config::Viewers::new(vec![
-            crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            crate::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ]));
         no_viewer.set_viewers_missing(Box::new([true]));
         no_viewer.viewer = crate::config::ViewerKind::App(0);
@@ -872,7 +884,7 @@ mod tests {
         shifted.selection_lost = true;
         say(&shifted, EPOCH);
 
-        // Half a code typed, and a code with nowhere to look.
+        // Half a search typed, and a search with nowhere to look.
         let mut short = state_at(now);
         short.update(
             AppEvent::Key(KeyEvent::new(Key::Char('1'), Mods::NONE)),
@@ -885,13 +897,13 @@ mod tests {
             Settings::with_routes(std::sync::Arc::new(routes), |s| s),
             now,
         );
-        type_code(&mut none, now);
+        type_search(&mut none, now);
         say(&none, EPOCH);
 
         // Every phase the search goes through.
         let mut searching = state_at(now);
         with_index(&mut searching, now, healthy_status(10, Duration::ZERO));
-        type_code(&mut searching, now);
+        type_search(&mut searching, now);
         for phase in [
             QueryPhase::LocalPending,
             QueryPhase::Verifying { since: now },
@@ -911,7 +923,7 @@ mod tests {
             say(&searching, EPOCH);
         }
 
-        // Recall history: opening commits the code, the resulting toast is
+        // Recall history: opening commits the search, the resulting toast is
         // cleared so it does not outrank the recall line, then Up.
         let mut recalling = state_at(now);
         with_index(&mut recalling, now, healthy_status(10, Duration::ZERO));
@@ -982,11 +994,11 @@ mod tests {
     }
 
     /// Lines start capitalised, except those led by a configured drive name
-    /// (`jobs: no live updates`, `custompro unreachable`), which keep the
+    /// (`projects: no live updates`, `shared unreachable`), which keep the
     /// configured spelling.
     #[test]
     fn every_status_line_starts_the_way_a_line_should() {
-        let configured: Vec<String> = ["custompro", "jobs"]
+        let configured: Vec<String> = ["shared", "projects"]
             .iter()
             .map(|n| format!("{n} "))
             .collect();

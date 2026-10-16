@@ -89,7 +89,7 @@ fn secondary_text_is_legible_to_the_aa_standard() {
     for (name, theme) in both() {
         let bg = base(theme);
         // `accent` is not drawn as text on the panel; it is checked as a bar in
-        // `a_boundary_is_as_loud_as_its_job` and as text on the settings tile.
+        // `a_boundary_is_as_loud_as_its_role` and as text on the settings tile.
         for (role, fg) in [
             ("dim", theme.dim),
             ("caption", theme.caption),
@@ -122,7 +122,7 @@ fn text_stays_legible_on_every_row_background() {
 
 /// Text in the search field's well meets the same bars as on the panel.
 #[test]
-fn the_code_is_legible_in_the_well_it_is_typed_into() {
+fn the_search_is_legible_in_the_well_it_is_typed_into() {
     for (name, theme) in both() {
         // The well is opaque, so no desktop leak applies.
         let well = opaque(theme.well);
@@ -231,7 +231,7 @@ fn a_text_box_is_findable_on_the_tile_it_sits_on() {
 /// (`NeutralStroke2`) is intentionally fainter. The accent bar must reach 3:1
 /// on every ground it is drawn over.
 #[test]
-fn a_boundary_is_as_loud_as_its_job() {
+fn a_boundary_is_as_loud_as_its_role() {
     for (name, theme) in both() {
         let bg = base(theme);
         let edge = contrast(theme.edge, bg);

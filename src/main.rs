@@ -34,7 +34,7 @@ fn main() -> io::Result<()> {
     };
 
     // A bad configuration file stops the program instead of falling back to
-    // defaults: searching the wrong share looks exactly like a job with no files.
+    // defaults: searching the wrong share looks exactly like a search with no results.
     let settings = match args.settings() {
         Ok(s) => s,
         Err(errors) => {

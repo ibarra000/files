@@ -11,11 +11,11 @@ pub fn of(path: &str) -> Icon {
     match extension(path).as_str() {
         "pdf" => Icon::FilePdf,
 
-        // CAD drawings and exchange formats.
+        // CAD and exchange formats.
         "dwg" | "dxf" | "dgn" | "plt" | "step" | "stp" | "iges" | "igs" | "sldprt" | "sldasm"
         | "ipt" | "iam" | "catpart" | "catproduct" => Icon::FileDrawing,
 
-        // Images, including TIFF scans of drawings.
+        // Images, including TIFF scans.
         "tif" | "tiff" | "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "heic" => {
             Icon::FileImage
         }
@@ -39,7 +39,7 @@ fn extension(path: &str) -> String {
         Some(cut) => &path[cut + 1..],
         None => path,
     };
-    // Last dot wins (`11-D-0704.rev-B.pdf`). A leading dot is a dotfile name,
+    // Last dot wins (`AB-C-0704.rev-B.pdf`). A leading dot is a dotfile name,
     // not an extension.
     match name.rfind('.') {
         Some(0) | None => String::new(),
@@ -52,12 +52,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_drawing_is_marked_as_one() {
-        assert_eq!(of(r"R:\jobs\11-D-0704\GA.dwg"), Icon::FileDrawing);
-        assert_eq!(of(r"R:\jobs\11-D-0704\GA.pdf"), Icon::FilePdf);
-        assert_eq!(of(r"R:\jobs\11-D-0704\scan.TIF"), Icon::FileImage);
-        assert_eq!(of(r"R:\jobs\11-D-0704\notes.docx"), Icon::FileDocument);
-        assert_eq!(of(r"R:\jobs\11-D-0704\issue.zip"), Icon::FileArchive);
+    fn each_kind_of_file_gets_its_own_mark() {
+        assert_eq!(of(r"R:\projects\AB-C-0704\model.dxf"), Icon::FileDrawing);
+        assert_eq!(of(r"R:\projects\AB-C-0704\report.pdf"), Icon::FilePdf);
+        assert_eq!(of(r"R:\projects\AB-C-0704\scan.TIF"), Icon::FileImage);
+        assert_eq!(of(r"R:\projects\AB-C-0704\notes.docx"), Icon::FileDocument);
+        assert_eq!(of(r"R:\projects\AB-C-0704\issue.zip"), Icon::FileArchive);
     }
 
     #[test]
@@ -76,13 +76,13 @@ mod tests {
 
     #[test]
     fn a_dot_in_a_folder_name_is_not_the_files_extension() {
-        assert_eq!(of(r"R:\jobs\11-D-0704.pdf\GA"), Icon::File);
-        assert_eq!(of(r"R:\jobs\11-D-0704.zip\GA.dwg"), Icon::FileDrawing);
+        assert_eq!(of(r"R:\projects\AB-C-0704.pdf\report"), Icon::File);
+        assert_eq!(of(r"R:\projects\AB-C-0704.zip\scan.tif"), Icon::FileImage);
     }
 
     #[test]
     fn the_last_dot_is_the_one_that_counts() {
-        assert_eq!(of("11-D-0704.rev-B.pdf"), Icon::FilePdf);
+        assert_eq!(of("AB-C-0704.rev-B.pdf"), Icon::FilePdf);
     }
 
     /// Non-ASCII names must not panic.

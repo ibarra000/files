@@ -204,7 +204,7 @@ fn a_toggle_starts_on_the_setting_that_is_in_force() {
         let row = rows(&settings)
             .into_iter()
             .find(|r| r.key == SettingKey::History)
-            .expect("recent codes are on the form");
+            .expect("recent searches are on the form");
         assert_eq!(row.field, Field::Toggle { on });
     }
 }

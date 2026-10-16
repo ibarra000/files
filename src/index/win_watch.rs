@@ -315,10 +315,7 @@ mod tests {
 
     #[test]
     fn a_record_names_the_file_so_the_dirty_entry_is_its_parent() {
-        assert_eq!(
-            parse(&chain(&["11d\\0704\\drawing.dwg"])),
-            vec!["11d\\0704"]
-        );
+        assert_eq!(parse(&chain(&["abc\\0704\\photo.tif"])), vec!["abc\\0704"]);
     }
 
     #[test]
@@ -329,8 +326,8 @@ mod tests {
     #[test]
     fn a_chain_yields_every_directory_in_it() {
         assert_eq!(
-            parse(&chain(&["11d\\a.pdf", "ab12\\b.pdf", "11d\\c.pdf"])),
-            vec!["11d", "ab12"],
+            parse(&chain(&["abc\\a.pdf", "ab12\\b.pdf", "abc\\c.pdf"])),
+            vec!["abc", "ab12"],
             "the duplicate should have been collapsed"
         );
     }
@@ -338,9 +335,9 @@ mod tests {
     /// Many records for one folder collapse to a single entry.
     #[test]
     fn a_burst_in_one_folder_collapses_to_one_entry() {
-        let names: Vec<String> = (0..40).map(|i| format!("11d\\f{i}.pdf")).collect();
+        let names: Vec<String> = (0..40).map(|i| format!("abc\\f{i}.pdf")).collect();
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        assert_eq!(parse(&chain(&refs)), vec!["11d"]);
+        assert_eq!(parse(&chain(&refs)), vec!["abc"]);
     }
 
     #[test]
@@ -352,13 +349,13 @@ mod tests {
     /// out of bounds.
     #[test]
     fn a_truncated_header_ends_the_batch() {
-        let bytes = chain(&["11d\\a.pdf"]);
+        let bytes = chain(&["abc\\a.pdf"]);
         assert!(parse(&bytes[..4]).is_empty());
     }
 
     #[test]
     fn a_name_running_past_the_buffer_ends_the_batch() {
-        let mut bytes = chain(&["11d\\a.pdf"]);
+        let mut bytes = chain(&["abc\\a.pdf"]);
         bytes[8..12].copy_from_slice(&0xFFFF_u32.to_le_bytes());
         assert!(parse(&bytes).is_empty());
     }
@@ -366,23 +363,23 @@ mod tests {
     /// `FileNameLength` is a byte count over UTF-16, so an odd one is corrupt.
     #[test]
     fn an_odd_name_length_ends_the_batch() {
-        let mut bytes = chain(&["11d\\a.pdf"]);
+        let mut bytes = chain(&["abc\\a.pdf"]);
         bytes[8..12].copy_from_slice(&7u32.to_le_bytes());
         assert!(parse(&bytes).is_empty());
     }
 
     #[test]
     fn a_next_offset_that_does_not_advance_ends_the_batch() {
-        let mut bytes = chain(&["11d\\a.pdf", "ab12\\b.pdf"]);
+        let mut bytes = chain(&["abc\\a.pdf", "ab12\\b.pdf"]);
         bytes[0..4].copy_from_slice(&1u32.to_le_bytes());
-        assert_eq!(parse(&bytes), vec!["11d"]);
+        assert_eq!(parse(&bytes), vec!["abc"]);
     }
 
     #[test]
     fn a_next_offset_past_the_buffer_ends_the_batch() {
-        let mut bytes = chain(&["11d\\a.pdf", "ab12\\b.pdf"]);
+        let mut bytes = chain(&["abc\\a.pdf", "ab12\\b.pdf"]);
         bytes[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(parse(&bytes), vec!["11d"]);
+        assert_eq!(parse(&bytes), vec!["abc"]);
     }
 
     /// A buffer of nothing but self-referential records must terminate.

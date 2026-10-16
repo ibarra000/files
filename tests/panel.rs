@@ -36,26 +36,26 @@ const HARNESS_MARGIN: f32 = 8.0;
 
 fn hit(name: &str) -> Hit {
     Hit {
-        path: Arc::from(format!("R:\\11d\\11-D-0704\\{name}").as_str()),
+        path: Arc::from(format!("R:\\abc\\AB-C-0704\\{name}").as_str()),
         name: Arc::from(name),
         match_pos: 0,
         index: 0,
     }
 }
 
-/// Types `code` and delivers `hits` as the matcher's result.
+/// Types `term` and delivers `hits` as the matcher's result.
 ///
 /// `matched` is the total the index found, which can exceed `hits.len()`
 /// because the search is capped.
-fn with_results(state: &mut AppState, code: &str, hits: Vec<Hit>, matched: u32, now: Instant) {
-    for c in code.chars() {
+fn with_results(state: &mut AppState, term: &str, hits: Vec<Hit>, matched: u32, now: Instant) {
+    for c in term.chars() {
         state.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
     }
     let epoch = state.query_epoch();
     state.update(
         AppEvent::Search(SearchMsg {
             epoch,
-            query: Query::contains(code),
+            query: Query::contains(term),
             elapsed: Duration::ZERO,
             result: Ok(SearchOutcome {
                 hits,
@@ -71,7 +71,7 @@ fn with_results(state: &mut AppState, code: &str, hits: Vec<Hit>, matched: u32, 
 
 fn many(n: usize) -> Vec<Hit> {
     (0..n)
-        .map(|i| hit(&format!("11-D-0704-{i:02}.pdf")))
+        .map(|i| hit(&format!("AB-C-0704-{i:02}.pdf")))
         .collect()
 }
 
@@ -139,11 +139,11 @@ fn harness(state: AppState) -> Harness<'static, Panel> {
     harness
 }
 
-/// The default settings plus one configured viewer, `avwin`.
-fn with_avwin() -> Settings {
+/// The default settings plus one configured viewer, `sketch`.
+fn with_sketch() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
-            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            files::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ])),
         ..Settings::fixture()
     }
@@ -151,7 +151,7 @@ fn with_avwin() -> Settings {
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    (AppState::new(with_avwin(), now), now)
+    (AppState::new(with_sketch(), now), now)
 }
 
 /// A state with nothing typed and a healthy index, so the status line is
@@ -199,10 +199,10 @@ fn on_screen(harness: &Harness<'_, Panel>) -> String {
 
 // --- what the panel says ---------------------------------------------------
 
-/// Raises a toast by pressing Enter on a code with no results.
+/// Raises a toast by pressing Enter on a search with no results.
 fn toasted(now: Instant) -> AppState {
     let (mut s, _) = state();
-    with_results(&mut s, "11-D-0704", Vec::new(), 0, now);
+    with_results(&mut s, "AB-C-0704", Vec::new(), 0, now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Enter, Mods::NONE)), now);
     assert!(s.toast.is_some(), "the fixture raised no toast");
     s
@@ -233,9 +233,9 @@ fn a_toast_gives_the_line_back_when_it_expires() {
 }
 
 #[test]
-fn the_footer_says_how_many_the_code_found() {
+fn the_footer_says_how_many_the_search_found() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
@@ -269,10 +269,10 @@ fn the_footer_says_what_enter_will_do() {
     for (viewer, label) in [
         (ViewerKind::Auto, "Open"),
         (ViewerKind::Pdf, "Open as combined PDF"),
-        (ViewerKind::App(0), "Open with avwin"),
+        (ViewerKind::App(0), "Open with sketch"),
     ] {
         let (mut s, now) = state();
-        with_results(&mut s, "11-D-0704", many(3), 3, now);
+        with_results(&mut s, "AB-C-0704", many(3), 3, now);
         s.viewer = viewer;
         let h = harness(s);
         let screen = on_screen(&h);
@@ -288,7 +288,7 @@ fn the_footer_says_what_enter_will_do() {
 fn with_no_viewers_the_menu_offers_none() {
     let now = Instant::now();
     let mut s = AppState::new(Settings::fixture(), now);
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    with_results(&mut s, "AB-C-0704", many(3), 3, now);
     s.actions_open = true;
 
     let h = harness(s);
@@ -301,7 +301,7 @@ fn with_no_viewers_the_menu_offers_none() {
 #[test]
 fn the_actions_menu_lists_everything_else() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    with_results(&mut s, "AB-C-0704", many(3), 3, now);
     s.actions_open = true;
 
     let h = harness(s);
@@ -309,7 +309,7 @@ fn the_actions_menu_lists_everything_else() {
     for offered in [
         "Open \u{b7} Enter",
         "Open as combined PDF \u{b7} Ctrl D",
-        "Open with avwin \u{b7} Ctrl E",
+        "Open with sketch \u{b7} Ctrl E",
         "Show in Explorer \u{b7} Ctrl O",
         "Copy path \u{b7} Ctrl C",
         "Copy name",
@@ -341,27 +341,27 @@ fn the_actions_menu_with_nothing_selected_offers_no_file() {
 #[test]
 fn a_missing_viewer_is_reported_before_it_is_needed() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    with_results(&mut s, "AB-C-0704", many(3), 3, now);
     s.viewer = ViewerKind::App(0);
     s.set_viewers_missing(Box::new([true]));
 
     let h = harness(s);
     let screen = on_screen(&h);
-    assert!(screen.contains("avwin.exe"), "{screen}");
+    assert!(screen.contains("sketch.exe"), "{screen}");
     assert!(screen.contains("F2"), "and says how to fix it:\n{screen}");
 }
 
-/// Browsing history shows the code and the "Recent codes" heading, and the
+/// Browsing history shows the search and the "Recent searches" heading, and the
 /// status line stays silent.
 #[test]
-fn browsing_the_recent_codes_puts_the_code_on_the_line() {
+fn browsing_the_recent_searches_puts_the_search_on_the_line() {
     let (mut s, now) = state();
     s.seed_history(vec![
-        "11-D-0704".into(),
+        "AB-C-0704".into(),
         "P12345-001".into(),
-        "22-A-1".into(),
+        "XY-Z-1".into(),
     ]);
-    // The first Up selects the newest code, the second the one before it.
+    // The first Up selects the newest search, the second the one before it.
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     assert!(s.history.is_browsing(), "the fixture is not browsing");
@@ -369,9 +369,9 @@ fn browsing_the_recent_codes_puts_the_code_on_the_line() {
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(screen.contains("P12345-001"), "{screen}");
-    assert!(screen.contains("Recent codes"), "{screen}");
+    assert!(screen.contains("Recent searches"), "{screen}");
     assert!(
-        !screen.contains("Codes you used before"),
+        !screen.contains("Searches you used before"),
         "the status line is still narrating:\n{screen}"
     );
 }
@@ -384,9 +384,9 @@ fn the_first_screen_is_a_search_box_and_nothing_else() {
 
     assert!(screen.contains("Search"), "no placeholder:\n{screen}");
     for gone in [
-        "Type a job code",
-        "11-D-0704",
-        "Recent codes",
+        "Type a search term",
+        "AB-C-0704",
+        "Recent searches",
         "Viewer:",
         "Quit",
         "Esc",
@@ -421,7 +421,7 @@ fn detailed_rows_fit_fewer_to_a_screen() {
     let drawn = |layout| {
         let (mut s, now) = state();
         s.settings.result_layout = layout;
-        with_results(&mut s, "11-D-0704", many(300), 300, now);
+        with_results(&mut s, "AB-C-0704", many(300), 300, now);
         let h = harness(s);
         let root = h.root();
         root.children_recursive()
@@ -452,12 +452,12 @@ fn detailed_rows_fit_fewer_to_a_screen() {
 fn a_compact_row_still_names_the_folder_it_is_in() {
     let (mut s, now) = state();
     s.settings.result_layout = ResultLayout::Compact;
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    with_results(&mut s, "AB-C-0704", many(3), 3, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
     assert!(
-        screen.contains(r"11-D-0704-00.pdf, in R:\11d\11-D-0704"),
+        screen.contains(r"AB-C-0704-00.pdf, in R:\abc\AB-C-0704"),
         "a compact row told a reader less than it knows:\n{screen}"
     );
 }
@@ -465,7 +465,7 @@ fn a_compact_row_still_names_the_folder_it_is_in() {
 #[test]
 fn the_results_are_captioned() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(3), 3, now);
+    with_results(&mut s, "AB-C-0704", many(3), 3, now);
 
     let h = harness(s);
     let screen = on_screen(&h);
@@ -479,11 +479,11 @@ fn the_results_are_captioned() {
 #[test]
 fn walking_down_a_long_list_carries_the_view_with_it() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
 
     let mut h = harness(s);
     assert!(
-        !on_screen(&h).contains("11-D-0704-50.pdf"),
+        !on_screen(&h).contains("AB-C-0704-50.pdf"),
         "the fixture starts with row fifty already on screen"
     );
 
@@ -496,13 +496,13 @@ fn walking_down_a_long_list_carries_the_view_with_it() {
 
     let screen = on_screen(&h);
     assert!(
-        screen.contains("11-D-0704-50.pdf"),
+        screen.contains("AB-C-0704-50.pdf"),
         "the selection walked off the bottom and the view stayed put:\n{screen}"
     );
     // Nearest-edge scrolling leaves the row at the bottom with its
     // predecessor still visible.
     assert!(
-        screen.contains("11-D-0704-49.pdf"),
+        screen.contains("AB-C-0704-49.pdf"),
         "it scrolled further than it had to:\n{screen}"
     );
 }
@@ -510,7 +510,7 @@ fn walking_down_a_long_list_carries_the_view_with_it() {
 #[test]
 fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(10), 10, now);
+    with_results(&mut s, "AB-C-0704", many(10), 10, now);
     let mut h = harness(s);
 
     h.hover_at(egui::pos2(
@@ -539,7 +539,7 @@ fn the_pointer_is_an_i_beam_over_the_search_box_and_nowhere_else() {
 #[test]
 fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
 
     let mut h = harness(s);
     let before = h.state().state.selected_row();
@@ -562,7 +562,7 @@ fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
 
     let screen = on_screen(&h);
     assert!(
-        !screen.contains("11-D-0704-00.pdf"),
+        !screen.contains("AB-C-0704-00.pdf"),
         "the wheel moved nothing:\n{screen}"
     );
     assert_eq!(
@@ -578,11 +578,11 @@ fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
 #[test]
 fn a_keystroke_does_not_blank_the_result_list() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-070", many(6), 6, now);
+    with_results(&mut s, "AB-C-070", many(6), 6, now);
 
     let mut h = harness(s);
     let before = on_screen(&h);
-    assert!(before.contains("11-D-0704-00.pdf"), "{before}");
+    assert!(before.contains("AB-C-0704-00.pdf"), "{before}");
 
     // One more character, then a frame drawn before any search result.
     h.state_mut().state.update(
@@ -593,7 +593,7 @@ fn a_keystroke_does_not_blank_the_result_list() {
 
     let during = on_screen(&h);
     assert!(
-        during.contains("11-D-0704-00.pdf"),
+        during.contains("AB-C-0704-00.pdf"),
         "the list went away while the next one was in flight:\n{during}"
     );
     assert!(
@@ -604,8 +604,8 @@ fn a_keystroke_does_not_blank_the_result_list() {
 
 /// A pasted string longer than the field stays within the panel's bounds.
 #[test]
-fn a_very_long_code_stays_inside_the_panel() {
-    let long = "11-D-0704-".repeat(30);
+fn a_very_long_search_stays_inside_the_panel() {
+    let long = "AB-C-0704-".repeat(30);
     let (mut s, now) = state();
     s.update(AppEvent::Paste(long.clone()), now);
     assert_eq!(s.input.caret(), long.len(), "the caret is at the end of it");
@@ -636,7 +636,7 @@ fn a_very_long_code_stays_inside_the_panel() {
 #[test]
 fn a_full_list_of_results_does_not_run_into_the_footer() {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
 
     let h = harness(s);
     // The content band in harness coordinates. Only row tops are checked: the
@@ -694,7 +694,7 @@ fn result_boxes(h: &Harness<'_, Panel>) -> Vec<(String, egui::Rect)> {
 fn two_columns_lay_the_results_out_side_by_side() {
     let (mut s, now) = state();
     s.settings.columns = 2;
-    with_results(&mut s, "11-D-0704", many(20), 20, now);
+    with_results(&mut s, "AB-C-0704", many(20), 20, now);
     let h = harness(s);
     let boxes = result_boxes(&h);
     assert!(boxes.len() >= 4, "only {} rows were drawn", boxes.len());
@@ -711,9 +711,9 @@ fn two_columns_lay_the_results_out_side_by_side() {
             .map(|(_, r)| *r)
             .unwrap_or_else(|| panic!("{name} is not on screen"))
     };
-    let first = at("11-D-0704-00.pdf");
-    let second = at("11-D-0704-01.pdf");
-    let third = at("11-D-0704-02.pdf");
+    let first = at("AB-C-0704-00.pdf");
+    let second = at("AB-C-0704-01.pdf");
+    let third = at("AB-C-0704-02.pdf");
     assert_eq!(
         first.top(),
         second.top(),
@@ -739,7 +739,7 @@ fn three_columns_show_more_results_than_one() {
     let drawn = |columns| {
         let (mut s, now) = state();
         s.settings.columns = columns;
-        with_results(&mut s, "11-D-0704", many(60), 60, now);
+        with_results(&mut s, "AB-C-0704", many(60), 60, now);
         result_boxes(&harness(s)).len()
     };
     let (one, three) = (drawn(1), drawn(3));
@@ -768,7 +768,7 @@ macro_rules! snapshot {
 
 snapshot!(looks_right_with_results, || {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 47, now);
+    with_results(&mut s, "AB-C-0704", many(6), 47, now);
     s
 });
 
@@ -781,10 +781,10 @@ snapshot!(looks_right_when_quiet, || {
 
 snapshot!(looks_right_with_a_toast, || toasted(Instant::now()));
 
-snapshot!(looks_right_showing_recent_codes, || {
+snapshot!(looks_right_showing_recent_searches, || {
     let (mut s, now) = state();
-    s.seed_history(vec!["11-D-0704".into(), "P12345-001".into()]);
-    // Recent codes appear only while browsing, so press Up.
+    s.seed_history(vec!["AB-C-0704".into(), "P12345-001".into()]);
+    // Recent searches appear only while browsing, so press Up.
     s.update(AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)), now);
     assert!(s.history.is_browsing(), "the fixture is not browsing");
     s
@@ -801,14 +801,14 @@ snapshot!(looks_right_picking_a_drive, || {
 // More results than fit on screen.
 snapshot!(looks_right_with_more_than_it_can_show, || {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
     s
 });
 
 snapshot!(looks_right_in_two_columns, || {
     let (mut s, now) = state();
     s.settings.columns = 2;
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Tab, Mods::NONE)), now);
     s
 });
@@ -816,7 +816,7 @@ snapshot!(looks_right_in_two_columns, || {
 snapshot!(looks_right_in_three_columns, || {
     let (mut s, now) = state();
     s.settings.columns = 3;
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
     s
 });
 
@@ -826,12 +826,12 @@ snapshot!(looks_right_showing_the_shortcuts, || {
     s.settings.aliases = Arc::new(files::alias::Aliases::new(vec![
         files::alias::Alias {
             name: "pw".into(),
-            code: "11-D-0704".into(),
+            code: "AB-C-0704".into(),
             note: Some("the pump house".into()),
         },
         files::alias::Alias {
             name: "gd".into(),
-            code: "22-A-1234".into(),
+            code: "XY-Z-1234".into(),
             note: None,
         },
     ]));
@@ -841,7 +841,7 @@ snapshot!(looks_right_showing_the_shortcuts, || {
 // The actions menu, which lists every action with its shortcut.
 snapshot!(looks_right_with_the_actions_menu_open, || {
     let (mut s, now) = state();
-    with_results(&mut s, "11-D-0704", many(6), 47, now);
+    with_results(&mut s, "AB-C-0704", many(6), 47, now);
     s.actions_open = true;
     s
 });
@@ -850,6 +850,6 @@ snapshot!(looks_right_with_the_actions_menu_open, || {
 snapshot!(looks_right_with_detailed_rows, || {
     let (mut s, now) = state();
     s.settings.result_layout = ResultLayout::Detailed;
-    with_results(&mut s, "11-D-0704", many(300), 300, now);
+    with_results(&mut s, "AB-C-0704", many(300), 300, now);
     s
 });

@@ -427,7 +427,7 @@ fn prune_seeds(seeds: &[String]) -> Vec<String> {
 
 /// Returns whether `rel` is `ancestor` or beneath it.
 ///
-/// The separator check stops `11d2` from being treated as a child of `11d`.
+/// The separator check stops `abc2` from being treated as a child of `abc`.
 pub fn is_within(rel: &str, ancestor: &str) -> bool {
     if ancestor.is_empty() || rel == ancestor {
         return true;

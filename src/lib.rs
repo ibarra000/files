@@ -1,4 +1,4 @@
-//! Job-code file search over large SMB shares.
+//! Fast file-name search over large network shares.
 //!
 //! All logic lives in the library so integration tests and benchmarks can
 //! reach it; the binaries are thin wrappers.

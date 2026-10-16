@@ -26,12 +26,12 @@ use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use files::search::verify::{AuditVerdict, VerifyOutcome};
 
-/// The base settings for these tests: the defaults plus an `avwin` viewer for
-/// `.dwg` files.
-fn with_avwin() -> Settings {
+/// The base settings for these tests: the defaults plus a `sketch` viewer for
+/// `.tif` files.
+fn with_sketch() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
-            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            files::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ])),
         ..Settings::fixture()
     }
@@ -39,7 +39,7 @@ fn with_avwin() -> Settings {
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    (AppState::new(with_avwin(), now), now)
+    (AppState::new(with_sketch(), now), now)
 }
 
 /// A state with no share configured.
@@ -107,7 +107,7 @@ fn a_line_with_no_term_on_it_is_not_dispatched() {
 #[test]
 fn typing_arms_one_search_rather_than_one_per_keystroke() {
     let (mut s, now) = state();
-    let r = type_in(&mut s, "11-D-0704", now);
+    let r = type_in(&mut s, "AB-C-0704", now);
     let searches = r
         .cmds
         .iter()
@@ -120,7 +120,7 @@ fn typing_arms_one_search_rather_than_one_per_keystroke() {
     assert!(s.search_due_at().is_some(), "nothing was armed");
     assert_eq!(s.phase, QueryPhase::LocalPending);
 
-    // The pause dispatches exactly one search, for the whole code.
+    // The pause dispatches exactly one search, for the whole term.
     let tick = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
     let dispatched: Vec<_> = tick
         .cmds
@@ -130,13 +130,13 @@ fn typing_arms_one_search_rather_than_one_per_keystroke() {
             _ => None,
         })
         .collect();
-    assert_eq!(dispatched, vec!["11-D-0704".to_string()]);
+    assert_eq!(dispatched, vec!["AB-C-0704".to_string()]);
     assert!(s.search_due_at().is_none(), "the deadline was not retired");
 }
 
 /// An unusual query is searched for rather than refused.
 #[test]
-fn an_unusual_code_is_searched_for_rather_than_refused() {
+fn an_unusual_term_is_searched_for_rather_than_refused() {
     let (mut s, now) = state();
     type_in(&mut s, "!!!", now);
     assert_eq!(s.phase, QueryPhase::LocalPending);
@@ -149,7 +149,7 @@ fn an_unusual_code_is_searched_for_rather_than_refused() {
 #[test]
 fn a_configuration_with_no_enabled_share_says_so() {
     let (mut s, now) = unconfigured_state();
-    let r = type_in(&mut s, "11-D-0704", now);
+    let r = type_in(&mut s, "AB-C-0704", now);
     assert_eq!(s.phase, QueryPhase::NoShares);
     assert_eq!(s.empty_reason, Some(EmptyReason::NoSharesConfigured));
     assert!(r.cmds.iter().all(|c| !matches!(c, Cmd::Search { .. })));
@@ -180,7 +180,7 @@ fn key_releases_are_ignored() {
 #[test]
 fn typing_bumps_the_epoch_so_stale_results_are_discarded() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-07", now);
+    type_in(&mut s, "AB-C-07", now);
     let stale = AppEvent::Search(SearchMsg {
         epoch: s.query_epoch() - 1,
         query: Query::contains("old"),
@@ -203,7 +203,7 @@ fn typing_bumps_the_epoch_so_stale_results_are_discarded() {
 #[test]
 fn a_cancelled_result_changes_nothing() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     let ev = AppEvent::Search(SearchMsg {
         epoch: s.query_epoch(),
         query: Query::parse(s.input.text()),
@@ -226,7 +226,7 @@ fn a_cancelled_result_changes_nothing() {
 #[test]
 fn escape_clears_the_input_and_never_quits() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     s.update(press(Key::Esc), now);
     assert_eq!(s.input, "");
@@ -239,8 +239,8 @@ fn escape_clears_the_input_and_never_quits() {
     );
 
     // Clearing is not a terminal state.
-    type_in(&mut s, "11-D-0704", now);
-    assert_eq!(s.input, "11-D-0704");
+    type_in(&mut s, "AB-C-0704", now);
+    assert_eq!(s.input, "AB-C-0704");
     assert!(!s.should_quit);
 }
 
@@ -248,7 +248,7 @@ fn escape_clears_the_input_and_never_quits() {
 #[test]
 fn ctrl_c_copies_the_selected_text() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(shift(Key::Left), now);
     s.update(shift(Key::Left), now);
 
@@ -270,7 +270,7 @@ fn ctrl_c_copies_the_selected_text() {
 #[test]
 fn ctrl_c_with_no_text_selected_copies_the_path() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     let v = view(&s);
     s.update(search_result(&v, many_hits(3), 3, 9_000), now);
     assert!(s.input.selection().is_none(), "the fixture selected text");
@@ -284,14 +284,14 @@ fn ctrl_c_with_no_text_selected_copies_the_path() {
         "{:?}",
         r.cmds
     );
-    assert_eq!(s.input, "11-D-0704", "the code must survive");
+    assert_eq!(s.input, "AB-C-0704", "the search must survive");
 }
 
 /// With nothing to copy, Ctrl+C shows a toast and the session continues.
 #[test]
 fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     s.update(ctrl(Key::Char('c')), now);
     assert!(!s.should_quit);
@@ -302,7 +302,7 @@ fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
         "{:?}",
         s.toast
     );
-    assert_eq!(s.input, "11-D-0704", "the code must survive");
+    assert_eq!(s.input, "AB-C-0704", "the search must survive");
 }
 
 /// Ctrl+X copies and removes the selection.
@@ -312,7 +312,7 @@ fn ctrl_c_with_nothing_to_copy_explains_itself_and_stays_running() {
 #[test]
 fn ctrl_x_cuts_the_selected_text() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(shift(Key::Left), now);
     s.update(shift(Key::Left), now);
 
@@ -325,7 +325,7 @@ fn ctrl_x_cuts_the_selected_text() {
         r.cmds
     );
     assert_eq!(
-        s.input, "11-D-07",
+        s.input, "AB-C-07",
         "the selection was copied but not removed"
     );
     assert!(!s.should_quit);
@@ -333,9 +333,9 @@ fn ctrl_x_cuts_the_selected_text() {
 
 /// With nothing selected, Ctrl+X leaves the input alone and shows a toast.
 #[test]
-fn ctrl_x_with_no_selection_leaves_the_code_alone() {
+fn ctrl_x_with_no_selection_leaves_the_search_alone() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let r = s.update(ctrl(Key::Char('x')), now);
     assert!(
@@ -343,7 +343,7 @@ fn ctrl_x_with_no_selection_leaves_the_code_alone() {
         "{:?}",
         r.cmds
     );
-    assert_eq!(s.input, "11-D-0704", "the code must survive");
+    assert_eq!(s.input, "AB-C-0704", "the search must survive");
     assert!(
         s.toast
             .as_ref()
@@ -358,7 +358,7 @@ fn ctrl_x_with_no_selection_leaves_the_code_alone() {
 #[test]
 fn nothing_except_ctrl_q_quits_the_application() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let codes = [
         Key::Esc,
@@ -398,7 +398,7 @@ fn nothing_except_ctrl_q_quits_the_application() {
 #[test]
 fn ctrl_q_quits_and_asks_exactly_once() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let r = s.update(ctrl(Key::Char('q')), now);
     assert!(s.should_quit);
@@ -412,7 +412,7 @@ fn ctrl_q_quits_and_asks_exactly_once() {
 #[test]
 fn ctrl_c_copies_rather_than_quitting() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let r = s.update(ctrl(Key::Char('c')), now);
     assert!(!s.should_quit);
@@ -450,30 +450,30 @@ fn a_control_combination_this_program_does_not_have_still_types_nothing() {
 #[test]
 fn an_unbound_control_combination_does_not_type_a_letter() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D", now);
+    type_in(&mut s, "AB-C", now);
     for c in ['q', 'x', 'z', 'n', 'p'] {
         s.update(ctrl(Key::Char(c)), now);
     }
-    assert_eq!(s.input, "11-D");
+    assert_eq!(s.input, "AB-C");
 }
 
 #[test]
 fn enter_opens_the_selection() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a.pdf"), hit("b.pdf")], 2, 9),
         now,
     );
 
     let r = s.update(press(Key::Enter), now);
-    // The request carries the typed code because the page set is rebuilt from
-    // the code, not from the rows on screen.
+    // The request carries the typed base name because the page set is rebuilt
+    // from it, not from the rows on screen.
     assert!(matches!(
         &r.cmds[0],
         Cmd::Open(req)
             if &*req.path == "V:\\a.pdf"
-                && req.query == "11-D-0704"
+                && req.query == "AB-C-0704"
                 && req.viewer == ViewerKind::Auto
     ));
     assert_eq!(
@@ -492,7 +492,7 @@ fn enter_opens_the_selection() {
 #[test]
 fn enter_with_no_results_reports_rather_than_opening() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     // Enter during the debounce flushes the search instead of acting on the
     // previous query's results; the report follows the result.
     let asked = s.update(press(Key::Enter), now);
@@ -506,7 +506,7 @@ fn enter_with_no_results_reports_rather_than_opening() {
     let r = s.update(
         AppEvent::Search(SearchMsg {
             epoch: s.query_epoch(),
-            query: Query::contains("11-D-0704"),
+            query: Query::contains("AB-C-0704"),
             elapsed: Duration::ZERO,
             result: Ok(SearchOutcome::default()),
         }),
@@ -523,7 +523,7 @@ fn enter_with_no_results_reports_rather_than_opening() {
 #[test]
 fn f5_opens_the_drive_list_rather_than_refreshing_everything() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     let r = s.update(press(Key::F(5)), now);
     assert!(s.picking_share);
     assert!(
@@ -536,7 +536,7 @@ fn f5_opens_the_drive_list_rather_than_refreshing_everything() {
 #[test]
 fn enter_in_the_drive_list_updates_only_that_drive() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(press(Key::F(5)), now);
     let r = s.update(press(Key::Enter), now);
 
@@ -559,7 +559,7 @@ fn enter_in_the_drive_list_updates_only_that_drive() {
 #[test]
 fn a_in_the_drive_list_refreshes_nothing() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(press(Key::F(5)), now);
     let r = s.update(press(Key::Char('a')), now);
 
@@ -585,7 +585,7 @@ fn escape_leaves_the_drive_list_without_updating_anything() {
 #[test]
 fn the_first_result_is_selected_by_default() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a.pdf"), hit("b.pdf")], 2, 9),
         now,
@@ -597,7 +597,7 @@ fn the_first_result_is_selected_by_default() {
 #[test]
 fn both_ends_of_the_list_wrap() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a"), hit("b"), hit("c")], 3, 3),
         now,
@@ -643,7 +643,7 @@ fn a_page_stops_at_the_ends_rather_than_wrapping() {
 #[test]
 fn a_pinned_selection_survives_a_result_update() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a"), hit("b"), hit("c")], 3, 3),
         now,
@@ -668,7 +668,7 @@ fn a_pinned_selection_survives_a_result_update() {
 #[test]
 fn a_pinned_selection_that_disappears_clamps_and_reports() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a"), hit("b"), hit("c")], 3, 3),
         now,
@@ -696,7 +696,7 @@ fn a_pinned_selection_that_disappears_clamps_and_reports() {
 #[test]
 fn typing_unpins_the_selection() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a"), hit("b")], 2, 2),
         now,
@@ -712,7 +712,7 @@ fn typing_unpins_the_selection() {
 #[test]
 fn verification_waits_for_a_pause_in_typing() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let early = s.update(
         AppEvent::Tick,
@@ -728,7 +728,7 @@ fn verification_waits_for_a_pause_in_typing() {
 #[test]
 fn continued_typing_pushes_the_verify_deadline_out() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-070", now);
+    type_in(&mut s, "AB-C-070", now);
     let first = s.verify_due_at().unwrap();
     let later = now + Duration::from_millis(100);
     s.update(key('4'), later);
@@ -738,7 +738,7 @@ fn continued_typing_pushes_the_verify_deadline_out() {
 #[test]
 fn a_wedged_verification_is_broken_by_the_watchdog() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
     assert!(s.phase.is_verifying());
 
@@ -994,7 +994,7 @@ fn busy_means_any_share_is_busy() {
 #[test]
 fn a_verifying_state_asks_for_animation_frames() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
     assert!(s.is_busy());
     assert!(s.next_deadline().is_some());
@@ -1003,7 +1003,7 @@ fn a_verifying_state_asks_for_animation_frames() {
 #[test]
 fn animation_stops_when_the_work_finishes() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
     assert!(s.is_busy());
 
@@ -1024,7 +1024,7 @@ fn animation_stops_when_the_work_finishes() {
 #[test]
 fn an_unchanged_directory_verifies_without_touching_the_results() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(search_result(&view(&s), vec![hit("a.pdf")], 1, 5), now);
 
     s.update(
@@ -1046,7 +1046,7 @@ fn an_unchanged_directory_verifies_without_touching_the_results() {
 #[test]
 fn a_failed_verification_keeps_the_local_results_on_screen() {
     let (mut s, now) = dev_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(search_result(&view(&s), vec![hit("a.pdf")], 1, 5), now);
 
     s.update(
@@ -1069,7 +1069,7 @@ fn a_failed_verification_keeps_the_local_results_on_screen() {
 fn a_server_answer_replaces_rather_than_unions() {
     // A union would keep showing files that have been deleted.
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("old.pdf"), hit("kept.pdf")], 2, 9),
         now,
@@ -1096,7 +1096,7 @@ fn a_server_answer_replaces_rather_than_unions() {
 #[test]
 fn an_audit_failure_warns_the_user() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
@@ -1152,7 +1152,7 @@ fn an_unreachable_drive_explains_itself_instead_of_showing_nothing() {
 #[test]
 fn a_genuine_no_match_says_how_much_was_searched() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(search_result(&view(&s), vec![], 0, 4321), now);
     assert_eq!(
         s.empty_reason,
@@ -1165,7 +1165,7 @@ fn a_genuine_no_match_says_how_much_was_searched() {
 #[test]
 fn a_new_snapshot_reruns_the_local_search_but_does_not_re_arm_verification() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     // Let the pending verification fire and settle first, so the
     // assertion below is about the snapshot event and nothing else.
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
@@ -1199,7 +1199,7 @@ fn a_failed_open_is_reported_rather_than_swallowed() {
     s.update(
         AppEvent::Open(OpenMsg::Failed {
             path: Arc::from(r"V:\a.pdf"),
-            detail: "avwin.exe not found".into(),
+            detail: "sketch.exe not found".into(),
         }),
         now,
     );
@@ -1254,8 +1254,8 @@ fn f2_without_viewers_toggles_between_the_built_in_two() {
 #[test]
 fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
-    s.update(search_result(&view(&s), vec![hit("a.dwg")], 1, 9), now);
+    type_in(&mut s, "AB-C-0704", now);
+    s.update(search_result(&view(&s), vec![hit("a.tif")], 1, 9), now);
     let r = s.update(ctrl(Key::Char('e')), now);
     let opened = r.cmds.iter().find_map(|c| match c {
         Cmd::Open(req) => Some(req.viewer),
@@ -1264,8 +1264,8 @@ fn ctrl_e_opens_with_the_first_viewer_and_only_if_there_is_one() {
     assert_eq!(opened, Some(ViewerKind::App(0)), "{:?}", r.cmds);
 
     let mut none = AppState::new(Settings::fixture(), now);
-    type_in(&mut none, "11-D-0704", now);
-    none.update(search_result(&view(&none), vec![hit("a.dwg")], 1, 9), now);
+    type_in(&mut none, "AB-C-0704", now);
+    none.update(search_result(&view(&none), vec![hit("a.tif")], 1, 9), now);
     let r = none.update(ctrl(Key::Char('e')), now);
     assert!(
         !r.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
@@ -1305,9 +1305,9 @@ fn f2_says_so_when_the_choice_cannot_be_persisted() {
 /// the highlighted entry. F2 is the exception: it changes the viewer without
 /// committing the entry or running a search.
 #[test]
-fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
+fn f2_during_recall_changes_the_viewer_without_accepting_the_search() {
     let (mut s, now) = state();
-    s.seed_history(vec!["11-D-0704".into(), "AB12-0704".into()]);
+    s.seed_history(vec!["AB-C-0704".into(), "AB12-0704".into()]);
     type_in(&mut s, "99-", now);
 
     s.update(press(Key::Up), now);
@@ -1324,7 +1324,7 @@ fn f2_during_recall_changes_the_viewer_without_accepting_the_code() {
 #[test]
 fn f2_does_not_disturb_the_query_or_the_results() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(
         search_result(&view(&s), vec![hit("a.pdf"), hit("b.pdf")], 2, 9),
         now,
@@ -1342,7 +1342,7 @@ fn f2_does_not_disturb_the_query_or_the_results() {
 #[test]
 fn enter_carries_the_viewer_that_is_active_now_not_the_one_configured_at_startup() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(search_result(&view(&s), vec![hit("a.pdf")], 1, 9), now);
     s.update(press(Key::F(2)), now);
 
@@ -1356,7 +1356,7 @@ fn enter_carries_the_viewer_that_is_active_now_not_the_one_configured_at_startup
     );
 }
 
-/// A partially assembled drawing set warns and names the skipped pages.
+/// A partially assembled page set warns and names the skipped pages.
 #[test]
 fn a_partial_assembly_warns_and_names_what_was_skipped() {
     let (mut s, now) = state();
@@ -1364,7 +1364,7 @@ fn a_partial_assembly_warns_and_names_what_was_skipped() {
         AppEvent::Open(OpenMsg::Launched {
             path: Arc::from(r"C:\cache\pdf\abc.pdf"),
             pages: 12,
-            skipped: vec!["11-D-0704_Page7.pdf (could not be read)".into()],
+            skipped: vec!["AB-C-0704_Page7.pdf (could not be read)".into()],
             truncated: false,
         }),
         now,
@@ -1390,7 +1390,7 @@ fn a_complete_assembly_says_nothing() {
     assert!(s.toast.is_none(), "{:?}", s.toast);
 }
 
-/// A drawing set longer than the page limit opens truncated, with a warning.
+/// A page set longer than the page limit opens truncated, with a warning.
 #[test]
 fn a_truncated_document_says_the_set_is_longer() {
     let (mut s, now) = state();
@@ -1414,13 +1414,13 @@ fn a_saved_viewer_is_confirmed_on_screen() {
     let (mut s, now) = state();
     s.update(
         AppEvent::Open(OpenMsg::ViewerSaved {
-            name: "avwin".into(),
+            name: "sketch".into(),
         }),
         now,
     );
     let t = s.toast.as_ref().unwrap();
     assert_eq!(t.severity, Severity::Info);
-    assert!(t.text.contains("avwin"), "{}", t.text);
+    assert!(t.text.contains("sketch"), "{}", t.text);
 }
 
 /// The toggle still applies, so a failed save is a warning, not an error.
@@ -1442,7 +1442,7 @@ fn a_failed_viewer_save_warns_rather_than_ending_the_session() {
 #[test]
 fn a_dead_worker_clears_the_spinner_and_says_so() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + VERIFY_DEBOUNCE);
     assert!(s.phase.is_verifying());
 
@@ -1521,13 +1521,13 @@ fn search_result(view: &AppStateView, hits: Vec<Hit>, matched: u32, total: u32) 
 // --- the results list --------------------------------------------------
 
 fn with_results(s: &mut AppState, now: Instant, n: usize) {
-    type_in(s, "11-D-0704", now);
+    type_in(s, "AB-C-0704", now);
     let v = view(s);
     s.update(search_result(&v, many_hits(n), n as u32, 9_000), now);
 }
 
 fn many_hits(n: usize) -> Vec<Hit> {
-    (0..n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect()
+    (0..n).map(|i| hit(&format!("abc_{i:04}.pdf"))).collect()
 }
 
 /// Down walks the list one rank at a time.
@@ -1581,7 +1581,11 @@ fn down_steps_into_the_shortcuts_and_enter_takes_one() {
     // text.
     s.update(press(Key::Enter), now);
     assert_eq!(s.input.text(), "gd");
-    assert_eq!(s.alias_cursor(), None, "the list stayed up under the code");
+    assert_eq!(
+        s.alias_cursor(),
+        None,
+        "the list stayed up under the search"
+    );
 }
 
 /// The first Escape leaves the shortcut list; only the second dismisses the
@@ -1627,12 +1631,12 @@ fn with_aliases() -> Settings {
         aliases: std::sync::Arc::new(files::alias::Aliases::new(vec![
             files::alias::Alias {
                 name: "pw".into(),
-                code: "11-D-0704".into(),
+                code: "AB-C-0704".into(),
                 note: Some("the pump house".into()),
             },
             files::alias::Alias {
                 name: "gd".into(),
-                code: "22-A-1234".into(),
+                code: "XY-Z-1234".into(),
                 note: None,
             },
         ])),
@@ -1663,13 +1667,13 @@ fn the_home_row_arrows_are_the_arrows() {
 
 /// Ctrl+L selects the whole input, as focusing a search box does elsewhere.
 #[test]
-fn ctrl_l_selects_the_whole_code() {
+fn ctrl_l_selects_the_whole_search() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     assert!(s.input.selection().is_none(), "the fixture selected text");
 
     s.update(ctrl(Key::Char('l')), now);
-    assert_eq!(s.input.selected_text(), Some("11-D-0704"));
+    assert_eq!(s.input.selected_text(), Some("AB-C-0704"));
 }
 
 /// Up and Down move the selection; Left and Right always move the caret.
@@ -1687,7 +1691,7 @@ fn left_and_right_always_move_the_caret() {
     let before = s.query_epoch();
     let typed = s.update(key('X'), now);
 
-    assert_eq!(s.input.text(), "11-D-070X4", "the caret moved, not the row");
+    assert_eq!(s.input.text(), "AB-C-070X4", "the caret moved, not the row");
     // Typing keeps the results and debounces the search, so the check is that
     // the keystroke re-armed it. See
     // `typing_keeps_the_results_until_the_new_ones_arrive`.
@@ -1751,7 +1755,7 @@ fn a_query_that_stops_being_one_does_clear_the_results() {
 
     assert_eq!(s.input.text(), "");
     assert_eq!(s.phase, QueryPhase::Idle);
-    assert!(s.hits.is_empty(), "the last code's results outlived it");
+    assert!(s.hits.is_empty(), "the last search's results outlived it");
     assert_eq!(s.selected_row(), None);
 }
 
@@ -1970,13 +1974,13 @@ fn in_columns_a_page_moves_a_screen_of_lines_and_keeps_the_column() {
 /// Enter before the debounce elapses must not open the row on screen, which
 /// belongs to the previous query; it waits for the new result instead.
 #[test]
-fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
+fn enter_before_the_search_fires_opens_the_new_search_not_the_old_one() {
     let (mut s, now) = state();
 
-    type_in(&mut s, "11-D-070", now);
+    type_in(&mut s, "AB-C-070", now);
     let v = view(&s);
     s.update(
-        search_result(&v, vec![hit("11-D-070-OLD.pdf")], 1, 9_000),
+        search_result(&v, vec![hit("AB-C-070-OLD.pdf")], 1, 9_000),
         now,
     );
     assert_eq!(s.hits.len(), 1);
@@ -1987,7 +1991,7 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
 
     assert!(
         !pressed.cmds.iter().any(|c| matches!(c, Cmd::Open(_))),
-        "Enter opened a row belonging to the previous code"
+        "Enter opened a row belonging to the previous search"
     );
     assert!(
         pressed.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
@@ -1998,7 +2002,7 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
     // The new result is what gets opened.
     let v = view(&s);
     let r = s.update(
-        search_result(&v, vec![hit("11-D-0704-NEW.pdf")], 1, 9_000),
+        search_result(&v, vec![hit("AB-C-0704-NEW.pdf")], 1, 9_000),
         now,
     );
     let opened = r.cmds.iter().find_map(|c| match c {
@@ -2007,7 +2011,7 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
     });
     let opened = opened.expect("the answer did not open anything");
     assert!(
-        opened.contains("11-D-0704-NEW"),
+        opened.contains("AB-C-0704-NEW"),
         "opened the wrong file: {opened}"
     );
 }
@@ -2015,7 +2019,7 @@ fn enter_before_the_search_fires_opens_the_new_code_not_the_old_one() {
 #[test]
 fn an_edit_between_enter_and_the_answer_cancels_the_open() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(press(Key::Enter), now);
 
     let stale = view(&s);
@@ -2031,7 +2035,7 @@ fn an_edit_between_enter_and_the_answer_cancels_the_open() {
 #[test]
 fn a_matcher_that_never_answers_an_enter_gives_the_keystroke_back() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(press(Key::Enter), now);
     assert!(s.toast.is_none());
 
@@ -2046,7 +2050,7 @@ fn a_matcher_that_never_answers_an_enter_gives_the_keystroke_back() {
 #[test]
 fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let due = now + VERIFY_DEBOUNCE;
     s.update(AppEvent::Tick, due);
@@ -2069,7 +2073,7 @@ fn the_local_answer_does_not_walk_the_phase_back_from_verifying() {
 #[test]
 fn clearing_the_field_stands_every_clock_down() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     assert!(s.search_due_at().is_some());
 
     for _ in 0..9 {
@@ -2085,7 +2089,7 @@ fn clearing_the_field_stands_every_clock_down() {
 #[test]
 fn a_paste_is_searched_for_at_once_rather_than_debounced() {
     let (mut s, now) = state();
-    let r = s.update(AppEvent::Paste("11-D-0704".into()), now);
+    let r = s.update(AppEvent::Paste("AB-C-0704".into()), now);
     assert!(
         r.cmds.iter().any(|c| matches!(c, Cmd::Search { .. })),
         "a paste waited out the pause: {:?}",
@@ -2114,12 +2118,12 @@ fn every_toast() -> Vec<String> {
 
     // Nothing to copy, and nothing to open.
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('c')), now);
     raised(&s);
 
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(search_result(&view(&s), Vec::new(), 0, 9_000), now);
     s.update(press(Key::Enter), now);
     raised(&s);
@@ -2150,19 +2154,19 @@ fn every_toast() -> Vec<String> {
     // Open outcomes other than a clean launch.
     for msg in [
         OpenMsg::Launched {
-            path: "R:\\11d\\a.pdf".into(),
+            path: "R:\\abc\\a.pdf".into(),
             pages: 8,
             skipped: vec!["page 3 is not a PDF".into()],
             truncated: false,
         },
         OpenMsg::Launched {
-            path: "R:\\11d\\a.pdf".into(),
+            path: "R:\\abc\\a.pdf".into(),
             pages: 64,
             skipped: Vec::new(),
             truncated: true,
         },
         OpenMsg::Failed {
-            path: "R:\\11d\\a.pdf".into(),
+            path: "R:\\abc\\a.pdf".into(),
             detail: "the file no longer exists".into(),
         },
         OpenMsg::ViewerSaveFailed {
@@ -2184,7 +2188,7 @@ fn every_toast() -> Vec<String> {
         let mut unsaveable = AppState::new(
             Settings {
                 have_file: false,
-                ..with_avwin()
+                ..with_sketch()
             },
             now,
         );
@@ -2239,7 +2243,7 @@ fn every_toast() -> Vec<String> {
     // A search that never returned. Enter must arrive while a search is still
     // pending, since that is what arms the watchdog.
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(press(Key::Enter), now);
     s.update(
         AppEvent::Tick,
@@ -2290,37 +2294,37 @@ fn every_toast_starts_the_way_a_line_should() {
 #[test]
 fn f3_writes_the_narrowing_into_the_search_box() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     s.update(press(Key::F(3)), now);
-    assert_eq!(s.input.text(), "11-D-0704*");
+    assert_eq!(s.input.text(), "AB-C-0704*");
     s.update(press(Key::F(3)), now);
-    assert_eq!(s.input.text(), "*11-D-0704");
+    assert_eq!(s.input.text(), "*AB-C-0704");
     s.update(press(Key::F(3)), now);
-    assert_eq!(s.input.text(), "11-D-0704", "the cycle has to come back");
+    assert_eq!(s.input.text(), "AB-C-0704", "the cycle has to come back");
 }
 
 #[test]
 fn f4_steps_through_the_file_types_and_back_to_all_of_them() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     s.update(press(Key::F(4)), now);
-    assert_eq!(s.input.text(), "11-D-0704 ext:pdf");
+    assert_eq!(s.input.text(), "AB-C-0704 ext:pdf");
     s.update(press(Key::F(4)), now);
-    assert_eq!(s.input.text(), "11-D-0704 ext:dwg");
+    assert_eq!(s.input.text(), "AB-C-0704 ext:dwg");
     s.update(press(Key::F(4)), now);
-    assert_eq!(s.input.text(), "11-D-0704");
+    assert_eq!(s.input.text(), "AB-C-0704");
 }
 
 #[test]
 fn the_two_narrowings_compose_without_either_dropping_the_other() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     s.update(press(Key::F(4)), now);
     s.update(press(Key::F(3)), now);
-    assert_eq!(s.input.text(), "11-D-0704* ext:pdf");
+    assert_eq!(s.input.text(), "AB-C-0704* ext:pdf");
 }
 
 /// Narrowing is a complete edit, so the search is dispatched without debounce,
@@ -2328,7 +2332,7 @@ fn the_two_narrowings_compose_without_either_dropping_the_other() {
 #[test]
 fn narrowing_dispatches_the_search_at_once_rather_than_waiting_out_the_pause() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let response = s.update(press(Key::F(3)), now);
     assert!(
@@ -2345,17 +2349,17 @@ fn narrowing_dispatches_the_search_at_once_rather_than_waiting_out_the_pause() {
 #[test]
 fn a_hand_typed_type_the_key_does_not_know_is_cleared_rather_than_guessed_at() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704 ext:sldprt", now);
+    type_in(&mut s, "AB-C-0704 ext:sldprt", now);
 
     s.update(press(Key::F(4)), now);
-    assert_eq!(s.input.text(), "11-D-0704");
+    assert_eq!(s.input.text(), "AB-C-0704");
 }
 
 /// The dispatched query carries the type filter added by F4.
 #[test]
 fn a_narrowed_search_is_dispatched_with_its_filter_intact() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     let response = s.update(press(Key::F(4)), now);
 
     let dispatched: Vec<Query> = response
@@ -2367,16 +2371,16 @@ fn a_narrowed_search_is_dispatched_with_its_filter_intact() {
         })
         .collect();
     assert_eq!(dispatched.len(), 1);
-    assert_eq!(dispatched[0].term(), "11-D-0704");
+    assert_eq!(dispatched[0].term(), "AB-C-0704");
     assert_eq!(dispatched[0].types().len(), 1);
 }
 
 /// A `*` inside a term is reported as a bad query; it cannot occur in a
 /// Windows filename, so a literal search could never match.
 #[test]
-fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
+fn a_star_in_the_middle_of_a_search_is_explained_rather_than_searched_for() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D*0704", now);
+    type_in(&mut s, "AB-C*0704", now);
 
     assert!(
         matches!(s.phase, QueryPhase::BadQuery { .. }),
@@ -2389,7 +2393,7 @@ fn a_star_in_the_middle_of_a_code_is_explained_rather_than_searched_for() {
 /// The minimum length applies to the search term, not the whole line:
 /// `  ext:pdf` has nine characters but no term.
 #[test]
-fn the_minimum_length_is_judged_on_the_code_and_not_on_the_whole_line() {
+fn the_minimum_length_is_judged_on_the_search_and_not_on_the_whole_line() {
     let (mut s, now) = state();
     type_in(&mut s, "  ext:pdf", now);
     assert_eq!(s.phase, QueryPhase::Idle);
@@ -2403,8 +2407,8 @@ fn live_state() -> (AppState, Instant) {
     let mappings = vec![
         Mapping {
             id: MappingId(0),
-            name: "custompro".into(),
-            path: std::path::PathBuf::from("V:\\Documents\\custpro"),
+            name: "shared".into(),
+            path: std::path::PathBuf::from("V:\\shared\\files"),
             kind: MappingKind::Flat,
             enabled: true,
             refresh: RefreshPolicy::Auto,
@@ -2480,7 +2484,7 @@ fn local_answer(s: &AppState, hits: Vec<Hit>) -> AppEvent {
 #[test]
 fn the_live_shares_are_asked_only_after_a_longer_pause_than_the_indexes() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
 
     let early = s.update(AppEvent::Tick, now + SEARCH_DEBOUNCE);
     assert!(
@@ -2501,14 +2505,14 @@ fn the_live_shares_are_asked_only_after_a_longer_pause_than_the_indexes() {
 #[test]
 fn a_live_answer_merges_into_the_local_results_rather_than_replacing_them() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
-    let local = local_answer(&s, vec![hit("11-D-0704.pdf")]);
+    let local = local_answer(&s, vec![hit("AB-C-0704.pdf")]);
     s.update(local, now);
     assert_eq!(s.hits.len(), 1);
 
-    let msg = live_msg(&s, answered(vec![live_hit("11-D-0704-rev.pdf")], 0));
+    let msg = live_msg(&s, answered(vec![live_hit("AB-C-0704-rev.pdf")], 0));
     s.update(msg, now);
 
     assert_eq!(s.hits.len(), 2, "the local row was dropped");
@@ -2521,7 +2525,7 @@ fn a_live_answer_merges_into_the_local_results_rather_than_replacing_them() {
 #[test]
 fn a_live_answer_for_a_superseded_keystroke_is_dropped() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
     let stale = AppEvent::Live(LiveMsg {
@@ -2540,7 +2544,7 @@ fn a_live_answer_for_a_superseded_keystroke_is_dropped() {
 #[test]
 fn clearing_the_field_retires_the_live_deadline_too() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('u')), now);
 
     let after = s.update(AppEvent::Tick, now + LIVE_DEBOUNCE * 2);
@@ -2556,7 +2560,7 @@ fn clearing_the_field_retires_the_live_deadline_too() {
 #[test]
 fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
     // The local search answers first and finds nothing. That says nothing
@@ -2586,7 +2590,7 @@ fn an_empty_list_from_a_partly_searched_share_never_reads_as_no_matches() {
 #[test]
 fn a_share_that_could_not_be_asked_says_so_rather_than_reporting_nothing() {
     let (mut s, now) = live_state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(AppEvent::Tick, now + LIVE_DEBOUNCE);
 
     let msg = live_msg(
@@ -2620,7 +2624,7 @@ fn a_configuration_of_only_live_shares_still_accepts_a_query() {
     let now = Instant::now();
     let mut s = AppState::new(settings, now);
 
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     assert!(
         !matches!(s.phase, QueryPhase::NoShares),
         "a live-only configuration was treated as having no drives"
@@ -2633,7 +2637,7 @@ fn a_configuration_of_only_live_shares_still_accepts_a_query() {
 fn aliased_state() -> (AppState, Instant) {
     let aliases = files::alias::Aliases::new(vec![files::alias::Alias {
         name: "pw".into(),
-        code: "11-D-0704".into(),
+        code: "AB-C-0704".into(),
         note: None,
     }]);
     let settings = Settings {
@@ -2651,21 +2655,21 @@ fn searched_for(r: &Response) -> Option<String> {
     })
 }
 
-/// An alias searches for its code immediately, without the typing debounce.
+/// An alias runs the search it stands for immediately, without the typing debounce.
 #[test]
-fn an_alias_searches_for_the_code_it_stands_for_without_a_pause() {
+fn an_alias_runs_the_search_it_stands_for_without_a_pause() {
     let (mut s, now) = aliased_state();
     let r = type_in(&mut s, "pw", now);
 
-    assert_eq!(searched_for(&r).as_deref(), Some("11-D-0704"));
-    assert_eq!(s.query().term(), "11-D-0704");
+    assert_eq!(searched_for(&r).as_deref(), Some("AB-C-0704"));
+    assert_eq!(s.query().term(), "AB-C-0704");
 }
 
 #[test]
 fn an_alias_is_searched_for_as_its_expansion() {
     let (mut s, now) = aliased_state();
     type_in(&mut s, "pw", now);
-    assert_eq!(s.query().term(), "11-D-0704");
+    assert_eq!(s.query().term(), "AB-C-0704");
 }
 
 #[test]
@@ -2685,7 +2689,7 @@ fn an_alias_does_not_rewrite_what_was_typed() {
     type_in(&mut s, "pw", now);
 
     assert_eq!(s.input.text(), "pw");
-    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
+    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("AB-C-0704"));
 }
 
 /// The active expansion is exposed so the UI can show what the alias stands
@@ -2697,10 +2701,10 @@ fn an_alias_reports_what_it_stood_for() {
 
     let alias = s.expansion().expect("the expansion must be readable");
     assert_eq!(alias.name.as_ref(), "pw");
-    assert_eq!(alias.describe(), "pw \u{b7} 11-D-0704");
+    assert_eq!(alias.describe(), "pw \u{b7} AB-C-0704");
 }
 
-/// Typing past an alias searches for the literal line, so longer codes that
+/// Typing past an alias searches for the literal line, so longer searches that
 /// start with an alias name stay reachable.
 #[test]
 fn typing_past_an_alias_goes_back_to_searching_for_what_is_on_the_line() {
@@ -2721,7 +2725,7 @@ fn an_alias_resolves_again_when_the_line_becomes_one() {
     assert!(s.expansion().is_none());
 
     s.update(press(Key::Backspace), now);
-    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("11-D-0704"));
+    assert_eq!(s.expansion().map(|a| a.code.as_ref()), Some("AB-C-0704"));
 }
 
 /// Alias names are case-insensitive.
@@ -2729,7 +2733,7 @@ fn an_alias_resolves_again_when_the_line_becomes_one() {
 fn an_alias_resolves_whatever_case_it_is_typed_in() {
     let (mut s, now) = aliased_state();
     type_in(&mut s, "PW", now);
-    assert_eq!(s.query().term(), "11-D-0704");
+    assert_eq!(s.query().term(), "AB-C-0704");
 }
 
 #[test]
@@ -2756,10 +2760,10 @@ fn a_configuration_without_aliases_is_unchanged() {
 use files::config::write::SettingKey;
 
 /// Builds an alias with no note.
-fn alias(name: &str, code: &str) -> files::alias::Alias {
+fn alias(name: &str, term: &str) -> files::alias::Alias {
     files::alias::Alias {
         name: name.into(),
-        code: code.into(),
+        code: term.into(),
         note: None,
     }
 }
@@ -2821,7 +2825,7 @@ fn a_file_rewritten_elsewhere_is_taken_whole() {
 #[test]
 fn turning_the_history_off_elsewhere_forgets_what_it_held() {
     let (mut s, now) = saveable();
-    s.history = files::history::History::from_entries(["11-D-0704"]);
+    s.history = files::history::History::from_entries(["AB-C-0704"]);
     assert!(!s.history.is_empty());
 
     adopt(
@@ -2833,7 +2837,7 @@ fn turning_the_history_off_elsewhere_forgets_what_it_held() {
         },
         now,
     );
-    assert!(s.history.is_empty(), "the codes outlived the setting");
+    assert!(s.history.is_empty(), "the searches outlived the setting");
 }
 
 /// An alias added in the settings window applies to the line already typed.
@@ -2850,11 +2854,11 @@ fn an_alias_added_elsewhere_expands_the_line_already_on_the_panel() {
         have_file: true,
         ..Settings::fixture()
     };
-    fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    fresh.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "AB-C-0704")]));
     adopt(&mut s, fresh, now);
 
     assert!(s.expansion().is_some(), "the new alias did not fire");
-    assert_eq!(s.query().term(), "11-D-0704");
+    assert_eq!(s.query().term(), "AB-C-0704");
 }
 
 #[test]
@@ -2864,7 +2868,7 @@ fn an_alias_removed_elsewhere_stops_expanding_the_line() {
         have_file: true,
         ..Settings::fixture()
     };
-    with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "11-D-0704")]));
+    with.aliases = std::sync::Arc::new(files::alias::Aliases::new(vec![alias("pw", "AB-C-0704")]));
     adopt(&mut s, with, now);
     type_in(&mut s, "pw", now);
     assert!(s.expansion().is_some());
@@ -2961,7 +2965,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
         match key {
             SettingKey::Theme => s.theme = files::config::ThemeChoice::Dark,
             SettingKey::Viewer => {
-                s.viewers = with_avwin().viewers;
+                s.viewers = with_sketch().viewers;
                 s.viewer = files::config::ViewerKind::App(0);
             }
             SettingKey::Hotkey => s.hotkey = files::hotkey::spec::HotkeySpec::Off,
@@ -3006,7 +3010,7 @@ fn what_a_key_claims_about_applying_at_once_is_what_it_does() {
 
     for key in SettingKey::ALL {
         let (mut s, now) = saveable();
-        s.history = files::history::History::from_entries(["11-D-0704"]);
+        s.history = files::history::History::from_entries(["AB-C-0704"]);
         let before = live(&s);
         adopt(&mut s, differing(key), now);
 
@@ -3135,7 +3139,7 @@ fn a_drive_failure_is_a_sentence_until_somebody_asks() {
         "a filesystem path reached an ordinary user: {plain}"
     );
     assert!(
-        plain.contains("custompro") || plain.contains("jobs"),
+        plain.contains("shared") || plain.contains("projects"),
         "the drive is not named at all: {plain}"
     );
 
@@ -3151,7 +3155,7 @@ fn a_toast_carries_its_detail_only_in_developer_mode() {
         s.settings.dev_mode = dev;
         s.update(
             AppEvent::Open(OpenMsg::Failed {
-                path: Arc::from(r"R:\11d\drawing.pdf"),
+                path: Arc::from(r"R:\abc\report.pdf"),
                 detail: "the handle is invalid (os error 6)".into(),
             }),
             now,
@@ -3164,7 +3168,7 @@ fn a_toast_carries_its_detail_only_in_developer_mode() {
     }
 
     let plain = toast(false);
-    assert!(plain.contains("drawing.pdf"), "{plain}");
+    assert!(plain.contains("report.pdf"), "{plain}");
     assert!(
         !plain.contains("os error"),
         "an os error code reached an ordinary user: {plain}"

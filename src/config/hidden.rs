@@ -34,7 +34,7 @@ pub const DEFAULT_HIDE_SYSTEM_FILES: bool = true;
 pub struct Hidden {
     /// Lowercase suffixes with a leading dot (`"db"` becomes `".db"`).
     ///
-    /// The dot makes a single `ends_with` correct: `Drawing.Final.db` matches
+    /// The dot makes a single `ends_with` correct: `Report.Final.db` matches
     /// and a file named plain `db` does not.
     suffixes: Box<[Box<str>]>,
     system: bool,
@@ -118,7 +118,7 @@ mod tests {
         for name in [
             "Thumbs.db",
             "desktop.ini",
-            "11-D-0704.lnk",
+            "AB-C-0704.lnk",
             "tracking.js",
             "setup.exe",
         ] {
@@ -127,9 +127,9 @@ mod tests {
     }
 
     #[test]
-    fn a_drawing_is_never_hidden() {
+    fn a_document_is_never_hidden() {
         let h = shipped();
-        for name in ["11-D-0704.pdf", "11-D-0704.dwg", "11-D-0704 rev B.PDF"] {
+        for name in ["AB-C-0704.pdf", "AB-C-0704.tif", "AB-C-0704 rev B.PDF"] {
             assert!(!h.hides(name), "{name} disappeared");
         }
     }
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn a_name_that_merely_contains_the_extension_is_kept() {
         let h = shipped();
-        for name in ["db.pdf", "11-db-0704.dwg", "ini", "db", "bakery.pdf"] {
+        for name in ["db.pdf", "ab-db-0704.tif", "ini", "db", "bakery.pdf"] {
             assert!(!h.hides(name), "{name} disappeared");
         }
     }
@@ -153,8 +153,8 @@ mod tests {
     #[test]
     fn only_the_final_extension_counts() {
         let h = shipped();
-        assert!(h.hides("Drawing.pdf.bak"));
-        assert!(!h.hides("Drawing.bak.pdf"));
+        assert!(h.hides("Report.pdf.bak"));
+        assert!(!h.hides("Report.bak.pdf"));
     }
 
     #[test]
@@ -173,9 +173,9 @@ mod tests {
         for name in [
             "Thumbs.db",
             "DESKTOP.INI",
-            "11-D-0704.pdf",
+            "AB-C-0704.pdf",
             "db.pdf",
-            "Drawing.pdf.bak",
+            "Report.pdf.bak",
             // Non-ASCII names must agree too, though non-ASCII extensions are
             // never configured.
             "Caf\u{e9}.db",
@@ -209,7 +209,7 @@ mod tests {
     fn a_non_ascii_extension_is_dropped_rather_than_half_working() {
         let h = Hidden::new(&["d\u{e9}", "db"], false);
         assert_eq!(h.suffixes().collect::<Vec<_>>(), vec![".db"]);
-        assert!(!h.hides("drawing.d\u{e9}"));
+        assert!(!h.hides("report.d\u{e9}"));
     }
 
     #[test]

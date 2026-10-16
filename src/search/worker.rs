@@ -344,7 +344,7 @@ pub fn spawn_live(
 
 fn run_live(backend: &Backend, slot: &LatestSlot<SearchRequest>, epoch: &Epoch, tx: &Events) {
     // Loaded before the first keystroke so the local sweep, which runs
-    // first, can answer previously searched codes from memory.
+    // first, can answer previously searched terms from memory.
     restore(backend);
 
     while let Some(request) = slot.take_blocking() {
@@ -415,7 +415,7 @@ fn restore(backend: &Backend) {
 /// Folds what a live pass found into that share's index.
 ///
 /// Nothing reads a live share in the background, so search results are its
-/// only listing. Keeping them lets a repeated code be answered from memory;
+/// only listing. Keeping them lets a repeated search be answered from memory;
 /// without it the per-share floor would skip a repeat query within the
 /// second.
 ///
@@ -527,9 +527,9 @@ mod tests {
     }
 
     /// The per-share floor refuses a second query within the second, so a
-    /// repeated code must be answered from the remembered listing.
+    /// repeated search must be answered from the remembered listing.
     #[test]
-    fn a_code_searched_once_is_answered_from_memory_afterwards() {
+    fn a_term_searched_once_is_answered_from_memory_afterwards() {
         let backend = live_backend(FakeDirSource::new().with_dir(LIVE_ROOT, &["p12345.pdf"]));
         ask_and_remember(&backend, "p12345");
 
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn the_flat_root_is_served_from_the_index_without_touching_the_network() {
-        let src = FakeDirSource::new().with_dir(crate::config::CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(crate::config::FLAT_FIXTURE_PATH, &["a.pdf"]);
         let b = backend(src.clone());
         assert!(
             b.store.indexed().all(|s| !s.has_index()),
@@ -665,13 +665,13 @@ mod tests {
 
     #[test]
     fn the_search_worker_answers_a_request() {
-        let src = FakeDirSource::new().with_dir("R:\\11d", &["alpha.pdf", "beta.pdf"]);
+        let src = FakeDirSource::new().with_dir("R:\\abc", &["alpha.pdf", "beta.pdf"]);
         let (tx, rx) = bounded(64);
         let tx = Events::headless(tx);
         let mut w = spawn_search(backend(src), tx).unwrap();
 
         w.submit(|epoch| SearchRequest {
-            query: Query::contains("11-D-0704"),
+            query: Query::contains("AB-C-0704"),
             epoch,
         });
 
@@ -694,13 +694,13 @@ mod tests {
     /// A search never touches the network, so a hung share cannot block it.
     #[test]
     fn a_search_never_reaches_the_share() {
-        let src = FakeDirSource::new().with_dir("R:\\11d", &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir("R:\\abc", &["a.pdf"]);
         src.set_hang(true);
         let (tx, rx) = bounded(64);
         let tx = Events::headless(tx);
         let mut w = spawn_search(backend(src.clone()), tx).unwrap();
         w.submit(|epoch| SearchRequest {
-            query: Query::contains("11-D-0704"),
+            query: Query::contains("AB-C-0704"),
             epoch,
         });
 

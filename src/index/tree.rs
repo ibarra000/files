@@ -769,10 +769,10 @@ mod tests {
     fn sample() -> TreeSegment {
         seg(&[
             ("", &["loose.pdf"]),
-            ("11d", &["notes.txt"]),
-            ("11d\\0704", &["quote.pdf", "drawing.pdf"]),
+            ("abc", &["notes.txt"]),
+            ("abc\\0704", &["quote.pdf", "photo.pdf"]),
             ("empty", &[]),
-            ("ab12", &["spec.pdf"]),
+            ("abd", &["spec.pdf"]),
         ])
     }
 
@@ -809,12 +809,12 @@ mod tests {
     fn an_empty_index_takes_what_a_search_found() {
         let ix = TreeIndex::empty("V:\\archive");
         let next = ix
-            .with_observed_files(&observed(&[("p12345", &["a.pdf", "b.dwg"])]))
+            .with_observed_files(&observed(&[("p12345", &["a.pdf", "b.tif"])]))
             .expect("something was new");
         assert_eq!(next.len(), 2);
         assert!(next.observed());
         assert!(!next.complete(), "an observed index is never complete");
-        assert_eq!(files_in(&next, "p12345"), ["a.pdf", "b.dwg"]);
+        assert_eq!(files_in(&next, "p12345"), ["a.pdf", "b.tif"]);
     }
 
     /// A repeated search must not publish a new index.
@@ -846,20 +846,20 @@ mod tests {
     #[test]
     fn remembering_a_second_search_never_drops_what_the_first_one_found() {
         let ix = TreeIndex::empty("V:\\archive")
-            .with_observed_files(&observed(&[("jobs", &["0704.pdf"])]))
+            .with_observed_files(&observed(&[("projects", &["0704.pdf"])]))
             .unwrap();
         let next = ix
-            .with_observed_files(&observed(&[("jobs", &["0801.pdf"])]))
+            .with_observed_files(&observed(&[("projects", &["0801.pdf"])]))
             .unwrap();
-        assert_eq!(files_in(&next, "jobs"), ["0704.pdf", "0801.pdf"]);
+        assert_eq!(files_in(&next, "projects"), ["0704.pdf", "0801.pdf"]);
     }
 
     #[test]
     fn a_name_is_matched_for_holding_however_it_is_cased() {
         let ix = TreeIndex::empty("V:\\archive")
-            .with_observed_files(&observed(&[("jobs", &["A.PDF"])]))
+            .with_observed_files(&observed(&[("projects", &["A.PDF"])]))
             .unwrap();
-        assert!(ix.holds("jobs", "a.pdf"));
+        assert!(ix.holds("projects", "a.pdf"));
         assert!(!ix.holds("other", "a.pdf"), "the folder has to match too");
     }
 
@@ -869,7 +869,7 @@ mod tests {
         let mut ix = TreeIndex::empty("V:\\archive");
         for i in 0..40 {
             ix = ix
-                .with_observed_files(&observed(&[("jobs", &[&format!("f{i:03}.pdf")])]))
+                .with_observed_files(&observed(&[("projects", &[&format!("f{i:03}.pdf")])]))
                 .expect("each name is new");
         }
         assert_eq!(ix.len(), 40);
@@ -902,10 +902,10 @@ mod tests {
         let s = sample();
         assert_eq!(s.file_count(), 5);
         assert_eq!(s.dir_of(0), Some(0), "loose.pdf is in the root");
-        assert_eq!(s.dir_of(1), Some(1), "notes.txt is in 11d");
+        assert_eq!(s.dir_of(1), Some(1), "notes.txt is in abc");
         assert_eq!(s.dir_of(2), Some(2));
         assert_eq!(s.dir_of(3), Some(2), "both of 0704's files");
-        assert_eq!(s.dir_of(4), Some(4), "ab12, skipping the empty folder");
+        assert_eq!(s.dir_of(4), Some(4), "abd, skipping the empty folder");
         assert_eq!(s.dir_of(5), None);
     }
 
@@ -939,17 +939,17 @@ mod tests {
     fn paths_are_composed_from_the_root_and_the_directory() {
         let index = TreeIndex::empty("R:\\").appended(Arc::new(sample()));
         assert_eq!(index.full_path(0).unwrap(), "R:\\loose.pdf");
-        assert_eq!(index.full_path(1).unwrap(), "R:\\11d\\notes.txt");
-        assert_eq!(index.full_path(2).unwrap(), "R:\\11d\\0704\\quote.pdf");
-        assert_eq!(index.full_path(4).unwrap(), "R:\\ab12\\spec.pdf");
+        assert_eq!(index.full_path(1).unwrap(), "R:\\abc\\notes.txt");
+        assert_eq!(index.full_path(2).unwrap(), "R:\\abc\\0704\\quote.pdf");
+        assert_eq!(index.full_path(4).unwrap(), "R:\\abd\\spec.pdf");
         assert_eq!(index.full_path(5), None);
     }
 
     /// A root without a trailing separator gains exactly one.
     #[test]
     fn a_root_without_a_trailing_separator_still_composes_cleanly() {
-        let index = TreeIndex::empty("R:\\Jobs").appended(Arc::new(sample()));
-        assert_eq!(index.full_path(1).unwrap(), "R:\\Jobs\\11d\\notes.txt");
+        let index = TreeIndex::empty("R:\\Projects").appended(Arc::new(sample()));
+        assert_eq!(index.full_path(1).unwrap(), "R:\\Projects\\abc\\notes.txt");
     }
 
     #[test]
@@ -1007,7 +1007,7 @@ mod tests {
 
     #[test]
     fn the_parent_of_a_relative_path_is_its_directory() {
-        assert_eq!(parent_rel("11d\\0704\\quote.pdf"), "11d\\0704");
+        assert_eq!(parent_rel("abc\\0704\\quote.pdf"), "abc\\0704");
         assert_eq!(parent_rel("loose.pdf"), "", "a file in the root");
         assert_eq!(parent_rel(""), "");
     }
@@ -1052,12 +1052,12 @@ mod apply_tests {
         tree_of(&[
             &[
                 ("", &["readme.txt"] as &[&str]),
-                ("11d", &["quote.pdf", "old.pdf"]),
+                ("abc", &["quote.pdf", "old.pdf"]),
             ],
             &[
-                ("11d\\0704", &["drawing.dwg"]),
-                ("ab12", &["spec.pdf"]),
-                ("ab12x", &["decoy.pdf"]),
+                ("abc\\0704", &["photo.tif"]),
+                ("abd", &["spec.pdf"]),
+                ("abdx", &["decoy.pdf"]),
             ],
         ])
     }
@@ -1065,20 +1065,20 @@ mod apply_tests {
     #[test]
     fn a_replaced_subtree_takes_the_fresh_contents() {
         let fresh = tree_of(&[&[
-            ("11d", &["quote.pdf", "new.pdf"] as &[&str]),
-            ("11d\\0704", &["drawing.dwg", "revised.dwg"]),
+            ("abc", &["quote.pdf", "new.pdf"] as &[&str]),
+            ("abc\\0704", &["photo.tif", "revised.tif"]),
         ]]);
-        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
+        let after = base().with_subtrees_replaced(&["abc".to_string()], &fresh);
 
         assert_eq!(
             paths(&after),
             vec![
-                "R:\\11d\\0704\\drawing.dwg",
-                "R:\\11d\\0704\\revised.dwg",
-                "R:\\11d\\new.pdf",
-                "R:\\11d\\quote.pdf",
-                "R:\\ab12\\spec.pdf",
-                "R:\\ab12x\\decoy.pdf",
+                "R:\\abc\\0704\\photo.tif",
+                "R:\\abc\\0704\\revised.tif",
+                "R:\\abc\\new.pdf",
+                "R:\\abc\\quote.pdf",
+                "R:\\abd\\spec.pdf",
+                "R:\\abdx\\decoy.pdf",
                 "R:\\readme.txt",
             ]
         );
@@ -1089,42 +1089,42 @@ mod apply_tests {
     #[test]
     fn a_folder_created_under_a_dirty_parent_is_picked_up() {
         let fresh = tree_of(&[&[
-            ("11d", &["quote.pdf", "old.pdf"] as &[&str]),
-            ("11d\\0704", &["drawing.dwg"]),
-            ("11d\\0999", &["brand new.pdf"]),
+            ("abc", &["quote.pdf", "old.pdf"] as &[&str]),
+            ("abc\\0704", &["photo.tif"]),
+            ("abc\\0999", &["brand new.pdf"]),
         ]]);
-        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
-        assert!(paths(&after).contains(&"R:\\11d\\0999\\brand new.pdf".to_string()));
+        let after = base().with_subtrees_replaced(&["abc".to_string()], &fresh);
+        assert!(paths(&after).contains(&"R:\\abc\\0999\\brand new.pdf".to_string()));
     }
 
     #[test]
     fn a_deleted_folder_leaves_the_index() {
-        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
-        let after = base().with_subtrees_replaced(&["11d".to_string()], &fresh);
+        let fresh = tree_of(&[&[("abc", &["quote.pdf"] as &[&str])]]);
+        let after = base().with_subtrees_replaced(&["abc".to_string()], &fresh);
 
         assert!(!paths(&after).iter().any(|p| p.contains("0704")));
         assert!(!paths(&after).iter().any(|p| p.contains("old.pdf")));
-        assert!(paths(&after).contains(&"R:\\ab12\\spec.pdf".to_string()));
+        assert!(paths(&after).contains(&"R:\\abd\\spec.pdf".to_string()));
     }
 
     /// A subtree that is gone entirely is replaced by nothing.
     #[test]
     fn replacing_a_subtree_with_nothing_removes_it() {
-        let after = base().with_subtrees_replaced(&["ab12".to_string()], &TreeIndex::empty(ROOT));
+        let after = base().with_subtrees_replaced(&["abd".to_string()], &TreeIndex::empty(ROOT));
         let got = paths(&after);
-        assert!(!got.iter().any(|p| p.contains("\\ab12\\")));
+        assert!(!got.iter().any(|p| p.contains("\\abd\\")));
         assert!(
-            got.contains(&"R:\\ab12x\\decoy.pdf".to_string()),
+            got.contains(&"R:\\abdx\\decoy.pdf".to_string()),
             "a prefix match is not a subtree: {got:?}"
         );
     }
 
-    /// The separator check. Without it `ab12` would swallow `ab12x`.
+    /// The separator check. Without it `abd` would swallow `abdx`.
     #[test]
     fn a_name_that_merely_starts_the_same_is_not_within_the_subtree() {
-        assert!(crate::index::walk::is_within("ab12\\sub", "ab12"));
-        assert!(crate::index::walk::is_within("ab12", "ab12"));
-        assert!(!crate::index::walk::is_within("ab12x", "ab12"));
+        assert!(crate::index::walk::is_within("abd\\sub", "abd"));
+        assert!(crate::index::walk::is_within("abd", "abd"));
+        assert!(!crate::index::walk::is_within("abdx", "abd"));
         assert!(crate::index::walk::is_within("anything", ""));
     }
 
@@ -1141,9 +1141,9 @@ mod apply_tests {
     fn untouched_segments_are_shared_rather_than_copied() {
         let before = base();
         let untouched = Arc::clone(&before.segments()[1]);
-        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
+        let fresh = tree_of(&[&[("abc", &["quote.pdf"] as &[&str])]]);
 
-        let after = before.with_subtrees_replaced(&["11d\\0704".to_string()], &fresh);
+        let after = before.with_subtrees_replaced(&["abc\\0704".to_string()], &fresh);
         assert!(
             after
                 .segments()
@@ -1157,8 +1157,8 @@ mod apply_tests {
     #[test]
     fn an_incremental_update_does_not_claim_the_index_is_newer() {
         let before = base();
-        let fresh = tree_of(&[&[("11d", &["quote.pdf"] as &[&str])]]);
-        let after = before.with_subtrees_replaced(&["11d".to_string()], &fresh);
+        let fresh = tree_of(&[&[("abc", &["quote.pdf"] as &[&str])]]);
+        let after = before.with_subtrees_replaced(&["abc".to_string()], &fresh);
 
         assert_eq!(after.captured_at(), before.captured_at());
         assert_eq!(after.volume_serial(), before.volume_serial());
@@ -1170,8 +1170,8 @@ mod apply_tests {
     fn the_directory_count_follows_the_update() {
         let before = base();
         assert_eq!(before.dir_count(), 5);
-        let after = before.with_subtrees_replaced(&["11d".to_string()], &TreeIndex::empty(ROOT));
-        assert_eq!(after.dir_count(), 3, "`11d` and `11d\\0704` both left");
+        let after = before.with_subtrees_replaced(&["abc".to_string()], &TreeIndex::empty(ROOT));
+        assert_eq!(after.dir_count(), 3, "`abc` and `abc\\0704` both left");
     }
 
     /// Repeated updates do not grow the segment count without bound.
@@ -1180,10 +1180,10 @@ mod apply_tests {
         let mut index = base();
         for i in 0..50 {
             let fresh = tree_of(&[&[(
-                "ab12",
+                "abd",
                 &[Box::leak(format!("v{i}.pdf").into_boxed_str()) as &str] as &[&str],
             )]]);
-            index = index.with_subtrees_replaced(&["ab12".to_string()], &fresh);
+            index = index.with_subtrees_replaced(&["abd".to_string()], &fresh);
         }
         assert!(
             index.segments().len() <= 2,
@@ -1191,10 +1191,7 @@ mod apply_tests {
             index.segments().len()
         );
         assert_eq!(
-            paths(&index)
-                .iter()
-                .filter(|p| p.contains("ab12\\"))
-                .count(),
+            paths(&index).iter().filter(|p| p.contains("abd\\")).count(),
             1,
             "each update should supersede the last, not stack on it"
         );
@@ -1204,15 +1201,15 @@ mod apply_tests {
     #[test]
     fn coalescing_preserves_every_path_and_its_folder() {
         let before = base();
-        let fresh = tree_of(&[&[("ab12", &["spec.pdf", "extra.pdf"] as &[&str])]]);
-        let after = before.with_subtrees_replaced(&["ab12".to_string()], &fresh);
+        let fresh = tree_of(&[&[("abd", &["spec.pdf", "extra.pdf"] as &[&str])]]);
+        let after = before.with_subtrees_replaced(&["abd".to_string()], &fresh);
 
         for seg in after.segments() {
             seg.check_invariants()
                 .expect("a coalesced segment is sound");
         }
-        assert!(paths(&after).contains(&"R:\\ab12\\extra.pdf".to_string()));
-        assert!(paths(&after).contains(&"R:\\11d\\0704\\drawing.dwg".to_string()));
+        assert!(paths(&after).contains(&"R:\\abd\\extra.pdf".to_string()));
+        assert!(paths(&after).contains(&"R:\\abc\\0704\\photo.tif".to_string()));
     }
 
     /// Replacing nothing is a no-op. The actor reaches this when a batch names

@@ -26,7 +26,7 @@ use super::errors::EnumError;
 use super::schedule::{Counters, ScanReason, StampHealth};
 use super::snapshot::Snapshot;
 use super::tree::TreeIndex;
-use crate::config::JOB_CACHE_CAPACITY;
+use crate::config::FOLDER_CACHE_CAPACITY;
 use crate::paths::{MappingId, MappingKind, Routes};
 
 /// Where the current listing came from.
@@ -450,19 +450,19 @@ fn activity_rank(a: &Activity) -> u8 {
     }
 }
 
-/// A cached job-folder listing, including the negative case.
+/// A cached folder listing, including the negative case.
 #[derive(Debug, Clone)]
-enum JobSlot {
+enum FolderSlot {
     Present {
         snapshot: Arc<Snapshot>,
         fetched_at: Instant,
     },
-    /// A remembered miss, so a partially typed code does not re-probe a
+    /// A remembered miss, so a partially typed search does not re-probe a
     /// nonexistent folder on every keystroke.
     Missing { err: EnumError, fetched_at: Instant },
 }
 
-impl JobSlot {
+impl FolderSlot {
     fn fetched_at(&self) -> Instant {
         match self {
             Self::Present { fetched_at, .. } | Self::Missing { fetched_at, .. } => *fetched_at,
@@ -827,14 +827,14 @@ pub struct IndexStore {
     /// assumes). A fixed slice keeps every `&MappingSlot` stable for the life
     /// of the process, so each actor owns exactly one slot.
     slots: Box<[MappingSlot]>,
-    jobs: Mutex<LruCache<PathBuf, JobSlot>>,
+    folders: Mutex<LruCache<PathBuf, FolderSlot>>,
 }
 
 impl Default for IndexStore {
     /// A store over the shipped routing table (one flat mapping and one
     /// tree). Used by tests.
     fn default() -> Self {
-        Self::for_routes(&crate::config::default_routes(), JOB_CACHE_CAPACITY)
+        Self::for_routes(&crate::config::default_routes(), FOLDER_CACHE_CAPACITY)
     }
 }
 
@@ -842,40 +842,40 @@ impl IndexStore {
     /// A store over [`crate::config::fixture_routes`]. Test fixture only.
     #[doc(hidden)]
     pub fn fixture() -> Self {
-        Self::for_routes(&crate::config::fixture_routes(), JOB_CACHE_CAPACITY)
+        Self::for_routes(&crate::config::fixture_routes(), FOLDER_CACHE_CAPACITY)
     }
 
     /// Builds a slot for every configured mapping, enabled or not.
     ///
     /// Disabled mappings get a slot but no actor, so `MappingId::index()`
     /// stays a direct index.
-    pub fn for_routes(routes: &Routes, job_capacity: usize) -> Self {
+    pub fn for_routes(routes: &Routes, folder_capacity: usize) -> Self {
         let slots = routes
             .all()
             .iter()
             .map(|m| MappingSlot::new(m.id, m.kind, &m.name, &m.path, m.enabled))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self::from_slots(slots, job_capacity)
+        Self::from_slots(slots, folder_capacity)
     }
 
-    /// A store with no mappings and a bounded job cache, for the job-cache
+    /// A store with no mappings and a bounded folder cache, for the folder-cache
     /// tests.
-    pub fn with_job_capacity(job_capacity: usize) -> Self {
-        Self::from_slots(Box::new([]), job_capacity)
+    pub fn with_folder_capacity(folder_capacity: usize) -> Self {
+        Self::from_slots(Box::new([]), folder_capacity)
     }
 
     /// A store over a single mapping. For tests and for `--doctor`.
     pub fn single(name: &str, dir: &Path, kind: MappingKind) -> Self {
         let slots = vec![MappingSlot::new(MappingId(0), kind, name, dir, true)].into_boxed_slice();
-        Self::from_slots(slots, JOB_CACHE_CAPACITY)
+        Self::from_slots(slots, FOLDER_CACHE_CAPACITY)
     }
 
-    fn from_slots(slots: Box<[MappingSlot]>, job_capacity: usize) -> Self {
-        let cap = NonZeroUsize::new(job_capacity.max(1)).expect("capacity is at least one");
+    fn from_slots(slots: Box<[MappingSlot]>, folder_capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(folder_capacity.max(1)).expect("capacity is at least one");
         Self {
             slots,
-            jobs: Mutex::new(LruCache::new(cap)),
+            folders: Mutex::new(LruCache::new(cap)),
         }
     }
 
@@ -935,12 +935,12 @@ impl IndexStore {
             .expect("the store has a tree mapping")
     }
 
-    // --- job folders -------------------------------------------------------
+    // --- folder cache ------------------------------------------------------
 
-    /// Looks up a job folder, honouring the TTL. Never does I/O; the mutex is
+    /// Looks up a folder listing, honouring the TTL. Never does I/O; the mutex is
     /// held only long enough to bump a refcount.
-    pub fn job(&self, dir: &Path, ttl: Duration) -> Cached {
-        let mut guard = self.jobs.lock();
+    pub fn folder(&self, dir: &Path, ttl: Duration) -> Cached {
+        let mut guard = self.folders.lock();
         let Some(slot) = guard.get(dir) else {
             return Cached::Absent;
         };
@@ -948,15 +948,15 @@ impl IndexStore {
             return Cached::Absent;
         }
         match slot {
-            JobSlot::Present { snapshot, .. } => Cached::Hit(Arc::clone(snapshot)),
-            JobSlot::Missing { err, .. } => Cached::Miss(*err),
+            FolderSlot::Present { snapshot, .. } => Cached::Hit(Arc::clone(snapshot)),
+            FolderSlot::Missing { err, .. } => Cached::Miss(*err),
         }
     }
 
-    pub fn publish_job(&self, dir: PathBuf, snapshot: Arc<Snapshot>) {
-        self.jobs.lock().put(
+    pub fn publish_folder(&self, dir: PathBuf, snapshot: Arc<Snapshot>) {
+        self.folders.lock().put(
             dir,
-            JobSlot::Present {
+            FolderSlot::Present {
                 snapshot,
                 fetched_at: Instant::now(),
             },
@@ -969,7 +969,7 @@ impl IndexStore {
     /// whitelist). A network blip, cancellation or malformed buffer says
     /// nothing about whether the folder exists, and caching it would pin a
     /// wrong answer for the whole TTL.
-    pub fn publish_job_miss(&self, dir: PathBuf, err: EnumError) {
+    pub fn publish_folder_miss(&self, dir: PathBuf, err: EnumError) {
         let definite = matches!(
             err,
             EnumError::PathNotFound(_) | EnumError::NotADirectory(_) | EnumError::AccessDenied(_)
@@ -977,25 +977,25 @@ impl IndexStore {
         if !definite {
             return;
         }
-        self.jobs.lock().put(
+        self.folders.lock().put(
             dir,
-            JobSlot::Missing {
+            FolderSlot::Missing {
                 err,
                 fetched_at: Instant::now(),
             },
         );
     }
 
-    pub fn invalidate_job(&self, dir: &Path) {
-        self.jobs.lock().pop(dir);
+    pub fn invalidate_folder(&self, dir: &Path) {
+        self.folders.lock().pop(dir);
     }
 
-    pub fn clear_jobs(&self) {
-        self.jobs.lock().clear();
+    pub fn clear_folders(&self) {
+        self.folders.lock().clear();
     }
 
-    pub fn job_cache_len(&self) -> usize {
-        self.jobs.lock().len()
+    pub fn folder_cache_len(&self) -> usize {
+        self.folders.lock().len()
     }
 }
 
@@ -1153,23 +1153,23 @@ mod tests {
     }
 
     #[test]
-    fn job_lookups_honour_the_ttl() {
+    fn folder_lookups_honour_the_ttl() {
         let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
-        s.publish_job(dir.clone(), snap(&["f.txt"], SystemTime::UNIX_EPOCH));
+        s.publish_folder(dir.clone(), snap(&["f.txt"], SystemTime::UNIX_EPOCH));
 
         assert!(matches!(
-            s.job(&dir, Duration::from_secs(60)),
+            s.folder(&dir, Duration::from_secs(60)),
             Cached::Hit(_)
         ));
-        assert!(matches!(s.job(&dir, Duration::ZERO), Cached::Absent));
+        assert!(matches!(s.folder(&dir, Duration::ZERO), Cached::Absent));
     }
 
     #[test]
-    fn an_unknown_job_folder_is_absent() {
+    fn an_unknown_folder_is_absent() {
         let s = IndexStore::fixture();
         assert!(matches!(
-            s.job(Path::new("R:\\nope"), Duration::from_secs(60)),
+            s.folder(Path::new("R:\\nope"), Duration::from_secs(60)),
             Cached::Absent
         ));
     }
@@ -1178,9 +1178,9 @@ mod tests {
     fn definite_misses_are_cached_so_typing_does_not_reprobe() {
         let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\nope");
-        s.publish_job_miss(dir.clone(), EnumError::PathNotFound(3));
+        s.publish_folder_miss(dir.clone(), EnumError::PathNotFound(3));
         assert!(matches!(
-            s.job(&dir, Duration::from_secs(60)),
+            s.folder(&dir, Duration::from_secs(60)),
             Cached::Miss(_)
         ));
     }
@@ -1191,9 +1191,9 @@ mod tests {
     fn transient_failures_are_never_cached() {
         let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
-        s.publish_job_miss(dir.clone(), EnumError::Transient(53));
+        s.publish_folder_miss(dir.clone(), EnumError::Transient(53));
         assert!(
-            matches!(s.job(&dir, Duration::from_secs(60)), Cached::Absent),
+            matches!(s.folder(&dir, Duration::from_secs(60)), Cached::Absent),
             "a blip must not poison the cache"
         );
     }
@@ -1210,9 +1210,9 @@ mod tests {
             EnumError::AccessDenied(5),
         ] {
             let dir = PathBuf::from(format!("R:\\d{definite:?}"));
-            s.publish_job_miss(dir.clone(), definite);
+            s.publish_folder_miss(dir.clone(), definite);
             assert!(
-                matches!(s.job(&dir, Duration::from_secs(60)), Cached::Miss(_)),
+                matches!(s.folder(&dir, Duration::from_secs(60)), Cached::Miss(_)),
                 "{definite:?} is a definite answer and should be cached"
             );
         }
@@ -1227,42 +1227,42 @@ mod tests {
             EnumError::Empty,
         ] {
             let dir = PathBuf::from(format!("R:\\i{indefinite:?}"));
-            s.publish_job_miss(dir.clone(), indefinite);
+            s.publish_folder_miss(dir.clone(), indefinite);
             assert!(
-                matches!(s.job(&dir, Duration::from_secs(60)), Cached::Absent),
+                matches!(s.folder(&dir, Duration::from_secs(60)), Cached::Absent),
                 "{indefinite:?} says nothing about the folder and must not be cached"
             );
         }
     }
 
     #[test]
-    fn the_job_cache_is_bounded() {
-        let s = IndexStore::with_job_capacity(4);
+    fn the_folder_cache_is_bounded() {
+        let s = IndexStore::with_folder_capacity(4);
         for i in 0..10 {
-            s.publish_job(
-                PathBuf::from(format!("R:\\job{i}")),
+            s.publish_folder(
+                PathBuf::from(format!("R:\\folder{i}")),
                 snap(&["f"], SystemTime::UNIX_EPOCH),
             );
         }
-        assert_eq!(s.job_cache_len(), 4, "must not grow without bound");
+        assert_eq!(s.folder_cache_len(), 4, "must not grow without bound");
         assert!(matches!(
-            s.job(Path::new("R:\\job9"), Duration::from_secs(60)),
+            s.folder(Path::new("R:\\folder9"), Duration::from_secs(60)),
             Cached::Hit(_)
         ));
         assert!(matches!(
-            s.job(Path::new("R:\\job0"), Duration::from_secs(60)),
+            s.folder(Path::new("R:\\folder0"), Duration::from_secs(60)),
             Cached::Absent
         ));
     }
 
     #[test]
-    fn invalidating_a_job_forces_a_refetch() {
+    fn invalidating_a_folder_forces_a_refetch() {
         let s = IndexStore::fixture();
         let dir = PathBuf::from("R:\\ab1234");
-        s.publish_job(dir.clone(), snap(&["f"], SystemTime::UNIX_EPOCH));
-        s.invalidate_job(&dir);
+        s.publish_folder(dir.clone(), snap(&["f"], SystemTime::UNIX_EPOCH));
+        s.invalidate_folder(&dir);
         assert!(matches!(
-            s.job(&dir, Duration::from_secs(60)),
+            s.folder(&dir, Duration::from_secs(60)),
             Cached::Absent
         ));
     }

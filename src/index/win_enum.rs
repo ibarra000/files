@@ -652,7 +652,7 @@ mod tests {
 
     #[test]
     fn find_first_enumeration_agrees_with_the_handle_strategy() {
-        let dir = temp_with(&["one.txt", "two.pdf", "three.dwg"]);
+        let dir = temp_with(&["one.txt", "two.pdf", "three.tif"]);
 
         let mut a = VecSink::default();
         list_handle_dirinfo(

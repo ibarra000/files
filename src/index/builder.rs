@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn wide_and_str_pushes_agree() {
-        let names = ["Report_A1.PDF", "drawing.dwg", "MiXeD"];
+        let names = ["Report_A1.PDF", "photo.tif", "MiXeD"];
 
         let mut a = SnapshotBuilder::new("V:\\");
         for n in names {

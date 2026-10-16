@@ -38,8 +38,8 @@ fn general(settings: &Settings, autostart: Option<bool>) -> Page {
     let mut remembering = vec![Block::Rows(vec![row(
         settings,
         SettingKey::History,
-        "Recent codes",
-        "Remember searched codes so the up arrow can recall them later.",
+        "Recent searches",
+        "Remember searches so the up arrow can recall them later.",
         Field::Toggle {
             on: settings.history,
         },
@@ -348,7 +348,7 @@ fn opening(settings: &Settings) -> Page {
                     settings,
                     SettingKey::Viewer,
                     "Enter opens",
-                    "Automatic uses each file's default app. PDF combines a code's pages \
+                    "Automatic uses each file's default app. PDF combines a base name's pages \
                      into one document. Viewers defined as [[viewer]] in the configuration \
                      file are also listed. F2 switches between them.",
                     Field::Choice {

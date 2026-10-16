@@ -21,7 +21,7 @@
 //!
 //! # The term is never split on whitespace
 //!
-//! Filenames on these shares contain spaces (`11-D-0704 survey.pdf`), so the
+//! Filenames on these shares contain spaces (`AB-C-0704 survey.pdf`), so the
 //! term is the line minus the byte ranges of the filter tokens, never a list
 //! of words.
 //!
@@ -211,7 +211,7 @@ impl TypeFilter {
 
 /// Returns the end of the stem, where the extension starts.
 ///
-/// The last dot splits: `11-D-0704.rev2.pdf` has the stem `11-D-0704.rev2`.
+/// The last dot splits: `AB-C-0704.rev2.pdf` has the stem `AB-C-0704.rev2`.
 /// `README` has an empty extension and is refused by every type filter.
 /// `.gitignore` has an empty stem and so never matches a suffix; a test pins
 /// this.
@@ -278,8 +278,8 @@ const EXT_PREFIX: &str = "ext:";
 
 /// The types F4 cycles through, in order.
 ///
-/// These shares hold PDF documents and DWG drawings. Any other extension is
-/// reachable by typing `ext:`.
+/// PDF documents and DWG (CAD) files are the types the panel is tuned for.
+/// Any other extension is reachable by typing `ext:`.
 pub const CYCLE_EXTENSIONS: &[&str] = &["pdf", "dwg"];
 
 /// One search line, parsed.
@@ -495,7 +495,7 @@ fn strip_ext_prefix(token: &str) -> Option<&str> {
         .then(|| &token[EXT_PREFIX.len()..])
 }
 
-/// `.pdf and .dwg`, for a sentence.
+/// `.pdf and .tif`, for a sentence.
 fn join(items: &[&str]) -> String {
     match items {
         [] => String::new(),
@@ -689,15 +689,15 @@ mod tests {
     /// Filenames contain spaces, so the line is not split into words.
     #[test]
     fn a_term_with_spaces_in_it_survives_the_filter_being_lifted_out() {
-        let q = Query::parse("11-D-0704 survey ext:pdf");
-        assert_eq!(q.term(), "11-D-0704 survey");
+        let q = Query::parse("AB-C-0704 survey ext:pdf");
+        assert_eq!(q.term(), "AB-C-0704 survey");
         assert_eq!(q.types().len(), 1);
     }
 
     /// The plain case parses to exactly a plain substring search.
     #[test]
     fn a_line_with_no_syntax_in_it_is_its_own_term() {
-        for line in ["11-D-0704", "report a1", "a.b.c", "(rev 2)"] {
+        for line in ["AB-C-0704", "report a1", "a.b.c", "(rev 2)"] {
             let q = Query::parse(line);
             assert_eq!(q.term(), line, "{line:?}");
             assert!(!q.is_filtered(), "{line:?}");
@@ -709,9 +709,9 @@ mod tests {
 
     #[test]
     fn one_token_can_name_several_extensions() {
-        let q = Query::parse("report ext:dwg,pdf");
+        let q = Query::parse("report ext:pdf,tif");
         let got: Vec<&str> = q.types().iter().map(Ext::as_str).collect();
-        assert_eq!(got, ["dwg", "pdf"]);
+        assert_eq!(got, ["pdf", "tif"]);
     }
 
     #[test]
@@ -804,9 +804,9 @@ mod tests {
 
     #[test]
     fn the_last_dot_splits_the_stem_from_the_extension() {
-        let name = b"11-D-0704.rev2.pdf";
+        let name = b"AB-C-0704.rev2.pdf";
         let (stem, ext) = split_stem(name);
-        assert_eq!(&name[..stem], b"11-D-0704.rev2");
+        assert_eq!(&name[..stem], b"AB-C-0704.rev2");
         assert_eq!(&name[ext..], b"pdf");
     }
 
@@ -864,9 +864,9 @@ mod tests {
         let h = Hidden::none();
         let q = Query::parse("*0704");
         let s = sieve(&h, b"0704", &q);
-        assert_eq!(s.admits(b"11-d-0704.pdf", 5), Some(5));
+        assert_eq!(s.admits(b"ab-c-0704.pdf", 5), Some(5));
         // No extension at all: the whole name is the stem.
-        assert_eq!(s.admits(b"11-d-0704", 5), Some(5));
+        assert_eq!(s.admits(b"ab-c-0704", 5), Some(5));
     }
 
     #[test]
@@ -875,7 +875,7 @@ mod tests {
         let q = Query::parse("report ext:pdf");
         let s = sieve(&h, b"report", &q);
         assert_eq!(s.admits(b"a_report.pdf", 2), Some(2));
-        assert_eq!(s.admits(b"a_report.dwg", 2), None, "wrong type");
+        assert_eq!(s.admits(b"a_report.tif", 2), None, "wrong type");
         assert_eq!(s.admits(b"a_report.bak", 2), None, "hidden");
     }
 
@@ -887,7 +887,7 @@ mod tests {
         let q = Query::parse("0704* ext:pdf");
         let s = sieve(&h, b"0704", &q);
         assert!(s.admits_inherited(b"anything at all.pdf"));
-        assert!(!s.admits_inherited(b"anything at all.dwg"));
+        assert!(!s.admits_inherited(b"anything at all.tif"));
     }
 
     #[test]
@@ -907,8 +907,8 @@ mod tests {
             "report*",
             "*report",
             "report ext:pdf",
-            "report* ext:dwg,pdf",
-            "11-D-0704 survey ext:pdf",
+            "report* ext:pdf,tif",
+            "AB-C-0704 survey ext:pdf",
         ] {
             let q = Query::parse(line);
             assert_eq!(Query::parse(&q.to_line()), q, "{line:?}");
@@ -944,8 +944,8 @@ mod tests {
             "Only .pdf files were looked at."
         );
         assert_eq!(
-            Query::parse("report* ext:dwg,pdf").describe().unwrap(),
-            "Only .dwg and .pdf files with it at the start of the name were looked at."
+            Query::parse("report* ext:pdf,tif").describe().unwrap(),
+            "Only .pdf and .tif files with it at the start of the name were looked at."
         );
         assert_eq!(
             Query::parse("*report").describe().unwrap(),

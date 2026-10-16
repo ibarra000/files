@@ -1,4 +1,4 @@
-//! Merges the separate page PDFs of a drawing set into one cached file.
+//! Merges the separate page PDFs of one document into one cached file.
 //!
 //! # Inherited page attributes
 //!

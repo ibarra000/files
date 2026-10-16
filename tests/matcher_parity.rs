@@ -188,9 +188,9 @@ fn parity_when_the_query_is_the_whole_name() {
 fn parity_across_many_rayon_chunks() {
     // More than one chunk, so the parallel merge is exercised.
     let names: Vec<String> = (0..40_000)
-        .map(|i| format!("job_{i:06}_report.pdf"))
+        .map(|i| format!("item_{i:06}_report.pdf"))
         .collect();
-    for query in ["job", "report", "_012", "0999", ".pdf", "zzz"] {
+    for query in ["item", "report", "_012", "0999", ".pdf", "zzz"] {
         assert_parity(&names, query);
     }
 }
@@ -204,13 +204,13 @@ fn parity_with_a_query_longer_than_every_name() {
 #[test]
 fn parity_with_punctuation_heavy_names() {
     let names = [
-        "11-D-0704 (rev 2).pdf",
-        "11-D-0704.pdf",
-        "copy of 11-D-0704 [old].pdf",
-        "P12345-001.dwg",
+        "AB-C-0704 (rev 2).pdf",
+        "AB-C-0704.pdf",
+        "copy of AB-C-0704 [old].pdf",
+        "P12345-001.tif",
     ]
     .map(String::from);
-    assert_parity(&names, "11-d-0704");
+    assert_parity(&names, "ab-c-0704");
     assert_parity(&names, "-00");
 }
 

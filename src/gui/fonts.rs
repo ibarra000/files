@@ -181,7 +181,7 @@ mod tests {
                 let width = ctx
                     .fonts_mut(|fonts| {
                         fonts.layout_no_wrap(
-                            "11-D-0704".to_owned(),
+                            "AB-C-0704".to_owned(),
                             id,
                             eframe::egui::Color32::WHITE,
                         )

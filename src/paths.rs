@@ -1,6 +1,6 @@
 //! The configured shares (mappings) and the set of targets a query searches.
 //!
-//! Every enabled share is searched; no code is routed to a single folder.
+//! Every enabled share is searched; no search is routed to a single folder.
 //! `tests/tree_parity.rs` holds a frozen set of known file locations and
 //! asserts the index finds all of them.
 
@@ -137,7 +137,7 @@ impl MappingId {
 /// How a mapping is laid out on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MappingKind {
-    /// One large directory holding every job's files directly.
+    /// One large directory holding every file directly, with no subfolders walked.
     Flat,
     /// The whole tree beneath the path, walked and indexed.
     ///
@@ -257,7 +257,7 @@ impl RefreshPolicy {
     }
 }
 
-/// Where a code resolves to.
+/// Where a search resolves to.
 ///
 /// `dir` is fully joined, so callers never join roots themselves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,25 +371,6 @@ impl Routes {
     /// Every enabled flat mapping, in configuration order.
     pub fn flat(&self) -> impl Iterator<Item = &Mapping> {
         self.enabled().filter(|m| m.kind == MappingKind::Flat)
-    }
-
-    /// Repoints a mapping by name, for an environment or command-line
-    /// override.
-    ///
-    /// Returns false when no such mapping exists; callers should treat that as
-    /// an error, since a dropped override searches the wrong share.
-    pub fn set_path(&mut self, name: &str, path: PathBuf) -> bool {
-        match self
-            .mappings
-            .iter_mut()
-            .find(|m| m.name.eq_ignore_ascii_case(name))
-        {
-            Some(m) => {
-                m.path = winpath::normalise_root(&path);
-                true
-            }
-            None => false,
-        }
     }
 
     /// Returns the configured mapping names, for error messages.

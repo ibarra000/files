@@ -317,13 +317,13 @@ mod tests {
     fn nothing_is_due_until_the_debounce_elapses() {
         let q = queue();
         let t0 = Instant::now();
-        assert!(q.record(changed(&["11d"]), t0));
+        assert!(q.record(changed(&["abc"]), t0));
 
         assert_eq!(q.take_due(t0 + DEBOUNCE / 2), None);
         assert_eq!(
             q.take_due(t0 + DEBOUNCE),
             Some(WatchBatch {
-                dirs: vec!["11d".into()],
+                dirs: vec!["abc".into()],
                 full: false
             })
         );
@@ -349,10 +349,10 @@ mod tests {
     fn duplicate_directories_are_coalesced() {
         let q = queue();
         let t0 = Instant::now();
-        q.record(changed(&["11d", "11d", "ab12"]), t0);
-        q.record(changed(&["11d"]), t0);
+        q.record(changed(&["abc", "abc", "abd"]), t0);
+        q.record(changed(&["abc"]), t0);
         let batch = q.take_due(t0 + DEBOUNCE).unwrap();
-        assert_eq!(batch.dirs, vec!["11d".to_string(), "ab12".to_string()]);
+        assert_eq!(batch.dirs, vec!["abc".to_string(), "abd".to_string()]);
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
     fn overflow_asks_for_a_full_rewalk_and_discards_the_set() {
         let q = queue();
         let t0 = Instant::now();
-        q.record(changed(&["11d"]), t0);
+        q.record(changed(&["abc"]), t0);
         q.record(WatchEvent::Overflow, t0);
 
         let batch = q.take_due(t0 + DEBOUNCE).unwrap();
@@ -385,7 +385,7 @@ mod tests {
         let q = queue();
         let t0 = Instant::now();
         q.record(WatchEvent::Overflow, t0);
-        q.record(changed(&["11d"]), t0);
+        q.record(changed(&["abc"]), t0);
 
         let batch = q.take_due(t0 + DEBOUNCE).unwrap();
         assert!(batch.full);

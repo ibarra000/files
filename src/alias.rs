@@ -1,20 +1,20 @@
-//! User-defined short names that expand to a search line (`pw` -> `11-D-0704`).
+//! User-defined short names that expand to a search line (`pw` -> `AB-C-0704`).
 //!
 //! An alias expands to an ordinary query, run through the normal matcher and
 //! ranking; nothing in the search knows aliases exist, so the oracle in
 //! `tests/matcher_parity.rs` is unaffected. The expansion may carry syntax
-//! (`ext:pdf 11-D-0704`).
+//! (`ext:pdf AB-C-0704`).
 //!
 //! An alias fires only when the whole line equals its name (ASCII case-
 //! insensitive). Prefix or substring matching would hide results for longer
-//! codes that contain the name. The expansion is shown on screen so an
+//! searches that contain the name. The expansion is shown on screen so an
 //! unintended match is visible.
 //!
-//! Codes are validated with
+//! Expansions are validated with
 //! [`Query::check`](crate::search::query::Query::check), the same check the
 //! matcher applies to a typed line.
 
-/// Why a name or code cannot be used as an alias.
+/// Why a name or expansion cannot be used as an alias.
 ///
 /// Shared by the config loader and the settings window so both reject the
 /// same input with the same message.
@@ -24,8 +24,9 @@ pub enum Invalid {
     NameIsNotAscii,
     NameHasASpace,
     DuplicateName,
+    /// The `code` key, the search input the alias expands to, is empty.
     NoCode,
-    /// The code is not a runnable search.
+    /// The expansion is not a runnable search.
     UnsearchableCode(crate::search::query::QueryReject),
 }
 
@@ -37,15 +38,16 @@ impl Invalid {
             Self::NameIsNotAscii => "an alias name must be ASCII".into(),
             Self::NameHasASpace => "an alias name cannot contain a space".into(),
             Self::DuplicateName => "that name is already an alias".into(),
-            Self::NoCode => "an alias needs a code".into(),
+            Self::NoCode => "an alias needs a code, the search it expands to".into(),
             Self::UnsearchableCode(reject) => {
-                format!("the code is not a valid search: {}", reject.detail())
+                format!("the expansion is not a valid search: {}", reject.detail())
             }
         }
     }
 }
 
-/// Checks whether `name` and `code` form a valid alias alongside `existing`.
+/// Checks whether `name` and the expansion `code` form a valid alias
+/// alongside `existing`.
 pub fn check(name: &str, code: &str, existing: &[Alias]) -> Result<(), Invalid> {
     let name = name.trim();
     let code = code.trim();
@@ -76,14 +78,15 @@ pub struct Alias {
     /// The typed name: ASCII, no whitespace, unique case-insensitively
     /// (enforced by the loader).
     pub name: Box<str>,
-    /// The search line the name expands to.
+    /// The search input the name expands to (the `code` key).
     pub code: Box<str>,
     /// Optional user description.
     pub note: Option<Box<str>>,
 }
 
 impl Alias {
-    /// Returns the display form (`name · code`) used by the status line and
+    /// Returns the display form (`name · expansion`) used by the status line and
+
     /// the settings list.
     pub fn describe(&self) -> String {
         format!("{} \u{b7} {}", self.name, self.code)
@@ -141,12 +144,12 @@ mod tests {
         Aliases::new(vec![
             Alias {
                 name: "pw".into(),
-                code: "11-D-0704".into(),
-                note: Some("Powerwall bracket".into()),
+                code: "AB-C-0704".into(),
+                note: Some("Project workbook".into()),
             },
             Alias {
                 name: "inv".into(),
-                code: "ext:pdf inverter".into(),
+                code: "ext:pdf invoice".into(),
                 note: None,
             },
         ])
@@ -154,7 +157,7 @@ mod tests {
 
     #[test]
     fn an_alias_resolves_to_the_line_it_stands_for() {
-        assert_eq!(table().resolve("pw").unwrap().code.as_ref(), "11-D-0704");
+        assert_eq!(table().resolve("pw").unwrap().code.as_ref(), "AB-C-0704");
     }
 
     #[test]
@@ -173,7 +176,7 @@ mod tests {
     #[test]
     fn a_line_that_merely_starts_with_an_alias_is_not_one() {
         assert!(table().resolve("pwx").is_none());
-        assert!(table().resolve("pw 11").is_none());
+        assert!(table().resolve("pw AB").is_none());
         assert!(table().resolve("xpw").is_none());
     }
 
@@ -195,7 +198,7 @@ mod tests {
     fn an_alias_may_expand_to_a_line_carrying_syntax() {
         assert_eq!(
             table().resolve("inv").unwrap().code.as_ref(),
-            "ext:pdf inverter"
+            "ext:pdf invoice"
         );
     }
 
@@ -203,7 +206,7 @@ mod tests {
     fn an_alias_describes_itself_the_one_way() {
         let aliases = table();
         let alias = aliases.resolve("pw").unwrap();
-        assert_eq!(alias.describe(), "pw \u{b7} 11-D-0704");
+        assert_eq!(alias.describe(), "pw \u{b7} AB-C-0704");
     }
 
     #[test]

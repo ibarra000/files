@@ -91,7 +91,7 @@ mod tests {
 
     fn hit(name: &str, match_pos: u32) -> Hit {
         Hit {
-            path: Arc::from(format!(r"R:\11d\11-D-0704\{name}").as_str()),
+            path: Arc::from(format!(r"R:\abc\AB-C-0704\{name}").as_str()),
             name: Arc::from(name),
             match_pos,
             index: 0,
@@ -100,13 +100,13 @@ mod tests {
 
     #[test]
     fn the_matched_run_is_the_part_the_query_found() {
-        let h = hit("A11-D-0704.pdf", 1);
-        let name = highlight(&h, "11-D-0704".len());
+        let h = hit("AAB-C-0704.pdf", 1);
+        let name = highlight(&h, "AB-C-0704".len());
         assert_eq!(
             name,
             Name {
                 before: "A",
-                matched: "11-D-0704",
+                matched: "AB-C-0704",
                 after: ".pdf"
             }
         );
@@ -137,8 +137,8 @@ mod tests {
     #[test]
     fn a_range_that_splits_a_character_falls_back_rather_than_panicking() {
         // "é" is two bytes, so offset 1 is inside it and offset 2 is after it.
-        let at_zero = hit("é11-D.pdf", 0);
-        let at_one = hit("é11-D.pdf", 1);
+        let at_zero = hit("éAB-C.pdf", 0);
+        let at_one = hit("éAB-C.pdf", 1);
         assert_eq!(highlight(&at_zero, 2).matched, "é");
         assert!(
             !highlight(&at_zero, 1).is_highlighted(),
@@ -152,15 +152,18 @@ mod tests {
 
     #[test]
     fn an_empty_query_highlights_nothing() {
-        let h = hit("11-D-0704.pdf", 0);
+        let h = hit("AB-C-0704.pdf", 0);
         assert!(!highlight(&h, 0).is_highlighted());
     }
 
     #[test]
     fn the_folder_is_everything_before_the_name() {
-        assert_eq!(folder(r"R:\11d\11-D-0704\a.pdf"), r"R:\11d\11-D-0704");
-        assert_eq!(folder(r"\\server\share\jobs\a.pdf"), r"\\server\share\jobs");
-        assert_eq!(folder("/mnt/jobs/a.pdf"), "/mnt/jobs");
+        assert_eq!(folder(r"R:\abc\AB-C-0704\a.pdf"), r"R:\abc\AB-C-0704");
+        assert_eq!(
+            folder(r"\\server\share\projects\a.pdf"),
+            r"\\server\share\projects"
+        );
+        assert_eq!(folder("/mnt/projects/a.pdf"), "/mnt/projects");
     }
 
     #[test]

@@ -542,8 +542,8 @@ impl AppState {
     /// Records a query in history.
     ///
     /// Returns the write to perform if the list changed; the caller does I/O.
-    fn remember(&mut self, code: &str) -> Option<Cmd> {
-        if !self.settings.history || !self.history.record(code) {
+    fn remember(&mut self, term: &str) -> Option<Cmd> {
+        if !self.settings.history || !self.history.record(term) {
             return None;
         }
         Some(Cmd::SaveHistory(Arc::new(self.history.snapshot())))
@@ -729,8 +729,8 @@ impl AppState {
         let path = Arc::clone(&hit.path);
 
         // The term, not the line: `pages::collect` matches by equality, so
-        // `11-D-0704 ext:pdf` would find no pages.
-        let code = self.query.term().to_string();
+        // `AB-C-0704 ext:pdf` would find no pages.
+        let term = self.query.term().to_string();
         // Computed before the path moves into the request.
         let viewers = Arc::clone(&self.settings.viewers);
         let route = crate::open::route_of(viewer, &path, &viewers);
@@ -738,7 +738,7 @@ impl AppState {
             path,
             // The typed term, not the row: `hits` is capped at MAX_RESULTS and
             // ranked by match position, so the page set is rebuilt from it.
-            query: code.clone(),
+            query: term.clone(),
             viewer,
             viewers,
         };

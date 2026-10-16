@@ -1273,7 +1273,7 @@ mod tests {
     use crate::index::builder::SnapshotBuilder;
 
     /// A subdirectory of its volume, so tests cover more than a drive root.
-    const DIR: &str = r"V:\Documents\custpro";
+    const DIR: &str = r"V:\shared\files";
 
     fn dir_path() -> &'static Path {
         Path::new(DIR)
@@ -1408,9 +1408,9 @@ mod tests {
     #[test]
     fn orphan_collection_keeps_every_configured_mapping() {
         let dir = tempfile::tempdir().unwrap();
-        let other = MappingKey::of(Path::new(r"S:rchive"));
+        let other = MappingKey::of(Path::new(r"S:\archive"));
         save(dir.path(), key(), &snap(&["a.pdf"], 7)).unwrap();
-        save(dir.path(), other, &snap_at(r"S:rchive", &["b.pdf"], 7)).unwrap();
+        save(dir.path(), other, &snap_at(r"S:\archive", &["b.pdf"], 7)).unwrap();
 
         gc_orphans(dir.path(), &[key(), other]);
 
@@ -1419,7 +1419,7 @@ mod tests {
             load(
                 dir.path(),
                 other,
-                Expect::new(Path::new(r"S:rchive"), Some(7))
+                Expect::new(Path::new(r"S:\archive"), Some(7))
             )
             .is_ok(),
             "a second configured mapping is not an orphan"
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn round_trips_a_snapshot_exactly() {
-        let names = ["Report_A1.PDF", "drawing_b.dwg", "Écoles-Été.pdf"];
+        let names = ["Report_A1.PDF", "photo_b.tif", "Écoles-Été.pdf"];
         let (_dir, loaded) = roundtrip(&names);
 
         assert_eq!(loaded.len(), 3);
@@ -1460,12 +1460,12 @@ mod tests {
     #[test]
     fn round_trips_a_large_snapshot() {
         let names: Vec<String> = (0..20_000)
-            .map(|i| format!("job_{i:07}_report.pdf"))
+            .map(|i| format!("item_{i:07}_report.pdf"))
             .collect();
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         let (_dir, loaded) = roundtrip(&refs);
         assert_eq!(loaded.len(), 20_000);
-        assert_eq!(loaded.display_name(19_999), "job_0019999_report.pdf");
+        assert_eq!(loaded.display_name(19_999), "item_0019999_report.pdf");
         loaded.check_invariants().unwrap();
     }
 
@@ -1726,7 +1726,7 @@ mod tests {
         );
     }
 
-    /// After a mapping moves from `V:\` to `V:\Documents\custpro`, the old
+    /// After a mapping moves from `V:\` to `V:\shared\files`, the old
     /// index must not be served.
     #[test]
     fn a_repointed_mapping_does_not_find_the_old_directorys_index() {
@@ -1807,7 +1807,7 @@ mod tests {
 
     #[test]
     fn the_cache_key_follows_the_directory_not_its_spelling() {
-        assert_eq!(key(), MappingKey::of(Path::new(r"v:/documents/CUSTPRO/")));
+        assert_eq!(key(), MappingKey::of(Path::new(r"v:/SHARED/Files/")));
         assert_ne!(key(), other_key());
         assert_ne!(key(), MappingKey::of(Path::new(r"V:\")));
     }
@@ -1880,15 +1880,15 @@ mod tree_tests {
         tree_of(&[
             &[
                 ("", &["readme.txt"] as &[&str]),
-                ("11d", &["quote.pdf", "drawing.dwg"]),
+                ("abc", &["quote.pdf", "photo.tif"]),
             ],
             &[
-                ("11d\\sub", &["nested.pdf"]),
+                ("abc\\sub", &["nested.pdf"]),
                 ("empty folder", &[] as &[&str]),
             ],
             &[(
                 "archive\\2019\\odd name",
-                &["11-3-0704 survey.pdf", "notes.txt"],
+                &["AB-3-0704 survey.pdf", "notes.txt"],
             )],
         ])
     }
@@ -1962,14 +1962,14 @@ mod tree_tests {
 
         let seg = &loaded.index.segments()[0];
         let folder = (0..seg.dir_count())
-            .find(|d| seg.dir_path(*d) == "11d")
+            .find(|d| seg.dir_path(*d) == "abc")
             .expect("the folder survived");
 
         let files: Vec<String> = seg
             .files_of(folder)
             .map(|i| seg.files().display_name(i).into_owned())
             .collect();
-        assert_eq!(files, vec!["quote.pdf", "drawing.dwg"]);
+        assert_eq!(files, vec!["quote.pdf", "photo.tif"]);
     }
 
     #[test]
@@ -1984,7 +1984,7 @@ mod tree_tests {
     /// A cached partial walk still reports itself as partial after a restart.
     #[test]
     fn an_incomplete_walks_coverage_survives_the_restart() {
-        let index = tree_of(&[&[("11d", &["a.pdf"] as &[&str])]]).with_complete(false);
+        let index = tree_of(&[&[("abc", &["a.pdf"] as &[&str])]]).with_complete(false);
         let coverage = TreeCoverage {
             dirs: 900,
             files: 1,

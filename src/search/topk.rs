@@ -21,7 +21,7 @@
 //! bits 31..0   entry index                     (directory order wins)
 //! ```
 //!
-//! The top bit ranks a file named after the code above files that are only
+//! The top bit ranks a file named after the search term above files that are only
 //! inside a matching folder. The entry index makes keys unique, so ordering is
 //! a strict total order and the parallel merge gives the same output as a
 //! serial sweep, with no run-to-run reshuffling of ties.
@@ -53,7 +53,7 @@ pub fn key(match_pos: u32, name_len: u32, index: u32) -> Key {
 /// Builds a ranking key for a file included because its folder matched.
 ///
 /// `match_pos` is the position within the folder name, so folders whose name
-/// begins with the code still beat folders that merely contain it.
+/// begins with the search term still beat folders that merely contain it.
 #[inline]
 pub fn key_inherited(match_pos: u32, name_len: u32, index: u32) -> Key {
     key(match_pos, name_len, index) | INHERITED

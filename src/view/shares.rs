@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn every_share_gets_a_row() {
-        let (a, b) = (mapping("jobs"), mapping("archive"));
+        let (a, b) = (mapping("projects"), mapping("archive"));
         let (sa, sb) = (status(10, Some(EPOCH)), status(20, Some(EPOCH)));
         let shares = [
             Row {
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn a_row_shows_how_old_its_share_is() {
-        let m = mapping("jobs");
+        let m = mapping("projects");
         let s = status(10, Some(EPOCH));
         let shares = vec![Row {
             mapping: &m,
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn a_share_that_was_never_read_says_so() {
-        let m = mapping("jobs");
+        let m = mapping("projects");
         let s = status(0, None);
         let shares = vec![Row {
             mapping: &m,
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn a_stale_share_shows_why_rather_than_its_size() {
-        let m = mapping("jobs");
+        let m = mapping("projects");
         let s = status(1_284_551, Some(EPOCH));
         let shares = vec![Row {
             mapping: &m,
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn every_row_keeps_the_house_style() {
-        let (a, b) = (mapping("jobs"), mapping("archive"));
+        let (a, b) = (mapping("projects"), mapping("archive"));
         let (sa, sb) = (status(10, Some(EPOCH)), status(20, None));
         let rows = [
             Row {

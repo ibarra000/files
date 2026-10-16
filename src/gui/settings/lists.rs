@@ -41,7 +41,7 @@ impl Default for DriveDraft {
 #[derive(Default)]
 pub struct AliasDraft {
     name: String,
-    code: String,
+    term: String,
     note: String,
     /// Validation error, set only after an add attempt.
     problem: Option<String>,
@@ -251,8 +251,8 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
                 .desired_width(widths[0]),
         );
         ui.add(
-            egui::TextEdit::singleline(&mut form.draft.code)
-                .hint_text(ALIASES.code_hint)
+            egui::TextEdit::singleline(&mut form.draft.term)
+                .hint_text(ALIASES.term_hint)
                 .desired_width(widths[1]),
         );
         ui.add(
@@ -262,12 +262,12 @@ pub fn aliases(ui: &mut egui::Ui, theme: &Theme, settings: &Settings, form: &mut
         );
         if ui.button(ALIASES.add).clicked() {
             // Same check the loader applies, so anything accepted here loads.
-            match crate::alias::check(&form.draft.name, &form.draft.code, current) {
+            match crate::alias::check(&form.draft.name, &form.draft.term, current) {
                 Ok(()) => {
                     let mut next = current.to_vec();
                     next.push(crate::alias::Alias {
                         name: form.draft.name.trim().into(),
-                        code: form.draft.code.trim().into(),
+                        code: form.draft.term.trim().into(),
                         note: Some(form.draft.note.trim())
                             .filter(|n| !n.is_empty())
                             .map(Into::into),

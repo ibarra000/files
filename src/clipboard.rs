@@ -28,9 +28,9 @@ pub fn set_text(text: &str) -> Result<(), ClipboardError> {
 }
 
 /// Reads text from the clipboard.
-pub fn get_text() -> Result<String, ClipboardError> {
+pub fn text() -> Result<String, ClipboardError> {
     let _guard = CLIPBOARD.lock();
-    imp::get_text()
+    imp::text()
 }
 
 /// A clipboard operation failure.
@@ -85,7 +85,7 @@ pub fn read_async(events: Events) {
     let _ = std::thread::Builder::new()
         .name("files-clipboard".into())
         .spawn(move || {
-            let msg = match get_text() {
+            let msg = match text() {
                 Ok(text) => ClipboardMsg::Read {
                     text: Arc::from(text.as_str()),
                 },
@@ -196,7 +196,7 @@ mod imp {
         Ok(())
     }
 
-    pub fn get_text() -> Result<String, ClipboardError> {
+    pub fn text() -> Result<String, ClipboardError> {
         // SAFETY: no preconditions; simply reports whether the format exists.
         if unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) } == 0 {
             return Err(ClipboardError::Empty);
@@ -257,7 +257,7 @@ mod imp {
     }
 
     /// Always `Unsupported`: terminals cannot be queried for clipboard text.
-    pub fn get_text() -> Result<String, ClipboardError> {
+    pub fn text() -> Result<String, ClipboardError> {
         Err(ClipboardError::Unsupported)
     }
 }
@@ -316,7 +316,7 @@ mod tests {
 
     /// Serialises tests that use the real system clipboard.
     ///
-    /// Separate from `CLIPBOARD`, which `set_text` and `get_text` take
+    /// Separate from `CLIPBOARD`, which `set_text` and `text` take
     /// internally; holding that one here would deadlock.
     static REAL_CLIPBOARD: Mutex<()> = Mutex::new(());
 
@@ -326,7 +326,7 @@ mod tests {
         // Availability depends on the machine, but a report must always arrive.
         let (tx, rx) = bounded(4);
         let tx = Events::headless(tx);
-        copy_async("11-D-0704".into(), tx);
+        copy_async("AB-C-0704".into(), tx);
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(AppEvent::Clipboard(_)) => {}
             other => panic!("expected a clipboard report, got {other:?}"),
@@ -338,9 +338,9 @@ mod tests {
     #[cfg(windows)]
     fn text_written_to_the_clipboard_reads_back_unchanged() {
         let _guard = REAL_CLIPBOARD.lock();
-        let sample = "11-D-0704 café Ω";
+        let sample = "AB-C-0704 café Ω";
         match set_text(sample) {
-            Ok(()) => assert_eq!(get_text().unwrap(), sample),
+            Ok(()) => assert_eq!(text().unwrap(), sample),
             Err(ClipboardError::Busy) => {}
             Err(other) => panic!("unexpected failure: {other:?}"),
         }
@@ -349,6 +349,6 @@ mod tests {
     #[test]
     #[cfg(not(windows))]
     fn reading_is_reported_as_unsupported_rather_than_empty() {
-        assert_eq!(get_text(), Err(ClipboardError::Unsupported));
+        assert_eq!(text(), Err(ClipboardError::Unsupported));
     }
 }

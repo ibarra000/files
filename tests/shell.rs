@@ -1,7 +1,7 @@
 //! Tests for the panel animator, run without a window.
 //!
 //! [`Motion`] is a pure function of elapsed time, so these tests step it at
-//! sixty frames a second with no toolkit, GPU or clock. Its main job is the
+//! sixty frames a second with no toolkit, GPU or clock. Its main purpose is the
 //! empty gate, which keeps the body from going empty for a single frame while
 //! results are in flight.
 

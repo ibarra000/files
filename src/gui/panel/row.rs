@@ -2,7 +2,7 @@
 //! points) or the detailed layout (adds the folder below the name; 52 points).
 //! Row text comes from [`crate::view::row`].
 //!
-//! Names are elided at the end, since the job code leads; folders are elided
+//! Names are elided at the end, since the search term leads; folders are elided
 //! at the start, since the deepest folder distinguishes otherwise identical
 //! rows. Compact rows omit the folder, so the full path is always in the
 //! tooltip and accessible name. See [`crate::config::ResultLayout`].
@@ -153,12 +153,12 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
         ResultLayout::Detailed => Weight::Semibold,
         ResultLayout::Compact => Weight::Regular,
     };
-    let mut job = LayoutJob::default();
+    let mut layout = LayoutJob::default();
     let mut push = |text: &str, colour: Color32, weight: Weight| {
         if text.is_empty() {
             return;
         }
-        job.append(
+        layout.append(
             text,
             0.0,
             TextFormat {
@@ -172,12 +172,12 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
     push(name.matched, theme.match_run, Weight::Semibold);
     push(name.after, body, weight);
     // One line, truncated with an ellipsis. `break_anywhere` is required
-    // because job codes have no spaces to break at.
-    job.wrap.max_width = text_w;
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some(text::ELLIPSIS);
-    let galley = painter.layout_job(job);
+    // because search terms often have no spaces to break at.
+    layout.wrap.max_width = text_w;
+    layout.wrap.max_rows = 1;
+    layout.wrap.break_anywhere = true;
+    layout.wrap.overflow_character = Some(text::ELLIPSIS);
+    let galley = painter.layout_job(layout);
 
     match style.layout {
         ResultLayout::Compact => {
@@ -232,7 +232,7 @@ pub fn show(ui: &mut Ui, style: &Style<'_>, hit: &Hit, selected: bool) -> Respon
 /// Draws the accent bar on the left of a selected row.
 ///
 /// `MARKER_W` wide, 45% of the row height, vertically centred. Shared with the
-/// recent-codes, alias and drive lists.
+/// recent-searches, alias and drive lists.
 pub fn marker(ui: &Ui, theme: &Theme, row: Rect) {
     let h = row.height() * 0.45;
     let bar = Rect::from_min_size(

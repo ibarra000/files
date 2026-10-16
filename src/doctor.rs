@@ -89,7 +89,7 @@ impl Default for Deadline {
     }
 }
 
-/// Prints the resolved routing table and where a code would be searched.
+/// Prints the resolved routing table and where a search would be sent.
 ///
 /// Makes no network calls, so it works on a machine with no drives mapped.
 pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Write) {
@@ -121,13 +121,13 @@ pub fn check_config(settings: &Settings, query: Option<&str>, out: &mut dyn Writ
     }
 
     // Every enabled share is searched, so list them in order.
-    if let Some(code) = query {
+    if let Some(term) = query {
         let _ = writeln!(out);
         let targets = routes.targets();
         if targets.is_empty() {
-            let _ = writeln!(out, "search {code:?}: no share is enabled");
+            let _ = writeln!(out, "search {term:?}: no share is enabled");
         } else {
-            let _ = writeln!(out, "search {code:?}: every enabled share, in order");
+            let _ = writeln!(out, "search {term:?}: every enabled share, in order");
             for t in &targets {
                 let _ = writeln!(
                     out,
@@ -214,7 +214,7 @@ pub fn doctor(
     // One budget for the whole report, not one per section.
     let deadline = Deadline::new();
 
-    // Every enabled mapping, not only the derived flat and job-folder roots,
+    // Every enabled mapping, not only the derived flat and tree roots,
     // which may be empty.
     for mapping in settings.routes.enabled() {
         report_root(&mapping.path, &source, deadline, out);
@@ -719,7 +719,7 @@ fn report_viewer(settings: &Settings, out: &mut dyn Write) {
         settings.viewer.name(&settings.viewers),
         match settings.viewer.within(&settings.viewers) {
             crate::config::ViewerKind::Auto => "each file opens in its default app",
-            crate::config::ViewerKind::Pdf => "a code's pages, combined into one PDF",
+            crate::config::ViewerKind::Pdf => "a base name's pages, combined into one PDF",
             crate::config::ViewerKind::App(_) => "the selected file, opened with that program",
         }
     );
@@ -899,7 +899,7 @@ fn report_directories(settings: &Settings, out: &mut dyn Write) {
         ),
         ("index cache", settings.cache_dir.clone()),
         (
-            "recent codes",
+            "recent searches",
             settings
                 .history_path
                 .as_deref()
@@ -1249,7 +1249,7 @@ pub fn bench(
         bench_server_filter(source.as_ref(), &dir, query, out);
         let _ = writeln!(out);
     } else {
-        let _ = writeln!(out, "SERVER-SIDE FILTER  (pass --query <CODE> to measure)");
+        let _ = writeln!(out, "SERVER-SIDE FILTER  (pass --query <TEXT> to measure)");
         let _ = writeln!(out);
     }
 
@@ -1523,7 +1523,7 @@ pub fn probe_timeout() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{BASE_PATH, CUSTPRO_PATH};
+    use crate::config::{FLAT_FIXTURE_PATH, TREE_FIXTURE_PATH};
     use crate::index::fake_source::FakeDirSource;
 
     fn settings() -> Settings {
@@ -1537,10 +1537,10 @@ mod tests {
         Arc::new(
             FakeDirSource::new()
                 .with_dir(
-                    CUSTPRO_PATH,
+                    FLAT_FIXTURE_PATH,
                     &["alpha_p12345.pdf", "beta.txt", "p12345_two.pdf"],
                 )
-                .with_dir(BASE_PATH, &["job.txt"]),
+                .with_dir(TREE_FIXTURE_PATH, &["notes.txt"]),
         )
     }
 
@@ -1679,8 +1679,8 @@ mod tests {
     #[test]
     fn bench_fails_loudly_when_the_server_filter_under_returns() {
         let src = FakeDirSource::new()
-            .with_dir(CUSTPRO_PATH, &["alpha_p12345.pdf", "p12345_two.pdf"])
-            .with_dir(BASE_PATH, &["job.txt"]);
+            .with_dir(FLAT_FIXTURE_PATH, &["alpha_p12345.pdf", "p12345_two.pdf"])
+            .with_dir(TREE_FIXTURE_PATH, &["notes.txt"]);
         src.set_query_drops(vec![0]);
         let report = text(|out| {
             bench(
@@ -1741,7 +1741,8 @@ mod tests {
     #[test]
     fn the_stamp_report_says_how_precise_the_probe_was() {
         let src = source();
-        let report = text(|out| bench_stamp(src.as_ref(), Path::new(CUSTPRO_PATH), false, out));
+        let report =
+            text(|out| bench_stamp(src.as_ref(), Path::new(FLAT_FIXTURE_PATH), false, out));
         assert!(
             report.contains("precision"),
             "a write-only stamp detects less than a full one, and the user              should be able to see which they have: {report}"

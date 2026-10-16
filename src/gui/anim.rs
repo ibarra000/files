@@ -24,7 +24,7 @@ pub const MAX_DT: f32 = 0.100;
 /// Which body the panel is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Content {
-    /// Previously used codes, shown only while the Up arrow is browsing them.
+    /// Previous searches, shown only while the Up arrow is browsing them.
     Recent,
     /// The configured shortcuts, shown in an empty box when any exist.
     Aliases,

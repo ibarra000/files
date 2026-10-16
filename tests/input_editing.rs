@@ -49,16 +49,16 @@ fn hit(name: &str) -> Hit {
     }
 }
 
-/// Drives a code through verification and on to `REMEMBER_DEBOUNCE`, which
+/// Drives a search through verification and on to `REMEMBER_DEBOUNCE`, which
 /// makes it eligible for recall.
-fn search_and_settle(s: &mut AppState, code: &str, now: Instant) -> Response {
-    type_in(s, code, now);
+fn search_and_settle(s: &mut AppState, term: &str, now: Instant) -> Response {
+    type_in(s, term, now);
     let at = now + VERIFY_DEBOUNCE;
     s.update(AppEvent::Tick, at);
     s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: files::search::query::Query::contains(code),
+            query: files::search::query::Query::contains(term),
             elapsed: Duration::from_millis(5),
             outcome: VerifyOutcome::Server {
                 hits: vec![hit("a.pdf")],
@@ -75,12 +75,12 @@ fn search_and_settle(s: &mut AppState, code: &str, now: Instant) -> Response {
 // --- editing ----------------------------------------------------------
 
 #[test]
-fn a_character_can_be_fixed_in_the_middle_of_a_code() {
+fn a_character_can_be_fixed_in_the_middle_of_a_search() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-074", now);
+    type_in(&mut s, "AB-C-074", now);
     s.update(press(Key::Left), now);
     type_in(&mut s, "0", now);
-    assert_eq!(s.input, "11-D-0704");
+    assert_eq!(s.input, "AB-C-0704");
 }
 
 #[test]
@@ -96,17 +96,17 @@ fn delete_removes_forwards_and_backspace_removes_backwards() {
 }
 
 #[test]
-fn ctrl_w_deletes_the_previous_field_of_the_code() {
+fn ctrl_w_deletes_the_previous_field_of_the_search() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('w')), now);
-    assert_eq!(s.input, "11-D-");
+    assert_eq!(s.input, "AB-C-");
 }
 
 #[test]
-fn ctrl_a_selects_the_whole_code_and_typing_replaces_it() {
+fn ctrl_a_selects_the_whole_search_and_typing_replaces_it() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('a')), now);
     type_in(&mut s, "P", now);
     assert_eq!(s.input, "P");
@@ -117,7 +117,7 @@ fn ctrl_a_selects_the_whole_code_and_typing_replaces_it() {
 #[test]
 fn moving_the_caret_or_selecting_never_re_runs_the_search() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     let epoch = s.query_epoch();
 
     let moves = [
@@ -145,21 +145,21 @@ fn moving_the_caret_or_selecting_never_re_runs_the_search() {
         );
     }
     assert_eq!(s.query_epoch(), epoch, "the query never changed");
-    assert_eq!(s.input, "11-D-0704");
+    assert_eq!(s.input, "AB-C-0704");
 }
 
 #[test]
 fn a_paste_lands_at_the_caret_as_a_single_edit() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-", now);
-    s.update(AppEvent::Paste("D-0704\r\n".into()), now);
-    assert_eq!(s.input, "11-D-0704", "the newline must not reach the query");
+    type_in(&mut s, "AB-", now);
+    s.update(AppEvent::Paste("C-0704\r\n".into()), now);
+    assert_eq!(s.input, "AB-C-0704", "the newline must not reach the query");
 }
 
 #[test]
 fn a_paste_replaces_the_selection() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('a')), now);
     s.update(AppEvent::Paste("P12345-001".into()), now);
     assert_eq!(s.input, "P12345-001");
@@ -168,14 +168,14 @@ fn a_paste_replaces_the_selection() {
 // --- escape -----------------------------------------------------------
 
 #[test]
-fn escape_drops_the_selection_before_it_clears_the_code() {
+fn escape_drops_the_selection_before_it_clears_the_search() {
     let (mut s, now) = state();
-    type_in(&mut s, "11-D-0704", now);
+    type_in(&mut s, "AB-C-0704", now);
     s.update(ctrl(Key::Char('a')), now);
 
     s.update(press(Key::Esc), now);
     assert_eq!(
-        s.input, "11-D-0704",
+        s.input, "AB-C-0704",
         "the first Esc only drops the highlight"
     );
 
@@ -187,15 +187,15 @@ fn escape_drops_the_selection_before_it_clears_the_code() {
 // --- recall -----------------------------------------------------------
 
 #[test]
-fn a_settled_code_becomes_recallable_and_is_stored() {
+fn a_settled_search_becomes_recallable_and_is_stored() {
     let (mut s, now) = state();
-    let r = search_and_settle(&mut s, "11-D-0704", now);
+    let r = search_and_settle(&mut s, "AB-C-0704", now);
 
-    assert_eq!(s.history.entries(), ["11-D-0704"]);
+    assert_eq!(s.history.entries(), ["AB-C-0704"]);
     assert!(
         r.cmds
             .iter()
-            .any(|c| matches!(c, Cmd::SaveHistory(entries) if entries.as_slice() == ["11-D-0704"])),
+            .any(|c| matches!(c, Cmd::SaveHistory(entries) if entries.as_slice() == ["AB-C-0704"])),
         "the list must be written as it is recorded, because there is no \
          clean shutdown to flush it at: {:?}",
         r.cmds
@@ -205,24 +205,24 @@ fn a_settled_code_becomes_recallable_and_is_stored() {
 /// Prefixes are never on screen long enough for the quiet period to expire.
 /// `tests/overlay.rs` covers a prefix that survives a pause mid-typing.
 #[test]
-fn the_prefixes_typed_on_the_way_to_a_code_are_not_remembered() {
+fn the_prefixes_typed_on_the_way_to_a_search_are_not_remembered() {
     let (mut s, now) = state();
-    search_and_settle(&mut s, "11-D-0704", now);
+    search_and_settle(&mut s, "AB-C-0704", now);
     assert_eq!(s.history.len(), 1);
-    assert_eq!(s.history.entries(), ["11-D-0704"]);
+    assert_eq!(s.history.entries(), ["AB-C-0704"]);
 }
 
-/// With nothing typed, the arrows walk the recent codes.
+/// With nothing typed, the arrows walk the recent searches.
 #[test]
-fn the_arrows_walk_the_recent_codes_when_nothing_is_typed() {
+fn the_arrows_walk_the_recent_searches_when_nothing_is_typed() {
     let (mut s, now) = state();
-    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+    s.seed_history(vec!["P12345-001".into(), "AB-C-0704".into()]);
 
     s.update(press(Key::Up), now);
     assert_eq!(s.input, "P12345-001");
 
     s.update(press(Key::Up), now);
-    assert_eq!(s.input, "11-D-0704");
+    assert_eq!(s.input, "AB-C-0704");
 
     s.update(press(Key::Down), now);
     assert_eq!(s.input, "P12345-001");
@@ -231,11 +231,11 @@ fn the_arrows_walk_the_recent_codes_when_nothing_is_typed() {
     assert_eq!(s.input, "", "past the newest, the field is empty again");
 }
 
-/// Down never restores a code it cleared.
+/// Down never restores a search it cleared.
 #[test]
-fn down_never_puts_a_cleared_code_back() {
+fn down_never_puts_a_cleared_search_back() {
     let (mut s, now) = state();
-    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+    s.seed_history(vec!["P12345-001".into(), "AB-C-0704".into()]);
 
     // Down on an empty field must not open the list.
     s.update(press(Key::Down), now);
@@ -249,27 +249,27 @@ fn down_never_puts_a_cleared_code_back() {
     assert_eq!(s.input, "", "past the newest, the field is empty");
     for _ in 0..4 {
         s.update(press(Key::Down), now);
-        assert_eq!(s.input, "", "Down put the cleared code back");
+        assert_eq!(s.input, "", "Down put the cleared search back");
     }
     assert!(!s.history.is_browsing());
 }
 
 /// Once something is typed, the arrows move in the results, not in recall.
 #[test]
-fn the_arrows_do_not_reach_the_recent_codes_once_something_is_typed() {
+fn the_arrows_do_not_reach_the_recent_searches_once_something_is_typed() {
     let (mut s, now) = state();
     s.seed_history(vec!["P12345-001".into()]);
     type_in(&mut s, "AB1", now);
 
     s.update(press(Key::Up), now);
-    assert_eq!(s.input, "AB1", "recall stole a half-typed code");
+    assert_eq!(s.input, "AB1", "recall stole a half-typed search");
 }
 
 /// Stepping through recall must not issue searches or verifications.
 #[test]
 fn browsing_recall_dispatches_no_work_until_an_entry_is_taken() {
     let (mut s, now) = state();
-    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+    s.seed_history(vec!["P12345-001".into(), "AB-C-0704".into()]);
 
     let open = s.update(press(Key::Up), now);
     let step = s.update(press(Key::Up), now);
@@ -284,7 +284,7 @@ fn browsing_recall_dispatches_no_work_until_an_entry_is_taken() {
     }
     assert!(
         s.verify_due_at().is_none(),
-        "a pending verify would fire for a code nobody chose"
+        "a pending verify would fire for a search nobody chose"
     );
 
     let taken = s.update(press(Key::Enter), now);
@@ -296,13 +296,13 @@ fn browsing_recall_dispatches_no_work_until_an_entry_is_taken() {
 }
 
 #[test]
-fn typing_after_recalling_a_code_keeps_it_and_edits_it() {
+fn typing_after_recalling_a_search_keeps_it_and_edits_it() {
     let (mut s, now) = state();
-    s.seed_history(vec!["11-D-0704".into()]);
+    s.seed_history(vec!["AB-C-0704".into()]);
     s.update(press(Key::Up), now);
     type_in(&mut s, "X", now);
 
-    assert_eq!(s.input, "11-D-0704X");
+    assert_eq!(s.input, "AB-C-0704X");
 }
 
 #[test]

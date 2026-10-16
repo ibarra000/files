@@ -16,7 +16,7 @@ use files::gui::settings::{self, Form};
 use files::gui::theme::Theme;
 use files::view::settings::{ActionId, PageId};
 
-const REPORT: &str = "drive jobs   reachable   120000 files";
+const REPORT: &str = "drive projects   reachable   120000 files";
 
 /// The harness state for one frame.
 struct Window {
@@ -143,12 +143,12 @@ fn the_list_offers_every_page() {
 #[test]
 fn choosing_a_page_changes_what_is_on_the_right() {
     let general = spoken(&harness_on(PageId::General, false));
-    assert!(general.iter().any(|s| s.contains("Recent codes")));
+    assert!(general.iter().any(|s| s.contains("Recent searches")));
     assert!(!general.iter().any(|s| s.contains("Hidden file types")));
 
     let searching = spoken(&harness_on(PageId::Searching, false));
     assert!(searching.iter().any(|s| s.contains("Hidden file types")));
-    assert!(!searching.iter().any(|s| s.contains("Recent codes")));
+    assert!(!searching.iter().any(|s| s.contains("Recent searches")));
 }
 
 /// The nav entry for the current page reports itself as selected.
@@ -178,7 +178,7 @@ fn a_setting_reads_out_its_label_and_the_sentence_under_it() {
     assert!(
         spoken
             .iter()
-            .any(|s| s.contains("Recent codes") && s.contains("up arrow can recall them")),
+            .any(|s| s.contains("Recent searches") && s.contains("up arrow can recall them")),
         "the row did not read out in full: {spoken:#?}"
     );
 }
@@ -189,11 +189,11 @@ fn a_switch_reports_itself_as_a_checkbox_that_is_on() {
     let harness = harness();
     let switch = switches(&harness)
         .into_iter()
-        .find(|n| n.label().as_deref() == Some("Recent codes"))
+        .find(|n| n.label().as_deref() == Some("Recent searches"))
         .expect("the switch is not in the accessibility tree at all");
     assert_eq!(
         switch.toggled(),
-        // Recent codes ships on.
+        // Recent searches ships on.
         Some(accesskit::Toggled::True),
         "a switch that is on did not say so"
     );
@@ -202,7 +202,7 @@ fn a_switch_reports_itself_as_a_checkbox_that_is_on() {
 #[test]
 fn clicking_a_switch_reports_exactly_one_change() {
     let mut harness = harness();
-    click(&mut harness, "Recent codes");
+    click(&mut harness, "Recent searches");
 
     let changed = &harness.state().changed;
     assert_eq!(
@@ -211,7 +211,7 @@ fn clicking_a_switch_reports_exactly_one_change() {
         "one click produced {} changes",
         changed.len()
     );
-    assert_eq!(changed[0].label, "Recent codes");
+    assert_eq!(changed[0].label, "Recent searches");
 }
 
 /// An unsaveable setting is shown disabled, with the reason read out.
@@ -222,7 +222,7 @@ fn a_setting_that_is_held_elsewhere_is_still_on_screen_and_says_so() {
 
     let spoken = spoken(&harness);
     assert!(
-        spoken.iter().any(|s| s.contains("Recent codes")),
+        spoken.iter().any(|s| s.contains("Recent searches")),
         "a pinned setting vanished instead of being refused: {spoken:#?}"
     );
     assert!(
@@ -231,7 +231,7 @@ fn a_setting_that_is_held_elsewhere_is_still_on_screen_and_says_so() {
     );
     let held = switches(&harness)
         .into_iter()
-        .find(|n| n.label().as_deref() == Some("Recent codes"))
+        .find(|n| n.label().as_deref() == Some("Recent searches"))
         .expect("the pinned switch is not in the tree");
     assert!(
         held.is_disabled(),

@@ -9,7 +9,7 @@
 //!
 //! * **One round trip** for the root's filtered query, which returns matching
 //!   files and matching subfolder names. At the default depth of one this
-//!   answers the common case, since a job code often names a folder.
+//!   answers the common case, since a search term often names a folder.
 //! * **One more per matching subfolder**, to list its contents. This mirrors
 //!   [`crate::search::matcher`]'s folder pass so a live share and a walked
 //!   tree rank folder matches the same way.
@@ -387,7 +387,7 @@ impl Pass<'_> {
     fn opts(&self) -> ListOpts {
         ListOpts {
             // Folders matter as much as files: the filtered query is the only way
-            // to find a folder named by the code.
+            // to find a folder named by the search term.
             files_only: false,
             ..ListOpts::default()
         }
@@ -621,20 +621,20 @@ mod tests {
     fn a_matching_folder_brings_its_files_with_it() {
         let src = Arc::new(
             FakeDirSource::new()
-                .with_tree(ROOT, &["p12345\\a.pdf", "p12345\\b.dwg", "other\\c.pdf"]),
+                .with_tree(ROOT, &["p12345\\a.pdf", "p12345\\b.tif", "other\\c.pdf"]),
         );
         let (mut paths, _) = answered(ask(&share(&src, 1), "p12345"));
         paths.sort();
         assert_eq!(
             paths,
-            ["V:\\archive\\p12345\\a.pdf", "V:\\archive\\p12345\\b.dwg"]
+            ["V:\\archive\\p12345\\a.pdf", "V:\\archive\\p12345\\b.tif"]
         );
     }
 
     #[test]
     fn a_type_filter_still_applies_to_what_a_folder_brings_in() {
         let src =
-            Arc::new(FakeDirSource::new().with_tree(ROOT, &["p12345\\a.pdf", "p12345\\b.dwg"]));
+            Arc::new(FakeDirSource::new().with_tree(ROOT, &["p12345\\a.pdf", "p12345\\b.tif"]));
         let (paths, _) = answered(ask(&share(&src, 1), "p12345 ext:pdf"));
         assert_eq!(paths, ["V:\\archive\\p12345\\a.pdf"]);
     }
@@ -644,9 +644,9 @@ mod tests {
     #[test]
     fn a_trailing_match_is_narrowed_back_from_the_loose_server_pattern() {
         let src =
-            Arc::new(FakeDirSource::new().with_dir(ROOT, &["p12345-rev.pdf", "job-p12345.pdf"]));
+            Arc::new(FakeDirSource::new().with_dir(ROOT, &["p12345-rev.pdf", "item-p12345.pdf"]));
         let (paths, _) = answered(ask(&share(&src, 1), "*p12345"));
-        assert_eq!(paths, ["V:\\archive\\job-p12345.pdf"]);
+        assert_eq!(paths, ["V:\\archive\\item-p12345.pdf"]);
     }
 
     /// `FindFirstFileExW` matches within one folder, so depth one cannot see a

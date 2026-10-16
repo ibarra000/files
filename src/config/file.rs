@@ -47,7 +47,7 @@ pub struct ConfigError {
     pub path: PathBuf,
     /// One-based line and column, when the problem has a single location.
     pub loc: Option<(usize, usize)>,
-    /// The entry kind and name the problem is in, such as `("mapping", "jobs")`
+    /// The entry kind and name the problem is in, such as `("mapping", "projects")`
     /// or `("alias", "pw")`.
     pub entry: Option<(&'static str, String)>,
     pub rule: Option<usize>,
@@ -733,7 +733,7 @@ fn viewer_extensions(table: &toml_edit::Table, label: &str, ctx: &mut Ctx<'_>) -
             item.span(),
             Some(("viewer", label)),
             None,
-            "extensions must be a list of file types, as [\"dwg\"]",
+            "extensions must be a list of file types, as [\"tif\"]",
             None,
         );
         return Vec::new();
@@ -746,7 +746,7 @@ fn viewer_extensions(table: &toml_edit::Table, label: &str, ctx: &mut Ctx<'_>) -
             item.span(),
             Some(("viewer", label)),
             None,
-            "every extensions entry must be a quoted file type, as \"dwg\"",
+            "every extensions entry must be a quoted file type, as \"tif\"",
             None,
         );
     }
@@ -1206,7 +1206,7 @@ mod tests {
 version = 3
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "tree"
 "#;
@@ -1303,7 +1303,7 @@ kind = "live"
 version = 3
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "tree"
 
@@ -1348,7 +1348,7 @@ kind = "tree"
 version = 3
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "nonsense"
 "#,
@@ -1540,9 +1540,9 @@ hide_system_files = false
 
     #[test]
     fn a_path_is_normalised_on_the_way_in() {
-        let text = MINIMAL.replace(r"path = 'R:\'", r"path = 'R:\jobs\'");
+        let text = MINIMAL.replace(r"path = 'R:\'", r"path = 'R:\projects\'");
         let c = parse_ok(&text);
-        assert_eq!(c.routes.all()[0].path, Path::new(r"R:\jobs"));
+        assert_eq!(c.routes.all()[0].path, Path::new(r"R:\projects"));
     }
 
     // --- rejection -----------------------------------------------------------
@@ -1573,7 +1573,7 @@ hide_system_files = false
     fn an_indexed_mapping_is_searched_for_every_query() {
         for kind in ["flat", "tree"] {
             let text = format!(
-                "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\nkind = \"{kind}\"\n"
+                "version = 3\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\nkind = \"{kind}\"\n"
             );
             let parsed = parse(&text, p(), ConfigSource::BuiltIn)
                 .unwrap_or_else(|e| panic!("{kind} was rejected: {:?}", messages(&e)));
@@ -1585,7 +1585,7 @@ hide_system_files = false
 
     #[test]
     fn a_leftover_rules_block_is_rejected() {
-        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\n\
                     kind = \"tree\"\n\n  [[mapping.rules]]\n  pattern = '^x$'\n";
         let errs = parse_err(text);
         assert!(messages(&errs).contains("unknown key \"rules\""));
@@ -1593,7 +1593,8 @@ hide_system_files = false
 
     #[test]
     fn a_version_one_configuration_is_told_exactly_what_to_change() {
-        let text = "version = 1\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        // `kind = "job-folder"` is the legacy value read from version 1 files.
+        let text = "version = 1\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\n\
                     kind = \"job-folder\"\n\n  [[mapping.rules]]\n  pattern = '^x$'\n\
                       folder = 'x'\n";
         let errs = parse_err(text);
@@ -1615,10 +1616,10 @@ hide_system_files = false
     #[test]
     fn reads_the_viewer_and_its_override_from_the_settings_table() {
         let text = format!(
-            "{MINIMAL}\n[settings]\nviewer = \"avwin\"\npdf_viewer = 'C:\\tools\\sumatra.exe'\n\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n"
+            "{MINIMAL}\n[settings]\nviewer = \"sketch\"\npdf_viewer = 'C:\\tools\\sumatra.exe'\n\n[[viewer]]\nname = \"sketch\"\nprogram = 'sketch.exe'\nextensions = [\"tif\"]\n"
         );
         let c = parse_ok(&text);
-        assert_eq!(c.settings.viewer.as_deref(), Some("avwin"));
+        assert_eq!(c.settings.viewer.as_deref(), Some("sketch"));
         assert_eq!(
             c.settings.pdf_viewer.as_deref(),
             Some(Path::new(r"C:\tools\sumatra.exe"))
@@ -1637,33 +1638,33 @@ hide_system_files = false
         );
     }
 
-    /// avwin is valid only when a `[[viewer]]` defines it.
+    /// sketch is valid only when a `[[viewer]]` defines it.
     #[test]
-    fn avwin_is_not_a_viewer_until_the_file_adds_it() {
-        let errs = parse_err(&format!("{MINIMAL}\n[settings]\nviewer = \"avwin\"\n"));
-        assert!(messages(&errs).contains("unknown viewer \"avwin\""));
+    fn sketch_is_not_a_viewer_until_the_file_adds_it() {
+        let errs = parse_err(&format!("{MINIMAL}\n[settings]\nviewer = \"sketch\"\n"));
+        assert!(messages(&errs).contains("unknown viewer \"sketch\""));
     }
 
     #[test]
     fn an_unknown_viewer_lists_the_ones_that_are_configured() {
         let text = format!(
-            "{MINIMAL}\n[settings]\nviewer = \"avwn\"\n\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n"
+            "{MINIMAL}\n[settings]\nviewer = \"skech\"\n\n[[viewer]]\nname = \"sketch\"\nprogram = 'sketch.exe'\nextensions = [\"tif\"]\n"
         );
         let msg = messages(&parse_err(&text));
-        assert!(msg.contains("\"avwin\""), "{msg}");
+        assert!(msg.contains("\"sketch\""), "{msg}");
     }
 
     #[test]
     fn a_viewer_table_is_read_in_order() {
         let text = format!(
-            "{MINIMAL}\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n\n[[viewer]]\nname = \"Notes\"\nprogram = 'C:\\Windows\\notepad.exe'\nextensions = '.TXT'\n"
+            "{MINIMAL}\n[[viewer]]\nname = \"sketch\"\nprogram = 'sketch.exe'\nextensions = [\"tif\"]\n\n[[viewer]]\nname = \"Notes\"\nprogram = 'C:\\Windows\\notepad.exe'\nextensions = '.TXT'\n"
         );
         let c = parse_ok(&text);
         let all = c.viewers.all();
         assert_eq!(all.len(), 2);
-        assert_eq!(all[0].name.as_ref(), "avwin");
-        assert_eq!(all[0].program.as_ref(), "avwin.exe");
-        assert_eq!(all[0].extensions.as_ref(), [Box::from("dwg")]);
+        assert_eq!(all[0].name.as_ref(), "sketch");
+        assert_eq!(all[0].program.as_ref(), "sketch.exe");
+        assert_eq!(all[0].extensions.as_ref(), [Box::from("tif")]);
         assert_eq!(all[1].name.as_ref(), "Notes");
         assert_eq!(all[1].program.as_ref(), r"C:\Windows\notepad.exe");
         // A bare string is a list of one; the dot and case are normalised.
@@ -1673,7 +1674,7 @@ hide_system_files = false
     #[test]
     fn a_viewer_needs_a_name_and_a_program() {
         let msg = messages(&parse_err(&format!(
-            "{MINIMAL}\n[[viewer]]\nextensions = [\"dwg\"]\n"
+            "{MINIMAL}\n[[viewer]]\nextensions = [\"tif\"]\n"
         )));
         assert!(msg.contains("needs a name"), "{msg}");
         assert!(msg.contains("needs a program"), "{msg}");
@@ -1682,7 +1683,7 @@ hide_system_files = false
     #[test]
     fn a_viewer_name_must_be_unique_and_not_a_built_in_mode() {
         let twice = format!(
-            "{MINIMAL}\n[[viewer]]\nname = \"avwin\"\nprogram = 'avwin.exe'\nextensions = [\"dwg\"]\n\n[[viewer]]\nname = \"AVWIN\"\nprogram = 'x.exe'\n"
+            "{MINIMAL}\n[[viewer]]\nname = \"sketch\"\nprogram = 'sketch.exe'\nextensions = [\"tif\"]\n\n[[viewer]]\nname = \"SKETCH\"\nprogram = 'x.exe'\n"
         );
         assert!(messages(&parse_err(&twice)).contains("already has this name"));
 
@@ -1696,8 +1697,8 @@ hide_system_files = false
     #[test]
     fn a_viewer_extension_is_held_to_the_same_rules_as_a_hidden_one() {
         for (bad, why) in [
-            ("*.dwg", "not a pattern"),
-            ("a.dwg", "extension only"),
+            ("*.tif", "not a pattern"),
+            ("a.tif", "extension only"),
             ("", "blank"),
             ("pdf", "pdf_viewer"),
             (".PDF", "pdf_viewer"),
@@ -1712,7 +1713,7 @@ hide_system_files = false
             format!("{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = 3\n");
         assert!(messages(&parse_err(&not_a_list)).contains("list of file types"));
         let mixed = format!(
-            "{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = [\"dwg\", 3]\n"
+            "{MINIMAL}\n[[viewer]]\nname = \"x\"\nprogram = 'x.exe'\nextensions = [\"tif\", 3]\n"
         );
         assert!(messages(&parse_err(&mixed)).contains("quoted file type"));
     }
@@ -1796,7 +1797,7 @@ hide_system_files = false
     /// `enabled` defaults to `true`, so an unparsed value must not enable it.
     #[test]
     fn a_mapping_enabled_by_a_non_boolean_is_rejected_rather_than_enabled() {
-        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\n\
              kind = \"tree\"\nenabled = \"no\"\n";
         let errs = parse_err(text);
         assert!(
@@ -1822,7 +1823,7 @@ path = 'W:\b'
 kind = "flat"
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "tree"
 "#;
@@ -1881,19 +1882,19 @@ kind = "tree"
 version = 3
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "tree"
 
 [[mapping]]
 name = "inner"
-path = 'R:\11d'
+path = 'R:\abc'
 kind = "tree"
 "#;
         let errs = parse_err(text);
         let msg = messages(&errs);
         assert!(msg.contains("inner"), "{msg}");
-        assert!(msg.contains("jobs"), "{msg}");
+        assert!(msg.contains("projects"), "{msg}");
         assert!(msg.contains("twice"), "{msg}");
     }
 
@@ -1910,7 +1911,7 @@ kind = "flat"
 
 [[mapping]]
 name = "inner"
-path = 'V:\docs\jobs'
+path = 'V:\docs\projects'
 kind = "tree"
 "#;
         let c = parse(text, p(), ConfigSource::BuiltIn)
@@ -1935,8 +1936,8 @@ kind = "tree"
 version = 3
 
 [[mapping]]
-name = "custompro"
-path = 'V:\Documents\custpro'
+name = "shared"
+path = 'V:\shared\files'
 kind = "flat"
 
 [[mapping]]
@@ -1956,12 +1957,12 @@ enabled = false
 version = 3
 
 [[mapping]]
-name = "jobs"
+name = "projects"
 path = 'R:\'
 kind = "tree"
 
 [[mapping]]
-name = "old-jobs"
+name = "old-projects"
 path = 'S:\archive'
 kind = "tree"
 "#;
@@ -2064,12 +2065,13 @@ enable = false
 
     // --- bringing an old file forward ---------------------------------------
 
-    /// A representative version 1 file.
+    /// A representative version 1 file. `kind = "job-folder"` is the legacy
+    /// value version 1 wrote.
     const V1_FILE: &str = r#"
 version = 1
 
 [[mapping]]
-name    = "jobs"
+name    = "projects"
 path    = 'R:\'
 kind    = "job-folder"
 enabled = true
@@ -2120,6 +2122,7 @@ case    = "lower"
             after.contains(&format!("version = {CONFIG_VERSION}")),
             "{after}"
         );
+        // The legacy version 1 folder kind is gone.
         assert!(!after.contains("job-folder"), "{after}");
         // A second load does not migrate again.
         let (_, migrated) = load_migrating(&path, false).unwrap();
@@ -2191,26 +2194,27 @@ case    = "lower"
     }
 
     #[test]
-    fn an_alias_is_read_back_with_its_code_and_note() {
+    fn an_alias_is_read_back_with_its_expansion_and_note() {
         let parsed = parse_ok(&with_alias(
-            "name = \"pw\"\ncode = \"11-D-0704\"\nnote = \"Powerwall bracket\"",
+            "name = \"pw\"\ncode = \"AB-C-0704\"\nnote = \"Project workbook\"",
         ));
         let alias = parsed.aliases.resolve("pw").expect("pw should resolve");
-        assert_eq!(alias.code.as_ref(), "11-D-0704");
-        assert_eq!(alias.note.as_deref(), Some("Powerwall bracket"));
+        assert_eq!(alias.code.as_ref(), "AB-C-0704");
+        assert_eq!(alias.note.as_deref(), Some("Project workbook"));
     }
 
     #[test]
     fn a_note_is_optional_and_an_empty_one_is_no_note() {
         let parsed = parse_ok(&with_alias(
-            "name = \"pw\"\ncode = \"11-D-0704\"\nnote = \"  \"",
+            "name = \"pw\"\ncode = \"AB-C-0704\"\nnote = \"  \"",
         ));
         assert_eq!(parsed.aliases.resolve("pw").unwrap().note, None);
     }
 
-    /// A filter with no search term, such as `ext:pdf`, is not a valid code.
+    /// A filter with no search term, such as `ext:pdf`, is not a valid
+    /// expansion.
     #[test]
-    fn an_alias_whose_code_cannot_be_searched_for_is_refused() {
+    fn an_alias_whose_expansion_cannot_be_searched_for_is_refused() {
         let errs = parse_err(&with_alias("name = \"pw\"\ncode = \"ext:pdf\""));
         let text = messages(&errs);
         assert!(text.contains("alias \"pw\""), "{text}");
@@ -2218,51 +2222,51 @@ case    = "lower"
     }
 
     #[test]
-    fn an_alias_may_stand_for_a_two_character_code() {
+    fn an_alias_may_stand_for_a_two_character_search() {
         let parsed = parse_ok(&with_alias("name = \"pw\"\ncode = \"ab\""));
         assert_eq!(parsed.aliases.resolve("pw").unwrap().code.as_ref(), "ab");
     }
 
     #[test]
     fn an_alias_may_stand_for_a_line_that_carries_syntax() {
-        let parsed = parse_ok(&with_alias("name = \"inv\"\ncode = \"ext:pdf inverter\""));
+        let parsed = parse_ok(&with_alias("name = \"inv\"\ncode = \"ext:pdf invoice\""));
         assert_eq!(
             parsed.aliases.resolve("inv").unwrap().code.as_ref(),
-            "ext:pdf inverter"
+            "ext:pdf invoice"
         );
     }
 
     #[test]
     fn two_aliases_of_the_same_name_are_refused_rather_than_one_winning() {
         let text = format!(
-            "{MINIMAL}\n[[alias]]\nname = \"pw\"\ncode = \"11-D-0704\"\n\
-             \n[[alias]]\nname = \"PW\"\ncode = \"11-D-0705\"\n"
+            "{MINIMAL}\n[[alias]]\nname = \"pw\"\ncode = \"AB-C-0704\"\n\
+             \n[[alias]]\nname = \"PW\"\ncode = \"AB-C-0705\"\n"
         );
         assert!(messages(&parse_err(&text)).contains("already an alias"));
     }
 
     #[test]
-    fn an_alias_needs_both_a_name_and_a_code() {
-        assert!(messages(&parse_err(&with_alias("code = \"11-D-0704\""))).contains("needs a name"));
+    fn an_alias_needs_both_a_name_and_an_expansion() {
+        assert!(messages(&parse_err(&with_alias("code = \"AB-C-0704\""))).contains("needs a name"));
         assert!(messages(&parse_err(&with_alias("name = \"pw\""))).contains("needs a code"));
     }
 
     #[test]
     fn an_alias_name_with_a_space_in_it_is_refused() {
-        let errs = parse_err(&with_alias("name = \"p w\"\ncode = \"11-D-0704\""));
+        let errs = parse_err(&with_alias("name = \"p w\"\ncode = \"AB-C-0704\""));
         assert!(messages(&errs).contains("cannot contain a space"));
     }
 
     #[test]
     fn a_non_ascii_alias_name_is_refused_rather_than_folded_inconsistently() {
-        let errs = parse_err(&with_alias("name = \"pü\"\ncode = \"11-D-0704\""));
+        let errs = parse_err(&with_alias("name = \"pü\"\ncode = \"AB-C-0704\""));
         assert!(messages(&errs).contains("must be ASCII"));
     }
 
     #[test]
     fn an_unknown_key_in_an_alias_is_an_error_like_anywhere_else() {
         let errs = parse_err(&with_alias(
-            "name = \"pw\"\ncode = \"11-D-0704\"\ncolour = \"red\"",
+            "name = \"pw\"\ncode = \"AB-C-0704\"\ncolour = \"red\"",
         ));
         assert!(messages(&errs).contains("unknown key \"colour\""));
     }

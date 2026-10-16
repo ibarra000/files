@@ -136,7 +136,7 @@ pub fn search(
 
 /// Runs a query against a walked tree.
 ///
-/// Two passes per segment, because a job code often names a folder:
+/// Two passes per segment, because a search term often names a folder:
 ///
 /// 1. the filenames, swept as a flat listing is;
 /// 2. the folder names, a much smaller arena, whose matches include the
@@ -621,13 +621,13 @@ mod tests {
     }
 
     #[test]
-    fn a_trailing_star_keeps_only_the_names_that_start_with_the_code() {
-        let s = snap(&["0704-plan.pdf", "job-0704.pdf", "0704.pdf"]);
+    fn a_trailing_star_keeps_only_the_names_that_start_with_the_term() {
+        let s = snap(&["0704-plan.pdf", "project-0704.pdf", "0704.pdf"]);
         assert_eq!(names(&ask(&s, "0704*")), ["0704.pdf", "0704-plan.pdf"]);
     }
 
     /// The sweep records only the leftmost occurrence per entry; the trailing
-    /// form must still admit a stem that ends in the code.
+    /// form must still admit a stem that ends in the search term.
     #[test]
     fn a_leading_star_finds_a_name_whose_first_occurrence_is_not_the_last() {
         let s = snap(&["0704-rev-0704.pdf", "0704-plan.pdf"]);
@@ -636,9 +636,9 @@ mod tests {
 
     #[test]
     fn a_type_filter_keeps_only_that_type() {
-        let s = snap(&["11-D-0704.pdf", "11-D-0704.dwg", "11-D-0704.docx"]);
-        assert_eq!(names(&ask(&s, "11-D-0704 ext:pdf")), ["11-D-0704.pdf"]);
-        let both = ask(&s, "11-D-0704 ext:dwg,pdf");
+        let s = snap(&["AB-C-0704.pdf", "AB-C-0704.tif", "AB-C-0704.docx"]);
+        assert_eq!(names(&ask(&s, "AB-C-0704 ext:pdf")), ["AB-C-0704.pdf"]);
+        let both = ask(&s, "AB-C-0704 ext:pdf,tif");
         assert_eq!(both.matched, 2);
     }
 
@@ -646,7 +646,7 @@ mod tests {
     /// before selection, or only a handful of rows would survive.
     #[test]
     fn a_refused_row_never_occupies_a_slot_in_the_selection() {
-        let mut names_in: Vec<String> = (0..400).map(|i| format!("0704-{i:04}.dwg")).collect();
+        let mut names_in: Vec<String> = (0..400).map(|i| format!("0704-{i:04}.tif")).collect();
         names_in.extend((0..400).map(|i| format!("zz-0704-{i:04}.pdf")));
         let refs: Vec<&str> = names_in.iter().map(String::as_str).collect();
         let s = snap(&refs);
@@ -664,7 +664,7 @@ mod tests {
     /// include filtered rows.
     #[test]
     fn the_match_count_counts_what_survived_the_filter() {
-        let s = snap(&["a-0704.pdf", "b-0704.dwg", "c-0704.dwg"]);
+        let s = snap(&["a-0704.pdf", "b-0704.tif", "c-0704.tif"]);
         assert_eq!(ask(&s, "0704").matched, 3);
         assert_eq!(ask(&s, "0704 ext:pdf").matched, 1);
     }
@@ -673,7 +673,7 @@ mod tests {
     /// "Searched N files".
     #[test]
     fn the_total_is_the_whole_index_whatever_the_filter() {
-        let s = snap(&["a-0704.pdf", "b-0704.dwg", "unrelated.txt"]);
+        let s = snap(&["a-0704.pdf", "b-0704.tif", "unrelated.txt"]);
         assert_eq!(ask(&s, "0704 ext:pdf").total, 3);
     }
 
@@ -695,11 +695,11 @@ mod tests {
     fn the_two_matchers_agree_under_every_mode_and_filter() {
         let s = snap(&[
             "0704.pdf",
-            "0704-plan.dwg",
+            "0704-plan.tif",
             "plan-0704.pdf",
-            "0704-rev-0704.dwg",
+            "0704-rev-0704.tif",
         ]);
-        for line in ["0704", "0704*", "*0704", "0704 ext:pdf", "*0704 ext:dwg"] {
+        for line in ["0704", "0704*", "*0704", "0704 ext:pdf", "*0704 ext:tif"] {
             let q = Query::parse(line);
             let simd = search(
                 &s,
@@ -725,18 +725,18 @@ mod tests {
 
     #[test]
     fn a_hidden_extension_is_left_out_of_the_results() {
-        let s = snap(&["11-D-0704.pdf", "11-D-0704.db", "11-D-0704.lnk"]);
+        let s = snap(&["AB-C-0704.pdf", "AB-C-0704.db", "AB-C-0704.lnk"]);
         assert_eq!(
-            names(&run_hiding(&s, "11-D-0704", &hiding(&["db", "lnk"]))),
-            vec!["11-D-0704.pdf"]
+            names(&run_hiding(&s, "AB-C-0704", &hiding(&["db", "lnk"]))),
+            vec!["AB-C-0704.pdf"]
         );
     }
 
     /// The footer count and the rows on screen agree.
     #[test]
     fn a_hidden_file_is_not_counted_as_a_match_either() {
-        let s = snap(&["11-D-0704.pdf", "11-D-0704.db", "11-D-0704.lnk"]);
-        let o = run_hiding(&s, "11-D-0704", &hiding(&["db", "lnk"]));
+        let s = snap(&["AB-C-0704.pdf", "AB-C-0704.db", "AB-C-0704.lnk"]);
+        let o = run_hiding(&s, "AB-C-0704", &hiding(&["db", "lnk"]));
         assert_eq!(o.matched, 1, "the footer would disagree with the list");
         assert_eq!(o.total, 3, "the index still holds all three");
     }
@@ -744,13 +744,13 @@ mod tests {
     /// Hidden files are filtered during selection, so they cannot fill the cap.
     #[test]
     fn a_wanted_file_is_found_behind_a_crowd_of_hidden_ones() {
-        let mut owned: Vec<String> = (0..500).map(|i| format!("11-D-0704 ({i}).db")).collect();
-        owned.push("11-D-0704.pdf".to_string());
+        let mut owned: Vec<String> = (0..500).map(|i| format!("AB-C-0704 ({i}).db")).collect();
+        owned.push("AB-C-0704.pdf".to_string());
         let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
         let s = snap(&refs);
 
-        let o = run_hiding(&s, "11-D-0704", &hiding(&["db"]));
-        assert_eq!(names(&o), vec!["11-D-0704.pdf"]);
+        let o = run_hiding(&s, "AB-C-0704", &hiding(&["db"]));
+        assert_eq!(names(&o), vec!["AB-C-0704.pdf"]);
         assert_eq!(o.matched, 1);
     }
 
@@ -767,11 +767,11 @@ mod tests {
     /// Both matchers apply the filter, since `--bench` switches between them.
     #[test]
     fn both_matchers_hide_the_same_files() {
-        let s = snap(&["11-D-0704.pdf", "11-D-0704.db"]);
+        let s = snap(&["AB-C-0704.pdf", "AB-C-0704.db"]);
         let hidden = hiding(&["db"]);
         let simd = search(
             &s,
-            &Query::contains("11-D"),
+            &Query::contains("AB-C"),
             MatcherKind::Simd,
             &hidden,
             &CancelToken::never(),
@@ -779,7 +779,7 @@ mod tests {
         .unwrap();
         let naive = search(
             &s,
-            &Query::contains("11-D"),
+            &Query::contains("AB-C"),
             MatcherKind::Naive,
             &hidden,
             &CancelToken::never(),
@@ -805,8 +805,8 @@ mod tests {
 
     #[test]
     fn nothing_is_hidden_when_the_list_is_empty() {
-        let s = snap(&["11-D-0704.pdf", "11-D-0704.db"]);
-        assert_eq!(run_hiding(&s, "11-D", &Hidden::none()).matched, 2);
+        let s = snap(&["AB-C-0704.pdf", "AB-C-0704.db"]);
+        assert_eq!(run_hiding(&s, "AB-C", &Hidden::none()).matched, 2);
     }
 
     #[test]
@@ -932,11 +932,11 @@ mod tests {
     #[test]
     fn simd_and_naive_agree() {
         let names_v: Vec<String> = (0..5000)
-            .map(|i| format!("job_{i:04}_report.pdf"))
+            .map(|i| format!("item_{i:04}_report.pdf"))
             .collect();
         let refs: Vec<&str> = names_v.iter().map(|s| s.as_str()).collect();
         let s = snap(&refs);
-        for q in ["job", "report", "_012", "0999", "zzz", ".pdf"] {
+        for q in ["item", "report", "_012", "0999", "zzz", ".pdf"] {
             let a = search(
                 &s,
                 &Query::contains(q),
@@ -1118,22 +1118,22 @@ mod tree_tests {
         .unwrap()
     }
 
-    /// A folder of five thousand drawings and ten PDFs contributes all ten under
+    /// A folder of five thousand scans and ten PDFs contributes all ten under
     /// `ext:pdf`, because the cap counts admitted files.
     #[test]
     fn the_folder_cap_counts_the_files_it_admitted_not_the_ones_it_looked_at() {
         let mut files: Vec<String> = (0..MAX_FILES_PER_FOLDER + 20)
-            .map(|i| format!("drawing-{i:03}.dwg"))
+            .map(|i| format!("scan-{i:03}.tif"))
             .collect();
         files.push("the-one.pdf".into());
         let refs: Vec<&str> = files.iter().map(String::as_str).collect();
-        let ix = index(&[("job-0704", &refs)]);
+        let ix = index(&[("project-0704", &refs)]);
 
         let out = ask(&ix, "0704 ext:pdf");
         assert_eq!(
             paths(&out),
-            ["R:\\job-0704\\the-one.pdf"],
-            "the PDF was crowded out by drawings the filter had already refused"
+            ["R:\\project-0704\\the-one.pdf"],
+            "the PDF was crowded out by scans the filter had already refused"
         );
         assert_eq!(out.matched, 1);
     }
@@ -1142,7 +1142,7 @@ mod tree_tests {
     /// applied to the file.
     #[test]
     fn a_mode_applies_to_the_folder_that_matched_and_not_to_its_files() {
-        let ix = index(&[("0704-job", &["anything at all.pdf"])]);
+        let ix = index(&[("0704-project", &["anything at all.pdf"])]);
         assert_eq!(paths(&ask(&ix, "0704*")).len(), 1);
         // The same folder, asked for as a trailing match, is not a match.
         assert!(paths(&ask(&ix, "*0704")).is_empty());
@@ -1150,15 +1150,18 @@ mod tree_tests {
 
     #[test]
     fn a_folder_match_still_honours_the_type_filter_on_what_it_brings_in() {
-        let ix = index(&[("job-0704", &["a.pdf", "b.dwg", "c.pdf"])]);
+        let ix = index(&[("project-0704", &["a.pdf", "b.tif", "c.pdf"])]);
         let out = ask(&ix, "0704 ext:pdf");
-        assert_eq!(paths(&out), ["R:\\job-0704\\a.pdf", "R:\\job-0704\\c.pdf"]);
+        assert_eq!(
+            paths(&out),
+            ["R:\\project-0704\\a.pdf", "R:\\project-0704\\c.pdf"]
+        );
         assert_eq!(out.matched, 2);
     }
 
     #[test]
     fn a_folder_holding_nothing_of_the_asked_for_type_contributes_nothing() {
-        let ix = index(&[("job-0704", &["a.dwg", "b.dwg"])]);
+        let ix = index(&[("project-0704", &["a.tif", "b.tif"])]);
         let out = ask(&ix, "0704 ext:pdf");
         assert!(paths(&out).is_empty());
         assert_eq!(out.matched, 0);
@@ -1173,10 +1176,10 @@ mod tree_tests {
 
     #[test]
     fn a_hidden_file_is_left_out_when_its_own_name_matched() {
-        let ix = index(&[("jobs", &["11-D-0704.pdf", "11-D-0704.db"])]);
+        let ix = index(&[("projects", &["AB-C-0704.pdf", "AB-C-0704.db"])]);
         assert_eq!(
-            paths(&run_hiding(&ix, "11-D-0704", &["db"])),
-            vec!["R:\\jobs\\11-D-0704.pdf"]
+            paths(&run_hiding(&ix, "AB-C-0704", &["db"])),
+            vec!["R:\\projects\\AB-C-0704.pdf"]
         );
     }
 
@@ -1184,33 +1187,33 @@ mod tree_tests {
     /// files such as `Thumbs.db`.
     #[test]
     fn a_hidden_file_pulled_in_by_its_folder_is_left_out_too() {
-        let ix = index(&[("11-D-0704", &["sheet 1.pdf", "Thumbs.db", "desktop.ini"])]);
+        let ix = index(&[("AB-C-0704", &["sheet 1.pdf", "Thumbs.db", "desktop.ini"])]);
         assert_eq!(
-            paths(&run_hiding(&ix, "11-D-0704", &["db", "ini"])),
-            vec!["R:\\11-D-0704\\sheet 1.pdf"]
+            paths(&run_hiding(&ix, "AB-C-0704", &["db", "ini"])),
+            vec!["R:\\AB-C-0704\\sheet 1.pdf"]
         );
     }
 
     /// A folder is judged by its own name, never by the hidden-extension filter.
     #[test]
     fn the_filter_applies_to_files_rather_than_the_folders_holding_them() {
-        let ix = index(&[("11-D-0704.db", &["sheet 1.pdf"])]);
+        let ix = index(&[("AB-C-0704.db", &["sheet 1.pdf"])]);
         assert_eq!(
-            paths(&run_hiding(&ix, "11-D-0704", &["db"])),
-            vec!["R:\\11-D-0704.db\\sheet 1.pdf"]
+            paths(&run_hiding(&ix, "AB-C-0704", &["db"])),
+            vec!["R:\\AB-C-0704.db\\sheet 1.pdf"]
         );
     }
 
-    /// A file is reachable through a folder whose name matches the code.
+    /// A file is reachable through a folder whose name matches the search term.
     #[test]
     fn finds_a_file_in_a_folder_no_rule_would_have_guessed() {
         let ix = index(&[(
             "archive\\2019\\odd name",
-            &["11-3-0704 survey.pdf", "unrelated.txt"],
+            &["AB-3-0704 survey.pdf", "unrelated.txt"],
         )]);
         assert_eq!(
-            paths(&run(&ix, "11-3-0704")),
-            vec!["R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf"]
+            paths(&run(&ix, "AB-3-0704")),
+            vec!["R:\\archive\\2019\\odd name\\AB-3-0704 survey.pdf"]
         );
     }
 
@@ -1218,20 +1221,20 @@ mod tree_tests {
     #[test]
     fn a_folder_match_brings_in_the_files_inside_it() {
         let ix = index(&[
-            ("11d\\0704", &["quote.pdf", "drawing.pdf"]),
+            ("abc\\0704", &["quote.pdf", "photo.pdf"]),
             ("ab12", &["unrelated.pdf"]),
         ]);
         let got = paths(&run(&ix, "0704"));
         assert_eq!(got.len(), 2, "{got:?}");
-        assert!(got.contains(&"R:\\11d\\0704\\quote.pdf".to_string()));
-        assert!(got.contains(&"R:\\11d\\0704\\drawing.pdf".to_string()));
+        assert!(got.contains(&"R:\\abc\\0704\\quote.pdf".to_string()));
+        assert!(got.contains(&"R:\\abc\\0704\\photo.pdf".to_string()));
     }
 
-    /// A file named after the code beats a file inside a folder named after it.
+    /// A file named after the search term beats a file inside a folder named after it.
     #[test]
-    fn a_file_named_for_the_code_outranks_the_folder_named_for_it() {
+    fn a_file_named_for_the_term_outranks_the_folder_named_for_it() {
         let ix = index(&[
-            ("11d\\0704", &["aaa.pdf", "bbb.pdf"]),
+            ("abc\\0704", &["aaa.pdf", "bbb.pdf"]),
             ("elsewhere", &["0704 summary.pdf"]),
         ]);
         assert_eq!(
@@ -1260,7 +1263,7 @@ mod tree_tests {
         );
     }
 
-    /// `matched` counts every file the code reaches, even when only some are
+    /// `matched` counts every file the search reaches, even when only some are
     /// retained.
     #[test]
     fn the_match_count_is_not_capped_by_what_is_shown() {
@@ -1327,8 +1330,8 @@ mod tree_tests {
 
     #[test]
     fn matching_is_case_insensitive_over_both_names_and_folders() {
-        let ix = index(&[("11D\\0704", &["QUOTE.pdf"])]);
-        assert_eq!(run(&ix, "11d").hits.len(), 1, "the folder");
+        let ix = index(&[("ABC\\0704", &["QUOTE.pdf"])]);
+        assert_eq!(run(&ix, "abc").hits.len(), 1, "the folder");
         assert_eq!(run(&ix, "quote").hits.len(), 1, "the file");
     }
 
