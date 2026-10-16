@@ -7,8 +7,8 @@
 //!
 //! ```text
 //! offsets: [0, 12, 25, 31, ...]            (n + 1 entries)
-//! lower:   b"report_a1.pdf\0drawing_b.dwg\0..."
-//! orig:    b"Report_A1.PDF\0Drawing_B.dwg\0..."
+//! lower:   b"report_a1.pdf\0photo_b.tif\0..."
+//! orig:    b"Report_A1.PDF\0Photo_B.tif\0..."
 //!          ^entry 0      ^NUL
 //! ```
 //!
@@ -393,7 +393,7 @@ mod tests {
 
     #[test]
     fn round_trips_names_in_order() {
-        let names = ["Report_A1.PDF", "drawing_b.dwg", "x"];
+        let names = ["Report_A1.PDF", "photo_b.tif", "x"];
         let s = snap(&names);
         assert_eq!(s.len(), 3);
         let got: Vec<String> = s.iter_names().map(|c| c.into_owned()).collect();

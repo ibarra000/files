@@ -6,7 +6,7 @@
 //! # `extensions`
 //!
 //! The file types PDF mode sends to the viewer instead of merging them, such as
-//! `dwg`, which PDF mode cannot read. Unclaimed types go to the Windows
+//! `tif`, which PDF mode cannot read. Unclaimed types go to the Windows
 //! association. `Auto` ignores this list and always uses Windows.
 
 use std::sync::Arc;
@@ -102,10 +102,10 @@ mod tests {
     #[test]
     fn a_viewer_is_found_by_name_whatever_its_case() {
         let v = Viewers::new(vec![
-            app("avwin", "avwin.exe", &["dwg"]),
+            app("sketch", "sketch.exe", &["tif"]),
             app("Notes", "notepad.exe", &[]),
         ]);
-        assert_eq!(v.find("AVWIN"), Some(0));
+        assert_eq!(v.find("SKETCH"), Some(0));
         assert_eq!(v.find(" notes "), Some(1));
         assert_eq!(v.find("sumatra"), None);
     }
@@ -114,10 +114,10 @@ mod tests {
     fn the_first_viewer_to_claim_an_extension_wins() {
         let v = Viewers::new(vec![
             app("a", "a.exe", &["txt"]),
-            app("b", "b.exe", &["dwg", "txt"]),
+            app("b", "b.exe", &["tif", "txt"]),
         ]);
         assert_eq!(v.claiming("txt"), Some(0));
-        assert_eq!(v.claiming("DWG"), Some(1));
+        assert_eq!(v.claiming("TIF"), Some(1));
         assert_eq!(v.claiming("pdf"), None);
     }
 
@@ -125,7 +125,7 @@ mod tests {
     fn no_viewers_claim_nothing() {
         let v = Viewers::default();
         assert!(v.is_empty());
-        assert_eq!(v.claiming("dwg"), None);
-        assert_eq!(v.find("avwin"), None);
+        assert_eq!(v.claiming("tif"), None);
+        assert_eq!(v.find("sketch"), None);
     }
 }

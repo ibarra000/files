@@ -1,5 +1,7 @@
 //! Monitor work-area lookups for placing the panel.
 
+// Win32 FFI: MonitorFromWindow and MonitorFromPoint, to place the panel.
+#![allow(unsafe_code)]
 #![cfg(windows)]
 
 use windows_sys::Win32::Foundation::HWND;

@@ -158,7 +158,7 @@ pub fn setting_row<R>(
 pub struct Entry<'a> {
     /// A drive name or alias name.
     pub name: &'a str,
-    /// A path or job code. Elided from the left, since a path's tail is what
+    /// A path or search term. Elided from the left, since a path's tail is what
     /// distinguishes it.
     pub detail: &'a str,
     /// A drive kind, or an alias note.
@@ -339,11 +339,11 @@ fn truncated(
     color: Color32,
     width: f32,
 ) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
-    job.wrap.max_width = width;
-    job.wrap.max_rows = 1;
-    job.wrap.overflow_character = Some('\u{2026}');
-    painter.layout_job(job)
+    let mut layout = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    layout.wrap.max_width = width;
+    layout.wrap.max_rows = 1;
+    layout.wrap.overflow_character = Some('\u{2026}');
+    painter.layout_job(layout)
 }
 
 /// Draws a toggle switch. See the module note for its accessibility role.

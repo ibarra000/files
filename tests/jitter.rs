@@ -25,10 +25,10 @@ const FRAME: Duration = Duration::from_nanos(16_666_667);
 /// until it stops.
 const KEYSTROKE_GAP: Duration = Duration::from_millis(120);
 
-/// The code every test types.
-const CODE: &str = "11-D-0704";
+/// The search term every test types.
+const TERM: &str = "AB-C-0704";
 
-/// Long enough for a typed code to be searched for and answered:
+/// Long enough for a typed term to be searched for and answered:
 /// `SEARCH_DEBOUNCE` plus slack.
 const SEARCH_SETTLE: Duration = Duration::from_millis(400);
 
@@ -194,7 +194,7 @@ impl Rig {
 
     /// Types `text` with `gap` between characters, running the frames in
     /// between so a debounce can fire mid-word.
-    fn type_code(&mut self, text: &str, gap: Duration) {
+    fn type_search(&mut self, text: &str, gap: Duration) {
         for c in text.chars() {
             self.feed(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)));
             self.run(gap);
@@ -208,16 +208,16 @@ impl Rig {
 
 fn corpus() -> Vec<&'static str> {
     vec![
-        "11-D-0704.pdf",
-        "11-D-0704-A.pdf",
-        "11-D-0704-B.pdf",
-        "11-D-0705.pdf",
-        "11-D-0706.pdf",
-        "11-D-0801.pdf",
-        "11-E-0704.pdf",
-        "12-D-0704.pdf",
-        "cover-11-D.pdf",
-        "index-11.pdf",
+        "AB-C-0704.pdf",
+        "AB-C-0704-A.pdf",
+        "AB-C-0704-B.pdf",
+        "AB-C-0705.pdf",
+        "AB-C-0706.pdf",
+        "AB-C-0801.pdf",
+        "AB-D-0704.pdf",
+        "AD-C-0704.pdf",
+        "cover-AB-C.pdf",
+        "index-AB.pdf",
     ]
 }
 
@@ -225,9 +225,9 @@ fn corpus() -> Vec<&'static str> {
 
 /// The list does not show its empty state while a refined search is in flight.
 #[test]
-fn typing_a_code_never_empties_the_result_list() {
+fn typing_a_search_never_empties_the_result_list() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.type_search("AB-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     assert!(
         !rig.state.hits.is_empty(),
@@ -235,8 +235,8 @@ fn typing_a_code_never_empties_the_result_list() {
     );
 
     rig.forget();
-    rig.type_code("D-0704", KEYSTROKE_GAP);
-    rig.log.report("typing_a_code");
+    rig.type_search("C-0704", KEYSTROKE_GAP);
+    rig.log.report("typing_a_search");
 
     assert!(
         !rig.log.bodies.contains(&Content::Empty),
@@ -247,12 +247,12 @@ fn typing_a_code_never_empties_the_result_list() {
 
 /// The body does not change on the way to showing the same content again.
 #[test]
-fn typing_a_code_does_not_change_the_body_at_all() {
+fn typing_a_search_does_not_change_the_body_at_all() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.type_search("AB-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     rig.forget();
-    rig.type_code("D-0704", KEYSTROKE_GAP);
+    rig.type_search("C-0704", KEYSTROKE_GAP);
 
     assert_eq!(
         rig.log.body_changes(),
@@ -264,13 +264,13 @@ fn typing_a_code_does_not_change_the_body_at_all() {
 
 /// Six keystrokes cost one sweep over the index.
 #[test]
-fn typing_a_code_costs_the_index_exactly_one_sweep() {
+fn typing_a_search_costs_the_index_exactly_one_sweep() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.type_search("AB-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     rig.forget();
 
-    rig.type_code("D-0704", KEYSTROKE_GAP);
+    rig.type_search("C-0704", KEYSTROKE_GAP);
     rig.run(Duration::from_millis(600));
     rig.log.report("index_cost");
 
@@ -284,10 +284,10 @@ fn typing_a_code_costs_the_index_exactly_one_sweep() {
 #[test]
 fn the_selection_stays_on_screen_while_typing() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.type_search("AB-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     rig.forget();
-    rig.type_code("D-07", KEYSTROKE_GAP);
+    rig.type_search("C-07", KEYSTROKE_GAP);
 
     assert!(
         rig.log.selected.iter().all(Option::is_some),
@@ -301,7 +301,7 @@ fn the_selection_stays_on_screen_while_typing() {
 #[test]
 fn an_unchanged_result_set_moves_nothing() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code(CODE, KEYSTROKE_GAP);
+    rig.type_search(TERM, KEYSTROKE_GAP);
     rig.run(Duration::from_millis(600));
 
     let before = rig.last();
@@ -310,7 +310,7 @@ fn an_unchanged_result_set_moves_nothing() {
 
     // Re-deliver the same answer.
     let epoch = rig.state.query_epoch();
-    rig.inflight.push((epoch, Query::contains(CODE)));
+    rig.inflight.push((epoch, Query::contains(TERM)));
     rig.run(Duration::from_millis(400));
 
     assert_eq!(rig.log.body_changes(), 0, "it changed the body");
@@ -322,11 +322,11 @@ fn an_unchanged_result_set_moves_nothing() {
     }
 }
 
-/// A code with no matches still reaches the empty state; the hold only delays it.
+/// A search with no matches still reaches the empty state; the hold only delays it.
 #[test]
-fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
+fn a_search_that_matches_nothing_still_reaches_the_empty_state() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("99-Z-9999", KEYSTROKE_GAP);
+    rig.type_search("ZZ-Z-9999", KEYSTROKE_GAP);
     rig.run(Duration::from_millis(600));
 
     assert!(rig.state.hits.is_empty());
@@ -338,11 +338,11 @@ fn a_code_that_matches_nothing_still_reaches_the_empty_state() {
     );
 }
 
-/// A nine-character code costs one sweep over the index.
+/// A nine-character search costs one sweep over the index.
 #[test]
 fn a_burst_of_typing_dispatches_exactly_one_search() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code(CODE, KEYSTROKE_GAP);
+    rig.type_search(TERM, KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     rig.log.report("one_search");
 
@@ -357,12 +357,12 @@ fn a_burst_of_typing_dispatches_exactly_one_search() {
 #[test]
 fn a_burst_of_typing_costs_the_window_system_nothing_until_it_stops() {
     let mut rig = Rig::summoned(corpus());
-    rig.type_code("11-", KEYSTROKE_GAP);
+    rig.type_search("AB-", KEYSTROKE_GAP);
     rig.run(SEARCH_SETTLE);
     rig.forget();
 
     // No settle afterwards: this measures the panel during the burst.
-    rig.type_code("D-0704", KEYSTROKE_GAP);
+    rig.type_search("C-0704", KEYSTROKE_GAP);
     rig.log.report("during_burst");
 
     assert_eq!(

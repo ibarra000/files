@@ -4,6 +4,9 @@
 //! here: `HWND` is `!Send`, so the panel's handle crosses threads as an
 //! `isize` through [`Panel`] and is rebuilt into an `HWND` only in this file.
 
+// Win32 FFI: RegisterHotKey and the hotkey thread's message pump.
+#![allow(unsafe_code)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicIsize, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -275,6 +278,7 @@ fn pump(hk: Hotkey, tx: &Events, ready: &Sender<Ready>, panel: &Panel) {
     // Create the message queue before publishing the thread id; until then
     // PostThreadMessageW fails with ERROR_INVALID_THREAD_ID and a hide would
     // be lost.
+    // SAFETY: MSG is plain data, for which all-zero bytes are a valid value.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     // SAFETY: a null window filters to this thread's own messages, and
     // PM_NOREMOVE leaves the queue alone. Called only to create the queue.

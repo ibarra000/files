@@ -28,7 +28,7 @@ pub fn vertical(rank: usize, len: usize, columns: usize, down: bool) -> usize {
 /// Returns the rank Tab (`forward`) or Shift+Tab lands on, or `None` at the
 /// end of the line.
 ///
-/// Does not wrap onto the next line; changing lines is Up and Down's job.
+/// Does not wrap onto the next line; changing lines belongs to Up and Down.
 pub fn across(rank: usize, len: usize, columns: usize, forward: bool) -> Option<usize> {
     if columns <= 1 || rank >= len {
         return None;

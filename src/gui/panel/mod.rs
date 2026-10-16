@@ -5,7 +5,7 @@
 //! `egui::ScrollArea` holding the whole list), so the window never resizes.
 //!
 //! The text field always has keyboard focus: Left/Right move the caret, Up/Down
-//! move the selection, and Enter activates it. Recent codes are a mode entered
+//! move the selection, and Enter activates it. Recent searches are a mode entered
 //! only with Up and left with Escape, so search history is never shown unasked.
 
 pub mod actions;
@@ -30,7 +30,7 @@ pub fn body_of(state: &AppState) -> Content {
     if state.picking_share {
         return Content::Shares;
     }
-    // Checked before the field, because browsing puts a code in the field.
+    // Checked before the field, because browsing puts a past search in the field.
     // Delegates to `showing_recent` so there is one source of truth.
     if state.showing_recent() {
         return Content::Recent;
@@ -208,11 +208,11 @@ mod tests {
 
     fn with_hits(n: usize) -> AppState {
         let mut state = state();
-        state.input.set_text("11-D");
+        state.input.set_text("AB-C");
         state.hits = (0..n)
             .map(|i| Hit {
-                path: Arc::from(format!(r"R:\jobs\11-D-070{i}.pdf").as_str()),
-                name: Arc::from(format!("11-D-070{i}.pdf").as_str()),
+                path: Arc::from(format!(r"R:\projects\AB-C-070{i}.pdf").as_str()),
+                name: Arc::from(format!("AB-C-070{i}.pdf").as_str()),
                 match_pos: 0,
                 index: i as u32,
             })
@@ -226,9 +226,9 @@ mod tests {
     }
 
     #[test]
-    fn the_recent_codes_appear_only_after_the_up_arrow() {
+    fn the_recent_searches_appear_only_after_the_up_arrow() {
         let mut state = state();
-        state.history.record("11-D-0704");
+        state.history.record("AB-C-0704");
 
         // Search history is not shown until Up is pressed.
         assert_eq!(body_of(&state), Content::Empty);
@@ -302,24 +302,24 @@ mod tests {
         state.settings.aliases =
             std::sync::Arc::new(crate::alias::Aliases::new(vec![crate::alias::Alias {
                 name: "pw".into(),
-                code: "11-D-0704".into(),
+                code: "AB-C-0704".into(),
                 note: None,
             }]));
         assert_eq!(body_of(&state), Content::Aliases);
     }
 
-    /// Showing aliases does not expose recent codes; Up is still required.
+    /// Showing aliases does not expose recent searches; Up is still required.
     #[test]
-    fn the_shortcuts_do_not_bring_the_recent_codes_with_them() {
+    fn the_shortcuts_do_not_bring_the_recent_searches_with_them() {
         let mut state = state();
         settle_index(&mut state);
         state.settings.aliases =
             std::sync::Arc::new(crate::alias::Aliases::new(vec![crate::alias::Alias {
                 name: "pw".into(),
-                code: "11-D-0704".into(),
+                code: "AB-C-0704".into(),
                 note: None,
             }]));
-        state.history.record("22-A-1234");
+        state.history.record("XY-Z-1234");
 
         assert_eq!(body_of(&state), Content::Aliases);
         state.update(

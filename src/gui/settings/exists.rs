@@ -57,7 +57,7 @@ mod tests {
         let mut cache = DirCache::default();
         let now = Instant::now();
         let asked = Cell::new(0);
-        let path = Path::new(r"R:\jobs");
+        let path = Path::new(r"R:\projects");
 
         assert!(cache.is_dir(path, now, counting(&asked, true)));
         assert!(cache.is_dir(path, now + TTL / 2, counting(&asked, false)));
@@ -69,7 +69,7 @@ mod tests {
         let mut cache = DirCache::default();
         let now = Instant::now();
         let asked = Cell::new(0);
-        let path = Path::new(r"R:\jobs");
+        let path = Path::new(r"R:\projects");
 
         assert!(!cache.is_dir(path, now, counting(&asked, false)));
         assert!(cache.is_dir(path, now + TTL * 2, counting(&asked, true)));

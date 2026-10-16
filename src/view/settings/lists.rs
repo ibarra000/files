@@ -8,7 +8,7 @@
 pub struct AliasWords {
     pub help: &'static str,
     pub name_hint: &'static str,
-    pub code_hint: &'static str,
+    pub term_hint: &'static str,
     pub note_hint: &'static str,
     pub add: &'static str,
     pub remove: &'static str,
@@ -20,7 +20,7 @@ impl AliasWords {
         [
             self.help,
             self.name_hint,
-            self.code_hint,
+            self.term_hint,
             self.note_hint,
             self.add,
             self.remove,
@@ -30,10 +30,10 @@ impl AliasWords {
 }
 
 pub const ALIASES: AliasWords = AliasWords {
-    help: "A short name for a frequently used code. Typing the name shows that code's \
+    help: "A short name for a frequent search. Typing the name shows that search's \
            results immediately.",
     name_hint: "Short name",
-    code_hint: "Code",
+    term_hint: "Search",
     note_hint: "Note (optional)",
     add: "Add",
     remove: "Remove",

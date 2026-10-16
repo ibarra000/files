@@ -1,0 +1,30 @@
+# Files allowed to opt out of `unsafe_code = "deny"` (Cargo.toml).
+# tools/check.sh fails if a file opts out without being listed here, or is
+# listed but no longer opts out. Adding a line needs a reviewer's agreement;
+# see docs/CODE_STANDARDS.md#unsafe-code.
+#
+# path                       # why it cannot be written in safe Rust
+
+src/autostart.rs           # Win32 FFI: the registry Run value.
+src/clipboard.rs           # Win32 FFI: OpenClipboard, GlobalAlloc and SetClipboardData.
+src/config/mod.rs          # Tests only: std::env::set_var, unsafe since edition 2024.
+src/gui/input.rs           # Win32 FFI: the keyboard layout and state, for AltGr input.
+src/gui/taskbar.rs         # Win32 FFI: reading the taskbar's theme from the registry.
+src/gui/tray.rs            # Win32 FFI: Shell_NotifyIconW, to re-tint the tray icon.
+src/gui/window.rs          # Win32 FFI: DWM backdrop, corners and frame.
+src/hotkey/win.rs          # Win32 FFI: RegisterHotKey and the hotkey thread's message pump.
+src/hotkey/win_hwnd.rs     # Win32 FFI: MonitorFromWindow and MonitorFromPoint, to place the panel.
+src/index/persist.rs       # memmap2: Mmap::map over a file opened to deny writers.
+src/index/std_enum.rs      # Tests only: SetFileAttributesW, to make a hidden file.
+src/index/volume.rs        # Win32 FFI: GetDriveTypeW, WNetGetConnectionW, GetVolumeInformationW.
+src/index/win_enum.rs      # Win32 FFI: GetFileInformationByHandleEx and FindFirstFileExW listings.
+src/index/win_util.rs      # Win32 FFI: closing handles and reading Win32-filled buffers.
+src/index/win_watch.rs     # Win32 FFI: ReadDirectoryChangesW and CancelIoEx.
+src/ipc/mod.rs             # Win32 FFI: ProcessIdToSessionId, for the per-session pipe name.
+src/ipc/pipe.rs            # Win32 FFI: named pipes between the panel and the settings window.
+src/log.rs                 # Win32 FFI: OutputDebugStringW, since files.exe has no console.
+src/notify.rs              # Win32 FFI: MessageBoxW.
+src/open/launch.rs         # Win32 FFI: ShellExecuteW and AllowSetForegroundWindow.
+src/single.rs              # Win32 FFI: the named mutex and event behind single-instance.
+src/update/apply.rs        # Win32 FFI: BCrypt SHA-256 and OpenProcess, to wait for the panel to exit.
+src/update/http.rs         # Win32 FFI: WinHTTP.

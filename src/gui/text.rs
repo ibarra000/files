@@ -50,7 +50,7 @@ mod tests {
 
     #[test]
     fn a_folder_that_fits_is_left_alone() {
-        let path = r"R:\11d\11-D-0704";
+        let path = r"R:\abc\AB-C-0704";
         assert_eq!(elide_left(path, 100.0, &monospaced), path);
         // Exactly the available width still fits.
         assert_eq!(
@@ -63,7 +63,7 @@ mod tests {
     /// The tail distinguishes rows, so the tail is kept.
     #[test]
     fn a_long_folder_loses_its_front_and_keeps_its_tail() {
-        let path = r"R:\jobs\2024\11d\11-D-0704";
+        let path = r"R:\projects\2024\abc\AB-C-0704";
         let shown = elide_left(path, 12.0, &monospaced);
 
         assert!(monospaced(&shown) <= 12.0, "{shown:?} does not fit");
@@ -72,12 +72,15 @@ mod tests {
             path.ends_with(shown.trim_start_matches(ELLIPSIS)),
             "{shown:?} is not a tail of the path"
         );
-        assert!(shown.ends_with("11-D-0704"), "{shown:?} lost the job code");
+        assert!(
+            shown.ends_with("AB-C-0704"),
+            "{shown:?} lost the search term"
+        );
     }
 
     #[test]
     fn no_more_is_dropped_than_has_to_be() {
-        let path = r"R:\jobs\2024\11d\11-D-0704";
+        let path = r"R:\projects\2024\abc\AB-C-0704";
         for width in 4..=26 {
             let shown = elide_left(path, width as f32, &monospaced);
             assert!(monospaced(&shown) <= width as f32, "{width}: {shown:?}");
@@ -102,7 +105,7 @@ mod tests {
 
     #[test]
     fn eliding_a_path_with_wide_characters_does_not_panic() {
-        let path = "R:\\Zeichnungen\\Prüfung\\日本語のフォルダ\\11-D-0704";
+        let path = "R:\\Zeichnungen\\Prüfung\\日本語のフォルダ\\AB-C-0704";
         for width in 0..=40 {
             let shown = elide_left(path, width as f32, &monospaced);
             assert!(monospaced(&shown) <= width as f32, "{width}: {shown:?}");
@@ -111,8 +114,8 @@ mod tests {
 
     #[test]
     fn a_column_too_narrow_for_anything_draws_nothing() {
-        assert_eq!(elide_left(r"R:\jobs", 0.0, &monospaced), "");
-        assert_eq!(elide_left(r"R:\jobs", 0.5, &monospaced), "");
+        assert_eq!(elide_left(r"R:\projects", 0.0, &monospaced), "");
+        assert_eq!(elide_left(r"R:\projects", 0.5, &monospaced), "");
     }
 
     #[test]

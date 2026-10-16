@@ -25,7 +25,7 @@ pub fn violations(text: &str, slot: Slot) -> Vec<String> {
     if text.contains("...") {
         out.push("three periods - the ellipsis is \u{2026}".to_string());
     }
-    // Spaced, so hyphens in `11-D-0704` and `--check-config` pass.
+    // Spaced, so hyphens in `AB-C-0704` and `--check-config` pass.
     if text.contains(" - ") {
         out.push("\" - \" as a connector - independent facts join with \" \u{b7} \"".to_string());
     }
@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn a_line_that_pads_itself_is_caught() {
-        let bad = "avwin.exe is not on PATH \u{b7}          F2 switches viewer";
+        let bad = "sketch.exe is not on PATH \u{b7}          F2 switches viewer";
         assert!(!violations(bad, Slot::Status).is_empty());
     }
 
@@ -88,9 +88,9 @@ mod tests {
 
     #[test]
     fn only_the_spaced_hyphen_is_a_connector() {
-        assert!(violations("Nothing matched 11-D-0704", Slot::Status).is_empty());
+        assert!(violations("Nothing matched AB-C-0704", Slot::Status).is_empty());
         assert!(violations("Run files --check-config", Slot::Status).is_empty());
-        assert!(!violations("Keep typing - a code needs 3 characters", Slot::Status).is_empty());
+        assert!(!violations("Keep typing - a search needs 3 characters", Slot::Status).is_empty());
     }
 
     #[test]

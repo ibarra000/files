@@ -247,7 +247,7 @@ const _: () = {
 pub enum Scalar {
     Str(String),
     Bool(bool),
-    /// A path, written as a TOML literal string (`'V:\Documents'`) so that
+    /// A path, written as a TOML literal string (`'V:\shared\files'`) so that
     /// backslashes are not treated as escapes.
     Path(String),
     List(Vec<String>),
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn rewriting_the_viewer_when_the_key_is_absent_adds_it_to_the_existing_table() {
-        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\n\
                     kind = \"flat\"\n\n\
                     [settings]\n# matcher = \"simd\"\npersist = true\n";
         let after = with_viewer(text, "pdf").unwrap();
@@ -839,7 +839,7 @@ mod tests {
 
     #[test]
     fn rewriting_the_viewer_with_no_settings_table_does_not_swallow_the_trailing_comments() {
-        let text = "version = 3\n\n[[mapping]]\nname = 'jobs'\npath = 'R:\\'\n\
+        let text = "version = 3\n\n[[mapping]]\nname = 'projects'\npath = 'R:\\'\n\
                     kind = \"flat\"\n\n\
                     # a parting note the user wrote\n# and a second line of it\n";
         let after = with_viewer(text, "pdf").unwrap();
@@ -859,8 +859,8 @@ mod tests {
         let text = format!(
             "{DEFAULT_CONFIG_TOML}
 [[viewer]]
-name = \"avwin\"
-program = 'avwin.exe'
+name = \"sketch\"
+program = 'sketch.exe'
 "
         );
         let viewers = reload(&text).viewers;
@@ -987,14 +987,14 @@ settings = {{ persist = true }}
         let after = apply(
             DEFAULT_CONFIG_TOML,
             &[Edit::Mappings(vec![
-                mapping(0, "custompro", r"V:\Documents\custpro", MappingKind::Flat),
-                mapping(1, "jobs", r"R:\", MappingKind::Tree),
+                mapping(0, "shared", r"V:\shared\files", MappingKind::Flat),
+                mapping(1, "projects", r"R:\", MappingKind::Tree),
             ])],
         )
         .unwrap();
 
         let parsed = reload(&after);
-        assert_eq!(parsed.routes.names(), ["custompro", "jobs"]);
+        assert_eq!(parsed.routes.names(), ["shared", "projects"]);
         assert_eq!(parsed.routes.all()[0].kind, MappingKind::Flat);
         assert_eq!(parsed.routes.all()[1].kind, MappingKind::Tree);
     }
@@ -1006,17 +1006,17 @@ settings = {{ persist = true }}
             DEFAULT_CONFIG_TOML,
             &[Edit::Mappings(vec![mapping(
                 0,
-                "jobs",
-                r"V:\Documents\custpro",
+                "projects",
+                r"V:\shared\files",
                 MappingKind::Flat,
             )])],
         )
         .unwrap();
 
-        assert!(after.contains(r"'V:\Documents\custpro'"), "{after}");
+        assert!(after.contains(r"'V:\shared\files'"), "{after}");
         assert_eq!(
             reload(&after).routes.all()[0].path,
-            std::path::PathBuf::from(r"V:\Documents\custpro")
+            std::path::PathBuf::from(r"V:\shared\files")
         );
     }
 
@@ -1102,11 +1102,11 @@ settings = {{ persist = true }}
         let after = apply(
             DEFAULT_CONFIG_TOML,
             &[Edit::Aliases(vec![
-                alias("pw", "11-D-0704"),
+                alias("pw", "AB-C-0704"),
                 crate::alias::Alias {
                     name: "inv".into(),
-                    code: "ext:pdf inverter".into(),
-                    note: Some("The inverter drawings".into()),
+                    code: "ext:pdf invoice".into(),
+                    note: Some("The invoice scans".into()),
                 },
             ])],
         )
@@ -1116,11 +1116,11 @@ settings = {{ persist = true }}
         assert_eq!(parsed.aliases.len(), 2);
         assert_eq!(
             parsed.aliases.resolve("pw").unwrap().code.as_ref(),
-            "11-D-0704"
+            "AB-C-0704"
         );
         assert_eq!(
             parsed.aliases.resolve("inv").unwrap().note.as_deref(),
-            Some("The inverter drawings")
+            Some("The invoice scans")
         );
     }
 
@@ -1128,7 +1128,7 @@ settings = {{ persist = true }}
     fn writing_aliases_leaves_the_comments_around_them_intact() {
         let after = apply(
             DEFAULT_CONFIG_TOML,
-            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+            &[Edit::Aliases(vec![alias("pw", "AB-C-0704")])],
         )
         .unwrap();
 
@@ -1144,16 +1144,16 @@ settings = {{ persist = true }}
     fn writing_aliases_twice_replaces_rather_than_appends() {
         let once = apply(
             DEFAULT_CONFIG_TOML,
-            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+            &[Edit::Aliases(vec![alias("pw", "AB-C-0704")])],
         )
         .unwrap();
-        let twice = apply(&once, &[Edit::Aliases(vec![alias("pw", "11-D-0999")])]).unwrap();
+        let twice = apply(&once, &[Edit::Aliases(vec![alias("pw", "AB-C-0999")])]).unwrap();
 
         let parsed = reload(&twice);
         assert_eq!(parsed.aliases.len(), 1);
         assert_eq!(
             parsed.aliases.resolve("pw").unwrap().code.as_ref(),
-            "11-D-0999"
+            "AB-C-0999"
         );
     }
 
@@ -1161,7 +1161,7 @@ settings = {{ persist = true }}
     fn writing_an_empty_list_removes_the_aliases_entirely() {
         let with = apply(
             DEFAULT_CONFIG_TOML,
-            &[Edit::Aliases(vec![alias("pw", "11-D-0704")])],
+            &[Edit::Aliases(vec![alias("pw", "AB-C-0704")])],
         )
         .unwrap();
         let without = apply(&with, &[Edit::Aliases(Vec::new())]).unwrap();
@@ -1184,7 +1184,7 @@ settings = {{ persist = true }}
         let path = dir.path().join("config.toml");
         std::fs::write(&path, DEFAULT_CONFIG_TOML).unwrap();
 
-        save(&path, &[Edit::Aliases(vec![alias("pw", "11-D-0704")])]).unwrap();
+        save(&path, &[Edit::Aliases(vec![alias("pw", "AB-C-0704")])]).unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(reload(&after).aliases.len(), 1);

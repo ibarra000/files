@@ -7,7 +7,7 @@
 //!   `[[viewer]]` table. None is built in; see [`crate::config::viewers`].
 //! - [`ViewerKind::Auto`]: the selected file, opened by whatever the system has
 //!   registered for its extension.
-//! - [`ViewerKind::Pdf`]: the typed code names a document whose pages are
+//! - [`ViewerKind::Pdf`]: the search input names a document whose pages are
 //!   separate files. They are re-collected ([`crate::search::pages`]), merged
 //!   ([`pdf`]) and opened ([`launch`]). The page set is rebuilt from the
 //!   snapshot because the rows on screen are capped at `MAX_RESULTS` and ranked
@@ -38,7 +38,7 @@ pub use launch::{LaunchError, program_on_path};
 pub struct OpenRequest {
     /// The selected row.
     pub path: Arc<str>,
-    /// The typed code, from which the page group is rebuilt.
+    /// The search input, from which the page group is rebuilt.
     pub query: String,
     pub viewer: ViewerKind,
     /// The list `viewer` indexes, as it was when the key was pressed.
@@ -75,7 +75,7 @@ pub struct Opened {
     pub pages: usize,
     /// Pages that were left out.
     pub skipped: Vec<pdf::Skipped>,
-    /// The code has more than `MAX_PAGES` pages and the document stops short.
+    /// The document has more than `MAX_PAGES` pages and is cut short.
     /// Surfaced so the user is told the document is incomplete.
     pub truncated: bool,
 }
@@ -83,7 +83,7 @@ pub struct Opened {
 /// Dependencies of an open, passed in so the logic is testable without a
 /// share, a viewer or a terminal.
 pub struct OpenContext<'a> {
-    /// The listing the code resolves to. `None` means the share did not
+    /// The listing the search resolves to. `None` means the share did not
     /// answer, which degrades to opening the selected file, never to failing.
     pub snapshot: Option<&'a crate::index::snapshot::Snapshot>,
     pub cache_dir: Option<&'a Path>,
@@ -98,7 +98,7 @@ pub struct OpenContext<'a> {
 /// naming a program, which neither `Pdf` nor a viewer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
-    /// Every page of the code, merged.
+    /// Every page of the document, merged.
     Document,
     /// One file, passed to the configured viewer at this index.
     App(usize),
@@ -114,7 +114,7 @@ pub fn route_of(viewer: ViewerKind, path: &str, viewers: &Viewers) -> Route {
     match viewer.within(viewers) {
         // Every file goes to the chosen viewer.
         ViewerKind::App(i) => Route::App(i),
-        // Drawings cannot be converted to PDF in-process, so a type claimed by
+        // Other types cannot be converted to PDF in-process, so a type claimed by
         // a configured viewer goes to that viewer. Otherwise the document
         // route, which opens a non-document file with the system handler.
         ViewerKind::Pdf => {
@@ -212,7 +212,7 @@ fn open_as_document(request: &OpenRequest, cx: &OpenContext<'_>) -> Result<Opene
 
     // Falls back to the selected file alone when the share did not answer,
     // the group is empty, or the selected row is not part of the group (for
-    // example `11-D-0704 revision notes.pdf`).
+    // example `AB-C-0704 revision notes.pdf`).
     let (assembled, truncated) = match group {
         Some(group) if group.contains_path(&request.path) => {
             let Some(cache_dir) = cx.cache_dir else {
@@ -251,7 +251,7 @@ fn open_one_as_pdf(path: &Arc<str>, cx: &OpenContext<'_>) -> Result<Opened, Open
     })
 }
 
-/// Rebuilds the code's page group, restricted to the selected file's folder.
+/// Rebuilds the search input's page group, restricted to the selected file's folder.
 ///
 /// With several mappings enabled, `Backend::snapshot_for` returns the first
 /// matching target, which may not be the selected row's share. The folder
@@ -300,16 +300,16 @@ mod tests {
             path: Arc::from(path),
             query: query.to_string(),
             viewer,
-            viewers: Arc::new(avwin()),
+            viewers: Arc::new(sketch()),
         }
     }
 
-    /// A single viewer that claims `dwg`.
-    fn avwin() -> Viewers {
-        Viewers::new(vec![ViewerApp::new("avwin", "avwin.exe", &["dwg"])])
+    /// A single viewer that claims `tif`.
+    fn sketch() -> Viewers {
+        Viewers::new(vec![ViewerApp::new("sketch", "sketch.exe", &["tif"])])
     }
 
-    /// Single-page codes open the share file directly, which must never be
+    /// Single-page documents open the share file directly, which must never be
     /// marked read-only.
     #[test]
     fn only_a_document_in_the_cache_is_ever_marked_read_only() {
@@ -318,7 +318,7 @@ mod tests {
 
         let merged = cache.path().join("aaaa.pdf");
         std::fs::write(&merged, b"%PDF-1.5\n").unwrap();
-        let on_the_share = share.path().join("11-D-0704.pdf");
+        let on_the_share = share.path().join("AB-C-0704.pdf");
         std::fs::write(&on_the_share, b"%PDF-1.5\n").unwrap();
 
         let cx = OpenContext {
@@ -385,13 +385,13 @@ mod tests {
             read_only: true,
         };
 
-        // avwin.exe is normally absent on a development machine.
+        // sketch.exe is normally absent on a development machine.
         match open(
             &request(file.to_str().unwrap(), "real", ViewerKind::App(0)),
             &cx,
         ) {
             Err(OpenError::Launch(LaunchError::ViewerNotFound(name))) => {
-                assert!(name.contains("avwin.exe"));
+                assert!(name.contains("sketch.exe"));
             }
             Err(other) => panic!("unexpected failure: {other:?}"),
             // The viewer is installed on this machine.
@@ -407,9 +407,9 @@ mod tests {
             "a.pdf (not a PDF)"
         );
         assert!(
-            OpenError::Launch(LaunchError::ViewerNotFound("avwin.exe".into()))
+            OpenError::Launch(LaunchError::ViewerNotFound("sketch.exe".into()))
                 .detail()
-                .contains("avwin.exe")
+                .contains("sketch.exe")
         );
     }
 
@@ -417,11 +417,11 @@ mod tests {
     #[test]
     fn a_selected_row_outside_the_group_is_not_part_of_a_document() {
         let snap = snapshot(
-            r"R:\11d",
+            r"R:\abc",
             &[
-                "11-d-0704.pdf",
-                "11-d-0704_Page1.pdf",
-                "11-d-0704 revision notes.pdf",
+                "ab-c-0704.pdf",
+                "ab-c-0704_Page1.pdf",
+                "ab-c-0704 revision notes.pdf",
             ],
         );
         let cx = OpenContext {
@@ -431,14 +431,14 @@ mod tests {
             read_only: true,
         };
 
-        let inside = request(r"R:\11d\11-d-0704_Page1.pdf", "11-d-0704", ViewerKind::Pdf);
+        let inside = request(r"R:\abc\ab-c-0704_Page1.pdf", "ab-c-0704", ViewerKind::Pdf);
         let outside = request(
-            r"R:\11d\11-d-0704 revision notes.pdf",
-            "11-d-0704",
+            r"R:\abc\ab-c-0704 revision notes.pdf",
+            "ab-c-0704",
             ViewerKind::Pdf,
         );
 
-        let group = collect_group(&inside, &cx).expect("the code has a document");
+        let group = collect_group(&inside, &cx).expect("the search input has a document");
         assert_eq!(group.len(), 2);
         assert!(group.contains_path(&inside.path));
         assert!(!group.contains_path(&outside.path));
@@ -447,14 +447,14 @@ mod tests {
     /// Pages from a different share than the selected row are excluded.
     #[test]
     fn a_group_never_reaches_outside_the_selected_files_folder() {
-        let snap = snapshot(r"S:\archive", &["11-d-0704.pdf", "11-d-0704_Page1.pdf"]);
+        let snap = snapshot(r"S:\archive", &["ab-c-0704.pdf", "ab-c-0704_Page1.pdf"]);
         let cx = OpenContext {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
             read_only: true,
         };
-        let picked = request(r"R:\11d\11-d-0704.pdf", "11-d-0704", ViewerKind::Pdf);
+        let picked = request(r"R:\abc\ab-c-0704.pdf", "ab-c-0704", ViewerKind::Pdf);
 
         assert!(
             collect_group(&picked, &cx).is_none(),
@@ -473,7 +473,7 @@ mod tests {
         };
         let picked = request(
             r"C:\definitely-not-here-4a91\x.pdf",
-            "11-d-0704",
+            "ab-c-0704",
             ViewerKind::Pdf,
         );
         assert!(collect_group(&picked, &cx).is_none());
@@ -483,15 +483,15 @@ mod tests {
     }
 
     #[test]
-    fn a_code_with_no_pages_at_all_has_no_group() {
-        let snap = snapshot(r"R:\11d", &["something-else.pdf"]);
+    fn a_search_with_no_pages_at_all_has_no_group() {
+        let snap = snapshot(r"R:\abc", &["something-else.pdf"]);
         let cx = OpenContext {
             snapshot: Some(&snap),
             cache_dir: None,
             pdf_viewer: None,
             read_only: true,
         };
-        let picked = request(r"R:\11d\something-else.pdf", "11-d-0704", ViewerKind::Pdf);
+        let picked = request(r"R:\abc\something-else.pdf", "ab-c-0704", ViewerKind::Pdf);
         assert!(collect_group(&picked, &cx).is_none());
     }
 
@@ -504,13 +504,13 @@ mod tests {
 
         // Out of order and with decoys.
         let mut names = vec![
-            "11-d-0704 revision notes.pdf".to_string(),
-            "11-d-0704_Page10.pdf".to_string(),
-            "11-d-0704.pdf".to_string(),
-            "11-d-0704_Page20.tif".to_string(),
+            "ab-c-0704 revision notes.pdf".to_string(),
+            "ab-c-0704_Page10.pdf".to_string(),
+            "ab-c-0704.pdf".to_string(),
+            "ab-c-0704_Page20.tif".to_string(),
         ];
-        names.extend((1..=9).map(|i| format!("11-d-0704_Page{i}.pdf")));
-        names.extend((11..=18).map(|i| format!("11-d-0704_Page{i}.pdf")));
+        names.extend((1..=9).map(|i| format!("ab-c-0704_Page{i}.pdf")));
+        names.extend((11..=18).map(|i| format!("ab-c-0704_Page{i}.pdf")));
         for name in &names {
             std::fs::write(dir.path().join(name), minimal_pdf()).unwrap();
         }
@@ -524,12 +524,12 @@ mod tests {
             read_only: true,
         };
         let picked = request(
-            &dir.path().join("11-d-0704.pdf").to_string_lossy(),
-            "11-d-0704",
+            &dir.path().join("ab-c-0704.pdf").to_string_lossy(),
+            "ab-c-0704",
             ViewerKind::Pdf,
         );
 
-        let group = collect_group(&picked, &cx).expect("the code has a document");
+        let group = collect_group(&picked, &cx).expect("the search input has a document");
         assert_eq!(group.len(), 19, "the bare file plus pages 1..18");
 
         let order: Vec<Option<u32>> = group.pages.iter().map(|p| p.page).collect();
@@ -543,16 +543,16 @@ mod tests {
         assert!(std::path::Path::new(doc.path.as_ref()).is_file());
     }
 
-    /// A document is rebuilt from the code, not from the rows on screen, so it
+    /// A document is rebuilt from the search input, not from the rows on screen, so it
     /// can exceed `MAX_RESULTS`. No files are needed: `collect_group` reads
     /// only the snapshot.
     #[test]
     fn a_document_larger_than_the_result_cap_is_still_assembled_whole() {
         let pages = crate::config::MAX_RESULTS + 100;
-        let mut names = vec!["11-d-0704.pdf".to_string()];
-        names.extend((1..=pages).map(|i| format!("11-d-0704_Page{i}.pdf")));
+        let mut names = vec!["ab-c-0704.pdf".to_string()];
+        names.extend((1..=pages).map(|i| format!("ab-c-0704_Page{i}.pdf")));
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let snap = snapshot("R:\\11d", &refs);
+        let snap = snapshot("R:\\abc", &refs);
 
         let cx = OpenContext {
             snapshot: Some(&snap),
@@ -560,9 +560,9 @@ mod tests {
             pdf_viewer: None,
             read_only: true,
         };
-        let picked = request("R:\\11d\\11-d-0704.pdf", "11-d-0704", ViewerKind::Pdf);
+        let picked = request("R:\\abc\\ab-c-0704.pdf", "ab-c-0704", ViewerKind::Pdf);
 
-        let group = collect_group(&picked, &cx).expect("the code has a document");
+        let group = collect_group(&picked, &cx).expect("the search input has a document");
         assert_eq!(group.len(), pages + 1, "the bare file plus every page");
         assert!(
             group.len() > crate::config::MAX_RESULTS,
@@ -604,36 +604,36 @@ mod tests {
     #[test]
     fn route_of_sends_each_kind_of_file_to_the_right_place() {
         use ViewerKind::{App, Auto, Pdf};
-        let viewers = avwin();
-        let avwin = App(0);
+        let viewers = sketch();
+        let sketch = App(0);
 
         for (viewer, path, want) in [
             // Auto: every file goes to the system.
-            (Auto, r"R:\11d\11-D-0704.pdf", Route::Shell),
-            (Auto, r"R:\11d\11-D-0704.DWG", Route::Shell),
-            (Auto, r"R:\11d\notes.docx", Route::Shell),
-            (Auto, r"R:\11d\scan.tif", Route::Shell),
-            (Auto, r"R:\11d\README", Route::Shell),
-            // Pdf: documents are assembled; drawings go to the claiming viewer.
-            (Pdf, r"R:\11d\11-D-0704.pdf", Route::Document),
-            (Pdf, r"R:\11d\11-D-0704.dwg", Route::App(0)),
-            (Pdf, r"R:\11d\notes.docx", Route::Document),
+            (Auto, r"R:\abc\AB-C-0704.pdf", Route::Shell),
+            (Auto, r"R:\abc\AB-C-0704.TIF", Route::Shell),
+            (Auto, r"R:\abc\notes.docx", Route::Shell),
+            (Auto, r"R:\abc\scan.tif", Route::Shell),
+            (Auto, r"R:\abc\README", Route::Shell),
+            // Pdf: documents are assembled; a claimed type goes to its viewer.
+            (Pdf, r"R:\abc\AB-C-0704.pdf", Route::Document),
+            (Pdf, r"R:\abc\AB-C-0704.tif", Route::App(0)),
+            (Pdf, r"R:\abc\notes.docx", Route::Document),
             // App: every file goes to the viewer.
-            (avwin, r"R:\11d\11-D-0704.pdf", Route::App(0)),
-            (avwin, r"R:\11d\11-D-0704.dwg", Route::App(0)),
-            (avwin, r"R:\11d\notes.docx", Route::App(0)),
+            (sketch, r"R:\abc\AB-C-0704.pdf", Route::App(0)),
+            (sketch, r"R:\abc\AB-C-0704.tif", Route::App(0)),
+            (sketch, r"R:\abc\notes.docx", Route::App(0)),
         ] {
             assert_eq!(route_of(viewer, path, &viewers), want, "{viewer:?} {path}");
         }
     }
 
-    /// With no viewer claiming drawings, PDF mode sends one down the document
+    /// With no viewer claiming its type, PDF mode sends a file down the document
     /// route.
     #[test]
-    fn with_no_viewers_a_drawing_takes_the_document_route() {
+    fn with_no_viewers_an_unclaimed_file_takes_the_document_route() {
         let none = Viewers::default();
         assert_eq!(
-            route_of(ViewerKind::Pdf, r"R:\11d\11-D-0704.dwg", &none),
+            route_of(ViewerKind::Pdf, r"R:\abc\AB-C-0704.tif", &none),
             Route::Document
         );
     }
@@ -643,11 +643,11 @@ mod tests {
     fn a_viewer_that_is_gone_goes_to_the_shell() {
         let none = Viewers::default();
         assert_eq!(
-            route_of(ViewerKind::App(2), r"R:\11d\a.pdf", &none),
+            route_of(ViewerKind::App(2), r"R:\abc\a.pdf", &none),
             Route::Shell
         );
         assert_eq!(
-            route_of(ViewerKind::App(1), r"R:\11d\a.pdf", &avwin()),
+            route_of(ViewerKind::App(1), r"R:\abc\a.pdf", &sketch()),
             Route::Shell
         );
     }
@@ -656,9 +656,9 @@ mod tests {
     /// mode that reads the extension.
     #[test]
     fn the_extension_is_matched_however_it_is_spelled() {
-        for spelling in ["dwg", "DWG", "Dwg", "dWg"] {
-            let path = format!(r"R:\11d\11-D-0704.{spelling}");
-            assert_eq!(route_of(ViewerKind::Pdf, &path, &avwin()), Route::App(0));
+        for spelling in ["tif", "TIF", "Tif", "tIf"] {
+            let path = format!(r"R:\abc\AB-C-0704.{spelling}");
+            assert_eq!(route_of(ViewerKind::Pdf, &path, &sketch()), Route::App(0));
         }
     }
 }

@@ -5,6 +5,9 @@
 //! the machine's proxy configuration, including auto-detection and PAC.
 //! Access goes through [`Fetch`] so callers can be tested without a network.
 
+// Win32 FFI: WinHTTP.
+#![allow(unsafe_code)]
+
 use std::fmt;
 use std::path::Path;
 
@@ -167,9 +170,11 @@ mod imp {
         // Handles drop in reverse order (request, connection, session), as
         // WinHTTP requires.
         //
-        // SAFETY for every call below: each string is NUL-terminated and
-        // outlives the call; each handle is one opened just above and still
-        // open; out parameters are live locals sized as the call is told.
+        // Every call below relies on the same three facts, which each SAFETY
+        // comment names: strings are NUL-terminated and outlive the call;
+        // handles are ones opened just above and still open; out parameters
+        // are live locals sized as the call is told.
+        // SAFETY: `agent` is NUL-terminated and outlives the call.
         let session = opened(unsafe {
             WinHttpOpen(
                 agent.as_ptr(),
@@ -180,12 +185,15 @@ mod imp {
             )
         })?;
         let (resolve, connect, send, receive) = TIMEOUTS;
+        // SAFETY: `session` is open.
         check(unsafe { WinHttpSetTimeouts(session.0, resolve, connect, send, receive) })?;
+        // SAFETY: `session` is open and `host` is NUL-terminated.
         let connection = opened(unsafe {
             WinHttpConnect(session.0, host.as_ptr(), INTERNET_DEFAULT_HTTPS_PORT, 0)
         })?;
         // HTTPS-to-HTTPS redirects are followed by default; release assets
         // redirect to a storage host.
+        // SAFETY: `connection` is open; `verb` and `path` are NUL-terminated.
         let request = opened(unsafe {
             WinHttpOpenRequest(
                 connection.0,
@@ -197,11 +205,14 @@ mod imp {
                 WINHTTP_FLAG_SECURE,
             )
         })?;
+        // SAFETY: `request` is open; no headers or body are passed.
         check(unsafe { WinHttpSendRequest(request.0, ptr::null(), 0, ptr::null(), 0, 0, 0) })?;
+        // SAFETY: `request` is open and has been sent.
         check(unsafe { WinHttpReceiveResponse(request.0, ptr::null_mut()) })?;
 
         let mut status: u32 = 0;
         let mut size = size_of::<u32>() as u32;
+        // SAFETY: `request` is open; `status` is a live u32 and `size` says so.
         check(unsafe {
             WinHttpQueryHeaders(
                 request.0,
@@ -220,12 +231,15 @@ mod imp {
         let mut buffer = vec![0u8; 64 * 1024];
         loop {
             let mut available: u32 = 0;
+            // SAFETY: `request` is open; `available` is a live local.
             check(unsafe { WinHttpQueryDataAvailable(request.0, &mut available) })?;
             if available == 0 {
                 return Ok(());
             }
             let want = (available as usize).min(buffer.len());
             let mut read: u32 = 0;
+            // SAFETY: `request` is open; `buffer` is writable for `want` bytes,
+            // which never exceeds its length; `read` is a live local.
             check(unsafe {
                 WinHttpReadData(
                     request.0,

@@ -7,13 +7,13 @@
 //!
 //! Mapping paths and names are kept. `[[mapping.rules]]`, `case` and `stop`
 //! are removed, along with their comments, since every share is now indexed.
-//! `kind = "job-folder"` becomes `kind = "tree"`; see [`crate::paths`].
+//! The legacy folder kind becomes `kind = "tree"`; see [`crate::paths`].
 //!
 //! # Version 2 to 3
 //!
-//! `avwin` is no longer a built-in viewer. A file with `viewer = "avwin"` is
-//! given an equivalent `[[viewer]]` table so the setting still resolves; other
-//! files gain no viewer.
+//! Version 2 had one built-in viewer program; version 3 has none. A file that
+//! chose it is given an equivalent `[[viewer]]` table so the setting still
+//! resolves; other files gain no viewer.
 //!
 //! Edits use `toml_edit`, as in [`super::write`], so the user's remaining
 //! comments and formatting are preserved.
@@ -70,14 +70,18 @@ pub fn to_current(text: &str) -> Result<String, Problem> {
     Ok(doc.to_string())
 }
 
-/// Removes routing rules and converts job-folder mappings to trees.
+/// The mapping kind version 1 used for a tree of per-project folders.
+// Legacy value read from version 1 files.
+const LEGACY_FOLDER_KIND: &str = "job-folder";
+
+/// Removes routing rules and converts legacy folder mappings to trees.
 fn v1_to_v2(doc: &mut DocumentMut) {
     if let Some(mappings) = doc
         .get_mut("mapping")
         .and_then(Item::as_array_of_tables_mut)
     {
         for mapping in mappings.iter_mut() {
-            if mapping.get("kind").and_then(Item::as_str) == Some("job-folder") {
+            if mapping.get("kind").and_then(Item::as_str) == Some(LEGACY_FOLDER_KIND) {
                 mapping["kind"] = value("tree");
             }
             // `rules` is an array of tables; removed explicitly for clarity.
@@ -101,31 +105,40 @@ fn v1_to_v2(doc: &mut DocumentMut) {
     }
 }
 
-/// The spellings version 2 accepted for its built-in avwin.
-const AVWIN_SPELLINGS: &[&str] = &["avwin", "av", "avwin.exe"];
+// Legacy values read from, and written back for, version 2 files that chose
+// the built-in viewer.
+/// The name version 2 gave its built-in viewer.
+const LEGACY_VIEWER_NAME: &str = "avwin";
+/// The program version 2 ran for it, looked up on `PATH`.
+const LEGACY_VIEWER_PROGRAM: &str = "avwin.exe";
+/// The file type version 2 sent to it from PDF mode.
+const LEGACY_VIEWER_EXTENSION: &str = "dwg";
+/// The spellings version 2 accepted for its built-in viewer.
+const LEGACY_VIEWER_SPELLINGS: &[&str] = &["avwin", "av", "avwin.exe"];
 
-/// Gives a file that chose avwin an equivalent `[[viewer]]` table.
+/// Gives a file that chose the built-in viewer an equivalent `[[viewer]]`
+/// table.
 ///
-/// The table matches version 2 behaviour: `avwin.exe` on `PATH`, claiming
-/// `dwg` from PDF mode.
+/// The table matches version 2 behaviour: the same program on `PATH`,
+/// claiming the same file type from PDF mode.
 fn v2_to_v3(doc: &mut DocumentMut) {
-    let chose_avwin = doc
+    let chose_legacy_viewer = doc
         .get("settings")
         .and_then(|s| s.get("viewer"))
         .and_then(Item::as_str)
         .is_some_and(|v| {
-            AVWIN_SPELLINGS
+            LEGACY_VIEWER_SPELLINGS
                 .iter()
                 .any(|a| a.eq_ignore_ascii_case(v.trim()))
         });
-    if !chose_avwin {
+    if !chose_legacy_viewer {
         return;
     }
     // Normalise to the table's name. Rewrite only when needed, because
     // replacing the value drops its trailing comment.
     let spelled = doc["settings"]["viewer"].as_str().map(str::trim);
-    if spelled != Some("avwin") {
-        doc["settings"]["viewer"] = value("avwin");
+    if spelled != Some(LEGACY_VIEWER_NAME) {
+        doc["settings"]["viewer"] = value(LEGACY_VIEWER_NAME);
     }
 
     let already = doc
@@ -135,7 +148,7 @@ fn v2_to_v3(doc: &mut DocumentMut) {
             viewers.iter().any(|v| {
                 v.get("name")
                     .and_then(Item::as_str)
-                    .is_some_and(|n| n.trim().eq_ignore_ascii_case("avwin"))
+                    .is_some_and(|n| n.trim().eq_ignore_ascii_case(LEGACY_VIEWER_NAME))
             })
         });
     if already {
@@ -143,14 +156,14 @@ fn v2_to_v3(doc: &mut DocumentMut) {
     }
 
     let mut table = Table::new();
-    table["name"] = value("avwin");
-    table["program"] = value("avwin.exe");
+    table["name"] = value(LEGACY_VIEWER_NAME);
+    table["program"] = value(LEGACY_VIEWER_PROGRAM);
     let mut extensions = Array::new();
-    extensions.push("dwg");
+    extensions.push(LEGACY_VIEWER_EXTENSION);
     table["extensions"] = value(extensions);
-    table
-        .decor_mut()
-        .set_prefix("\n# Added during upgrade: avwin is no longer built in.\n");
+    table.decor_mut().set_prefix(format!(
+        "\n# Added during upgrade: {LEGACY_VIEWER_NAME} is no longer built in.\n"
+    ));
 
     match doc.get_mut("viewer").and_then(Item::as_array_of_tables_mut) {
         Some(viewers) => viewers.push(table),
@@ -183,13 +196,14 @@ mod tests {
     use crate::config::file;
     use std::path::Path;
 
-    /// A version 1 file in the shape of the shipped default.
+    /// A version 1 file in the shape of the shipped default. Its legacy values
+    /// (`kind = "job-folder"`) are what version 1 wrote.
     const V1: &str = r#"
 version = 1
 
 [[mapping]]
-name    = "custompro"
-path    = 'V:\Documents\custpro'
+name    = "shared"
+path    = 'V:\shared\files'
 kind    = "flat"
 enabled = true
 stop    = true
@@ -198,13 +212,13 @@ stop    = true
   pattern = '^PP'
 
 [[mapping]]
-name    = "jobs"
+name    = "projects"
 path    = 'R:\'
 kind    = "job-folder"
 enabled = true
 case    = "lower"
 
-  # Four fields, single-LETTER second field:  11-D-0704-A2 -> 11d
+  # Four fields, single-LETTER second field:  AB-C-0704-A2 -> abc
   [[mapping.rules]]
   pattern = '^([A-Z0-9]+)-([A-Z])-([A-Z0-9]+)-([A-Z0-9]+)$'
   folder  = '${1}${2}'
@@ -240,7 +254,10 @@ case    = "lower"
             .iter()
             .map(|m| m.path.display().to_string())
             .collect();
-        assert!(paths.iter().any(|p| p.contains("custpro")), "{paths:?}");
+        assert!(
+            paths.iter().any(|p| p.contains(r"shared\files")),
+            "{paths:?}"
+        );
         assert!(paths.iter().any(|p| p.starts_with("R:")), "{paths:?}");
     }
 
@@ -248,39 +265,46 @@ case    = "lower"
     fn the_names_survive_too() {
         let parsed = reload(&migrated());
         let names = parsed.routes.names();
-        assert!(names.contains(&"custompro"), "{names:?}");
-        assert!(names.contains(&"jobs"), "{names:?}");
+        assert!(names.contains(&"shared"), "{names:?}");
+        assert!(names.contains(&"projects"), "{names:?}");
     }
 
     #[test]
-    fn a_job_folder_becomes_a_tree() {
+    fn a_legacy_folder_kind_becomes_a_tree() {
         let parsed = reload(&migrated());
-        let jobs = parsed
+        let projects = parsed
             .routes
             .all()
             .iter()
-            .find(|m| m.name.as_ref() == "jobs")
-            .expect("jobs must survive");
-        assert_eq!(jobs.kind, crate::paths::MappingKind::Tree);
+            .find(|m| m.name.as_ref() == "projects")
+            .expect("projects must survive");
+        assert_eq!(projects.kind, crate::paths::MappingKind::Tree);
     }
 
     #[test]
     fn a_flat_mapping_stays_flat() {
         let parsed = reload(&migrated());
-        let custpro = parsed
+        let shared = parsed
             .routes
             .all()
             .iter()
-            .find(|m| m.name.as_ref() == "custompro")
-            .expect("custompro must survive");
-        assert_eq!(custpro.kind, crate::paths::MappingKind::Flat);
+            .find(|m| m.name.as_ref() == "shared")
+            .expect("shared must survive");
+        assert_eq!(shared.kind, crate::paths::MappingKind::Flat);
     }
 
     /// Each of these keys is a startup error in version 2 and later.
     #[test]
     fn nothing_the_rule_engine_needed_is_left_behind() {
         let text = migrated();
-        for gone in ["rules", "pattern", "folder", "case", "stop", "job-folder"] {
+        for gone in [
+            "rules",
+            "pattern",
+            "folder",
+            "case",
+            "stop",
+            LEGACY_FOLDER_KIND,
+        ] {
             assert!(!text.contains(gone), "{gone:?} survived:\n{text}");
         }
     }
@@ -306,20 +330,21 @@ case    = "lower"
     #[test]
     fn a_comment_that_is_not_about_the_rules_survives() {
         let text = V1.replace(
-            "[[mapping]]\nname    = \"jobs\"",
-            "# The drawings, on the old server.\n[[mapping]]\nname    = \"jobs\"",
+            "[[mapping]]\nname    = \"projects\"",
+            "# The archive, on the old server.\n[[mapping]]\nname    = \"projects\"",
         );
         let migrated = to_current(&text).unwrap();
         assert!(
-            migrated.contains("# The drawings, on the old server."),
+            migrated.contains("# The archive, on the old server."),
             "{migrated}"
         );
     }
 
     /// A version 2 file in the shape of the shipped default, with `viewer` set.
+    /// The trailing comment is the one version 2 shipped, legacy name included.
     fn v2(viewer: &str) -> String {
         format!(
-            "version = 2\n\n[[mapping]]\nname = \"jobs\"\npath = 'R:\\'\nkind = \"tree\"\nenabled = true\n\n[settings]\n# Default viewer for Enter.\nviewer = \"{viewer}\"   # auto | pdf | avwin\n"
+            "version = 2\n\n[[mapping]]\nname = \"projects\"\npath = 'R:\\'\nkind = \"tree\"\nenabled = true\n\n[settings]\n# Default viewer for Enter.\nviewer = \"{viewer}\"   # auto | pdf | avwin\n"
         )
     }
 
@@ -338,9 +363,11 @@ case    = "lower"
             .collect()
     }
 
-    /// Any accepted avwin spelling yields the same program claiming `dwg`.
+    /// Any spelling version 2 accepted for its built-in viewer yields the same
+    /// program, claiming the same file type.
     #[test]
-    fn a_version_two_file_that_chose_avwin_keeps_it() {
+    fn a_version_two_file_that_chose_the_legacy_viewer_keeps_it() {
+        // Legacy spellings read from version 2 files.
         for spelling in ["avwin", "AV", "AvWin.exe"] {
             let migrated = to_current(&v2(spelling)).unwrap();
             assert_eq!(
@@ -362,20 +389,21 @@ case    = "lower"
     }
 
     #[test]
-    fn a_version_two_file_that_did_not_choose_avwin_gains_nothing() {
+    fn a_version_two_file_that_did_not_choose_the_legacy_viewer_gains_nothing() {
         for viewer in ["auto", "pdf"] {
             let migrated = to_current(&v2(viewer)).unwrap();
             assert!(viewers_of(&migrated).is_empty(), "{viewer}:\n{migrated}");
             assert!(!migrated.contains("[[viewer]]"), "{migrated}");
         }
         let no_settings =
-            "version = 2\n\n[[mapping]]\nname = \"jobs\"\npath = 'R:\\'\nkind = \"tree\"\n";
+            "version = 2\n\n[[mapping]]\nname = \"projects\"\npath = 'R:\\'\nkind = \"tree\"\n";
         assert!(viewers_of(&to_current(no_settings).unwrap()).is_empty());
     }
 
-    /// A second avwin would be a duplicate name and fail to load.
+    /// A second table for the legacy viewer would be a duplicate name and fail
+    /// to load.
     #[test]
-    fn an_avwin_viewer_that_is_already_there_is_not_added_again() {
+    fn a_legacy_viewer_that_is_already_there_is_not_added_again() {
         let text = format!(
             "{}\n[[viewer]]\nname = \"AVWIN\"\nprogram = 'C:\\tools\\avwin.exe'\n",
             v2("avwin")

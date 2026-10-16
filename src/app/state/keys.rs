@@ -370,7 +370,7 @@ impl AppState {
             return self.move_share(1);
         }
         // Down never starts recall, only steps within it; otherwise Down on an
-        // empty field would toggle a code in and out.
+        // empty field would toggle a recent search in and out.
         if self.history.is_browsing() {
             return self.history_newer();
         }

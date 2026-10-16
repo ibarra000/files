@@ -209,7 +209,7 @@ impl FakeDirSource {
     /// Registers a directory holding `n` generated files.
     pub fn with_synthetic(self, dir: impl Into<PathBuf>, n: usize) -> Self {
         let names = (0..n)
-            .map(|i| FakeEntry::file(format!("job_{i:07}_report.pdf")))
+            .map(|i| FakeEntry::file(format!("item_{i:07}_report.pdf")))
             .collect();
         self.dirs.lock().insert(dir.into(), names);
         self

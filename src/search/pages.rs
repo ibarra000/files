@@ -1,12 +1,12 @@
-//! Finds the files that are the pages of one job code's document.
+//! Finds the files that are the pages of one base name's document.
 //!
 //! Documents on these shares are stored one file per page:
 //!
 //! ```text
-//! 11-D-0704.pdf   11-D-0704_Page1.pdf   ...   11-D-0704Page12.pdf
+//! AB-C-0704.pdf   AB-C-0704_Page1.pdf   ...   AB-C-0704Page12.pdf
 //! ```
 //!
-//! so opening `11-D-0704` means thirteen files. This module finds them and
+//! so opening `AB-C-0704` means thirteen files. This module finds them and
 //! orders them.
 //!
 //! # Not built on `matcher::search`
@@ -17,7 +17,7 @@
 //! # Why an uncapped sweep is affordable
 //!
 //! Membership is equality: a member's name is exactly
-//! `code + marker? + ".pdf"`, so its length is `code.len() + marker.len() + 4`
+//! `base + marker? + ".pdf"`, so its length is `base.len() + marker.len() + 4`
 //! with the marker bounded by [`MAX_MARKER_LEN`]. [`Snapshot::name_len`] is
 //! O(1) and never touches the name arena, so nearly every entry is rejected by
 //! an integer compare. The sweep is serial because it runs once per Enter and
@@ -32,7 +32,7 @@ use crate::util::fold;
 
 /// The extension a page must have.
 ///
-/// A sibling such as `11-D-0704_Page2.tif` is not a member and is skipped
+/// A sibling such as `AB-C-0704_Page2.tif` is not a member and is skipped
 /// without a warning.
 const PAGE_EXT: &str = ".pdf";
 
@@ -58,7 +58,7 @@ pub struct Page {
     pub page: Option<u32>,
 }
 
-/// A code's pages, in merge order.
+/// A base name's pages, in merge order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PageGroup {
     /// Bare file first, then ascending page number.
@@ -86,27 +86,27 @@ impl PageGroup {
     }
 }
 
-/// Returns whether `name` is a page of `code`'s document, and which page.
+/// Returns whether `name` is a page of `base`'s document, and which page.
 ///
 /// `Some(None)` is the bare, unsuffixed file. `None` means not a member.
 ///
 /// Pure and total: `name` is a file name, nothing touches the filesystem, and
 /// no input panics. The whole membership rule lives here.
-pub fn page_of(code: &str, name: &str) -> Option<Option<u32>> {
-    let code = code.trim();
-    if code.is_empty() {
+pub fn page_of(base: &str, name: &str) -> Option<Option<u32>> {
+    let base = base.trim();
+    if base.is_empty() {
         return None;
     }
     let stem = name.strip_suffix_fold(PAGE_EXT)?;
 
-    // Exactly the code: the bare file, which merges first.
-    if eq_fold(stem, code) {
+    // Exactly the base name: the bare file, which merges first.
+    if eq_fold(stem, base) {
         return Some(None);
     }
 
-    // Otherwise the code must be a prefix followed only by a page marker.
-    // `11-D-0704 revision notes` and `11-D-0704-A2` are different documents.
-    let rest = strip_prefix_fold(stem, code)?;
+    // Otherwise the base name must be a prefix followed only by a page marker.
+    // `AB-C-0704 revision notes` and `AB-C-0704-A2` are different documents.
+    let rest = strip_prefix_fold(stem, base)?;
     marker_page(rest).map(Some)
 }
 
@@ -118,9 +118,9 @@ pub fn page_of(code: &str, name: &str) -> Option<Option<u32>> {
 /// _Page1    Page12    _P3    -p4    " page 5"
 /// ```
 ///
-/// The letter is required. A bare trailing number such as `11-D-0704-2` is
-/// usually a different code, and treating it as a page would merge an
-/// unrelated drawing into the document.
+/// The letter is required. A bare trailing number such as `AB-C-0704-2` is
+/// usually a different base name, and treating it as a page would merge an
+/// unrelated file into the document.
 fn marker_page(rest: &str) -> Option<u32> {
     let b = rest.as_bytes();
     let mut i = 0;
@@ -156,17 +156,17 @@ fn marker_page(rest: &str) -> Option<u32> {
     digits.parse::<u32>().ok()
 }
 
-/// Collects `code`'s pages from `snap`, in merge order.
-pub fn collect(snap: &Snapshot, code: &str, cancel: &CancelToken) -> PageGroup {
+/// Collects `base`'s pages from `snap`, in merge order.
+pub fn collect(snap: &Snapshot, base: &str, cancel: &CancelToken) -> PageGroup {
     let mut out = PageGroup::default();
-    let code = code.trim();
-    if code.is_empty() {
+    let base = base.trim();
+    if base.is_empty() {
         return out;
     }
 
     // Folded once and compared against the folded arena, so this agrees with
     // the matcher byte for byte. See `util::fold`.
-    let needle = fold::fold_query(code);
+    let needle = fold::fold_query(base);
     let min_len = needle.len() + PAGE_EXT.len();
     let max_len = min_len + MAX_MARKER_LEN;
 
@@ -191,7 +191,7 @@ pub fn collect(snap: &Snapshot, code: &str, cancel: &CancelToken) -> PageGroup {
         let Ok(name) = std::str::from_utf8(lower) else {
             continue;
         };
-        let Some(page) = page_of(code, name) else {
+        let Some(page) = page_of(base, name) else {
             continue;
         };
 
@@ -240,7 +240,7 @@ fn strip_prefix_fold<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     //
     // `split_at_checked` because `split_at` panics inside a multi-byte
     // character, and share names such as `Rapport-Été.pdf` are common. An
-    // offset off a character boundary means the text is not the code.
+    // offset off a character boundary means the text is not the base name.
     let (head, rest) = s.split_at_checked(prefix.len())?;
     eq_fold(head, prefix).then_some(rest)
 }
@@ -269,7 +269,7 @@ mod tests {
     use std::time::SystemTime;
 
     fn snap(names: &[&str]) -> Snapshot {
-        let mut b = SnapshotBuilder::with_capacity(r"R:\11d", names.len(), 32);
+        let mut b = SnapshotBuilder::with_capacity(r"R:\abc", names.len(), 32);
         for n in names {
             b.push_str(n);
         }
@@ -284,77 +284,77 @@ mod tests {
 
     #[test]
     fn the_bare_file_and_its_pages_form_one_group() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234.pdf"), Some(None));
-        assert_eq!(page_of("11-d-1234", "11-d-1234_Page1.pdf"), Some(Some(1)));
-        assert_eq!(page_of("11-d-1234", "11-d-1234Page12.pdf"), Some(Some(12)));
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234.pdf"), Some(None));
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234_Page1.pdf"), Some(Some(1)));
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234Page12.pdf"), Some(Some(12)));
     }
 
     #[test]
     fn every_page_marker_spelling_is_recognised() {
         for (name, want) in [
-            ("11-d-1234_Page1.pdf", 1u32),
-            ("11-d-1234Page2.pdf", 2),
-            ("11-d-1234_P3.pdf", 3),
-            ("11-d-1234-p4.pdf", 4),
-            ("11-d-1234 page 5.pdf", 5),
-            ("11-d-1234_pg6.pdf", 6),
-            ("11-d-1234_PAGE007.pdf", 7),
+            ("ab-c-1234_Page1.pdf", 1u32),
+            ("ab-c-1234Page2.pdf", 2),
+            ("ab-c-1234_P3.pdf", 3),
+            ("ab-c-1234-p4.pdf", 4),
+            ("ab-c-1234 page 5.pdf", 5),
+            ("ab-c-1234_pg6.pdf", 6),
+            ("ab-c-1234_PAGE007.pdf", 7),
         ] {
             assert_eq!(
-                page_of("11-d-1234", name),
+                page_of("ab-c-1234", name),
                 Some(Some(want)),
                 "{name} should be page {want}"
             );
         }
     }
 
-    /// Membership is equality against the code, so a file that merely starts
-    /// with the code is a different document.
+    /// Membership is equality against the base name, so a file that merely starts
+    /// with the base name is a different document.
     #[test]
     fn a_name_with_extra_text_is_not_a_page() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234 revision notes.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-1234 sketch.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234 revision notes.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234 sketch.pdf"), None);
     }
 
     #[test]
-    fn a_different_code_is_not_a_page() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234-A2.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-12345.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "99-d-1234.pdf"), None);
+    fn a_different_base_name_is_not_a_page() {
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234-A2.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-12345.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "zz-c-1234.pdf"), None);
     }
 
     /// A sibling in another format is not a page and produces no warning.
     #[test]
     fn a_non_pdf_sibling_is_not_a_member() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234_Page2.tif"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-1234.txt"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-1234"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234_Page2.tif"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234.txt"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234"), None);
     }
 
-    /// `11-d-1234-2` is usually a different code, not page two.
+    /// `ab-c-1234-2` is usually a different base name, not page two.
     #[test]
     fn a_trailing_number_without_a_letter_is_not_a_page_marker() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234-2.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-1234_2.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-12342.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234-2.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234_2.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-12342.pdf"), None);
     }
 
     #[test]
-    fn the_code_is_matched_case_insensitively() {
-        assert_eq!(page_of("11-d-1234", "11-D-1234.PDF"), Some(None));
-        assert_eq!(page_of("11-D-1234", "11-d-1234_page3.pdf"), Some(Some(3)));
+    fn the_base_name_is_matched_case_insensitively() {
+        assert_eq!(page_of("ab-c-1234", "AB-C-1234.PDF"), Some(None));
+        assert_eq!(page_of("AB-C-1234", "ab-c-1234_page3.pdf"), Some(Some(3)));
     }
 
-    /// `self.input` is not trimmed, so a pasted code may carry a trailing space.
+    /// `self.input` is not trimmed, so a pasted search may carry a trailing space.
     #[test]
     fn a_query_with_surrounding_whitespace_still_forms_its_group() {
         assert_eq!(
-            page_of("  11-d-1234 ", "11-d-1234_Page1.pdf"),
+            page_of("  ab-c-1234 ", "ab-c-1234_Page1.pdf"),
             Some(Some(1))
         );
         let g = collect(
-            &snap(&["11-d-1234_Page1.pdf"]),
-            " 11-d-1234 ",
+            &snap(&["ab-c-1234_Page1.pdf"]),
+            " ab-c-1234 ",
             &CancelToken::never(),
         );
         assert_eq!(g.len(), 1);
@@ -362,8 +362,8 @@ mod tests {
 
     #[test]
     fn an_absurd_page_number_is_not_a_page_rather_than_a_panic() {
-        assert_eq!(page_of("11-d-1234", "11-d-1234_Page99999999999.pdf"), None);
-        assert_eq!(page_of("11-d-1234", "11-d-1234_Page.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234_Page99999999999.pdf"), None);
+        assert_eq!(page_of("ab-c-1234", "ab-c-1234_Page.pdf"), None);
     }
 
     /// `strip_suffix_fold` must not panic on names whose split offset falls
@@ -371,14 +371,14 @@ mod tests {
     #[test]
     fn a_multi_byte_name_is_not_a_page_rather_than_a_panic() {
         for name in [
-            "11-d-1234 rev\u{2019} 2",
-            "11-d-1234\u{2013}v2",
-            "11-d-1234\u{4e2d}\u{6587}",
+            "ab-c-1234 rev\u{2019} 2",
+            "ab-c-1234\u{2013}v2",
+            "ab-c-1234\u{4e2d}\u{6587}",
             "\u{20ac}ab",
             "abc\u{20ac}abc",
-            "11-d-1234.p\u{e9}f",
+            "ab-c-1234.p\u{e9}f",
         ] {
-            let _ = page_of("11-d-1234", name);
+            let _ = page_of("ab-c-1234", name);
             let _ = page_of("abc", name);
             let _ = page_of("a", name);
         }
@@ -395,8 +395,8 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_code_matches_nothing() {
-        assert_eq!(page_of("", "11-d-1234.pdf"), None);
+    fn an_empty_base_name_matches_nothing() {
+        assert_eq!(page_of("", "ab-c-1234.pdf"), None);
         assert!(collect(&snap(&["a.pdf"]), "   ", &CancelToken::never()).is_empty());
     }
 
@@ -406,19 +406,19 @@ mod tests {
     fn the_unsuffixed_file_merges_first() {
         let g = collect(
             &snap(&[
-                "11-d-1234_Page2.pdf",
-                "11-d-1234.pdf",
-                "11-d-1234_Page1.pdf",
+                "ab-c-1234_Page2.pdf",
+                "ab-c-1234.pdf",
+                "ab-c-1234_Page1.pdf",
             ]),
-            "11-d-1234",
+            "ab-c-1234",
             &CancelToken::never(),
         );
         assert_eq!(
             order(&g),
             [
-                "11-d-1234.pdf",
-                "11-d-1234_Page1.pdf",
-                "11-d-1234_Page2.pdf"
+                "ab-c-1234.pdf",
+                "ab-c-1234_Page1.pdf",
+                "ab-c-1234_Page2.pdf"
             ]
         );
     }
@@ -426,9 +426,9 @@ mod tests {
     /// Sorted as text, `_Page10` would land between `_Page1` and `_Page2`.
     #[test]
     fn pages_merge_in_numeric_order_not_alphabetical() {
-        let names: Vec<String> = (1..=12).map(|i| format!("11-d-1234_Page{i}.pdf")).collect();
+        let names: Vec<String> = (1..=12).map(|i| format!("ab-c-1234_Page{i}.pdf")).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let g = collect(&snap(&refs), "11-d-1234", &CancelToken::never());
+        let g = collect(&snap(&refs), "ab-c-1234", &CancelToken::never());
 
         let pages: Vec<u32> = g.pages.iter().filter_map(|p| p.page).collect();
         assert_eq!(pages, (1..=12).collect::<Vec<_>>());
@@ -438,17 +438,17 @@ mod tests {
     #[test]
     fn duplicate_page_numbers_keep_a_stable_order() {
         let a = collect(
-            &snap(&["11-d-1234_Page01.pdf", "11-d-1234_Page1.pdf"]),
-            "11-d-1234",
+            &snap(&["ab-c-1234_Page01.pdf", "ab-c-1234_Page1.pdf"]),
+            "ab-c-1234",
             &CancelToken::never(),
         );
         let b = collect(
-            &snap(&["11-d-1234_Page1.pdf", "11-d-1234_Page01.pdf"]),
-            "11-d-1234",
+            &snap(&["ab-c-1234_Page1.pdf", "ab-c-1234_Page01.pdf"]),
+            "ab-c-1234",
             &CancelToken::never(),
         );
         assert_eq!(order(&a), order(&b));
-        assert_eq!(order(&a), ["11-d-1234_Page1.pdf", "11-d-1234_Page01.pdf"]);
+        assert_eq!(order(&a), ["ab-c-1234_Page1.pdf", "ab-c-1234_Page01.pdf"]);
     }
 
     // --- the sweep ----------------------------------------------------------
@@ -457,23 +457,23 @@ mod tests {
     fn collecting_keeps_only_the_documents_own_pages() {
         let g = collect(
             &snap(&[
-                "11-d-1234.pdf",
-                "11-d-1234_Page1.pdf",
-                "11-d-1234Page12.pdf",
-                "11-d-1234_Page2.tif",
-                "11-d-1234 revision notes.pdf",
-                "11-d-1234-A2.pdf",
+                "ab-c-1234.pdf",
+                "ab-c-1234_Page1.pdf",
+                "ab-c-1234Page12.pdf",
+                "ab-c-1234_Page2.tif",
+                "ab-c-1234 revision notes.pdf",
+                "ab-c-1234-A2.pdf",
                 "99-x-0001.pdf",
             ]),
-            "11-d-1234",
+            "ab-c-1234",
             &CancelToken::never(),
         );
         assert_eq!(
             order(&g),
             [
-                "11-d-1234.pdf",
-                "11-d-1234_Page1.pdf",
-                "11-d-1234Page12.pdf"
+                "ab-c-1234.pdf",
+                "ab-c-1234_Page1.pdf",
+                "ab-c-1234Page12.pdf"
             ]
         );
         assert!(!g.capped);
@@ -484,16 +484,16 @@ mod tests {
     #[test]
     fn the_length_filter_admits_everything_the_rule_accepts() {
         for name in [
-            "11-d-1234 page 1234.pdf",
-            "11-d-1234_page_1234.pdf",
-            "11-d-1234_Page10000.pdf",
-            "11-d-1234-p-999999.pdf",
+            "ab-c-1234 page 1234.pdf",
+            "ab-c-1234_page_1234.pdf",
+            "ab-c-1234_Page10000.pdf",
+            "ab-c-1234-p-999999.pdf",
         ] {
             assert!(
-                page_of("11-d-1234", name).is_some(),
+                page_of("ab-c-1234", name).is_some(),
                 "{name} should be a page"
             );
-            let g = collect(&snap(&[name]), "11-d-1234", &CancelToken::never());
+            let g = collect(&snap(&[name]), "ab-c-1234", &CancelToken::never());
             assert_eq!(g.len(), 1, "{name} was filtered out before it was parsed");
         }
     }
@@ -501,30 +501,30 @@ mod tests {
     #[test]
     fn the_full_path_of_each_page_is_materialised() {
         let g = collect(
-            &snap(&["11-d-1234.pdf"]),
-            "11-d-1234",
+            &snap(&["ab-c-1234.pdf"]),
+            "ab-c-1234",
             &CancelToken::never(),
         );
-        assert_eq!(&*g.pages[0].path, r"R:\11d\11-d-1234.pdf");
-        assert!(g.contains_path(r"R:\11D\11-D-1234.PDF"), "paths fold too");
-        assert!(!g.contains_path(r"R:\11d\other.pdf"));
+        assert_eq!(&*g.pages[0].path, r"R:\abc\ab-c-1234.pdf");
+        assert!(g.contains_path(r"R:\ABC\AB-C-1234.PDF"), "paths fold too");
+        assert!(!g.contains_path(r"R:\abc\other.pdf"));
     }
 
     /// The length pre-filter actually rejects candidates.
     #[test]
     fn a_broad_query_against_a_large_listing_finds_nothing_to_allocate() {
         let names: Vec<String> = (0..50_000)
-            .map(|i| format!("job_{i:07}_report_{i}.pdf"))
+            .map(|i| format!("item_{i:07}_report_{i}.pdf"))
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let g = collect(&snap(&refs), "job", &CancelToken::never());
+        let g = collect(&snap(&refs), "item", &CancelToken::never());
         assert!(g.is_empty(), "a prefix is not a document");
     }
 
     #[test]
     fn collection_stops_when_the_work_is_superseded() {
         let names: Vec<String> = (0..MATCH_CHUNK_ENTRIES + 16)
-            .map(|i| format!("11-d-1234_Page{i}.pdf"))
+            .map(|i| format!("ab-c-1234_Page{i}.pdf"))
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
 
@@ -532,7 +532,7 @@ mod tests {
         let token = epoch.token(epoch.bump());
         epoch.bump(); // supersede it before the sweep starts
 
-        let g = collect(&snap(&refs), "11-d-1234", &token);
+        let g = collect(&snap(&refs), "ab-c-1234", &token);
         assert!(g.cancelled);
         assert!(g.is_empty());
     }
@@ -540,10 +540,10 @@ mod tests {
     #[test]
     fn a_group_larger_than_the_ceiling_reports_itself_capped() {
         let names: Vec<String> = (1..=MAX_PAGES + 10)
-            .map(|i| format!("11-d-1234_Page{i}.pdf"))
+            .map(|i| format!("ab-c-1234_Page{i}.pdf"))
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let g = collect(&snap(&refs), "11-d-1234", &CancelToken::never());
+        let g = collect(&snap(&refs), "ab-c-1234", &CancelToken::never());
 
         assert!(
             g.capped,
@@ -567,7 +567,7 @@ mod tests {
 
         /// Alphabet of one-, two-, three- and four-byte characters, so split
         /// offsets land inside characters. Kept small, via `prop_oneof!`, so
-        /// generated names collide with generated codes.
+        /// generated names collide with generated base names.
         fn piece() -> impl Strategy<Value = char> {
             prop_oneof![
                 Just('a'),
@@ -592,26 +592,26 @@ mod tests {
             /// `page_of` must not panic on any input.
             #[test]
             fn the_membership_rule_never_panics_on_any_name(
-                code in text(1..12),
+                base in text(1..12),
                 name in text(0..24),
             ) {
-                let _ = page_of(&code, &name);
+                let _ = page_of(&base, &name);
             }
 
             #[test]
             fn the_sweep_never_panics_on_any_listing(
-                code in text(1..12),
+                base in text(1..12),
                 names in proptest::collection::vec(text(0..24), 0..16),
             ) {
                 let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-                let _ = collect(&snap(&refs), &code, &CancelToken::never());
+                let _ = collect(&snap(&refs), &base, &CancelToken::never());
             }
         }
     }
 
     #[test]
     fn an_empty_listing_produces_an_empty_group() {
-        let g = collect(&snap(&[]), "11-d-1234", &CancelToken::never());
+        let g = collect(&snap(&[]), "ab-c-1234", &CancelToken::never());
         assert!(g.is_empty());
         assert!(!g.cancelled);
     }

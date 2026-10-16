@@ -216,14 +216,14 @@ mod tests {
     fn a_burst_of_keystrokes_produces_one_redraw_request() {
         let mut s = state();
         let now = Instant::now();
-        let events: Vec<AppEvent> = "11-D-0704"
+        let events: Vec<AppEvent> = "AB-C-0704"
             .chars()
             .map(|c| AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)))
             .collect();
 
         let response = step(&mut s, events, now);
         assert_eq!(response.redraw, Redraw::Yes, "one merged redraw, not nine");
-        assert_eq!(s.input, "11-D-0704");
+        assert_eq!(s.input, "AB-C-0704");
     }
 
     #[test]
@@ -239,7 +239,7 @@ mod tests {
     fn a_pending_debounce_gives_the_loop_a_deadline() {
         let mut s = state();
         let now = Instant::now();
-        for c in "11-D-0704".chars() {
+        for c in "AB-C-0704".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
         let deadline = s.next_deadline().expect("verification is pending");

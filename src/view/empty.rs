@@ -68,7 +68,7 @@ pub fn view(reason: &EmptyReason, query: &str) -> Option<Block> {
         ]),
 
         EmptyReason::PathNotFound { dir } => Some(vec![
-            Run::body("No folder for that job code \u{b7} "),
+            Run::body("No folder for that search \u{b7} "),
             aside(format!("looked in {}", dir.display())),
         ]),
 
@@ -102,13 +102,13 @@ mod tests {
                 searched: 1_284_551,
             },
             EmptyReason::IndexUnavailable {
-                detail: "V:\\Documents\\custpro unreachable (os error 53)".into(),
+                detail: "V:\\shared\\files unreachable (os error 53)".into(),
             },
             EmptyReason::PathNotFound {
-                dir: PathBuf::from("R:\\11d"),
+                dir: PathBuf::from("R:\\abc"),
             },
             EmptyReason::AccessDenied {
-                dir: PathBuf::from("R:\\11d"),
+                dir: PathBuf::from("R:\\abc"),
             },
             EmptyReason::NotSearchedYet,
         ]
@@ -120,7 +120,7 @@ mod tests {
         // single run may legitimately end in a space.
         let mut lines = Vec::new();
         for reason in every_reason() {
-            for query in ["", "11-D-0704"] {
+            for query in ["", "AB-C-0704"] {
                 if let Some(block) = view(&reason, query) {
                     lines.push(crate::view::plain(&block));
                 }
@@ -140,7 +140,7 @@ mod tests {
             if reason == EmptyReason::NoQuery {
                 continue;
             }
-            let t = text(&reason, "11-D-0704");
+            let t = text(&reason, "AB-C-0704");
             assert!(
                 t.lines().any(|l| l.trim().len() > 8),
                 "{reason:?} says nothing worth reading:\n{t}"
@@ -157,14 +157,14 @@ mod tests {
     }
 
     #[test]
-    fn a_no_match_names_the_code_and_says_nothing_else() {
+    fn a_no_match_names_the_search_and_says_nothing_else() {
         let t = text(
             &EmptyReason::NoMatches {
                 searched: 1_284_551,
             },
-            "11-D-0704",
+            "AB-C-0704",
         );
-        assert!(t.contains("11-D-0704"), "{t}");
+        assert!(t.contains("AB-C-0704"), "{t}");
         assert!(!t.contains("1,284,551"), "{t}");
         assert!(!t.contains('\n'), "more than one line:\n{t}");
     }
@@ -173,9 +173,9 @@ mod tests {
     fn a_failure_keeps_the_diagnostic_that_makes_it_solvable() {
         let t = text(
             &EmptyReason::IndexUnavailable {
-                detail: "V:\\Documents\\custpro unreachable (os error 53)".into(),
+                detail: "V:\\shared\\files unreachable (os error 53)".into(),
             },
-            "11-D-0704",
+            "AB-C-0704",
         );
         assert!(t.contains("unreachable"), "{t}");
         assert!(t.contains("os error 53"), "{t}");
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn every_message_is_one_line() {
         for reason in every_reason() {
-            for query in ["", "11-D-0704"] {
+            for query in ["", "AB-C-0704"] {
                 let Some(block) = view(&reason, query) else {
                     continue;
                 };

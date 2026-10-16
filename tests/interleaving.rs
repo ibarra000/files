@@ -113,7 +113,7 @@ fn apply(s: &mut AppState, step: &Step, clock: &mut Instant) -> Response {
         // Sent as a real message with the current epoch; setting `s.hits`
         // directly could build unreachable states.
         Step::Results(n) => {
-            let hits: Vec<Hit> = (0..*n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect();
+            let hits: Vec<Hit> = (0..*n).map(|i| hit(&format!("abc_{i:04}.pdf"))).collect();
             s.update(
                 AppEvent::Search(SearchMsg {
                     epoch: s.query_epoch(),
@@ -179,7 +179,7 @@ fn holds(s: &AppState, r: &Response, step: &Step) -> Result<(), TestCaseError> {
         prop_assert!(row < s.hits.len(), "rank {} is past the list", row);
     }
 
-    // 5. Browsing recent codes always has a cursor.
+    // 5. Browsing recent searches always has a cursor.
     if s.history.is_browsing() {
         prop_assert!(
             s.history.cursor().is_some(),
@@ -209,12 +209,12 @@ fn fresh_in(columns: usize) -> (AppState, Instant) {
     let settings = Settings {
         columns,
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
-            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            files::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ])),
         ..Settings::fixture()
     };
     let mut s = AppState::new(settings, now);
-    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
+    s.seed_history(vec!["P12345-001".into(), "AB-C-0704".into()]);
     (s, now)
 }
 
@@ -244,7 +244,7 @@ proptest! {
         counts in prop::collection::vec(0usize..320, 1..8),
     ) {
         let (mut s, now) = fresh();
-        for c in "11-D-0704".chars() {
+        for c in "AB-C-0704".chars() {
             s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::NONE)), now);
         }
 
@@ -252,7 +252,7 @@ proptest! {
         for rank in ranks {
             // Resize the list between the frame a click aimed at and its arrival.
             let count = counts.next().unwrap_or(0);
-            let hits: Vec<Hit> = (0..count).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect();
+            let hits: Vec<Hit> = (0..count).map(|i| hit(&format!("abc_{i:04}.pdf"))).collect();
             s.update(
                 AppEvent::Search(SearchMsg {
                     epoch: s.query_epoch(),

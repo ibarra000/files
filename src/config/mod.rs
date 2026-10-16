@@ -23,16 +23,18 @@ pub use viewers::{ViewerApp, Viewers};
 
 // --- Roots -----------------------------------------------------------------
 
-/// Per-job folders. Each job code resolves to one small subdirectory.
-pub const BASE_PATH: &str = "R:\\";
+/// The tree share in the test and demo fixtures: a whole volume.
+#[doc(hidden)]
+pub const TREE_FIXTURE_PATH: &str = "R:\\";
 
-/// CustomPro: a flat directory holding every job's files directly.
+/// The flat share in the test and demo fixtures: one large directory.
 ///
 /// This is a subdirectory, not a drive root. Win32 calls that accept only a
 /// volume root must derive one with [`crate::util::winpath::volume_root_of`];
 /// otherwise the volume serial is lost and the persisted index's identity
 /// check is silently disabled.
-pub const CUSTPRO_PATH: &str = r"V:\Documents\custpro";
+#[doc(hidden)]
+pub const FLAT_FIXTURE_PATH: &str = r"V:\shared\files";
 
 // --- Query -----------------------------------------------------------------
 
@@ -48,10 +50,10 @@ pub const MIN_TERM_LEN: usize = 1;
 /// listing and saves nothing. Below this only the local index answers.
 pub const MIN_SERVER_QUERY_LEN: usize = 3;
 
-/// The shortest code written to the history file.
+/// The shortest search written to the history file.
 ///
-/// Keeps one- and two-character prefixes typed on the way to a real code out
-/// of the recent-codes list.
+/// Keeps one- and two-character prefixes typed on the way to a real search
+/// out of the recent-searches list.
 pub const MIN_REMEMBERED_LEN: usize = 3;
 
 /// Results retained and reachable by scrolling.
@@ -125,8 +127,8 @@ pub const LIVE_DEADLINE: Duration = Duration::from_millis(1_200);
 ///
 /// Set by file-server cost, independently of [`SEARCH_DEBOUNCE`]: a leading
 /// `*` defeats the NTFS index, so each query costs the server real CPU. 600 ms
-/// clears the 200-300 ms pauses between the groups of a code such as
-/// `11-D-0704`, so typing it costs one query rather than several.
+/// clears the 200-300 ms pauses between the groups of a search such as
+/// `AB-C-0704`, so typing it costs one query rather than several.
 pub const LIVE_DEBOUNCE: Duration = Duration::from_millis(600);
 
 /// Floor between two queries of the same share, whatever asks for them.
@@ -156,17 +158,17 @@ pub const SERVER_FILTER_MISS_LIMIT: u32 = 3;
 
 // --- Timing ----------------------------------------------------------------
 
-/// How long an `R:\<job>\` listing stays valid. These folders are small and a
+/// How long a cached folder listing stays valid. These folders are small and a
 /// re-scan is one round trip.
-pub const JOB_CACHE_TTL: Duration = Duration::from_secs(20);
+pub const FOLDER_CACHE_TTL: Duration = Duration::from_secs(20);
 
-/// Bounded number of `R:\` job listings kept resident.
-pub const JOB_CACHE_CAPACITY: usize = 64;
+/// Bounded number of folder listings kept resident.
+pub const FOLDER_CACHE_CAPACITY: usize = 64;
 
 /// Quiet period after the last keystroke before the local match runs.
 ///
 /// The match is sub-millisecond and local; the delay only avoids showing a
-/// list for every prefix of a code being typed. The network is paced
+/// list for every prefix of a search being typed. The network is paced
 /// separately by [`VERIFY_DEBOUNCE`] and [`LIVE_DEBOUNCE`].
 ///
 /// `AppState::on_tick` still runs the matcher before verification, because
@@ -184,12 +186,12 @@ const _: () = assert!(SEARCH_DEBOUNCE.as_millis() <= VERIFY_DEBOUNCE.as_millis()
 /// server CPU and must not fire per keystroke.
 pub const VERIFY_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Quiet period after the last keystroke before the code on the line reaches
-/// the recall list.
+/// Quiet period after the last keystroke before the search on the line
+/// reaches the recall list.
 ///
 /// Independent of [`VERIFY_DEBOUNCE`]: this is set by how long a person pauses
-/// mid-code, so partial codes such as `11-D` are not recorded on the way to
-/// `11-D-0704`. `History::record` collapses any prefix chain that gets through.
+/// mid-search, so partial searches such as `AB-C` are not recorded on the way to
+/// `AB-C-0704`. `History::record` collapses any prefix chain that gets through.
 pub const REMEMBER_DEBOUNCE: Duration = Duration::from_millis(1_500);
 
 /// How close together two clicks must be to count as a double-click.
@@ -236,7 +238,7 @@ pub const PATCH_SPACING: Duration = Duration::from_secs(5);
 /// How long a burst of change notifications accumulates before it is acted on.
 ///
 /// Measured from the first pending event, not the last; see
-/// [`crate::index::watch`]. Long enough that copying in a job folder arrives
+/// [`crate::index::watch`]. Long enough that copying in a project folder arrives
 /// as one update.
 pub const WATCH_DEBOUNCE: Duration = Duration::from_secs(2);
 
@@ -298,7 +300,7 @@ pub const FLOOR_SPREAD_PERCENT: u32 = 25;
 
 /// Shortest gap between two writes of the index to disk.
 ///
-/// The cache is written whole (around 100 MB for the job share), so watcher
+/// The cache is written whole (around 100 MB for a large tree share), so watcher
 /// patches are persisted at most this often. A crash loses at most this
 /// interval of folder updates.
 pub const PERSIST_SPACING: Duration = Duration::from_secs(5 * 60);
@@ -342,7 +344,7 @@ pub const DEFAULT_MAX_CONCURRENT_SCANS: usize = 2;
 /// Per-directory buffer during a tree walk.
 ///
 /// An eighth of [`DIR_BUFFER_BYTES`]: still one round trip for nearly every
-/// job-tree directory, at far fewer SMB2 credits, so eight walkers can run at
+/// directory in a tree share, at far fewer SMB2 credits, so eight walkers can run at
 /// once.
 pub const WALK_DIR_BUFFER_BYTES: usize = 128 << 10;
 
@@ -423,7 +425,7 @@ impl MatcherKind {
 /// Which application a chosen result is handed to.
 ///
 /// [`Self::App`] opens the single selected file. [`Self::Pdf`] gathers every
-/// page of the code and opens one assembled PDF. [`Self::Auto`] hands the file
+/// page of the base name and opens one assembled PDF. [`Self::Auto`] hands the file
 /// to Windows. See [`crate::open::route_of`] for how a mode and file name
 /// become a destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -431,7 +433,7 @@ pub enum ViewerKind {
     /// Whatever Windows has registered for the file.
     #[default]
     Auto,
-    /// Every page of the code, merged into one PDF and opened with the
+    /// Every page of the base name, merged into one PDF and opened with the
     /// system's `.pdf` handler. A file a configured viewer claims goes to that
     /// viewer instead.
     Pdf,
@@ -446,7 +448,7 @@ pub enum ViewerKind {
 /// How much of itself a result row shows.
 ///
 /// [`Self::Detailed`] adds the folder under the name, which distinguishes
-/// same-named files in different job folders, at the cost of fewer rows per
+/// same-named files in different project folders, at the cost of fewer rows per
 /// screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResultLayout {
@@ -666,18 +668,18 @@ pub fn default_routes() -> Routes {
     file::builtin().routes
 }
 
-/// Two enabled drives for tests to search: the flat `custompro` at
-/// [`CUSTPRO_PATH`] and the tree `jobs` at `R:\`.
+/// Two enabled drives for tests to search: the flat `shared` at
+/// [`FLAT_FIXTURE_PATH`] and the tree `projects` at `R:\`.
 const FIXTURE_MAPPINGS: &str = r#"
 [[mapping]]
-name    = "custompro"
-path    = 'V:\Documents\custpro'
+name    = "shared"
+path    = 'V:\shared\files'
 kind    = "flat"
 enabled = true
 refresh = "auto"
 
 [[mapping]]
-name    = "jobs"
+name    = "projects"
 path    = 'R:\'
 kind    = "tree"
 enabled = true
@@ -771,7 +773,7 @@ impl Pin {
 pub struct Settings {
     /// The routing table. Immutable once loaded, shared by every thread.
     pub routes: Arc<Routes>,
-    /// The short names configured for codes typed often.
+    /// The short names configured for searches typed often.
     ///
     /// Shared because `Settings` is cloned into every worker.
     pub aliases: Arc<crate::alias::Aliases>,
@@ -794,7 +796,7 @@ pub struct Settings {
     pub stale_notices: bool,
     /// Whether a message may carry the technical detail behind it.
     ///
-    /// Off by default, so a failure reads as "jobs cannot be reached" rather
+    /// Off by default, so a failure reads as "projects cannot be reached" rather
     /// than an OS error. `--doctor` output is never gated by this.
     pub dev_mode: bool,
     /// Whether clicking on something else puts the panel away.
@@ -808,7 +810,7 @@ pub struct Settings {
     pub hide_after_opening: bool,
     /// Whether Escape puts the panel away rather than clearing the box.
     ///
-    /// When off, Escape clears the code and only the hotkey hides the panel.
+    /// When off, Escape clears the search and only the hotkey hides the panel.
     pub hide_on_escape: bool,
     /// Whether an assembled document is handed to the viewer read-only.
     ///
@@ -833,7 +835,7 @@ pub struct Settings {
     /// Off by default. Diagnoses unexpected index reloads on the affected
     /// machine; see [`crate::index::log`].
     pub index_log: Option<PathBuf>,
-    /// Remember codes between runs, for recall with the Up arrow.
+    /// Remember searches between runs, for recall with the Up arrow.
     pub history: bool,
     /// Where history is stored. `None` disables storage but keeps in-session
     /// recall.
@@ -1232,18 +1234,7 @@ impl Settings {
     }
 
     /// As [`Settings::from_env`], but over a supplied routing table.
-    ///
-    /// Path overrides repoint a mapping in the table. Paths are normalised: a
-    /// volume root keeps its trailing separator and anything deeper loses it,
-    /// so `CreateFileW` never sees a non-root path with a trailing separator.
-    pub fn from_env_with(mut routes: Routes) -> Self {
-        if let Some(v) = env_str("FILES_BASE_PATH") {
-            routes.set_path("jobs", PathBuf::from(v));
-        }
-        if let Some(v) = env_str("FILES_CUSTPRO_PATH") {
-            routes.set_path("custompro", PathBuf::from(v));
-        }
-
+    pub fn from_env_with(routes: Routes) -> Self {
         let mut s = Self::with_routes(Arc::new(routes), |s| s);
         if let Some(v) = env_str("FILES_FS_STRATEGY").and_then(|v| EnumStrategy::parse(&v)) {
             s.enum_strategy = v;
@@ -1394,7 +1385,9 @@ pub fn default_cache_dir() -> Option<PathBuf> {
     }
 }
 
+// Tests only: std::env::set_var, unsafe since edition 2024.
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -1508,7 +1501,7 @@ mod tests {
         let s = Settings::default();
         assert!(s.hidden.hides("Thumbs.db"));
         assert!(s.hidden.hides("shortcut.lnk"));
-        assert!(!s.hidden.hides("11-D-0704.pdf"));
+        assert!(!s.hidden.hides("AB-C-0704.pdf"));
         assert!(s.hidden.hides_system());
     }
 
@@ -1571,7 +1564,7 @@ mod tests {
 
     fn two_viewers() -> Viewers {
         Viewers::new(vec![
-            ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            ViewerApp::new("sketch", "sketch.exe", &["tif"]),
             ViewerApp::new("Notes", "notepad.exe", &[]),
         ])
     }
@@ -1588,10 +1581,10 @@ mod tests {
         assert_eq!(ViewerKind::parse("pdf", &none), Some(ViewerKind::Pdf));
         assert_eq!(ViewerKind::parse("  MERGE ", &none), Some(ViewerKind::Pdf));
         // No built-in modes beyond those two.
-        assert_eq!(ViewerKind::parse("avwin", &none), None);
+        assert_eq!(ViewerKind::parse("sketch", &none), None);
 
         let two = two_viewers();
-        assert_eq!(ViewerKind::parse("AVWIN", &two), Some(ViewerKind::App(0)));
+        assert_eq!(ViewerKind::parse("SKETCH", &two), Some(ViewerKind::App(0)));
         assert_eq!(ViewerKind::parse("notes", &two), Some(ViewerKind::App(1)));
         assert_eq!(ViewerKind::parse("notepad", &two), None);
     }
@@ -1648,7 +1641,7 @@ mod tests {
         for name in ["auto", "PDF", " merge ", "by-extension", "merged"] {
             assert!(ViewerKind::is_reserved(name), "{name}");
         }
-        assert!(!ViewerKind::is_reserved("avwin"));
+        assert!(!ViewerKind::is_reserved("sketch"));
     }
 
     #[test]

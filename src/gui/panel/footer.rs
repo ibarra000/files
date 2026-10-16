@@ -232,7 +232,7 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
 
     // Status text, ellipsised so it never runs under the default-action button.
     let stop = (right - GAP).max(left + STATUS_RESERVE.min(right - left).max(0.0));
-    let mut job = LayoutJob::single_section(
+    let mut layout = LayoutJob::single_section(
         line.text.clone(),
         TextFormat {
             font_id: font,
@@ -240,11 +240,11 @@ fn status(ui: &mut Ui, state: &AppState, theme: &Theme, band: Rect, right: f32, 
             ..Default::default()
         },
     );
-    job.wrap.max_width = (stop - left).max(0.0);
-    job.wrap.max_rows = 1;
-    job.wrap.break_anywhere = true;
-    job.wrap.overflow_character = Some('\u{2026}');
-    let galley = painter.layout_job(job);
+    layout.wrap.max_width = (stop - left).max(0.0);
+    layout.wrap.max_rows = 1;
+    layout.wrap.break_anywhere = true;
+    layout.wrap.overflow_character = Some('\u{2026}');
+    let galley = painter.layout_job(layout);
     painter.galley(
         pos2(left, band.center().y - galley.rect.height() / 2.0),
         galley,

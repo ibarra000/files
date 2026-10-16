@@ -1,4 +1,4 @@
-//! Tests the overlay's summon and dismiss behaviour and which codes reach the
+//! Tests the overlay's summon and dismiss behaviour and which searches reach the
 //! recall list.
 //!
 //! The state machine is a pure function of (event, time), so nothing here
@@ -17,13 +17,13 @@ use files::search::matcher::{Hit, SearchOutcome};
 use files::search::query::Query;
 use files::search::verify::{SkipReason, VerifyOutcome};
 
-const CODE: &str = "11-D-0704";
+const TERM: &str = "AB-C-0704";
 
-/// The default settings plus one configured viewer, `avwin`.
-fn with_avwin() -> Settings {
+/// The default settings plus one configured viewer, `sketch`.
+fn with_sketch() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
-            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            files::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ])),
         ..Settings::fixture()
     }
@@ -31,7 +31,7 @@ fn with_avwin() -> Settings {
 
 fn state() -> (AppState, Instant) {
     let now = Instant::now();
-    let s = AppState::new(with_avwin(), now);
+    let s = AppState::new(with_sketch(), now);
     (s, now)
 }
 
@@ -91,17 +91,17 @@ fn deliver_hits(s: &mut AppState, hits: Vec<Hit>, now: Instant) {
     );
 }
 
-/// Types a code and ticks past both `VERIFY_DEBOUNCE` and `REMEMBER_DEBOUNCE`.
+/// Types a search and ticks past both `VERIFY_DEBOUNCE` and `REMEMBER_DEBOUNCE`.
 ///
 /// No `VerifyMsg` is delivered, so callers show the history commit does not
 /// depend on the server. Returns the settle time and the response of the
 /// final tick, which carries the history write.
-fn settle(s: &mut AppState, code: &str, now: Instant) -> (Instant, Response) {
-    type_in(s, code, now);
+fn settle(s: &mut AppState, term: &str, now: Instant) -> (Instant, Response) {
+    type_in(s, term, now);
     quiet(s, now)
 }
 
-/// Ticks past both debounces for a code already typed.
+/// Ticks past both debounces for a search already typed.
 fn quiet(s: &mut AppState, typed_at: Instant) -> (Instant, Response) {
     s.update(AppEvent::Tick, typed_at + VERIFY_DEBOUNCE);
     let later = typed_at + REMEMBER_DEBOUNCE;
@@ -141,21 +141,21 @@ fn the_hotkey_shrinks_the_program_to_the_overlay() {
     assert!(s.overlay_up);
 }
 
-/// Keeps the code and its results; selecting it lets the next keystroke
+/// Keeps the search and its results; selecting it lets the next keystroke
 /// replace it.
 #[test]
-fn the_hotkey_keeps_the_code_already_typed_and_selects_it() {
+fn the_hotkey_keeps_the_search_already_typed_and_selects_it() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     summon(&mut s, now);
-    assert_eq!(s.input.text(), CODE);
-    assert!(s.input.has_selection(), "the code should be selected");
+    assert_eq!(s.input.text(), TERM);
+    assert!(s.input.has_selection(), "the search should be selected");
 }
 
 #[test]
-fn the_first_keystroke_in_the_overlay_replaces_the_code_that_was_there() {
+fn the_first_keystroke_in_the_overlay_replaces_the_search_that_was_there() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     summon(&mut s, now);
     type_in(&mut s, "P", now);
     assert_eq!(s.input.text(), "P");
@@ -166,7 +166,7 @@ fn the_first_keystroke_in_the_overlay_replaces_the_code_that_was_there() {
 #[test]
 fn summoning_the_overlay_does_not_re_arm_the_server_check() {
     let (mut s, now) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
+    let (settled, _) = settle(&mut s, TERM, now);
     let epoch = s.query_epoch();
     assert!(
         s.verify_due_at().is_none(),
@@ -211,27 +211,27 @@ fn a_second_hotkey_press_asks_for_the_window_back() {
     assert!(!s.overlay_up);
 }
 
-/// Escape closes in one press and keeps the code.
+/// Escape closes in one press and keeps the search.
 ///
 /// Clearing first would run `on_input_changed`, dropping the debounce and
-/// resetting the phase before the code could be committed.
+/// resetting the phase before the search could be committed.
 #[test]
-fn escape_in_the_overlay_closes_it_in_one_press_and_keeps_the_code() {
+fn escape_in_the_overlay_closes_it_in_one_press_and_keeps_the_search() {
     let (mut s, now) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
+    let (settled, _) = settle(&mut s, TERM, now);
     summon(&mut s, settled);
 
     let r = s.update(press(Key::Esc), settled);
 
     assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
-    assert_eq!(s.input.text(), CODE, "the line was cleared");
+    assert_eq!(s.input.text(), TERM, "the line was cleared");
 }
 
 /// The selection made by summoning does not absorb the first Escape.
 #[test]
 fn escape_in_the_overlay_closes_even_with_a_selection_on_the_line() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     summon(&mut s, now);
     assert!(s.input.has_selection(), "precondition: summoning selects");
 
@@ -243,7 +243,7 @@ fn escape_in_the_overlay_closes_even_with_a_selection_on_the_line() {
 #[test]
 fn escape_in_the_overlay_closes_from_the_results_too() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     deliver_hits(&mut s, vec![hit("a.pdf"), hit("b.pdf")], now);
     summon(&mut s, now);
     s.update(press(Key::Down), now);
@@ -254,10 +254,10 @@ fn escape_in_the_overlay_closes_from_the_results_too() {
     assert!(has(&r, &Cmd::DismissOverlay), "no dismiss: {:?}", r.cmds);
 }
 
-/// While browsing recent codes, the first Escape leaves the list and the
+/// While browsing recent searches, the first Escape leaves the list and the
 /// second closes the overlay, as with the drive picker.
 #[test]
-fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
+fn escape_leaves_the_recent_searches_before_it_closes_the_overlay() {
     let (mut s, now) = state();
     s.seed_history(vec!["older".into()]);
     summon(&mut s, now);
@@ -284,8 +284,8 @@ fn escape_leaves_the_recent_codes_before_it_closes_the_overlay() {
 #[test]
 fn opening_a_result_from_the_overlay_opens_it() {
     let (mut s, now) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, _) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
     summon(&mut s, settled);
 
     let r = s.update(press(Key::Enter), settled);
@@ -297,20 +297,20 @@ fn opening_a_result_from_the_overlay_opens_it() {
     );
 }
 
-/// The opened code is selected so the next keystroke replaces it.
+/// The opened search is selected so the next keystroke replaces it.
 #[test]
-fn opening_a_result_selects_the_code_it_opened() {
+fn opening_a_result_selects_the_search_it_opened() {
     let (mut s, now) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, _) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
     summon(&mut s, settled);
 
     s.update(press(Key::Enter), settled);
 
     assert_eq!(
         s.input.selected_text(),
-        Some(CODE),
-        "the code was left unselected, so a second search types into the first"
+        Some(TERM),
+        "the search was left unselected, so a second search types into the first"
     );
 }
 
@@ -322,8 +322,8 @@ fn opening_a_result_selects_the_code_it_opened() {
 fn opening_something_closes_the_overlay() {
     let now = Instant::now();
     let (mut s, _) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, _) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
     summon(&mut s, settled);
 
     let r = s.update(press(Key::Enter), settled);
@@ -331,7 +331,7 @@ fn opening_something_closes_the_overlay() {
     assert!(has(&r, &Cmd::DismissOverlay), "the overlay stayed up");
 }
 
-/// With `hide_after_opening` off, the overlay stays up and the code is
+/// With `hide_after_opening` off, the overlay stays up and the search is
 /// selected.
 #[test]
 fn the_overlay_can_be_told_to_stay_up_after_an_open() {
@@ -343,8 +343,8 @@ fn the_overlay_can_be_told_to_stay_up_after_an_open() {
         },
         now,
     );
-    let (settled, _) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, _) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
     summon(&mut s, settled);
 
     let r = s.update(press(Key::Enter), settled);
@@ -352,8 +352,8 @@ fn the_overlay_can_be_told_to_stay_up_after_an_open() {
     assert!(!has(&r, &Cmd::DismissOverlay), "the overlay went anyway");
     assert_eq!(
         s.input.selected_text(),
-        Some(CODE),
-        "and the code is selected, so the next keystroke replaces it"
+        Some(TERM),
+        "and the search is selected, so the next keystroke replaces it"
     );
 }
 
@@ -362,8 +362,8 @@ fn the_overlay_can_be_told_to_stay_up_after_an_open() {
 fn copying_leaves_the_panel_up_to_be_read() {
     let now = Instant::now();
     let (mut s, _) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, _) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
     summon(&mut s, settled);
 
     for action in [
@@ -404,8 +404,8 @@ fn every_hiding_action_hides() {
         ActionId::Settings,
     ] {
         let (mut s, _) = state();
-        let (settled, _) = settle(&mut s, CODE, now);
-        deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+        let (settled, _) = settle(&mut s, TERM, now);
+        deliver_hits(&mut s, vec![hit("report.pdf")], settled);
         summon(&mut s, settled);
 
         // Skip actions the menu does not offer; one of the three opens is
@@ -436,7 +436,7 @@ fn an_open_that_fails_after_the_panel_has_gone_is_still_reported() {
 
     let r = s.update(
         AppEvent::Open(files::app::event::OpenMsg::Failed {
-            path: std::sync::Arc::from(r"R:\jobs\11-D-0704\GA.pdf"),
+            path: std::sync::Arc::from(r"R:\projects\AB-C-0704\GA.pdf"),
             detail: "the file no longer exists".into(),
         }),
         now,
@@ -457,7 +457,7 @@ fn an_open_that_fails_with_the_panel_up_is_a_toast() {
 
     let r = s.update(
         AppEvent::Open(files::app::event::OpenMsg::Failed {
-            path: std::sync::Arc::from(r"R:\jobs\11-D-0704\GA.pdf"),
+            path: std::sync::Arc::from(r"R:\projects\AB-C-0704\GA.pdf"),
             detail: "the file no longer exists".into(),
         }),
         now,
@@ -515,22 +515,22 @@ fn escape_can_be_told_to_clear_rather_than_close() {
         },
         now,
     );
-    let (settled, _) = settle(&mut s, CODE, now);
+    let (settled, _) = settle(&mut s, TERM, now);
     summon(&mut s, settled);
 
     let r = s.update(press(Key::Esc), settled);
     assert!(!has(&r, &Cmd::DismissOverlay), "Escape closed the panel");
-    // Summoning selects the whole code, so the first Escape drops the
+    // Summoning selects the whole search, so the first Escape drops the
     // selection and the second clears the box.
     s.update(press(Key::Esc), settled);
-    assert_eq!(s.input.text(), "", "the code was not cleared");
+    assert_eq!(s.input.text(), "", "the search was not cleared");
 }
 
 /// The overlay stays up so the "nothing to open" message can be read.
 #[test]
 fn enter_with_nothing_to_open_keeps_the_overlay_up() {
     let (mut s, now) = state();
-    let (settled, _) = settle(&mut s, CODE, now);
+    let (settled, _) = settle(&mut s, TERM, now);
     deliver_hits(&mut s, vec![], settled);
     summon(&mut s, settled);
 
@@ -543,7 +543,7 @@ fn enter_with_nothing_to_open_keeps_the_overlay_up() {
 #[test]
 fn escape_outside_the_overlay_clears_the_line_and_touches_no_window() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
 
     let r = s.update(press(Key::Esc), now);
 
@@ -567,7 +567,7 @@ fn ctrl_q_still_quits_from_inside_the_overlay() {
 /// `SEARCH_DEBOUNCE` is shorter than a typing pause, so a prefix can reach
 /// `QueryPhase::Local` mid-typing; gating on the phase alone would record it.
 #[test]
-fn a_code_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
+fn a_search_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
     let (mut s, now) = state();
     summon(&mut s, now);
     type_in(&mut s, "inv", now);
@@ -585,41 +585,41 @@ fn a_code_abandoned_mid_typing_is_not_remembered_when_the_overlay_closes() {
     assert_eq!(saves(&r), 0);
 }
 
-/// A settled code is remembered by the quiet period alone, without a keypress
+/// A settled search is remembered by the quiet period alone, without a keypress
 /// or a server answer.
 ///
 /// `run_verify` skips the server entirely with two shares configured, so the
 /// commit must not depend on verification.
 #[test]
-fn a_code_that_settled_is_remembered_without_anybody_pressing_anything() {
+fn a_search_that_settled_is_remembered_without_anybody_pressing_anything() {
     let (mut s, now) = state();
     summon(&mut s, now);
-    let (settled, r) = settle(&mut s, CODE, now);
+    let (settled, r) = settle(&mut s, TERM, now);
     assert!(
         s.verify_due_at().is_none(),
         "the debounce should have fired"
     );
 
-    assert_eq!(s.history.entries(), [CODE]);
-    assert_eq!(saved(&r).as_deref(), Some(&[CODE.to_string()][..]));
+    assert_eq!(s.history.entries(), [TERM]);
+    assert_eq!(saved(&r).as_deref(), Some(&[TERM.to_string()][..]));
 
     // The commit on close is a backstop and writes nothing more.
     assert_eq!(saves(&s.update(press(Key::Esc), settled)), 0);
 }
 
-/// A settled code with no results is remembered so it can be recalled and
+/// A settled search with no results is remembered so it can be recalled and
 /// corrected.
 #[test]
-fn a_code_that_found_nothing_is_remembered_too() {
+fn a_search_that_found_nothing_is_remembered_too() {
     let (mut s, now) = state();
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     deliver_hits(&mut s, vec![], now);
     assert!(s.hits.is_empty(), "precondition");
 
     let (settled, r) = quiet(&mut s, now);
 
-    assert_eq!(s.history.entries(), [CODE]);
-    assert_eq!(saved(&r).as_deref(), Some(&[CODE.to_string()][..]));
+    assert_eq!(s.history.entries(), [TERM]);
+    assert_eq!(saved(&r).as_deref(), Some(&[TERM.to_string()][..]));
 
     // Enter opens nothing and writes no second entry.
     let enter = s.update(press(Key::Enter), settled);
@@ -628,7 +628,7 @@ fn a_code_that_found_nothing_is_remembered_too() {
 }
 
 #[test]
-fn enter_on_a_half_typed_code_with_nothing_to_open_remembers_nothing() {
+fn enter_on_a_half_typed_search_with_nothing_to_open_remembers_nothing() {
     let (mut s, now) = state();
     type_in(&mut s, "inv", now);
     deliver_hits(&mut s, vec![], now);
@@ -644,17 +644,17 @@ fn enter_on_a_half_typed_code_with_nothing_to_open_remembers_nothing() {
 /// `History::record` refuses a duplicate head entry and `remember` then emits
 /// no command.
 #[test]
-fn a_settled_code_is_written_once_however_many_triggers_fire() {
+fn a_settled_search_is_written_once_however_many_triggers_fire() {
     let (mut s, now) = state();
     // 1. The quiet period expiring.
-    let (settled, quiet) = settle(&mut s, CODE, now);
-    deliver_hits(&mut s, vec![hit("drawing.pdf")], settled);
+    let (settled, quiet) = settle(&mut s, TERM, now);
+    deliver_hits(&mut s, vec![hit("report.pdf")], settled);
 
     // 2. Verification answering, skipped as with two shares configured.
     let verify = s.update(
         AppEvent::Verify(VerifyMsg {
             epoch: s.query_epoch(),
-            query: Query::contains(CODE),
+            query: Query::contains(TERM),
             elapsed: std::time::Duration::ZERO,
             outcome: VerifyOutcome::Skipped(SkipReason::SeveralShares),
         }),
@@ -667,26 +667,26 @@ fn a_settled_code_is_written_once_however_many_triggers_fire() {
     let dismissed = s.update(AppEvent::Hotkey(HotkeyMsg::Dismissed), settled);
 
     let total = saves(&quiet) + saves(&verify) + saves(&enter) + saves(&dismissed);
-    assert_eq!(total, 1, "the code was written {total} times");
-    assert_eq!(s.history.entries(), [CODE]);
+    assert_eq!(total, 1, "the search was written {total} times");
+    assert_eq!(s.history.entries(), [TERM]);
 }
 
-/// Typing one code in bursts with real pauses leaves one history entry.
+/// Typing one search in bursts with real pauses leaves one history entry.
 ///
 /// Other helpers use one `Instant` for every character, so no deadline can
-/// expire mid-code. Here the code is typed in three bursts, with gaps longer
+/// expire mid-search. Here the search is typed in three bursts, with gaps longer
 /// than the quiet period. `REMEMBER_DEBOUNCE` absorbs short gaps and
 /// `History::record` collapses a remembered prefix.
 #[test]
-fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
+fn typing_one_search_with_pauses_leaves_exactly_one_entry() {
     let (mut s, mut now) = state();
     summon(&mut s, now);
 
     let mut written: Vec<Vec<String>> = Vec::new();
     // The two-second pauses exceed the quiet period.
     for (burst, pause) in [
-        ("11", std::time::Duration::from_millis(700)),
-        ("-D", std::time::Duration::from_millis(2_000)),
+        ("AB", std::time::Duration::from_millis(700)),
+        ("-C", std::time::Duration::from_millis(2_000)),
         ("-0704", std::time::Duration::from_millis(2_000)),
     ] {
         for c in burst.chars() {
@@ -705,11 +705,11 @@ fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
 
     assert_eq!(
         s.history.entries(),
-        [CODE],
+        [TERM],
         "the prefixes typed on the way to it were kept"
     );
 
-    // `11-D` settles during the long pause and is written, then replaced when
+    // `AB-C` settles during the long pause and is written, then replaced when
     // typing resumes. Every write must hold exactly one entry.
     assert!(
         written.iter().all(|entries| entries.len() == 1),
@@ -717,30 +717,30 @@ fn typing_one_code_with_pauses_leaves_exactly_one_entry() {
     );
     assert_eq!(
         written.last().map(Vec::as_slice),
-        Some(&[CODE.to_string()][..]),
-        "the last write is the finished code"
+        Some(&[TERM.to_string()][..]),
+        "the last write is the finished search"
     );
 }
 
 #[test]
-fn three_codes_looked_up_in_turn_are_three_entries() {
+fn three_searches_looked_up_in_turn_are_three_entries() {
     let (mut s, mut now) = state();
-    for code in ["11-D-0704", "P12345-001", "22-A-0001"] {
-        let (settled, _) = settle(&mut s, code, now);
+    for term in ["AB-C-0704", "P12345-001", "XY-Z-0001"] {
+        let (settled, _) = settle(&mut s, term, now);
         now = settled + std::time::Duration::from_secs(1);
-        // Clear the line before the next code.
+        // Clear the line before the next search.
         s.update(ctrl(Key::Char('u')), now);
     }
     assert_eq!(
         s.history.entries(),
-        ["22-A-0001", "P12345-001", "11-D-0704"]
+        ["XY-Z-0001", "P12345-001", "AB-C-0704"]
     );
 }
 
 /// Browsing and then closing does not reorder history.
 ///
 /// The commit in `request_dismiss` runs before browsing ends, so a recalled
-/// code on the line would otherwise be recorded.
+/// search on the line would otherwise be recorded.
 #[test]
 fn browsing_recall_and_then_closing_the_overlay_does_not_reorder_the_list() {
     let (mut s, now) = state();
@@ -777,10 +777,10 @@ fn a_query_below_the_remembering_length_is_never_remembered() {
 
 /// With no share configured nothing is searched, so nothing is remembered.
 #[test]
-fn a_code_typed_where_no_share_is_configured_is_not_remembered() {
+fn a_search_typed_where_no_share_is_configured_is_not_remembered() {
     let (mut s, now) = unconfigured_state();
     summon(&mut s, now);
-    type_in(&mut s, CODE, now);
+    type_in(&mut s, TERM, now);
     let later = now + VERIFY_DEBOUNCE;
     s.update(AppEvent::Tick, later);
 

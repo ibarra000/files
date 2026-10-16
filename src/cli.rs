@@ -190,8 +190,8 @@ USAGE:
     files [OPTIONS]                 the search panel (tray application)
     files --settings                the settings window
     files-cli --doctor
-    files-cli --check-config [--query <CODE>]
-    files-cli --bench [--query <CODE>] [--allow-write]
+    files-cli --check-config [--query <TEXT>]
+    files-cli --bench [--query <TEXT>] [--allow-write]
     files-cli --bench --walk [--concurrency <N>] [--max-depth <N>]
 
 MODES:
@@ -213,7 +213,7 @@ OPTIONS:
                         exit, without touching the network
     --no-config         ignore the configuration file and use the built-in
                         defaults
-    --query <CODE>      job code for --bench or --check-config
+    --query <TEXT>      search input for --bench or --check-config
     --allow-write       let --bench create one temporary file, to confirm
                         directory timestamps update on this server
     --concurrency <N>   directories --bench --walk reads at once (default 8,
@@ -226,8 +226,8 @@ OPTIONS:
                         (default: off until --bench confirms it is safe)
     --viewer <KIND>     auto | pdf | <a [[viewer]] name> (default: auto)
                         auto opens each file in its default app. pdf
-                        combines a code's pages into one document; types a
-                        [[viewer]] claims go to that viewer instead. A
+                        combines a base name's pages into one document;
+                        types a [[viewer]] claims go to that viewer instead. A
                         [[viewer]] name opens the selected file with that
                         program. F2 switches at run time; this flag pins it
     --pdf-viewer <PATH> open combined PDFs with this program instead of the
@@ -254,8 +254,6 @@ CONFIGURATION:
     the file with files-cli --check-config.
 
 ENVIRONMENT:
-    FILES_BASE_PATH, FILES_CUSTPRO_PATH   repoint the mappings named 'jobs'
-                                          and 'custompro'
     FILES_FS_STRATEGY, FILES_MATCHER, FILES_SERVER_FILTER, FILES_PERSIST,
     FILES_CACHE_DIR, FILES_INDEX_LOG, FILES_VIEWER, FILES_PDF_VIEWER,
     FILES_HISTORY, FILES_HOTKEY, FILES_THEME, FILES_STALE_NOTICES,
@@ -721,8 +719,6 @@ mod tests {
     #[test]
     fn the_help_text_documents_every_environment_variable_the_loader_reads() {
         for var in [
-            "FILES_BASE_PATH",
-            "FILES_CUSTPRO_PATH",
             "FILES_FS_STRATEGY",
             "FILES_MATCHER",
             "FILES_SERVER_FILTER",
@@ -747,12 +743,12 @@ mod tests {
     #[test]
     fn selects_a_viewer() {
         assert_eq!(
-            args(&["--viewer", "avwin"])
+            args(&["--viewer", "sketch"])
                 .unwrap()
                 .overrides
                 .viewer
                 .as_deref(),
-            Some("avwin")
+            Some("sketch")
         );
         let s = args(&["--no-config", "--viewer", "PDF"])
             .unwrap()

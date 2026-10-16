@@ -32,6 +32,9 @@
 //! A violation returns `EnumError::Corrupt` and falls through to the next
 //! strategy. It never panics and never indexes out of bounds.
 
+// Win32 FFI: GetFileInformationByHandleEx and FindFirstFileExW listings.
+#![allow(unsafe_code)]
+
 use std::mem::{offset_of, size_of};
 use std::path::Path;
 use std::time::Instant;
@@ -451,10 +454,12 @@ fn probe_stamp_by_attributes(dir: &Path) -> Result<DirStamp, EnumError> {
     };
     let wide = wide_path(dir, is_root);
 
+    // SAFETY: WIN32_FILE_ATTRIBUTE_DATA is plain data, for which all-zero
+    // bytes are a valid value.
+    let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
     // SAFETY: `wide` is NUL-terminated and outlives the call; `data` is a
     // correctly sized, correctly aligned local of exactly the type
     // GetFileExInfoStandard writes, and is only read after a success return.
-    let mut data: WIN32_FILE_ATTRIBUTE_DATA = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         GetFileAttributesExW(wide.as_ptr(), GetFileExInfoStandard, (&raw mut data).cast())
     };
@@ -652,7 +657,7 @@ mod tests {
 
     #[test]
     fn find_first_enumeration_agrees_with_the_handle_strategy() {
-        let dir = temp_with(&["one.txt", "two.pdf", "three.dwg"]);
+        let dir = temp_with(&["one.txt", "two.pdf", "three.tif"]);
 
         let mut a = VecSink::default();
         list_handle_dirinfo(

@@ -43,7 +43,7 @@ pub fn drive_letter_of(path: &Path) -> Option<String> {
 /// The volume root containing `path`, with the trailing separator the volume
 /// APIs require.
 ///
-/// `V:\Documents\custpro` and `V:\` both yield `V:\`;
+/// `V:\shared\files` and `V:\` both yield `V:\`;
 /// `\\server\share\folder` yields `\\server\share\`.
 pub fn volume_root_of(path: &Path) -> Option<PathBuf> {
     let s = path.to_string_lossy();
@@ -102,8 +102,8 @@ pub fn normalise_root(path: &Path) -> PathBuf {
 
 /// A stable identifier for a directory, used to name its cache files.
 ///
-/// Case- and separator-insensitive, so `V:\Documents\custpro` and
-/// `v:/documents/custpro/` identify the same index rather than two.
+/// Case- and separator-insensitive, so `V:\shared\files` and
+/// `v:/Shared/FILES/` identify the same index rather than two.
 pub fn path_key(path: &Path) -> u64 {
     let s = path.to_string_lossy();
     let s = strip_verbatim(&s);
@@ -131,7 +131,7 @@ pub fn same_dir(a: &Path, b: &Path) -> bool {
 /// Whether `path` is `root` itself or lies beneath it.
 ///
 /// Compared component by component rather than as a string prefix, which
-/// would call `V:\\jobs2` a child of `V:\\jobs`. Case-insensitive, because
+/// would call `V:\\projects2` a child of `V:\\projects`. Case-insensitive, because
 /// the file systems this runs against are.
 pub fn contains(root: &Path, path: &Path) -> bool {
     let root = normalise_root(root);
@@ -159,7 +159,7 @@ mod tests {
     fn extracts_the_drive_letter() {
         assert_eq!(drive_letter_of(Path::new(r"V:\")).as_deref(), Some("V:"));
         assert_eq!(
-            drive_letter_of(Path::new(r"V:\Documents\custpro")).as_deref(),
+            drive_letter_of(Path::new(r"V:\shared\files")).as_deref(),
             Some("V:")
         );
         assert_eq!(drive_letter_of(Path::new("v:")).as_deref(), Some("V:"));
@@ -180,11 +180,11 @@ mod tests {
     #[test]
     fn finds_the_volume_root_of_a_subdirectory() {
         assert_eq!(
-            volume_root_of(Path::new(r"V:\Documents\custpro")),
+            volume_root_of(Path::new(r"V:\shared\files")),
             Some(PathBuf::from(r"V:\"))
         );
         assert_eq!(
-            volume_root_of(Path::new(r"V:\Documents\custpro\")),
+            volume_root_of(Path::new(r"V:\shared\files\")),
             Some(PathBuf::from(r"V:\"))
         );
         assert_eq!(
@@ -197,12 +197,12 @@ mod tests {
     #[test]
     fn finds_the_volume_root_of_a_unc_path() {
         assert_eq!(
-            volume_root_of(Path::new(r"\\fileserv\jobs\sub\dir")),
-            Some(PathBuf::from(r"\\fileserv\jobs\"))
+            volume_root_of(Path::new(r"\\fileserv\projects\sub\dir")),
+            Some(PathBuf::from(r"\\fileserv\projects\"))
         );
         assert_eq!(
-            volume_root_of(Path::new(r"\\fileserv\jobs")),
-            Some(PathBuf::from(r"\\fileserv\jobs\"))
+            volume_root_of(Path::new(r"\\fileserv\projects")),
+            Some(PathBuf::from(r"\\fileserv\projects\"))
         );
     }
 
@@ -217,11 +217,11 @@ mod tests {
     fn recognises_volume_roots() {
         assert!(is_volume_root(Path::new(r"V:\")));
         assert!(is_volume_root(Path::new("V:")));
-        assert!(is_volume_root(Path::new(r"\\fileserv\jobs")));
-        assert!(is_volume_root(Path::new(r"\\fileserv\jobs\")));
+        assert!(is_volume_root(Path::new(r"\\fileserv\projects")));
+        assert!(is_volume_root(Path::new(r"\\fileserv\projects\")));
 
         assert!(!is_volume_root(Path::new(r"V:\Documents")));
-        assert!(!is_volume_root(Path::new(r"V:\Documents\custpro")));
+        assert!(!is_volume_root(Path::new(r"V:\shared\files")));
         assert!(!is_volume_root(Path::new("relative")));
     }
 
@@ -230,16 +230,16 @@ mod tests {
         assert_eq!(normalise_root(Path::new(r"V:\")), PathBuf::from(r"V:\"));
         assert_eq!(normalise_root(Path::new("V:")), PathBuf::from(r"V:\"));
         assert_eq!(
-            normalise_root(Path::new(r"V:\Documents\custpro\")),
-            PathBuf::from(r"V:\Documents\custpro")
+            normalise_root(Path::new(r"V:\shared\files\")),
+            PathBuf::from(r"V:\shared\files")
         );
         assert_eq!(
-            normalise_root(Path::new(r"V:\Documents\custpro")),
-            PathBuf::from(r"V:\Documents\custpro")
+            normalise_root(Path::new(r"V:\shared\files")),
+            PathBuf::from(r"V:\shared\files")
         );
         assert_eq!(
-            normalise_root(Path::new(r"\\fileserv\jobs\sub\")),
-            PathBuf::from(r"\\fileserv\jobs\sub")
+            normalise_root(Path::new(r"\\fileserv\projects\sub\")),
+            PathBuf::from(r"\\fileserv\projects\sub")
         );
     }
 
@@ -250,35 +250,32 @@ mod tests {
 
     #[test]
     fn the_path_key_ignores_case_and_separator_spelling() {
-        let a = path_key(Path::new(r"V:\Documents\custpro"));
-        assert_eq!(a, path_key(Path::new(r"v:\documents\CUSTPRO")));
-        assert_eq!(a, path_key(Path::new(r"V:/Documents/custpro/")));
-        assert_eq!(a, path_key(Path::new(r"\\?\V:\Documents\custpro")));
+        let a = path_key(Path::new(r"V:\shared\files"));
+        assert_eq!(a, path_key(Path::new(r"v:\SHARED\Files")));
+        assert_eq!(a, path_key(Path::new(r"V:/shared/files/")));
+        assert_eq!(a, path_key(Path::new(r"\\?\V:\shared\files")));
     }
 
     #[test]
     fn different_directories_get_different_keys() {
         assert_ne!(
-            path_key(Path::new(r"V:\Documents\custpro")),
+            path_key(Path::new(r"V:\shared\files")),
             path_key(Path::new(r"V:\Documents\other"))
         );
         // A root and its subdirectory must not collide, or a stale index
         // would be served.
         assert_ne!(
             path_key(Path::new(r"V:\")),
-            path_key(Path::new(r"V:\Documents\custpro"))
+            path_key(Path::new(r"V:\shared\files"))
         );
     }
 
     #[test]
     fn same_dir_agrees_with_the_key() {
         assert!(same_dir(
-            Path::new(r"V:\Documents\custpro"),
-            Path::new(r"v:/documents/custpro/")
+            Path::new(r"V:\shared\files"),
+            Path::new(r"v:/Shared/FILES/")
         ));
-        assert!(!same_dir(
-            Path::new(r"V:\"),
-            Path::new(r"V:\Documents\custpro")
-        ));
+        assert!(!same_dir(Path::new(r"V:\"), Path::new(r"V:\shared\files")));
     }
 }

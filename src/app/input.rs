@@ -224,8 +224,8 @@ impl Input {
 
     /// Selects the run of non-whitespace around `byte`.
     ///
-    /// Splits on whitespace only, so a double-click on `11-D-0704` selects the
-    /// whole code rather than `11`.
+    /// Splits on whitespace only, so a double-click on `AB-C-0704` selects the
+    /// whole search rather than `AB`.
     pub fn select_word_at(&mut self, byte: usize) {
         let at = self.clamp_boundary(byte);
         let mut lo = at;
@@ -363,7 +363,7 @@ pub fn sanitize(text: &str) -> String {
     cleaned.trim().to_string()
 }
 
-/// Fields are runs of alphanumerics, so Ctrl+Left steps `11-D-0704` one
+/// Fields are runs of alphanumerics, so Ctrl+Left steps `AB-C-0704` one
 /// dash-delimited field at a time.
 fn is_field_char(c: char) -> bool {
     c.is_alphanumeric()
@@ -421,18 +421,18 @@ mod tests {
 
     #[test]
     fn typing_leaves_the_caret_at_the_end() {
-        let input = typed("11-D-0704");
-        assert_eq!(input.text(), "11-D-0704");
+        let input = typed("AB-C-0704");
+        assert_eq!(input.text(), "AB-C-0704");
         assert_eq!(input.caret(), input.text().len());
         assert!(!input.has_selection());
     }
 
     #[test]
     fn a_character_can_be_inserted_in_the_middle() {
-        let mut input = typed("11-D-074");
+        let mut input = typed("AB-C-074");
         input.move_left(false, false);
         assert!(input.insert_char('0'));
-        assert_eq!(input.text(), "11-D-0704");
+        assert_eq!(input.text(), "AB-C-0704");
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn shift_left_extends_a_selection_the_caret_started() {
-        let mut input = typed("11-D-0704");
+        let mut input = typed("AB-C-0704");
         input.move_left(false, true);
         input.move_left(false, true);
         assert_eq!(input.selected_text(), Some("04"));
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn typing_over_a_selection_replaces_it() {
-        let mut input = typed("11-D-0704");
+        let mut input = typed("AB-C-0704");
         input.select_all();
         input.insert_char('X');
         assert_eq!(input.text(), "X");
@@ -485,44 +485,44 @@ mod tests {
 
     #[test]
     fn backspace_over_a_selection_removes_the_whole_run() {
-        let mut input = typed("11-D-0704");
+        let mut input = typed("AB-C-0704");
         input.move_left(false, true);
         input.move_left(false, true);
         assert!(input.backspace());
-        assert_eq!(input.text(), "11-D-07");
+        assert_eq!(input.text(), "AB-C-07");
         assert!(!input.has_selection());
     }
 
     #[test]
-    fn field_motion_steps_between_the_dashes_of_a_code() {
-        let mut input = typed("11-D-0704");
+    fn field_motion_steps_between_the_dashes_of_a_search() {
+        let mut input = typed("AB-C-0704");
         input.move_left(true, false);
         assert_eq!(input.caret(), 5, "start of 0704");
         input.move_left(true, false);
-        assert_eq!(input.caret(), 3, "start of D");
+        assert_eq!(input.caret(), 3, "start of C");
         input.move_left(true, false);
         assert_eq!(input.caret(), 0);
         input.move_left(true, false);
         assert_eq!(input.caret(), 0, "clamped, not wrapped");
 
         input.move_right(true, false);
-        assert_eq!(input.caret(), 2, "end of 11");
+        assert_eq!(input.caret(), 2, "end of AB");
     }
 
     #[test]
-    fn ctrl_w_deletes_one_field_not_the_whole_code() {
-        let mut input = typed("11-D-0704");
+    fn ctrl_w_deletes_one_field_not_the_whole_search() {
+        let mut input = typed("AB-C-0704");
         assert!(input.delete_prev_field());
-        assert_eq!(input.text(), "11-D-");
+        assert_eq!(input.text(), "AB-C-");
         assert!(input.delete_prev_field());
-        assert_eq!(input.text(), "11-");
+        assert_eq!(input.text(), "AB-");
     }
 
     #[test]
-    fn a_double_click_selects_the_whole_code_not_one_field() {
-        let mut input = typed("11-D-0704");
+    fn a_double_click_selects_the_whole_search_not_one_field() {
+        let mut input = typed("AB-C-0704");
         input.select_word_at(4);
-        assert_eq!(input.selected_text(), Some("11-D-0704"));
+        assert_eq!(input.selected_text(), Some("AB-C-0704"));
     }
 
     #[test]
@@ -588,8 +588,8 @@ mod tests {
     fn recalling_a_history_entry_replaces_the_line_and_drops_the_selection() {
         let mut input = typed("abc");
         input.select_all();
-        input.set_text("11-D-0704");
-        assert_eq!(input.text(), "11-D-0704");
+        input.set_text("AB-C-0704");
+        assert_eq!(input.text(), "AB-C-0704");
         assert_eq!(input.caret(), 9);
         assert!(!input.has_selection());
     }
@@ -603,17 +603,17 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_code_loses_its_newline_and_keeps_its_content() {
-        assert_eq!(sanitize("11-D-0704\r\n"), "11-D-0704");
-        assert_eq!(sanitize("  11-D-0704  "), "11-D-0704");
-        assert_eq!(sanitize("11-D\n0704"), "11-D0704");
+    fn a_pasted_search_loses_its_newline_and_keeps_its_content() {
+        assert_eq!(sanitize("AB-C-0704\r\n"), "AB-C-0704");
+        assert_eq!(sanitize("  AB-C-0704  "), "AB-C-0704");
+        assert_eq!(sanitize("AB-C\n0704"), "AB-C0704");
         assert_eq!(sanitize("\u{7}\u{1b}"), "");
     }
 
     #[test]
     fn it_still_reads_as_a_string_at_the_old_call_sites() {
-        let input = typed("11-D-0704");
-        assert_eq!(input, "11-D-0704");
+        let input = typed("AB-C-0704");
+        assert_eq!(input, "AB-C-0704");
         assert_eq!(input.chars().count(), 9);
         assert!(!input.is_empty());
     }

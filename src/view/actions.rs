@@ -20,7 +20,7 @@ use crate::config::{ViewerKind, Viewers};
 pub enum ActionId {
     /// Whatever `Enter` does, which depends on the viewer `F2` chose.
     Open,
-    /// Opens every page of the code as one merged PDF, regardless of mode.
+    /// Opens every page of the base name as one merged PDF, regardless of mode.
     OpenAsDocument,
     /// Opens the file with the configured viewer at this index.
     OpenWith(usize),
@@ -187,22 +187,22 @@ mod tests {
     fn state() -> AppState {
         let settings = Settings {
             viewers: Arc::new(crate::config::Viewers::new(vec![
-                crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+                crate::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
             ])),
             ..Settings::fixture()
         };
         AppState::new(settings, Instant::now())
     }
 
-    const AVWIN: ViewerKind = ViewerKind::App(0);
+    const SKETCH: ViewerKind = ViewerKind::App(0);
 
     fn with_hits(n: usize) -> AppState {
         let mut s = state();
-        s.input.set_text("11-D");
+        s.input.set_text("AB-C");
         s.hits = (0..n)
             .map(|i| Hit {
-                path: Arc::from(format!(r"R:\jobs\11-D-070{i}.pdf").as_str()),
-                name: Arc::from(format!("11-D-070{i}.pdf").as_str()),
+                path: Arc::from(format!(r"R:\projects\AB-C-070{i}.pdf").as_str()),
+                name: Arc::from(format!("AB-C-070{i}.pdf").as_str()),
                 match_pos: 0,
                 index: i as u32,
             })
@@ -238,7 +238,7 @@ mod tests {
         for (viewer, said) in [
             (ViewerKind::Auto, "Open"),
             (ViewerKind::Pdf, "Open as combined PDF"),
-            (AVWIN, "Open with avwin"),
+            (SKETCH, "Open with sketch"),
         ] {
             let mut s = with_hits(3);
             s.viewer = viewer;
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn the_menu_offers_the_other_two_viewers_and_not_the_current_one() {
-        for viewer in [ViewerKind::Auto, ViewerKind::Pdf, AVWIN] {
+        for viewer in [ViewerKind::Auto, ViewerKind::Pdf, SKETCH] {
             let mut s = with_hits(3);
             s.viewer = viewer;
             let all = actions(&s);
@@ -317,9 +317,9 @@ mod tests {
     }
 
     #[test]
-    fn browsing_a_code_offers_nothing_to_do_with_a_file() {
+    fn browsing_a_past_search_offers_nothing_to_do_with_a_file() {
         let mut s = with_hits(3);
-        s.history.record("11-D-0704");
+        s.history.record("AB-C-0704");
         s.input.clear();
         s.update(
             AppEvent::Key(KeyEvent::new(Key::Up, Mods::NONE)),
@@ -348,13 +348,13 @@ mod tests {
     fn every_configured_viewer_is_offered_and_the_first_has_the_key() {
         let mut s = with_hits(3);
         s.settings.viewers = Arc::new(crate::config::Viewers::new(vec![
-            crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            crate::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
             crate::config::ViewerApp::new("Notes", "notepad.exe", &[]),
         ]));
         let all = actions(&s);
         let first = all.iter().find(|a| a.id == ActionId::OpenWith(0)).unwrap();
         let second = all.iter().find(|a| a.id == ActionId::OpenWith(1)).unwrap();
-        assert_eq!(first.description, "Open with avwin");
+        assert_eq!(first.description, "Open with sketch");
         assert_eq!(first.shortcut, Some("Ctrl+E"));
         assert_eq!(second.description, "Open with Notes");
         assert_eq!(second.shortcut, None);

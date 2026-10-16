@@ -154,8 +154,8 @@ mod tests {
         let mut state = AppState::new(Settings::fixture(), Instant::now());
         state.hits = (0..n)
             .map(|i| Hit {
-                path: Arc::from(format!(r"R:\jobs\11-D-070{i}.pdf").as_str()),
-                name: Arc::from(format!("11-D-070{i}.pdf").as_str()),
+                path: Arc::from(format!(r"R:\projects\AB-C-070{i}.pdf").as_str()),
+                name: Arc::from(format!("AB-C-070{i}.pdf").as_str()),
                 match_pos: 0,
                 index: i as u32,
             })
@@ -250,7 +250,7 @@ mod tests {
     #[test]
     fn clicking_in_the_search_field_moves_the_caret() {
         let mut state = state_with_hits(0);
-        state.input.set_text("11-D-0704");
+        state.input.set_text("AB-C-0704");
 
         state.on_intent(
             Intent::Caret {
@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_a_remembered_code_takes_that_one() {
+    fn clicking_a_remembered_search_takes_that_one() {
         let now = Instant::now();
         let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into(), "b".into(), "c".into()]);
@@ -338,12 +338,12 @@ mod tests {
         assert_eq!(state.input.text(), "c", "it took a neighbour instead");
         assert!(
             !state.history.is_browsing(),
-            "a click uses the code, it does not preview it"
+            "a click uses the search, it does not preview it"
         );
     }
 
     #[test]
-    fn clicking_a_remembered_code_that_is_gone_does_nothing() {
+    fn clicking_a_remembered_search_that_is_gone_does_nothing() {
         let now = Instant::now();
         let mut state = AppState::new(Settings::fixture(), now);
         state.seed_history(vec!["a".into()]);

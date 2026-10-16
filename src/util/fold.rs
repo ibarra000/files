@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn preserves_byte_length_for_ascii() {
-        for s in ["", "a", "Z", "11-D-0704", "MiXeD CaSe .Txt"] {
+        for s in ["", "a", "Z", "AB-C-0704", "MiXeD CaSe .Txt"] {
             assert_eq!(fold(s).len(), s.len(), "length changed for {s:?}");
         }
     }
@@ -167,14 +167,14 @@ mod tests {
 
     #[test]
     fn fold_query_matches_fold_into() {
-        for s in ["ABC", "ÉCOLE", "11-D-0704"] {
+        for s in ["ABC", "ÉCOLE", "AB-C-0704"] {
             assert_eq!(fold_query(s).as_slice(), fold(s).as_slice());
         }
     }
 
     #[test]
     fn ascii_queries_never_need_the_unicode_fallback() {
-        assert!(!needs_unicode_fallback("11-D-0704"));
+        assert!(!needs_unicode_fallback("AB-C-0704"));
         assert!(needs_unicode_fallback("École"));
     }
 

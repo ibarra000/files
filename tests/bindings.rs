@@ -25,9 +25,9 @@ use files::view::actions;
 /// the body shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Where {
-    /// A code typed and results on screen.
+    /// A search typed and results on screen.
     Searching,
-    /// Browsing recent codes.
+    /// Browsing recent searches.
     Recent,
     /// `F5` has been pressed.
     Picking,
@@ -79,7 +79,7 @@ fn table() -> Vec<Binding> {
         b(Key::Char('c'), CTRL, Searching, "copy the selected text"),
         b(Key::Char('x'), CTRL, Searching, "cut the selected text"),
         b(Key::Char('v'), CTRL, Searching, "paste"),
-        b(Key::Char('a'), CTRL, Searching, "select the whole code"),
+        b(Key::Char('a'), CTRL, Searching, "select the whole search"),
         b(Key::Char('u'), CTRL, Searching, "clear the line"),
         b(Key::Char('w'), CTRL, Searching, "delete the previous field"),
         b(
@@ -140,12 +140,12 @@ fn table() -> Vec<Binding> {
         b(Key::PageDown, NONE, Searching, "a listful down"),
         b(Key::PageUp, NONE, Searching, "a listful up"),
         b(Key::Enter, NONE, Searching, "open the selection"),
-        b(Key::Esc, NONE, Searching, "clear the code"),
-        // Browsing recent codes.
-        b(Key::Up, NONE, Recent, "an older code"),
-        b(Key::Down, NONE, Recent, "a newer code"),
-        b(Key::Enter, NONE, Recent, "use this code"),
-        anymod(Key::F(2), Recent, "switch viewer without taking the code"),
+        b(Key::Esc, NONE, Searching, "clear the search"),
+        // Browsing recent searches.
+        b(Key::Up, NONE, Recent, "an older search"),
+        b(Key::Down, NONE, Recent, "a newer search"),
+        b(Key::Enter, NONE, Recent, "use this search"),
+        anymod(Key::F(2), Recent, "switch viewer without taking the search"),
     ]
 }
 
@@ -161,7 +161,7 @@ fn hit(name: &str) -> Hit {
 }
 
 fn deliver(s: &mut AppState, n: usize, now: Instant) {
-    let hits: Vec<Hit> = (0..n).map(|i| hit(&format!("11d_{i:04}.pdf"))).collect();
+    let hits: Vec<Hit> = (0..n).map(|i| hit(&format!("abc_{i:04}.pdf"))).collect();
     s.update(
         AppEvent::Search(SearchMsg {
             epoch: s.query_epoch(),
@@ -179,11 +179,11 @@ fn deliver(s: &mut AppState, n: usize, now: Instant) {
     );
 }
 
-/// The default settings plus one configured viewer, `avwin`.
-fn with_avwin() -> Settings {
+/// The default settings plus one configured viewer, `sketch`.
+fn with_sketch() -> Settings {
     Settings {
         viewers: std::sync::Arc::new(files::config::Viewers::new(vec![
-            files::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+            files::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
         ])),
         ..Settings::fixture()
     }
@@ -196,13 +196,13 @@ fn with_avwin() -> Settings {
 /// `tests/overlay.rs`.
 fn fixture(at: Where) -> (AppState, Instant) {
     let now = Instant::now();
-    let mut s = AppState::new(with_avwin(), now);
-    s.seed_history(vec!["P12345-001".into(), "11-D-0704".into()]);
-    for c in "11-D-0704".chars() {
+    let mut s = AppState::new(with_sketch(), now);
+    s.seed_history(vec!["P12345-001".into(), "AB-C-0704".into()]);
+    for c in "AB-C-0704".chars() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), NONE)), now);
     }
     deliver(&mut s, 60, now);
-    // Park the caret mid-code so Backspace and Delete both have an effect;
+    // Park the caret mid-search so Backspace and Delete both have an effect;
     // a legitimate no-op would be indistinguishable from a dead binding.
     s.update(AppEvent::Key(KeyEvent::new(Key::Left, NONE)), now);
     s.update(AppEvent::Key(KeyEvent::new(Key::Left, NONE)), now);
@@ -502,7 +502,7 @@ fn only_the_function_keys_ignore_their_modifiers() {
 /// Browsing handles only its own keys and passes the rest to editing.
 #[test]
 fn browsing_hands_back_every_key_it_does_not_own() {
-    // A character ends browsing and edits the previewed code.
+    // A character ends browsing and edits the previewed search.
     let (mut s, now) = fixture(Where::Recent);
     let before = s.input.text().to_string();
     s.update(AppEvent::Key(KeyEvent::new(Key::Char('X'), NONE)), now);
@@ -514,7 +514,7 @@ fn browsing_hands_back_every_key_it_does_not_own() {
     assert_eq!(
         s.input.text(),
         format!("{before}X"),
-        "the previewed code should be kept and edited, not thrown away"
+        "the previewed search should be kept and edited, not thrown away"
     );
 
     // The fixture is on the newest entry, so Down leaves browsing with an
@@ -532,7 +532,7 @@ fn browsing_hands_back_every_key_it_does_not_own() {
     // browsing.
     for _ in 0..4 {
         s.update(AppEvent::Key(KeyEvent::new(Key::Down, NONE)), now);
-        assert_eq!(s.input.text(), "", "Down put the cleared code back");
+        assert_eq!(s.input.text(), "", "Down put the cleared search back");
         assert_eq!(where_of(&s), Where::Searching);
     }
 
@@ -562,7 +562,7 @@ fn altgr_types_a_character_rather_than_being_swallowed() {
         s.update(AppEvent::Key(KeyEvent::new(Key::Char(c), Mods::ALTGR)), now);
     }
 
-    // Inserted at the mid-code caret, so only presence is checked.
+    // Inserted at the mid-search caret, so only presence is checked.
     assert!(
         s.input.text().contains("@{[é"),
         "AltGr characters were swallowed as bindings: {:?}",
@@ -596,7 +596,7 @@ fn a_control_combination_this_program_does_not_have_types_nothing() {
 fn a_key_release_is_not_a_second_keystroke() {
     let now = Instant::now();
     let mut s = AppState::new(Settings::fixture(), now);
-    for c in "11-D".chars() {
+    for c in "AB-C".chars() {
         let key = KeyEvent::new(Key::Char(c), NONE);
         s.update(AppEvent::Key(key), now);
         s.update(
@@ -607,7 +607,7 @@ fn a_key_release_is_not_a_second_keystroke() {
             now,
         );
     }
-    assert_eq!(s.input.text(), "11-D");
+    assert_eq!(s.input.text(), "AB-C");
 }
 
 /// Every action has a descriptive label, not a bare key name.

@@ -172,10 +172,10 @@ mod tests {
     fn request(path: &str) -> OpenRequest {
         OpenRequest {
             path: Arc::from(path),
-            query: "11-D-0704".into(),
+            query: "AB-C-0704".into(),
             viewer: ViewerKind::App(0),
             viewers: Arc::new(crate::config::Viewers::new(vec![
-                crate::config::ViewerApp::new("avwin", "avwin.exe", &["dwg"]),
+                crate::config::ViewerApp::new("sketch", "sketch.exe", &["tif"]),
             ])),
         }
     }

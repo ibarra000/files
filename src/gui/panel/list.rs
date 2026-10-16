@@ -1,4 +1,4 @@
-//! The content band: a caption over one of the results, recent codes, aliases
+//! The content band: a caption over one of the results, recent searches, aliases
 //! or drive picker, in the panel's only [`ScrollArea`]; or a centred empty-state
 //! message.
 //!
@@ -140,7 +140,7 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
 const fn heading_of(content: Content) -> Option<&'static str> {
     match content {
         Content::Results => Some("Results"),
-        Content::Recent => Some("Recent codes"),
+        Content::Recent => Some("Recent searches"),
         Content::Aliases => Some("Shortcuts"),
         Content::Shares => Some("Drives"),
         Content::Empty => None,
@@ -235,7 +235,7 @@ fn results(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     intents
 }
 
-/// Draws the recent-codes list shown by the Up arrow.
+/// Draws the recent-searches list shown by the Up arrow.
 ///
 /// Styled unlike a result (accent weight, no folder or extension) so the two
 /// kinds of row are distinguishable.
@@ -289,8 +289,8 @@ fn recent(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
 
 /// Draws the configured aliases, shown when the box is empty.
 ///
-/// Styled like the recent codes, with the alias name on the left and its
-/// code dimmed on the right.
+/// Styled like the recent searches, with the alias name on the left and the
+/// search it stands for dimmed on the right.
 fn aliases(ui: &mut Ui, state: &AppState, theme: &Theme) -> Vec<Intent> {
     let mut intents = Vec::new();
     let cursor = state.alias_cursor();
@@ -432,9 +432,9 @@ fn shares(ui: &mut Ui, state: &AppState, theme: &Theme, wall: SystemTime) {
 /// Placement lives here; `view::empty` supplies only the text.
 fn centred_block(ui: &Ui, theme: &Theme, band: Rect, block: &view::Block) {
     let painter = ui.painter().clone();
-    let mut job = LayoutJob::default();
+    let mut layout = LayoutJob::default();
     for run in block {
-        job.append(
+        layout.append(
             &run.text,
             0.0,
             TextFormat {
@@ -444,7 +444,7 @@ fn centred_block(ui: &Ui, theme: &Theme, band: Rect, block: &view::Block) {
             },
         );
     }
-    let galley = painter.layout_job(job);
+    let galley = painter.layout_job(layout);
     let at = pos2(
         band.center().x - galley.rect.width() / 2.0,
         band.center().y - galley.rect.height() / 2.0,

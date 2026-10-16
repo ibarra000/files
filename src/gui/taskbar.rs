@@ -4,6 +4,8 @@
 //! app theme egui follows (`AppsUseLightTheme`). The Windows 11 default is
 //! light apps on a dark taskbar, so the tray icon must read this one.
 
+// Win32 FFI: reading the taskbar's theme from the registry.
+#![allow(unsafe_code)]
 #![cfg(windows)]
 
 use std::io;

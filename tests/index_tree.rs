@@ -25,12 +25,12 @@ const TREE_ROOT: &str = "R:\\";
 /// unconventionally named folder.
 fn share() -> FakeDirSource {
     FakeDirSource::new()
-        .with_dir(files::config::CUSTPRO_PATH, &["p12345 cover.pdf"])
+        .with_dir(files::config::FLAT_FIXTURE_PATH, &["p12345 cover.pdf"])
         .with_tree(
             TREE_ROOT,
             &[
-                "11d\\0704\\quote.pdf",
-                "11d\\0704\\drawing.pdf",
+                "abc\\0704\\quote.pdf",
+                "abc\\0704\\design.pdf",
                 "ab12\\spec.pdf",
                 "archive\\2019\\odd name\\11-3-0704 survey.pdf",
             ],
@@ -41,7 +41,7 @@ fn share() -> FakeDirSource {
 fn settings() -> Settings {
     Settings {
         persist: false,
-        ..Settings::for_mapping("jobs", TREE_ROOT, MappingKind::Tree)
+        ..Settings::for_mapping("projects", TREE_ROOT, MappingKind::Tree)
     }
 }
 
@@ -53,8 +53,8 @@ fn mixed_store() -> Arc<IndexStore> {
             vec![
                 files::paths::Mapping {
                     id: MappingId(0),
-                    name: "custompro".into(),
-                    path: "V:\\custpro".into(),
+                    name: "shared".into(),
+                    path: "V:\\shared".into(),
                     kind: MappingKind::Flat,
                     enabled: true,
                     refresh: Default::default(),
@@ -62,7 +62,7 @@ fn mixed_store() -> Arc<IndexStore> {
                 },
                 files::paths::Mapping {
                     id: MappingId(1),
-                    name: "jobs".into(),
+                    name: "projects".into(),
                     path: TREE_ROOT.into(),
                     kind: MappingKind::Tree,
                     enabled: true,
@@ -78,7 +78,7 @@ fn mixed_store() -> Arc<IndexStore> {
 
 fn tree_store() -> Arc<IndexStore> {
     Arc::new(IndexStore::single(
-        "jobs",
+        "projects",
         std::path::Path::new(TREE_ROOT),
         MappingKind::Tree,
     ))
@@ -129,7 +129,7 @@ fn found(store: &IndexStore, query: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// The actor walks the tree, publishes it, and a nested file is found by code.
+/// The actor walks the tree, publishes it, and a nested file is found by name.
 #[test]
 fn the_actor_walks_the_tree_and_the_file_becomes_findable() {
     let store = tree_store();
@@ -150,7 +150,7 @@ fn the_actor_walks_the_tree_and_the_file_becomes_findable() {
     actor.shutdown(Duration::from_millis(500));
 }
 
-/// A code matching a folder name finds the files inside it.
+/// A search term matching a folder name finds the files inside it.
 #[test]
 fn a_code_naming_a_folder_finds_its_contents_through_the_actor() {
     let store = tree_store();
@@ -166,8 +166,8 @@ fn a_code_naming_a_folder_finds_its_contents_through_the_actor() {
     assert_eq!(
         got,
         vec![
-            "R:\\11d\\0704\\drawing.pdf",
-            "R:\\11d\\0704\\quote.pdf",
+            "R:\\abc\\0704\\design.pdf",
+            "R:\\abc\\0704\\quote.pdf",
             // Matched on its own name, which contains `0704`.
             "R:\\archive\\2019\\odd name\\11-3-0704 survey.pdf",
         ]
@@ -217,7 +217,7 @@ fn the_tree_actor_leaves_the_flat_index_alone() {
 #[test]
 fn an_unreadable_folder_degrades_the_tree_and_names_itself() {
     let src = share();
-    src.fail_dir("R:\\11d\\0704", EnumError::AccessDenied(5));
+    src.fail_dir("R:\\abc\\0704", EnumError::AccessDenied(5));
     let store = tree_store();
     let mut actor = tree_actor(src, Arc::clone(&store));
 
@@ -236,7 +236,7 @@ fn an_unreadable_folder_degrades_the_tree_and_names_itself() {
     let status = store.first_tree_slot().status();
     let coverage = status.coverage.as_ref().expect("coverage is reported");
     assert_eq!(coverage.holes, 1);
-    assert!(coverage.examples.iter().any(|e| e == "11d\\0704"));
+    assert!(coverage.examples.iter().any(|e| e == "abc\\0704"));
     // The rest of the share is still searchable.
     assert_eq!(found(&store, "spec"), vec!["R:\\ab12\\spec.pdf"]);
     actor.shutdown(Duration::from_millis(500));
@@ -246,7 +246,7 @@ fn an_unreadable_folder_degrades_the_tree_and_names_itself() {
 #[test]
 fn a_folder_that_vanished_mid_walk_does_not_degrade_the_tree() {
     let src = share();
-    src.fail_dir("R:\\11d\\0704", EnumError::PathNotFound(3));
+    src.fail_dir("R:\\abc\\0704", EnumError::PathNotFound(3));
     let store = tree_store();
     let mut actor = tree_actor(src, Arc::clone(&store));
 
@@ -381,7 +381,7 @@ fn persisting_settings(cache: &std::path::Path) -> Settings {
     Settings {
         persist: true,
         cache_dir: Some(cache.to_path_buf()),
-        ..Settings::for_mapping("jobs", TREE_ROOT, MappingKind::Tree)
+        ..Settings::for_mapping("projects", TREE_ROOT, MappingKind::Tree)
     }
 }
 
@@ -650,14 +650,14 @@ fn a_tree_actor_will_not_read_a_flat_cache_written_for_the_same_root() {
 
     // A flat actor indexing the tree root, so both use the same cache key.
     let flat_store = Arc::new(IndexStore::single(
-        "custompro",
+        "shared",
         std::path::Path::new(TREE_ROOT),
         MappingKind::Flat,
     ));
     let flat_settings = Settings {
         persist: true,
         cache_dir: Some(cache.path().to_path_buf()),
-        ..Settings::for_mapping("custompro", TREE_ROOT, MappingKind::Flat)
+        ..Settings::for_mapping("shared", TREE_ROOT, MappingKind::Flat)
     };
     let ctx = IndexContext::new(
         flat_settings,
@@ -964,7 +964,7 @@ mod live {
 
         // Two folders change, but the watcher reports only an overflow.
         src.add_file("R:\\ab12", "one.pdf");
-        src.add_file("R:\\11d\\0704", "two.pdf");
+        src.add_file("R:\\abc\\0704", "two.pdf");
         watcher.push(WatchEvent::Overflow);
 
         assert!(

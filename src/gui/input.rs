@@ -26,6 +26,9 @@
 //! only on the Ctrl+Alt path. If an `Event::Text` is present in the same frame,
 //! [`translate`] skips the reconstruction so the two never both fire.
 
+// Win32 FFI: the keyboard layout and state, for AltGr input.
+#![allow(unsafe_code)]
+
 use eframe::egui;
 
 use crate::app::event::AppEvent;
@@ -490,9 +493,9 @@ mod tests {
 
     #[test]
     fn a_paste_arrives_whole_rather_than_as_characters() {
-        let events = translate(&input_with(vec![egui::Event::Paste("11-D-0704".into())]));
+        let events = translate(&input_with(vec![egui::Event::Paste("AB-C-0704".into())]));
         assert!(
-            matches!(events.as_slice(), [AppEvent::Paste(text)] if text == "11-D-0704"),
+            matches!(events.as_slice(), [AppEvent::Paste(text)] if text == "AB-C-0704"),
             "{events:?}"
         );
     }

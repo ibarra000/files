@@ -10,6 +10,9 @@
 //! quoted first argument as a window title and `&` in a path breaks its
 //! command line; `ShellExecuteW` takes the path as a parameter.
 
+// Win32 FFI: ShellExecuteW and AllowSetForegroundWindow.
+#![allow(unsafe_code)]
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -261,7 +264,7 @@ fn path_exts() -> Vec<String> {
     }
     let raw = std::env::var("PATHEXT")
         .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC".to_owned());
-    // Empty first, so `avwin.exe` is found as written before `avwin.exe.exe`.
+    // Empty first, so `sketch.exe` is found as written before `sketch.exe.exe`.
     std::iter::once(String::new())
         .chain(
             raw.split(';')
@@ -326,11 +329,11 @@ mod tests {
     #[test]
     fn a_name_that_already_has_its_extension_is_not_given_a_second() {
         let dir = tempfile::tempdir().expect("a scratch directory");
-        std::fs::write(dir.path().join("avwin.exe"), b"").unwrap();
+        std::fs::write(dir.path().join("sketch.exe"), b"").unwrap();
         let exts = vec![String::new(), ".exe".to_owned()];
         assert_eq!(
-            resolve_on_path("avwin.exe", &[dir.path().to_path_buf()], &exts),
-            Some(dir.path().join("avwin.exe"))
+            resolve_on_path("sketch.exe", &[dir.path().to_path_buf()], &exts),
+            Some(dir.path().join("sketch.exe"))
         );
     }
 
@@ -366,9 +369,9 @@ mod tests {
     #[test]
     fn every_error_carries_a_usable_detail() {
         assert!(
-            LaunchError::ViewerNotFound("avwin.exe".into())
+            LaunchError::ViewerNotFound("sketch.exe".into())
                 .detail()
-                .contains("avwin.exe")
+                .contains("sketch.exe")
         );
         assert!(
             LaunchError::NoHandler("PDF".into())
@@ -395,28 +398,22 @@ mod tests {
 
     #[test]
     fn only_a_pdf_is_sent_to_the_configured_viewer() {
-        assert!(is_pdf(r"V:\Documents\custpro\11-d-0704.pdf"));
+        assert!(is_pdf(r"V:\shared\files\ab-c-0704.pdf"));
         assert!(is_pdf(r"V:\a.PDF"), "the extension folds");
-        assert!(!is_pdf(r"R:\11d\11-D-0704 notes.doc"));
-        assert!(!is_pdf(r"R:\11d\drawing.dwg"));
-        assert!(!is_pdf(r"R:\11d\no-extension"));
+        assert!(!is_pdf(r"R:\abc\AB-C-0704 notes.doc"));
+        assert!(!is_pdf(r"R:\abc\photo.tif"));
+        assert!(!is_pdf(r"R:\abc\no-extension"));
     }
 
     #[test]
     fn a_missing_association_names_the_kind_of_file_it_could_not_open() {
-        assert_eq!(extension_of(r"R:	d\drawing.dwg"), "DWG");
-        assert_eq!(extension_of(r"R:	d.PdF"), "PDF");
-        assert_eq!(
-            extension_of(
-                r"R:	d
-o-extension"
-            ),
-            ""
-        );
+        assert_eq!(extension_of(r"R:\abc\photo.tif"), "TIF");
+        assert_eq!(extension_of(r"R:\abc\a.PdF"), "PDF");
+        assert_eq!(extension_of(r"R:\abc\no-extension"), "");
         assert!(
-            LaunchError::NoHandler(extension_of(r"R:	d\drawing.dwg"))
+            LaunchError::NoHandler(extension_of(r"R:\abc\photo.tif"))
                 .detail()
-                .contains("DWG")
+                .contains("TIF")
         );
     }
 
@@ -424,6 +421,6 @@ o-extension"
     /// checked.
     #[test]
     fn probing_for_a_viewer_does_not_panic() {
-        let _ = program_on_path("avwin.exe");
+        let _ = program_on_path("sketch.exe");
     }
 }

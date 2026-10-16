@@ -9,12 +9,12 @@
 //! Checked by [`style::violations`] and applied by tests in every module below.
 //!
 //! * **Sentence case.** Key names, program names, acronyms and configured
-//!   names keep their own spelling: `Enter`, `avwin.exe`, `PDF`, `jobs`.
+//!   names keep their own spelling: `Enter`, `sketch.exe`, `PDF`, `projects`.
 //! * **Fragments or sentences by slot.** The status slot (status line and
 //!   toasts) takes no full stop; the body pane takes whole sentences.
 //! * **`…` (U+2026), never `...`.**
 //! * **` · ` joins independent facts.** ` - ` is not a connector; at footer
-//!   width it is indistinguishable from the hyphen in `11-D-0704`.
+//!   width it is indistinguishable from the hyphen in `AB-C-0704`.
 //! * **Only the first `·`-joined clause is capitalised.** Shared `label()`
 //!   fragments in [`crate::index::store`] stay lowercase and are capitalised
 //!   at the point of use by [`sentence`].
@@ -105,7 +105,7 @@ pub fn plain(block: &Block) -> String {
 /// Capitalises a shared lowercase fragment for the head of a line.
 ///
 /// Only a leading lowercase letter changes; fragments starting with a path,
-/// switch or code are returned unchanged.
+/// switch or search term are returned unchanged.
 pub fn sentence(fragment: &str) -> String {
     let mut chars = fragment.chars();
     match chars.next() {
@@ -125,11 +125,11 @@ mod tests {
         assert_eq!(sentence("no live updates"), "No live updates");
     }
 
-    /// Lowercase program names such as `avwin.exe` would still be changed, so
+    /// Lowercase program names such as `sketch.exe` would still be changed, so
     /// callers must not pass them.
     #[test]
     fn a_fragment_that_does_not_start_with_a_word_keeps_its_spelling() {
-        for text in ["--check-config", "11-D-0704", "PDF is in use", ""] {
+        for text in ["--check-config", "AB-C-0704", "PDF is in use", ""] {
             assert_eq!(sentence(text), text, "{text} was rewritten");
         }
     }

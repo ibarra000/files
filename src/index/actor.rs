@@ -1439,7 +1439,7 @@ fn covered(seeds: &[String], report: &walk::WalkReport) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CUSTPRO_PATH;
+    use crate::config::FLAT_FIXTURE_PATH;
     use crate::index::DirStamp;
     use crate::index::fake_source::{Call, FakeDirSource};
     use crate::index::schedule::{ScanReason, StampHealth};
@@ -1502,7 +1502,7 @@ mod tests {
 
     #[test]
     fn the_actor_publishes_an_initial_snapshot() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf", "b.pdf"]);
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1519,7 +1519,7 @@ mod tests {
 
     #[test]
     fn the_session_is_warmed_before_anything_needs_it() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1540,7 +1540,7 @@ mod tests {
     /// An unchanged stamp avoids a full rescan.
     #[test]
     fn an_unchanged_stamp_avoids_re_enumeration() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
@@ -1552,7 +1552,7 @@ mod tests {
             |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        let scans_after_first = src.list_count(CUSTPRO_PATH);
+        let scans_after_first = src.list_count(FLAT_FIXTURE_PATH);
 
         // Several explicit non-forced refreshes with an unchanged stamp.
         for _ in 0..3 {
@@ -1561,7 +1561,7 @@ mod tests {
         }
 
         assert_eq!(
-            src.list_count(CUSTPRO_PATH),
+            src.list_count(FLAT_FIXTURE_PATH),
             scans_after_first,
             "an unchanged directory must not be re-enumerated"
         );
@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn a_changed_stamp_triggers_a_rescan() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
@@ -1583,7 +1583,7 @@ mod tests {
             Duration::from_secs(3)
         ));
 
-        src.add_file(CUSTPRO_PATH, "b.pdf");
+        src.add_file(FLAT_FIXTURE_PATH, "b.pdf");
         src.set_stamp(Some(DirStamp::new(2, 2)));
         actor.refresh(false);
 
@@ -1600,7 +1600,7 @@ mod tests {
 
     #[test]
     fn a_forced_refresh_bypasses_the_stamp_check() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
@@ -1612,13 +1612,13 @@ mod tests {
             |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        let before = src.list_count(CUSTPRO_PATH);
+        let before = src.list_count(FLAT_FIXTURE_PATH);
 
         actor.refresh(true);
         assert!(
             wait_for(
                 &store,
-                |_| src.list_count(CUSTPRO_PATH) > before,
+                |_| src.list_count(FLAT_FIXTURE_PATH) > before,
                 Duration::from_secs(3)
             ),
             "F5 must re-enumerate regardless of the stamp"
@@ -1629,7 +1629,7 @@ mod tests {
     /// An error must never discard the data already held.
     #[test]
     fn a_failing_refresh_keeps_serving_the_previous_snapshot() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf", "b.pdf"]);
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1659,7 +1659,7 @@ mod tests {
 
     #[test]
     fn a_refresh_report_reaches_the_ui() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::fixture());
         let (tx, rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1687,7 +1687,7 @@ mod tests {
 
     #[test]
     fn shutdown_is_prompt() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         let store = Arc::new(IndexStore::fixture());
         let (tx, _rx) = bounded(256);
         let tx = Events::headless(tx);
@@ -1706,7 +1706,7 @@ mod tests {
     /// Shutdown reaches a scan that is already running, via the stop flag.
     #[test]
     fn shutdown_reaches_a_scan_that_is_already_running() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         // Make the listing block, not the probe: `probe_stamp` takes no
         // cancellation token, so hanging it would test nothing here.
         src.set_stamp_error(Some(EnumError::Unsupported(50)));
@@ -1741,7 +1741,7 @@ mod tests {
     /// rescanned on the floor, not on every probe interval.
     #[test]
     fn a_share_that_will_not_report_a_stamp_is_rescanned_on_the_floor_not_the_probe_interval() {
-        let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
+        let src = FakeDirSource::new().with_synthetic(FLAT_FIXTURE_PATH, 50);
         src.set_stamp_supported(false);
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1756,7 +1756,7 @@ mod tests {
         // Three floors of wall clock; on the probe cadence that would be
         // around sixty enumerations.
         std::thread::sleep(FLOOR * 3);
-        let scans = src.list_count(CUSTPRO_PATH);
+        let scans = src.list_count(FLAT_FIXTURE_PATH);
         actor.shutdown(Duration::from_millis(500));
 
         assert!(
@@ -1771,7 +1771,7 @@ mod tests {
 
     #[test]
     fn a_transient_stamp_failure_never_triggers_an_enumeration() {
-        let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
+        let src = FakeDirSource::new().with_synthetic(FLAT_FIXTURE_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1782,12 +1782,12 @@ mod tests {
             |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        let after_first = src.list_count(CUSTPRO_PATH);
+        let after_first = src.list_count(FLAT_FIXTURE_PATH);
 
         src.set_stamp_error(Some(EnumError::Transient(53)));
         // Well inside one floor, so nothing else may cause a scan.
         std::thread::sleep(FLOOR / 2);
-        let scans = src.list_count(CUSTPRO_PATH);
+        let scans = src.list_count(FLAT_FIXTURE_PATH);
         actor.shutdown(Duration::from_millis(500));
 
         assert_eq!(
@@ -1799,7 +1799,7 @@ mod tests {
     /// A failing first scan is retried no faster than the minimum spacing.
     #[test]
     fn a_failed_first_scan_is_retried_no_faster_than_the_minimum_spacing() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_error(Some(EnumError::Transient(53)));
         let store = Arc::new(IndexStore::fixture());
         let cadence = Cadence::fast();
@@ -1808,7 +1808,7 @@ mod tests {
 
         let window = Duration::from_millis(300);
         std::thread::sleep(window);
-        let attempts = src.list_count(CUSTPRO_PATH);
+        let attempts = src.list_count(FLAT_FIXTURE_PATH);
         actor.shutdown(Duration::from_millis(500));
 
         assert!(attempts >= 2, "it must keep trying, got {attempts}");
@@ -1822,7 +1822,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_stamp_is_never_re_enumerated_however_long_the_app_runs() {
-        let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
+        let src = FakeDirSource::new().with_synthetic(FLAT_FIXTURE_PATH, 50);
         src.set_stamp(Some(DirStamp::new(7, 7)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1833,12 +1833,12 @@ mod tests {
             |s| s.first_flat_slot().as_flat().is_some(),
             Duration::from_secs(3)
         ));
-        let after_first = src.list_count(CUSTPRO_PATH);
+        let after_first = src.list_count(FLAT_FIXTURE_PATH);
 
         // Most of a floor: many probe intervals, no enumeration.
         std::thread::sleep(Duration::from_millis(300));
-        let scans = src.list_count(CUSTPRO_PATH);
-        let probes = src.stamp_count(CUSTPRO_PATH);
+        let scans = src.list_count(FLAT_FIXTURE_PATH);
+        let probes = src.stamp_count(FLAT_FIXTURE_PATH);
         actor.shutdown(Duration::from_millis(500));
 
         assert_eq!(scans, after_first, "nothing changed, so nothing to rebuild");
@@ -1850,7 +1850,7 @@ mod tests {
 
     #[test]
     fn sixteen_f5_presses_produce_one_enumeration() {
-        let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 50);
+        let src = FakeDirSource::new().with_synthetic(FLAT_FIXTURE_PATH, 50);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1863,13 +1863,13 @@ mod tests {
         ));
         // Settle, so the initial scan is not still in flight.
         std::thread::sleep(Duration::from_millis(50));
-        let before = src.list_count(CUSTPRO_PATH);
+        let before = src.list_count(FLAT_FIXTURE_PATH);
 
         for _ in 0..16 {
             actor.refresh(true);
         }
         std::thread::sleep(Duration::from_millis(100));
-        let after = src.list_count(CUSTPRO_PATH);
+        let after = src.list_count(FLAT_FIXTURE_PATH);
         actor.shutdown(Duration::from_millis(500));
 
         assert!(after > before, "F5 must do something");
@@ -1884,7 +1884,7 @@ mod tests {
     /// answer must not replace a populated index.
     #[test]
     fn an_empty_listing_does_not_immediately_replace_a_populated_index() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1896,7 +1896,7 @@ mod tests {
             Duration::from_secs(3)
         ));
 
-        src.set_dir(CUSTPRO_PATH, &[]);
+        src.set_dir(FLAT_FIXTURE_PATH, &[]);
         actor.refresh(true);
         std::thread::sleep(Duration::from_millis(60));
 
@@ -1910,7 +1910,7 @@ mod tests {
 
     #[test]
     fn a_genuinely_emptied_directory_is_accepted_on_the_second_answer() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1922,7 +1922,7 @@ mod tests {
             Duration::from_secs(3)
         ));
 
-        src.set_dir(CUSTPRO_PATH, &[]);
+        src.set_dir(FLAT_FIXTURE_PATH, &[]);
         actor.refresh(true);
         assert!(
             wait_for(
@@ -1937,7 +1937,7 @@ mod tests {
 
     #[test]
     fn the_scan_reason_reaches_the_ui() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let mut actor =
@@ -1965,7 +1965,7 @@ mod tests {
     fn the_decision_log_records_why_each_scan_happened() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.log");
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let store = Arc::new(IndexStore::fixture());
         let context =
@@ -2012,7 +2012,7 @@ mod tests {
     fn a_warm_start_with_a_matching_stamp_serves_the_cache_without_enumerating() {
         let cache = tempfile::tempdir().unwrap();
         let stamp = DirStamp::new(11, 11);
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf", "b.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf", "b.pdf"]);
         src.set_stamp(Some(stamp));
 
         // First run: populate the cache.
@@ -2065,7 +2065,7 @@ mod tests {
             Duration::from_secs(3)
         ));
         std::thread::sleep(Duration::from_millis(100));
-        let scans = src.list_count(CUSTPRO_PATH);
+        let scans = src.list_count(FLAT_FIXTURE_PATH);
         let origin = store.first_flat_slot().status().origin;
         actor.shutdown(Duration::from_millis(500));
 
@@ -2079,7 +2079,7 @@ mod tests {
     #[test]
     fn a_warm_start_whose_directory_moved_re_enumerates() {
         let cache = tempfile::tempdir().unwrap();
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(11, 11)));
 
         let settings = || Settings {
@@ -2109,7 +2109,7 @@ mod tests {
         }
 
         // Something was added while the app was closed.
-        src.add_file(CUSTPRO_PATH, "b.pdf");
+        src.add_file(FLAT_FIXTURE_PATH, "b.pdf");
         src.bump_stamp();
         src.clear_calls();
 
@@ -2143,7 +2143,7 @@ mod tests {
     /// A source without stamp support is reported as degraded.
     #[test]
     fn a_source_with_no_stamp_support_is_marked_degraded() {
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp_supported(false);
         let store = Arc::new(IndexStore::fixture());
         let mut actor = spawn(fast_ctx(src, Arc::clone(&store)), draining_events()).unwrap();
@@ -2172,7 +2172,7 @@ mod tests {
     #[test]
     fn a_rejected_cache_is_reported_rather_than_silently_ignored() {
         let cache = tempfile::tempdir().unwrap();
-        let src = FakeDirSource::new().with_dir(CUSTPRO_PATH, &["a.pdf"]);
+        let src = FakeDirSource::new().with_dir(FLAT_FIXTURE_PATH, &["a.pdf"]);
         src.set_stamp(Some(DirStamp::new(1, 1)));
         let settings = Settings {
             persist: true,
@@ -2228,9 +2228,9 @@ mod tests {
 
     #[test]
     fn scan_once_returns_a_snapshot_and_its_stats() {
-        let src = FakeDirSource::new().with_synthetic(CUSTPRO_PATH, 500);
+        let src = FakeDirSource::new().with_synthetic(FLAT_FIXTURE_PATH, 500);
         let (snapshot, stats) =
-            scan_once(&src, Path::new(CUSTPRO_PATH), &ListOpts::default()).unwrap();
+            scan_once(&src, Path::new(FLAT_FIXTURE_PATH), &ListOpts::default()).unwrap();
         assert_eq!(snapshot.len(), 500);
         assert_eq!(stats.entries, 500);
     }

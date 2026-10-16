@@ -42,15 +42,15 @@ pub enum View<'a> {
 /// The cached report and any run in progress.
 pub struct Reporter {
     state: State,
-    /// Receiver for the running job, if any.
-    job: Option<Receiver<String>>,
+    /// Receiver for the run in progress, if any.
+    running: Option<Receiver<String>>,
 }
 
 impl Default for Reporter {
     fn default() -> Self {
         Self {
             state: State::Idle,
-            job: None,
+            running: None,
         }
     }
 }
@@ -58,7 +58,7 @@ impl Default for Reporter {
 impl Reporter {
     /// Collects a finished run, if any. Call once per frame.
     pub fn poll(&mut self, now: Instant) {
-        let Some(rx) = &self.job else {
+        let Some(rx) = &self.running else {
             return;
         };
         match rx.try_recv() {
@@ -67,14 +67,14 @@ impl Reporter {
                     text: text.into(),
                     at: now,
                 };
-                self.job = None;
+                self.running = None;
             }
             Err(TryRecvError::Empty) => {}
             // The thread exited without sending (`spawn` prevents this).
             // Fall back to Idle rather than spinning indefinitely.
             Err(TryRecvError::Disconnected) => {
                 self.state = State::Idle;
-                self.job = None;
+                self.running = None;
             }
         }
     }
@@ -89,7 +89,7 @@ impl Reporter {
         now: Instant,
         wake: impl FnOnce() + Send + 'static,
     ) {
-        if !wanted || self.job.is_some() {
+        if !wanted || self.running.is_some() {
             return;
         }
         let fresh = match &self.state {
@@ -102,7 +102,7 @@ impl Reporter {
             return;
         }
         self.state = State::Running;
-        self.job = Some(spawn(settings.clone(), hotkey, wake));
+        self.running = Some(spawn(settings.clone(), hotkey, wake));
     }
 
     /// Starts a run regardless of the cache, keeping the old report visible.
@@ -112,14 +112,14 @@ impl Reporter {
         hotkey: Option<Result<(), String>>,
         wake: impl FnOnce() + Send + 'static,
     ) {
-        if self.job.is_some() {
+        if self.running.is_some() {
             return;
         }
         self.state = match std::mem::replace(&mut self.state, State::Running) {
             State::Ready { text, .. } | State::Refreshing { text } => State::Refreshing { text },
             _ => State::Running,
         };
-        self.job = Some(spawn(settings.clone(), hotkey, wake));
+        self.running = Some(spawn(settings.clone(), hotkey, wake));
     }
 
     pub fn view(&self) -> View<'_> {
@@ -188,7 +188,7 @@ mod tests {
                 text: text.into(),
                 at,
             },
-            job: None,
+            running: None,
         }
     }
 
@@ -208,7 +208,7 @@ mod tests {
         reporter.wanted(true, &Settings::fixture(), None, now + TTL / 2, move || {
             flag.store(true, std::sync::atomic::Ordering::Relaxed)
         });
-        assert!(reporter.job.is_none(), "a second run was started");
+        assert!(reporter.running.is_none(), "a second run was started");
         assert!(!woken.load(std::sync::atomic::Ordering::Relaxed));
         assert_eq!(reporter.view(), View::Ready("all fine"));
     }
@@ -218,7 +218,7 @@ mod tests {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
         reporter.wanted(true, &Settings::fixture(), None, now + TTL * 2, || {});
-        assert!(reporter.job.is_some(), "no second run was started");
+        assert!(reporter.running.is_some(), "no second run was started");
         assert_eq!(reporter.view(), View::Waiting);
     }
 
@@ -227,7 +227,7 @@ mod tests {
         let now = Instant::now();
         let mut reporter = ready("all fine", now);
         reporter.wanted(false, &Settings::fixture(), None, now + TTL * 2, || {});
-        assert!(reporter.job.is_none());
+        assert!(reporter.running.is_none());
         assert_eq!(reporter.view(), View::Ready("all fine"));
     }
 
@@ -252,7 +252,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut reporter = Reporter {
             state: State::Running,
-            job: Some(rx),
+            running: Some(rx),
         };
         reporter.poll(now);
         assert_eq!(reporter.view(), View::Waiting, "polled an empty channel");
@@ -260,7 +260,7 @@ mod tests {
         tx.send("a fresh reading".to_owned()).unwrap();
         reporter.poll(now);
         assert_eq!(reporter.view(), View::Ready("a fresh reading"));
-        assert!(reporter.job.is_none(), "the finished job was kept");
+        assert!(reporter.running.is_none(), "the finished run was kept");
     }
 
     /// A thread that exits without sending returns the reporter to Idle.
@@ -269,13 +269,13 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let mut reporter = Reporter {
             state: State::Running,
-            job: Some(rx),
+            running: Some(rx),
         };
         drop(tx);
         reporter.poll(Instant::now());
-        assert!(reporter.job.is_none());
+        assert!(reporter.running.is_none());
         // A new request starts a new run.
         reporter.wanted(true, &Settings::fixture(), None, Instant::now(), || {});
-        assert!(reporter.job.is_some());
+        assert!(reporter.running.is_some());
     }
 }

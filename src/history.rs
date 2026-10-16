@@ -18,17 +18,17 @@ use std::thread::JoinHandle;
 
 use crate::util::latest_slot::LatestSlot;
 
-/// Maximum number of remembered codes.
+/// Maximum number of remembered searches.
 pub const MAX_ENTRIES: usize = 200;
 
 /// Longest entry accepted, in bytes, so a corrupt file cannot flood the
 /// search box.
 const MAX_ENTRY_LEN: usize = 512;
 
-/// Previously used codes, newest first, plus the browsing cursor.
+/// Previously used searches, newest first, plus the browsing cursor.
 ///
 /// The cursor is `Some` only while the user is browsing; nothing on screen may
-/// show these codes while it is `None`.
+/// show these searches while it is `None`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
     entries: Vec<String>,
@@ -76,7 +76,7 @@ impl History {
         self.cursor.is_some()
     }
 
-    /// Records a code at the front of the list. Returns whether the list
+    /// Records a search at the front of the list. Returns whether the list
     /// changed.
     ///
     /// Duplicates are removed case-insensitively, matching the shares; the
@@ -93,10 +93,10 @@ impl History {
             return false;
         }
 
-        // A longer code extending the head replaces it, so `11-D` followed by
-        // `11-D-0704` leaves one entry. Only the head is checked, since only
+        // A longer search extending the head replaces it, so `AB-C` followed by
+        // `AB-C-0704` leaves one entry. Only the head is checked, since only
         // the previous entry can be part of the same typing sequence.
-        // Shortening a code is intentional and keeps both entries.
+        // Shortening a search is intentional and keeps both entries.
         if self.supersedes_head(entry) {
             self.entries[0] = entry.to_string();
             self.cursor = None;
@@ -121,7 +121,7 @@ impl History {
             && entry.as_bytes()[..head.len()].eq_ignore_ascii_case(head.as_bytes())
     }
 
-    /// Starts browsing at the newest code. Returns `None` when history is
+    /// Starts browsing at the newest search. Returns `None` when history is
     /// empty.
     ///
     /// Browsing only starts from an empty field, so no draft is saved.
@@ -168,7 +168,7 @@ impl History {
         self.entries.get(self.cursor?).map(String::as_str)
     }
 
-    /// Stops browsing, keeping the recalled code.
+    /// Stops browsing, keeping the recalled search.
     pub fn accept(&mut self) {
         self.cursor = None;
     }
@@ -216,7 +216,7 @@ pub fn default_path() -> Option<PathBuf> {
     Some(dir.join("files").join("history.txt"))
 }
 
-/// Reads the stored codes, newest first.
+/// Reads the stored searches, newest first.
 ///
 /// Never fails: an unreadable file yields nothing and invalid lines are
 /// skipped.
@@ -237,7 +237,7 @@ pub fn load(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Writes the codes, newest first.
+/// Writes the searches, newest first.
 ///
 /// Writes a temp file, calls `sync_all`, then renames over the destination.
 /// Renaming over is safe because this file is never memory-mapped (unlike the
@@ -334,15 +334,15 @@ mod tests {
     }
 
     #[test]
-    fn the_newest_code_is_first() {
+    fn the_newest_search_is_first() {
         let mut h = History::new();
-        h.record("11-D-0704");
+        h.record("AB-C-0704");
         h.record("P12345-001");
-        assert_eq!(h.entries(), ["P12345-001", "11-D-0704"]);
+        assert_eq!(h.entries(), ["P12345-001", "AB-C-0704"]);
     }
 
     #[test]
-    fn repeating_a_code_moves_it_to_the_front_rather_than_duplicating_it() {
+    fn repeating_a_search_moves_it_to_the_front_rather_than_duplicating_it() {
         let mut h = history(&["c", "b", "a"]);
         assert!(h.record("a"));
         assert_eq!(h.entries(), ["a", "c", "b"]);
@@ -350,55 +350,55 @@ mod tests {
     }
 
     #[test]
-    fn the_same_code_in_different_case_is_the_same_job() {
-        let mut h = history(&["11-D-0704"]);
-        h.record("11-d-0704");
-        assert_eq!(h.entries(), ["11-d-0704"], "newest spelling wins");
+    fn the_same_search_in_different_case_is_the_same_entry() {
+        let mut h = history(&["AB-C-0704"]);
+        h.record("ab-c-0704");
+        assert_eq!(h.entries(), ["ab-c-0704"], "newest spelling wins");
         assert_eq!(h.len(), 1);
     }
 
     /// Covers prefixes recorded when typing pauses past the quiet period.
     #[test]
-    fn a_code_typed_on_the_way_to_a_longer_one_is_superseded_by_it() {
+    fn a_search_typed_on_the_way_to_a_longer_one_is_superseded_by_it() {
         let mut h = History::new();
-        for step in ["11", "11-D", "11-D-07", "11-D-0704"] {
+        for step in ["AB", "AB-C", "AB-C-07", "AB-C-0704"] {
             h.record(step);
         }
-        assert_eq!(h.entries(), ["11-D-0704"]);
-        assert_eq!(h.len(), 1, "the list kept the walk as well as the code");
+        assert_eq!(h.entries(), ["AB-C-0704"]);
+        assert_eq!(h.len(), 1, "the list kept the walk as well as the search");
     }
 
     #[test]
     fn only_the_entry_just_recorded_can_be_superseded() {
-        let mut h = history(&["P12345-001", "11-D"]);
-        h.record("11-D-0704");
-        assert_eq!(h.entries(), ["11-D-0704", "P12345-001", "11-D"]);
+        let mut h = history(&["P12345-001", "AB-C"]);
+        h.record("AB-C-0704");
+        assert_eq!(h.entries(), ["AB-C-0704", "P12345-001", "AB-C"]);
     }
 
     #[test]
     fn a_prefix_in_the_other_case_is_still_a_prefix() {
-        let mut h = history(&["11-d"]);
-        h.record("11-D-0704");
-        assert_eq!(h.entries(), ["11-D-0704"]);
+        let mut h = history(&["ab-c"]);
+        h.record("AB-C-0704");
+        assert_eq!(h.entries(), ["AB-C-0704"]);
     }
 
     #[test]
-    fn shortening_a_code_keeps_both() {
-        let mut h = history(&["11-D-0704"]);
-        h.record("11-D");
-        assert_eq!(h.entries(), ["11-D", "11-D-0704"]);
+    fn shortening_a_search_keeps_both() {
+        let mut h = history(&["AB-C-0704"]);
+        h.record("AB-C");
+        assert_eq!(h.entries(), ["AB-C", "AB-C-0704"]);
     }
 
-    /// Known trade-off: a distinct code that extends the head still replaces it.
+    /// Known trade-off: a distinct search that extends the head still replaces it.
     #[test]
-    fn a_longer_code_sharing_a_prefix_replaces_it() {
-        let mut h = history(&["11-D-07"]);
-        h.record("11-D-0704");
-        assert_eq!(h.entries(), ["11-D-0704"]);
+    fn a_longer_search_sharing_a_prefix_replaces_it() {
+        let mut h = history(&["AB-C-07"]);
+        h.record("AB-C-0704");
+        assert_eq!(h.entries(), ["AB-C-0704"]);
     }
 
     #[test]
-    fn recording_the_code_already_at_the_front_changes_nothing() {
+    fn recording_the_search_already_at_the_front_changes_nothing() {
         let mut h = history(&["a"]);
         assert!(!h.record("a"));
     }
@@ -416,10 +416,10 @@ mod tests {
     fn the_list_is_capped() {
         let mut h = History::new();
         for i in 0..(MAX_ENTRIES + 50) {
-            h.record(&format!("code-{i}"));
+            h.record(&format!("search-{i}"));
         }
         assert_eq!(h.len(), MAX_ENTRIES);
-        assert_eq!(h.entries()[0], format!("code-{}", MAX_ENTRIES + 49));
+        assert_eq!(h.entries()[0], format!("search-{}", MAX_ENTRIES + 49));
     }
 
     #[test]
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn accepting_keeps_the_recalled_code() {
+    fn accepting_keeps_the_recalled_search() {
         let mut h = history(&["a"]);
         h.begin();
         h.accept();
@@ -532,10 +532,10 @@ mod tests {
         let path = dir.path().join("history.txt");
 
         let mut writer = spawn_writer(path.clone()).unwrap();
-        writer.store(Arc::new(vec!["11-D-0704".to_string()]));
+        writer.store(Arc::new(vec!["AB-C-0704".to_string()]));
         writer.shutdown();
 
-        assert_eq!(load(&path), ["11-D-0704"]);
+        assert_eq!(load(&path), ["AB-C-0704"]);
     }
 
     #[test]

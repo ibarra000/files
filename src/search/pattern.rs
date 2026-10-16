@@ -189,14 +189,14 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_plain_job_code() {
+    fn accepts_a_plain_search_term() {
         assert_eq!(
             wildcard_for(&Query::contains("p12345")).unwrap(),
             "*p12345*"
         );
         assert_eq!(
-            wildcard_for(&Query::contains("11-D-0704")).unwrap(),
-            "*11-D-0704*"
+            wildcard_for(&Query::contains("AB-C-0704")).unwrap(),
+            "*AB-C-0704*"
         );
         assert_eq!(
             wildcard_for(&Query::contains("report_a1")).unwrap(),
@@ -357,7 +357,7 @@ mod tests {
         assert_eq!(wc("p12345 ext:pdf"), "*p12345*.pdf");
         assert_eq!(wc("p12345* ext:pdf"), "p12345*.pdf");
         // No alternation in an NT expression, and one pattern per call.
-        assert_eq!(wc("p12345 ext:dwg,pdf"), "*p12345*");
+        assert_eq!(wc("p12345 ext:pdf,tif"), "*p12345*");
     }
 
     /// A folder has no extension, so a pattern for folders must not carry one.
@@ -373,14 +373,14 @@ mod tests {
     #[test]
     fn confirms_narrows_the_loose_pattern_back_to_what_was_asked_for() {
         let trailing = Query::parse("*p12345");
-        assert!(confirms("job-p12345.pdf", &trailing));
+        assert!(confirms("item-p12345.pdf", &trailing));
         assert!(
-            !confirms("p12345-job.pdf", &trailing),
+            !confirms("p12345-item.pdf", &trailing),
             "not a trailing match"
         );
 
-        let several = Query::parse("p12345 ext:dwg,pdf");
-        assert!(confirms("p12345.dwg", &several));
+        let several = Query::parse("p12345 ext:pdf,tif");
+        assert!(confirms("p12345.tif", &several));
         assert!(!confirms("p12345.txt", &several), "not an asked-for type");
     }
 
@@ -391,9 +391,9 @@ mod tests {
         let names = [
             "p12345",
             "p12345.pdf",
-            "p12345.dwg",
-            "job-p12345.pdf",
-            "p12345-job.pdf",
+            "p12345.tif",
+            "item-p12345.pdf",
+            "p12345-item.pdf",
             "p12345.rev2.pdf",
             "unrelated.pdf",
         ];
@@ -404,7 +404,7 @@ mod tests {
             "p12345 ext:pdf",
             "p12345* ext:pdf",
             "*p12345 ext:pdf",
-            "p12345 ext:dwg,pdf",
+            "p12345 ext:pdf,tif",
         ] {
             let q = Query::parse(line);
             let pattern = wildcard_for(&q).unwrap();
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn every_accepted_query_produces_a_pattern_with_exactly_two_stars() {
-        for q in ["p12345", "11-D-0704", "a b c1", "o'brien1"] {
+        for q in ["p12345", "AB-C-0704", "a b c1", "o'brien1"] {
             let p = wildcard_for(&Query::contains(q)).unwrap();
             assert_eq!(p.matches('*').count(), 2);
             assert!(p.starts_with('*') && p.ends_with('*'));

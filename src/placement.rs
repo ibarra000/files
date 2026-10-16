@@ -129,7 +129,7 @@ pub fn forget(path: &Path) -> Result<(), PlacementError> {
 
 /// A request to the writer thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Job {
+enum Task {
     At(i32, i32),
     Forget,
 }
@@ -140,19 +140,19 @@ enum Job {
 /// makes [`Writer::store`] cheap enough to call on every frame of a drag,
 /// even when `%APPDATA%` is on a network share.
 pub struct Writer {
-    slot: Arc<LatestSlot<Job>>,
+    slot: Arc<LatestSlot<Task>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Writer {
     /// Queues a position, replacing any not yet written.
     pub fn store(&self, at: (i32, i32)) {
-        self.slot.put(Job::At(at.0, at.1));
+        self.slot.put(Task::At(at.0, at.1));
     }
 
     /// Queues the removal of the remembered position.
     pub fn forget(&self) {
-        self.slot.put(Job::Forget);
+        self.slot.put(Task::Forget);
     }
 
     /// Stops the thread, waiting without a timeout for any pending write, as
@@ -173,16 +173,16 @@ impl Drop for Writer {
 
 /// Starts the writer for `path`.
 pub fn spawn_writer(path: PathBuf) -> std::io::Result<Writer> {
-    let slot = Arc::new(LatestSlot::<Job>::new());
+    let slot = Arc::new(LatestSlot::<Task>::new());
     let worker = Arc::clone(&slot);
     let handle = std::thread::Builder::new()
         .name("files-placement".into())
         .spawn(move || {
-            while let Some(job) = worker.take_blocking() {
+            while let Some(task) = worker.take_blocking() {
                 // Best effort: a failed write only loses the position.
-                let _ = match job {
-                    Job::At(left, top) => save(&path, (left, top)),
-                    Job::Forget => forget(&path),
+                let _ = match task {
+                    Task::At(left, top) => save(&path, (left, top)),
+                    Task::Forget => forget(&path),
                 };
             }
         })?;

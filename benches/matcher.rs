@@ -25,11 +25,11 @@ use files::index::tree::{SegmentBuilder, TreeIndex};
 use files::search::{matcher, pages};
 use files::util::cancel::{CancelToken, Epoch};
 
-/// A listing shaped like the real one: job codes with a suffix.
+/// A listing shaped like the real one: numbered names with a suffix.
 fn synthetic(n: usize) -> Snapshot {
     let mut b = SnapshotBuilder::with_capacity("V:\\", n, 40);
     for i in 0..n {
-        b.push_str(&format!("job_{i:07}_{}_report.pdf", i % 997));
+        b.push_str(&format!("item_{i:07}_{}_report.pdf", i % 997));
     }
     b.finish(SystemTime::UNIX_EPOCH, 0, None)
 }
@@ -49,7 +49,7 @@ fn simd_versus_naive(c: &mut Criterion) {
             b.iter(|| {
                 matcher::search(
                     &snap,
-                    &Query::contains("job_0012345"),
+                    &Query::contains("item_0012345"),
                     kind,
                     &Hidden::none(),
                     &CancelToken::never(),
@@ -100,10 +100,10 @@ fn query_shape(c: &mut Criterion) {
     // matches nearly every name, so `topk` ranks the whole arena. If it is
     // slow, the fix is an early-out in `topk`, not a higher floor.
     for (label, query) in [
-        ("one_char", "j"),
+        ("one_char", "i"),
         ("rare_zzz", "zzzzzz"),
-        ("short_job", "job"),
-        ("selective", "job_0123456"),
+        ("short_term", "item"),
+        ("selective", "item_0123456"),
         ("dense", "report"),
     ] {
         group.bench_function(label, |b| {
@@ -141,7 +141,7 @@ fn cancellation_latency(c: &mut Criterion) {
                 let started = Instant::now();
                 let _ = matcher::search(
                     &snap,
-                    &Query::contains("job"),
+                    &Query::contains("item"),
                     MatcherKind::Simd,
                     &Hidden::none(),
                     &token,
@@ -154,7 +154,7 @@ fn cancellation_latency(c: &mut Criterion) {
     });
 }
 
-/// Gathering a code's pages, which runs once per Enter against the flat index.
+/// Gathering a base name's pages, which runs once per Enter against the flat index.
 ///
 /// The sweep is uncapped, so this relies on the O(1) name-length prefilter
 /// rejecting almost every entry before the arena is touched.
@@ -164,8 +164,8 @@ fn page_collection(c: &mut Criterion) {
         let snap = synthetic(n);
         group.throughput(Throughput::Elements(n as u64));
         group.bench_with_input(BenchmarkId::new("miss", n), &n, |b, _| {
-            // Common case: no page set for the code, so every entry is rejected.
-            b.iter(|| pages::collect(&snap, "11-D-0704", &CancelToken::never()));
+            // Common case: no page set for the base name, so every entry is rejected.
+            b.iter(|| pages::collect(&snap, "AB-C-0704", &CancelToken::never()));
         });
     }
     group.finish();
@@ -175,7 +175,7 @@ fn page_collection(c: &mut Criterion) {
 /// negligible next to the network I/O.
 fn snapshot_build(c: &mut Criterion) {
     let names: Vec<String> = (0..200_000)
-        .map(|i| format!("job_{i:07}_{}_report.pdf", i % 997))
+        .map(|i| format!("item_{i:07}_{}_report.pdf", i % 997))
         .collect();
 
     let mut group = c.benchmark_group("build");
@@ -204,10 +204,10 @@ fn synthetic_tree(dirs: usize, per_dir: usize) -> TreeIndex {
     let mut files: Vec<String> = Vec::with_capacity(per_dir);
 
     for d in 0..dirs {
-        let rel = format!("{:02}\\{:02}\\job_{d:06}", d % 64, (d / 64) % 64);
+        let rel = format!("{:02}\\{:02}\\item_{d:06}", d % 64, (d / 64) % 64);
         files.clear();
         for f in 0..per_dir {
-            files.push(format!("{d:06}-{f:02} drawing rev a.pdf"));
+            files.push(format!("{d:06}-{f:02} summary rev a.pdf"));
         }
         b.push_dir(&rel, &files);
         if b.arena_bytes() >= SEGMENT_MAX_BYTES {
@@ -263,7 +263,7 @@ fn tree_scaling(c: &mut Criterion) {
                 b.iter(|| {
                     matcher::search_tree(
                         index,
-                        &Query::contains("job_012345"),
+                        &Query::contains("item_012345"),
                         &Hidden::none(),
                         &CancelToken::never(),
                     )

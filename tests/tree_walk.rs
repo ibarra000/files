@@ -54,15 +54,15 @@ fn strs(v: &[String]) -> Vec<&str> {
     v.iter().map(|s| s.as_str()).collect()
 }
 
-/// A job share: codes at the top, per-job subfolders below, one loose file.
+/// A tree share: project folders at the top, numbered subfolders below, one loose file.
 fn tree() -> FakeDirSource {
     FakeDirSource::new().with_tree(
         "R:\\",
         &[
-            "11d\\0704\\quote.pdf",
-            "11d\\0704\\drawing.pdf",
-            "11d\\0705\\quote.pdf",
-            "11d\\notes.txt",
+            "abc\\0704\\quote.pdf",
+            "abc\\0704\\design.pdf",
+            "abc\\0705\\quote.pdf",
+            "abc\\notes.txt",
             "ab12\\spec.pdf",
             "loose.pdf",
         ],
@@ -80,16 +80,16 @@ fn finds_every_file_in_the_tree() {
     let (report, sink) = walk(&tree(), &WalkOpts::default());
 
     assert_eq!(report.files, 6);
-    assert_eq!(report.dirs_visited, 5, "root, 11d, 0704, 0705, ab12");
+    assert_eq!(report.dirs_visited, 5, "root, abc, 0704, 0705, ab12");
     assert!(report.complete(), "{report:?}");
     assert_eq!(
         sink.paths(),
         HashSet::from(
             [
-                "11d\\0704\\quote.pdf",
-                "11d\\0704\\drawing.pdf",
-                "11d\\0705\\quote.pdf",
-                "11d\\notes.txt",
+                "abc\\0704\\quote.pdf",
+                "abc\\0704\\design.pdf",
+                "abc\\0705\\quote.pdf",
+                "abc\\notes.txt",
                 "ab12\\spec.pdf",
                 "loose.pdf",
             ]
@@ -153,7 +153,7 @@ fn never_reads_more_directories_at_once_than_it_was_allowed() {
 #[test]
 fn an_unreadable_directory_is_recorded_and_its_siblings_still_walked() {
     let src = tree();
-    src.fail_dir("R:\\11d\\0704", EnumError::AccessDenied(5));
+    src.fail_dir("R:\\abc\\0704", EnumError::AccessDenied(5));
 
     let (report, sink) = walk(&src, &WalkOpts::default().with_concurrency(1));
 
@@ -167,15 +167,15 @@ fn an_unreadable_directory_is_recorded_and_its_siblings_still_walked() {
         "the rest of the tree still arrived"
     );
     assert!(
-        sink.paths().contains("11d\\0705\\quote.pdf"),
+        sink.paths().contains("abc\\0705\\quote.pdf"),
         "including the failed folder's own sibling"
     );
-    assert_eq!(report.errors.recorded[0].0, "11d\\0704");
+    assert_eq!(report.errors.recorded[0].0, "abc\\0704");
 }
 
 #[test]
 fn a_junction_is_counted_but_not_followed() {
-    let src = tree().with_junction("R:\\", "mirror", "R:\\11d");
+    let src = tree().with_junction("R:\\", "mirror", "R:\\abc");
     let (report, sink) = walk(&src, &WalkOpts::default());
 
     assert_eq!(report.skipped_reparse, 1);
@@ -269,7 +269,7 @@ fn a_missing_root_is_reported_rather_than_hung_on() {
 #[test]
 fn a_folder_that_vanishes_mid_walk_is_not_a_coverage_hole() {
     let src = tree();
-    src.fail_dir("R:\\11d\\0704", EnumError::PathNotFound(3));
+    src.fail_dir("R:\\abc\\0704", EnumError::PathNotFound(3));
 
     let (report, sink) = walk(&src, &WalkOpts::default().with_concurrency(1));
 
@@ -285,7 +285,7 @@ fn a_folder_that_vanishes_mid_walk_is_not_a_coverage_hole() {
 #[test]
 fn an_unreadable_folder_is_a_coverage_hole() {
     let src = tree();
-    src.fail_dir("R:\\11d\\0704", EnumError::AccessDenied(5));
+    src.fail_dir("R:\\abc\\0704", EnumError::AccessDenied(5));
 
     let (report, _) = walk(&src, &WalkOpts::default().with_concurrency(1));
 
@@ -383,14 +383,14 @@ fn found(index: &files::index::tree::TreeIndex, query: &str) -> Vec<String> {
     .collect()
 }
 
-/// A file in an unpredictable folder is walked, indexed and found by its code.
+/// A file in an unpredictable folder is walked, indexed and found by its name.
 #[test]
 fn a_walked_tree_can_be_searched_for_a_code_no_rule_would_have_routed() {
     let src = FakeDirSource::new().with_tree(
         "R:\\",
         &[
             "archive\\2019\\odd name\\11-3-0704 survey.pdf",
-            "11d\\0704\\quote.pdf",
+            "abc\\0704\\quote.pdf",
             "ab12\\unrelated.pdf",
         ],
     );
@@ -409,9 +409,9 @@ fn a_code_that_names_a_folder_finds_what_is_in_it() {
     let src = FakeDirSource::new().with_tree(
         "R:\\",
         &[
-            "11d\\0704\\quote.pdf",
-            "11d\\0704\\drawing.pdf",
-            "11d\\0705\\other.pdf",
+            "abc\\0704\\quote.pdf",
+            "abc\\0704\\design.pdf",
+            "abc\\0705\\other.pdf",
         ],
     );
     let (index, _) = indexed(&src, &WalkOpts::default());
@@ -420,7 +420,7 @@ fn a_code_that_names_a_folder_finds_what_is_in_it() {
     got.sort();
     assert_eq!(
         got,
-        vec!["R:\\11d\\0704\\drawing.pdf", "R:\\11d\\0704\\quote.pdf"]
+        vec!["R:\\abc\\0704\\design.pdf", "R:\\abc\\0704\\quote.pdf"]
     );
 }
 
@@ -543,9 +543,9 @@ mod subtrees {
             "R:\\",
             &[
                 "top.txt",
-                "11d\\quote.pdf",
-                "11d\\0704\\drawing.dwg",
-                "11d\\0704\\deep\\note.txt",
+                "abc\\quote.pdf",
+                "abc\\0704\\design.dwg",
+                "abc\\0704\\deep\\note.txt",
                 "ab12\\spec.pdf",
                 "ab12x\\decoy.pdf",
             ],
@@ -574,14 +574,14 @@ mod subtrees {
 
     #[test]
     fn a_seed_brings_its_whole_subtree_and_nothing_else() {
-        let (sink, report) = seeded(&["11d"]);
+        let (sink, report) = seeded(&["abc"]);
         assert!(report.complete(), "{report:?}");
         assert_eq!(
             dirs(&sink),
             vec![
-                "11d".to_string(),
-                "11d\\0704".to_string(),
-                "11d\\0704\\deep".to_string(),
+                "abc".to_string(),
+                "abc\\0704".to_string(),
+                "abc\\0704\\deep".to_string(),
             ]
         );
     }
@@ -598,13 +598,13 @@ mod subtrees {
     /// would return its contents twice.
     #[test]
     fn a_seed_already_covered_by_another_is_not_walked_twice() {
-        let (sink, _) = seeded(&["11d", "11d\\0704", "11d"]);
+        let (sink, _) = seeded(&["abc", "abc\\0704", "abc"]);
         assert_eq!(
             dirs(&sink),
             vec![
-                "11d".to_string(),
-                "11d\\0704".to_string(),
-                "11d\\0704\\deep".to_string(),
+                "abc".to_string(),
+                "abc\\0704".to_string(),
+                "abc\\0704\\deep".to_string(),
             ]
         );
     }

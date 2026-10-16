@@ -120,7 +120,7 @@ impl AppState {
             return None;
         }
         self.remember_due_at = None;
-        let code = self.input.text().to_string();
-        self.remember(&code)
+        let line = self.input.text().to_string();
+        self.remember(&line)
     }
 }

@@ -78,7 +78,7 @@ impl Actors {
         let tx = Events::new(raw, wake);
         let store = Arc::new(IndexStore::for_routes(
             &settings.routes,
-            crate::config::JOB_CACHE_CAPACITY,
+            crate::config::FOLDER_CACHE_CAPACITY,
         ));
 
         // Remove cache files that belong to no configured directory, or the
@@ -402,38 +402,40 @@ pub fn default_source(settings: &Settings) -> Arc<dyn DirSource> {
 
 /// An in-memory source, for exercising the whole stack without any drives.
 pub fn fake_source_for_demo() -> Arc<dyn DirSource> {
-    // Shaped like a real job so interesting cases can be tried by hand:
+    // Shaped like a real project folder so interesting cases can be tried by
+    // hand:
     //
     //   * twenty pages, more than MAX_RESULTS, so the list stops at fifteen
     //     while the document opens whole;
     //   * a `.tif` page, which is not a member and must be skipped silently;
-    //   * files that merely start with the code, which belong to no document.
-    let mut names: Vec<String> = vec!["11-D-0704.pdf".into()];
-    names.extend((1..=20).map(|i| format!("11-D-0704_Page{i}.pdf")));
-    names.push("11-D-0704_Page21.tif".into());
-    names.push("11-D-0704 revision notes.pdf".into());
-    names.push("11-D-0704 notes.txt".into());
+    //   * files that merely start with the base name, which belong to no
+    //     document.
+    let mut names: Vec<String> = vec!["AB-C-0704.pdf".into()];
+    names.extend((1..=20).map(|i| format!("AB-C-0704_Page{i}.pdf")));
+    names.push("AB-C-0704_Page21.tif".into());
+    names.push("AB-C-0704 revision notes.pdf".into());
+    names.push("AB-C-0704 notes.txt".into());
     // Registered as a tree at the configured roots so `--demo` exercises the
-    // recursive walk. The nested codes are ones no routing rule would guess.
+    // recursive walk. The nested names are ones no routing rule would guess.
     let nested: Vec<String> = [
-        "archive\\2019\\odd name\\11-3-0704 survey.pdf",
-        "archive\\2019\\odd name\\11-3-0704 notes.txt",
+        "archive\\2019\\odd name\\AB-3-0704 survey.pdf",
+        "archive\\2019\\odd name\\AB-3-0704 notes.txt",
         "archive\\2020\\ab12-0704 spec.pdf",
-        "ab12\\drawing.pdf",
-        "ab12\\rev b\\drawing.pdf",
+        "ab12\\report.pdf",
+        "ab12\\rev b\\report.pdf",
     ]
     .iter()
     .map(|s| s.to_string())
     .collect();
-    // The job folder is added as tree paths too, so it has an entry in its
+    // The project folder is added as tree paths too, so it has an entry in its
     // parent and a recursive walk can reach it.
     let mut paths: Vec<String> = nested;
-    paths.extend(names.iter().map(|n| format!("11d\\{n}")));
+    paths.extend(names.iter().map(|n| format!("abc\\{n}")));
     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
 
     Arc::new(
         FakeDirSource::new()
-            .with_synthetic(crate::config::CUSTPRO_PATH, 2_000)
+            .with_synthetic(crate::config::FLAT_FIXTURE_PATH, 2_000)
             .with_tree("R:\\", &paths),
     )
 }
@@ -454,12 +456,12 @@ mod tests {
     fn start() -> (Actors, Receiver<AppEvent>) {
         let source: Arc<dyn DirSource> = Arc::new(
             FakeDirSource::new()
-                .with_dir(crate::config::CUSTPRO_PATH, &["alpha.pdf"])
-                // A tree reachable from its root, since the job share is
-                // walked. The fixtures contain the typed code.
+                .with_dir(crate::config::FLAT_FIXTURE_PATH, &["alpha.pdf"])
+                // A tree reachable from its root, since the tree share is
+                // walked. The fixtures contain the typed search.
                 .with_tree(
                     "R:\\",
-                    &["11d\\11-D-0704 one.pdf", "11d\\11-D-0704 two.pdf"],
+                    &["abc\\AB-C-0704 one.pdf", "abc\\AB-C-0704 two.pdf"],
                 ),
         );
         Actors::start(settings(), source, std::sync::Arc::new(|| {})).unwrap()
@@ -472,7 +474,7 @@ mod tests {
     #[test]
     fn no_actor_is_started_for_a_share_that_is_not_configured() {
         let routes = crate::paths::Routes::single(
-            "jobs",
+            "projects",
             std::path::PathBuf::from("R:\\"),
             crate::paths::MappingKind::Tree,
         );
@@ -481,7 +483,7 @@ mod tests {
             ..Settings::with_routes(Arc::new(routes), |s| s)
         };
         let source: Arc<dyn DirSource> =
-            Arc::new(FakeDirSource::new().with_tree("R:\\", &["11d\\one.pdf"]));
+            Arc::new(FakeDirSource::new().with_tree("R:\\", &["abc\\one.pdf"]));
 
         let (mut actors, _rx) =
             Actors::start(settings, source, std::sync::Arc::new(|| {})).unwrap();
@@ -497,7 +499,7 @@ mod tests {
     #[test]
     fn a_configuration_with_no_flat_share_never_reports_a_missing_one() {
         let routes = crate::paths::Routes::single(
-            "jobs",
+            "projects",
             std::path::PathBuf::from("R:\\"),
             crate::paths::MappingKind::Tree,
         );
@@ -506,7 +508,7 @@ mod tests {
             ..Settings::with_routes(Arc::new(routes), |s| s)
         };
         let source: Arc<dyn DirSource> =
-            Arc::new(FakeDirSource::new().with_tree("R:\\", &["11d\\one.pdf"]));
+            Arc::new(FakeDirSource::new().with_tree("R:\\", &["abc\\one.pdf"]));
 
         let (mut actors, _rx) =
             Actors::start(settings, source, std::sync::Arc::new(|| {})).unwrap();
@@ -559,7 +561,7 @@ mod tests {
     fn a_dispatched_search_produces_a_result() {
         let (actors, rx) = start();
 
-        // The job share is walked in the background, so wait for the index
+        // The tree share is walked in the background, so wait for the index
         // before searching rather than asserting on a race.
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline
@@ -574,7 +576,7 @@ mod tests {
 
         let mut cmds = CmdList::new();
         cmds.push(Cmd::Search {
-            query: crate::search::query::Query::contains("11-D-0704"),
+            query: crate::search::query::Query::contains("AB-C-0704"),
             epoch: 1,
         });
         actors.dispatch(cmds);
@@ -600,7 +602,7 @@ mod tests {
         let (actors, rx) = start();
         let mut cmds = CmdList::new();
         cmds.push(Cmd::Search {
-            query: crate::search::query::Query::contains("11-D-0704"),
+            query: crate::search::query::Query::contains("AB-C-0704"),
             epoch: 42,
         });
         actors.dispatch(cmds);
@@ -658,9 +660,12 @@ mod tests {
         };
 
         // At the configured path, so the demo searches what the settings name.
-        assert_eq!(count(crate::config::CUSTPRO_PATH, true).unwrap(), 2_000);
+        assert_eq!(
+            count(crate::config::FLAT_FIXTURE_PATH, true).unwrap(),
+            2_000
+        );
 
-        // The job root holds only folders: nothing under files-only options,
+        // The tree root holds only folders: nothing under files-only options,
         // subdirectories when a walk asks for them.
         assert_eq!(
             count("R:\\", true).unwrap(),
@@ -674,8 +679,8 @@ mod tests {
 
         // Reachable from that root, as on a real share.
         assert!(
-            count("R:\\11d", true).unwrap() > 20,
-            "the job folder is reachable"
+            count("R:\\abc", true).unwrap() > 20,
+            "the project folder is reachable"
         );
         assert!(
             count("R:\\archive\\2019\\odd name", true).unwrap() > 0,

@@ -714,9 +714,9 @@ fn not_before(now: Instant, at: Instant) -> Instant {
 /// opposed to the share being unreachable right now.
 ///
 /// Decides whether change detection is disabled or merely retried, and which
-/// message the user sees. A whitelist of definite answers, like the job-cache
+/// message the user sees. A whitelist of definite answers, like the folder-cache
 /// miss whitelist in
-/// [`crate::index::store::IndexStore::publish_job_miss`], so a network blip
+/// [`crate::index::store::IndexStore::publish_folder_miss`], so a network blip
 /// never disables change detection.
 pub fn is_probe_refusal(err: EnumError) -> bool {
     matches!(
