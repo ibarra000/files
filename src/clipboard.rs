@@ -7,6 +7,9 @@
 //! Off Windows, copying uses the OSC 52 terminal escape sequence and reading
 //! returns `Unsupported`.
 
+// Win32 FFI: OpenClipboard, GlobalAlloc and SetClipboardData.
+#![allow(unsafe_code)]
+
 use std::fmt;
 use std::sync::Arc;
 

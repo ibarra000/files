@@ -2,6 +2,8 @@
 name = "files"
 version = "0.2.0"
 edition = "2024"
+# eframe and egui_kittest 0.36 need 1.95. CI checks this version.
+rust-version = "1.95"
 # Read by the installer, Apps & Features, and the version block `build.rs` embeds.
 description = "files - nfs & smb indexer"
 # Release source for the update check unless `update_from` names a share.
@@ -111,6 +113,17 @@ muda = { version = "0.20", default-features = false }
 [build-dependencies]
 # Embeds the icon, version block and manifest. See `build.rs`.
 winresource = "0.1"
+
+# Unsafe code is refused everywhere except the Win32 FFI modules listed in
+# tools/unsafe-allowlist.txt, and each block there needs a `// SAFETY:` comment.
+# See docs/CODE_STANDARDS.md#unsafe-code.
+[lints.rust]
+unsafe_code = "deny"
+# snake_case functions, UpperCamelCase types, UPPER_SNAKE_CASE constants.
+nonstandard_style = { level = "deny", priority = -1 }
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"
 
 [features]
 # Embeds `eframe/default_fonts` (1.41 MB of TTFs, omitted from release builds)

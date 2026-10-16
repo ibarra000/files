@@ -1,0 +1,6 @@
+# Stable Rust, with the tools `tools/check.sh` runs. The minimum supported
+# version is `rust-version` in Cargo.toml; CI checks it separately.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]

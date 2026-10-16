@@ -14,6 +14,8 @@
 //! Every failure (create, connect, broken pipe) means "no other end" and
 //! clears the same liveness flag; there is no error type.
 
+// Win32 FFI: named pipes between the panel and the settings window.
+#![allow(unsafe_code)]
 #![cfg(windows)]
 
 use std::sync::Arc;
@@ -83,6 +85,7 @@ impl Drop for Owned {
 // pointer into this process's memory, and each one below is used by exactly
 // one thread for exactly one direction.
 unsafe impl Send for Owned {}
+// SAFETY: as for `Send`, above.
 unsafe impl Sync for Owned {}
 
 /// Writes one newline-terminated message; returns `false` once the other end

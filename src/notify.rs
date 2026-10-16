@@ -5,6 +5,9 @@
 //! reported on another thread, so without this they would go unseen. Success
 //! is never reported this way.
 
+// Win32 FFI: MessageBoxW.
+#![allow(unsafe_code)]
+
 /// Shows `message` in a topmost, foreground message box.
 ///
 /// Blocks the calling thread until dismissed, so the box is not hidden behind

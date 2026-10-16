@@ -12,6 +12,9 @@
 //! `Option<Box<dyn Link>>`, edits the configuration file directly, and labels
 //! changes as taking effect on next start.
 
+// Win32 FFI: ProcessIdToSessionId, for the per-session pipe name.
+#![allow(unsafe_code)]
+
 pub mod wire;
 
 #[cfg(windows)]

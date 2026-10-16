@@ -5,6 +5,9 @@
 //! everything until a logger is installed. `main.rs` installs this before
 //! opening any window. Warnings and errors by default; set `FILES_LOG` for more.
 
+// Win32 FFI: OutputDebugStringW, since files.exe has no console.
+#![allow(unsafe_code)]
+
 use std::io::Write;
 
 /// Environment variable that sets the log level.

@@ -8,6 +8,9 @@
 //! Elevation is left to `msiexec`, which prompts once for the per-machine
 //! install. Rollback is left to `MajorUpgrade` in `wix/files.wxs`.
 
+// Win32 FFI: BCrypt SHA-256 and OpenProcess, to wait for the panel to exit.
+#![allow(unsafe_code)]
+
 use std::path::{Path, PathBuf};
 
 use crate::update::Manifest;

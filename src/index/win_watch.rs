@@ -27,6 +27,9 @@
 //! must be even and fit, `NextEntryOffset` must advance, and an iteration cap
 //! stops a crafted cycle. A violation ends the batch without panicking.
 
+// Win32 FFI: ReadDirectoryChangesW and CancelIoEx.
+#![allow(unsafe_code)]
+
 use std::mem::{offset_of, size_of};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -7,6 +7,8 @@
 //! Both crates are therefore given handlers that post the action and wake the
 //! event loop, as other producers do via [`crate::app::event::Events`].
 
+// Win32 FFI: Shell_NotifyIconW, to re-tint the tray icon.
+#![allow(unsafe_code)]
 #![cfg(windows)]
 
 use std::sync::Arc;

@@ -1,6 +1,9 @@
 //! Windows helpers shared by the enumerators: path conversion to UTF-16,
 //! RAII handle wrappers, and an aligned buffer for kernel-written records.
 
+// Win32 FFI: closing handles and reading Win32-filled buffers.
+#![allow(unsafe_code)]
+
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};

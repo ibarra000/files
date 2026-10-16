@@ -18,6 +18,9 @@
 //! compositor granted, reduced to the one question the renderer needs: whether
 //! to paint its own fill.
 
+// Win32 FFI: DWM backdrop, corners and frame.
+#![allow(unsafe_code)]
+
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{HWND, S_OK};
 #[cfg(windows)]

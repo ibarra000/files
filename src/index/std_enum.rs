@@ -127,6 +127,8 @@ impl DirSource for StdDirSource {
 }
 
 #[cfg(test)]
+// Tests only: SetFileAttributesW, to make a hidden file.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
     use crate::index::enumerate::VecSink;

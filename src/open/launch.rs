@@ -10,6 +10,9 @@
 //! quoted first argument as a window title and `&` in a path breaks its
 //! command line; `ShellExecuteW` takes the path as a parameter.
 
+// Win32 FFI: ShellExecuteW and AllowSetForegroundWindow.
+#![allow(unsafe_code)]
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::Path;

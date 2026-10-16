@@ -6,6 +6,8 @@
 //! `WndProc` of ours) and the summon thread owns no window (see
 //! [`crate::hotkey`]).
 
+// Win32 FFI: the named mutex and event behind single-instance.
+#![allow(unsafe_code)]
 #![cfg(windows)]
 
 use std::sync::Arc;
@@ -42,6 +44,7 @@ impl Drop for Owned {
 // this process's memory, and every use below passes it by value. The wait
 // thread needs to own one.
 unsafe impl Send for Owned {}
+// SAFETY: as for `Send`, above.
 unsafe impl Sync for Owned {}
 
 /// This process's claim to being the only copy.

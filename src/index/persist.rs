@@ -28,6 +28,9 @@
 //! access. Names are always decoded lossily, never with
 //! `from_utf8_unchecked`.
 
+// memmap2: Mmap::map over a file opened to deny writers.
+#![allow(unsafe_code)]
+
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};

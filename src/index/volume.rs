@@ -9,6 +9,9 @@
 //! * The **SMB dialect** bounds the maximum transfer size. SMB 2.0.2 and some
 //!   NAS firmware cap it at 64 KiB, which makes 1 MiB buffers no faster.
 
+// Win32 FFI: GetDriveTypeW, WNetGetConnectionW, GetVolumeInformationW.
+#![allow(unsafe_code)]
+
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
@@ -253,6 +256,8 @@ pub fn volume_serial(path: &Path) -> Option<u32> {
 /// Reads the remote protocol in use, when the root is a network share.
 pub fn remote_protocol(root: &Path) -> Option<RemoteProtocol> {
     let handle = open_dir(root)?;
+    // SAFETY: FILE_REMOTE_PROTOCOL_INFO is plain data, for which all-zero
+    // bytes are a valid value.
     let mut info: FILE_REMOTE_PROTOCOL_INFO = unsafe { std::mem::zeroed() };
     info.StructureVersion = 2;
     info.StructureSize = std::mem::size_of::<FILE_REMOTE_PROTOCOL_INFO>() as u16;

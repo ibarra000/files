@@ -1,0 +1,46 @@
+# The same checks as the pre-push hook, plus the test suite and the minimum
+# supported Rust version. See CONTRIBUTING.md.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, audits, tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the channel and components; this installs it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Pixel snapshot tests need a GPU adapter and stay off here
+      # (feature `ui-snapshots`); run them locally before changing the UI.
+      - name: tools/check.sh
+        shell: bash
+        run: sh tools/check.sh
+
+  msrv:
+    name: minimum Rust (1.95)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        shell: bash
+        run: cargo +1.95 check --all-targets --locked

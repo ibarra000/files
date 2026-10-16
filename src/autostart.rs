@@ -6,6 +6,9 @@
 //! the only source of truth; nothing is stored in `config.toml`, because Task
 //! Manager's Startup tab and the installer both edit this value directly.
 
+// Win32 FFI: the registry Run value.
+#![allow(unsafe_code)]
+
 use std::io;
 use std::path::Path;
 

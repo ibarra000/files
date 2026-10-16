@@ -1,0 +1,6 @@
+# Shell scripts run under Git Bash and CI's bash; a CRLF breaks the shebang.
+*.sh            text eol=lf
+.githooks/*     text eol=lf
+
+# Snapshot images are compared byte for byte.
+*.png           binary

@@ -26,6 +26,9 @@
 //! only on the Ctrl+Alt path. If an `Event::Text` is present in the same frame,
 //! [`translate`] skips the reconstruction so the two never both fire.
 
+// Win32 FFI: the keyboard layout and state, for AltGr input.
+#![allow(unsafe_code)]
+
 use eframe::egui;
 
 use crate::app::event::AppEvent;

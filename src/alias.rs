@@ -86,7 +86,6 @@ pub struct Alias {
 
 impl Alias {
     /// Returns the display form (`name · expansion`) used by the status line and
-
     /// the settings list.
     pub fn describe(&self) -> String {
         format!("{} \u{b7} {}", self.name, self.code)

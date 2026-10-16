@@ -1386,6 +1386,8 @@ pub fn default_cache_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+// Tests only: std::env::set_var, unsafe since edition 2024.
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
