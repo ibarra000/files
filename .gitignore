@@ -1,5 +1,9 @@
+bin/
+obj/
+/artifacts
+TestResults/
+*.user
+.vs/
+# Left over from the Rust version.
 /target
 /ueli
-/tests/snapshots/*.old.png
-/tests/snapshots/*.new.png
-/tests/snapshots/*.diff.png

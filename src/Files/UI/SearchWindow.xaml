@@ -1,0 +1,61 @@
+<Window x:Class="Files.UI.SearchWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="files"
+        Width="680" Height="460"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True"
+        WindowStartupLocation="Manual">
+    <Border Padding="14,14,14,10" Background="Transparent" MouseLeftButtonDown="OnDragWindow">
+        <DockPanel>
+            <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+                <TextBox x:Name="Input" FontSize="18" Padding="10,6"
+                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
+                <TextBlock x:Name="Placeholder" Text="Search file names" FontSize="18" Margin="13,7,0,0"
+                           IsHitTestVisible="False" Style="{StaticResource Dim}" />
+                <TextBlock x:Name="AliasHint" FontSize="13" Margin="0,0,14,0" HorizontalAlignment="Right"
+                           VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Dim}" />
+            </Grid>
+
+            <Grid DockPanel.Dock="Bottom" Margin="4,8,4,0">
+                <TextBlock x:Name="Status" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
+                <TextBlock x:Name="Hint" HorizontalAlignment="Right" Style="{StaticResource Dim}"
+                           Text="Enter open · Ctrl+O show in folder · right-click for more" />
+            </Grid>
+
+            <ListBox x:Name="Results" BorderThickness="0" Background="Transparent"
+                     VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                     MouseDoubleClick="OnResultDoubleClick" ContextMenuOpening="OnResultMenuOpening"
+                     PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                        <Setter Property="Padding" Value="10,3" />
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ContextMenu>
+                    <ContextMenu />
+                </ListBox.ContextMenu>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid Margin="2,3" ToolTip="{Binding Detail}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock FontSize="14" TextTrimming="CharacterEllipsis">
+                                    <Run Text="{Binding Before, Mode=OneWay}" /><Run Text="{Binding Match, Mode=OneWay}" FontWeight="Bold" /><Run Text="{Binding After, Mode=OneWay}" />
+                                </TextBlock>
+                                <TextBlock Text="{Binding Detail}" FontSize="12" TextTrimming="CharacterEllipsis"
+                                           Style="{StaticResource Dim}" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="1" Text="{Binding Badge}" FontSize="12" Margin="10,0,0,0"
+                                       VerticalAlignment="Center" Style="{StaticResource Dim}" />
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </DockPanel>
+    </Border>
+</Window>

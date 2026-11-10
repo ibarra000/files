@@ -3,8 +3,8 @@
   The installer, written by hand against the WiX 5 schema.
   Build it with `tools/make_msi.ps1`.
 
-  Installs two executables into Program Files, one Start-menu shortcut and,
-  optionally, a sign-in startup entry. It does not modify `PATH`.
+  Installs one self-contained executable into Program Files, one Start-menu
+  shortcut and, optionally, a sign-in startup entry. It does not modify `PATH`.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -36,10 +36,6 @@
 
         <Component Id="MainExe" Bitness="always64">
           <File Id="filesExe" Source="$(var.TargetDir)\files.exe" KeyPath="yes" />
-        </Component>
-
-        <Component Id="CliExe" Bitness="always64">
-          <File Id="filesCliExe" Source="$(var.TargetDir)\files-cli.exe" KeyPath="yes" />
         </Component>
 
       </Directory>
@@ -79,14 +75,13 @@
 
     <Feature Id="Main"
              Title="files"
-             Description="The search panel and the files-cli diagnostic tool."
+             Description="The search panel and its settings."
              Level="1"
              AllowAbsent="no">
       <ComponentRef Id="MainExe" />
-      <ComponentRef Id="CliExe" />
       <ComponentRef Id="StartMenuShortcut" />
 
-      <!-- Selected by default. The installer, the settings window's General page
+      <!-- Selected by default. The installer, the Settings window's General page
            and Task Manager's Startup tab all control the same `Run` value. -->
       <Feature Id="StartWithWindows"
                Title="Start with Windows"

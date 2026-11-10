@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- Only for the tray icon: WPF has no NotifyIcon of its own. -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- WPF0001: ThemeMode (the Fluent theme) is marked experimental.
+         WFO0003: a WinForms DPI hint; this is a WPF app, whose DPI mode comes from the manifest. -->
+    <NoWarn>$(NoWarn);WPF0001;WFO0003</NoWarn>
+    <AssemblyName>files</AssemblyName>
+    <RootNamespace>Files</RootNamespace>
+    <Version>1.0.0</Version>
+    <Product>files</Product>
+    <Description>files - nfs &amp; smb indexer</Description>
+    <ApplicationIcon>..\..\assets\files.ico</ApplicationIcon>
+    <ApplicationManifest>..\..\assets\files.manifest</ApplicationManifest>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- WinForms' implicit usings clash with WPF names (Application, KeyEventArgs, ...). -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
+    <InternalsVisibleTo Include="Files.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Data\Sql\*.sql" LogicalName="%(Filename)%(Extension)" />
+    <Resource Include="..\..\assets\files.ico" Link="files.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageReference Include="PDFsharp" Version="6.5.0" />
+  </ItemGroup>
+
+</Project>
