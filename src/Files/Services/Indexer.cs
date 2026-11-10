@@ -158,6 +158,11 @@ public sealed class Indexer : IDisposable
 
     private void LoadShard(Volume stored)
     {
+        if (_states.ContainsKey(stored.Id))
+        {
+            // Added while start-up was loading, and already being read.
+            return;
+        }
         Volume volume = stored;
         if (volume.Status == VolumeStatus.Scanning)
         {
@@ -175,7 +180,8 @@ public sealed class Indexer : IDisposable
         {
             problem = $"The saved file list could not be read, so it will be read again: {error.Message}";
         }
-        Put(new VolumeState(volume, index, null, problem));
+        // A volume added while start-up was loading already has a newer state; keep it.
+        PutIfAbsent(new VolumeState(volume, index, null, problem));
     }
 
     private void ScanDue()
@@ -300,6 +306,19 @@ public sealed class Indexer : IDisposable
         lock (_gate)
         {
             _states = _states.SetItem(state.Volume.Id, state);
+        }
+        Changed?.Invoke();
+    }
+
+    private void PutIfAbsent(VolumeState state)
+    {
+        lock (_gate)
+        {
+            if (_states.ContainsKey(state.Volume.Id))
+            {
+                return;
+            }
+            _states = _states.Add(state.Volume.Id, state);
         }
         Changed?.Invoke();
     }

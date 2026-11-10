@@ -62,9 +62,10 @@ public sealed class IndexerTests
         string missing = Path.Combine(temp.Path, "gone");
         Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
         using var indexer = new Indexer(catalog, Path.Combine(temp.Path, "volumes"), () => new Settings());
-        indexer.Start();
 
+        // Added before start-up loading runs: loading must not overwrite the scan's result.
         indexer.Add("gone", missing);
+        indexer.Start();
         VolumeState state = await WaitFor(indexer, s => s.Problem is not null);
 
         Assert.Equal(VolumeStatus.Offline, state.Volume.Status);
