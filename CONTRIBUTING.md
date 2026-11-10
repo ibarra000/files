@@ -62,6 +62,7 @@ Tests cover `Core`, `Data` and `Services` against temporary folders and database
 Maintainers only:
 
 1. Bump `<Version>` in `src/Files/Files.csproj` and commit `chore: release <version>`.
+   The release machine needs the signing certificate (subject `CN=files`, thumbprint `5EAA01DFACB29C29C8D7C21F961F616CFB6B3728`) in `Cert:\CurrentUser\My` and signtool from the Windows SDK. Keep a backup of the certificate's private key (an exported, password-protected `.pfx`) somewhere safe and off the repository: installed copies refuse updates signed with anything else.
 2. Build and publish the installer:
 
    ```powershell
@@ -70,7 +71,7 @@ Maintainers only:
    pwsh tools/make_msi.ps1 -Release                          # GitHub release v<version>
    ```
 
-   `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag.
+   `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag. The script signs `files.exe` and the MSI, and stops if either is not signed by the release certificate.
 
 ## Getting help
 

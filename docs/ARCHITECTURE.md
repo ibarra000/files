@@ -88,7 +88,7 @@ There are no change notifications: a periodic rescan is simpler and works the sa
 ## Updates
 
 1. One minute after start, then every 4 hours, `Services/Updater.cs` reads `latest.json` (`version`, `msi`, `sha256`, `notes`) from the update folder, or from the latest GitHub release.
-2. If it is newer, the tray offers to install it. The installer is copied or downloaded, and its SHA-256 must match.
+2. If it is newer, the tray offers to install it. The installer is copied or downloaded. Its SHA-256 must match, and `Services/Signature.cs` must find an intact Authenticode signature from the release certificate, pinned by thumbprint in `Updater.PublisherThumbprint`.
 3. A copy of `files.exe` is started as `files-update.exe --apply-update <msi> <pid> <exe>`. It waits for the app to exit, runs `msiexec /i … /qb`, and relaunches only if the install succeeded.
 
-The digest catches corruption, not tampering: who may publish is controlled by the folder's permissions or the GitHub repository.
+The digest catches an incomplete download; the signature catches tampering. Because the certificate is self-signed, `WinVerifyTrust` reports an untrusted root, which is accepted: trust comes from the pinned thumbprint, and a signature from any other certificate is refused. Replacing the certificate takes one release signed with the old certificate that carries the new thumbprint.

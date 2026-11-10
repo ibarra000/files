@@ -4,8 +4,11 @@
 
 .DESCRIPTION
     Publishes the self-contained files.exe, reads the version from
-    src/Files/Files.csproj and passes both to WiX 5. Requires the WiX dotnet
-    tool and its UI extension:
+    src/Files/Files.csproj and passes both to WiX 5. files.exe and the MSI are
+    both signed with the release certificate, which must be in the current
+    user's certificate store; the updater refuses installers signed with any
+    other certificate. Requires signtool (Windows SDK), the WiX dotnet tool and
+    its UI extension:
 
         dotnet tool install --global wix --version 5.0.2
         wix extension add --global WixToolset.UI.wixext/5.0.2
@@ -29,7 +32,14 @@ param(
 
     # Publish the installer and latest.json as GitHub release v<version>. The
     # `v` prefix is required: the updater downloads from releases/download/v<version>/.
-    [switch]$Release
+    [switch]$Release,
+
+    # The release-signing certificate in Cert:\CurrentUser\My. Must match
+    # Updater.PublisherThumbprint, or installed copies will refuse the update.
+    [string]$Thumbprint = '5EAA01DFACB29C29C8D7C21F961F616CFB6B3728',
+
+    # Timestamping keeps signatures valid after the certificate expires.
+    [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +54,15 @@ function Write-Manifest([string]$Folder, [string]$Version, [string]$Msi) {
     Move-Item -Path $tmp -Destination (Join-Path $Folder 'latest.json') -Force
 }
 
+# Signs a file with the release certificate and checks the result.
+function Sign-File([string]$Path) {
+    & $signtool sign /sha1 $Thumbprint /s My /fd SHA256 /tr $TimestampUrl /td SHA256 /q $Path
+    if ($LASTEXITCODE -ne 0) { throw "signtool could not sign $Path ($LASTEXITCODE)" }
+    $signer = (Get-AuthenticodeSignature $Path).SignerCertificate
+    if ($signer.Thumbprint -ne $Thumbprint) { throw "$Path is not signed by $Thumbprint" }
+    Write-Host "signed $(Split-Path -Leaf $Path)"
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root 'src\Files\Files.csproj'
 $artifacts = Join-Path $root 'artifacts'
@@ -55,10 +74,21 @@ try {
     if (-not $version) { throw "could not read <Version> from $project" }
     Write-Host "version $version"
 
+    if (-not (Test-Path "Cert:\CurrentUser\My\$Thumbprint")) {
+        throw "the signing certificate $Thumbprint is not in Cert:\CurrentUser\My"
+    }
+    $signtool = (Get-Command signtool -ErrorAction SilentlyContinue).Source
+    if (-not $signtool) {
+        $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+        if (-not $signtool) { throw 'signtool not found; install the Windows SDK' }
+    }
+
     if (-not $NoBuild) {
         Write-Host 'publishing files.exe...'
         dotnet publish $project -c Release -o $publishDir
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
+        Sign-File (Join-Path $publishDir 'files.exe')
     }
 
     # `dotnet tool install --global` puts wix in ~\.dotnet\tools, which is not always on PATH.
@@ -75,6 +105,7 @@ try {
     & $wix build -arch x64 -define "Version=$version" -define "TargetDir=$publishDir" `
         -ext WixToolset.UI.wixext -out $out (Join-Path $root 'wix\files.wxs')
     if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
+    Sign-File $out
     Write-Host "wrote $out"
 
     if ($Publish) {

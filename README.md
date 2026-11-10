@@ -12,7 +12,7 @@ Instant file-name search across folders and network shares on Windows.
 - **Opening.** <kbd>Enter</kbd> opens with the Windows default, a program you choose, or as a combined PDF. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. Right-click a result for every option. Drag a result into another app to hand it the file.
 - **PDF page sets.** `NAME.pdf`, `NAME_Page2.pdf`, `NAME-p3.pdf`, … in one folder can be merged into one document (<kbd>Ctrl</kbd>+<kbd>D</kbd>).
 - **Typing helpers.** Aliases (a short name that searches for something longer) and recent searches, shown when the box is empty.
-- **Updates** from GitHub releases or a shared folder, with SHA-256 verification.
+- **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
 
 ## Keys
 
@@ -33,6 +33,8 @@ Instant file-name search across folders and network shares on Windows.
 1. Download `files-<version>-x64.msi` from the [releases](https://github.com/ibarra000/files/releases) and run it. It installs per machine and asks for elevation. "Start with Windows" is on by default.
 2. Start **files** from the Start menu. The first time, Settings opens on **Volumes**: add the folders you want to search.
 3. Press the hotkey and search.
+
+Releases are signed with a self-signed certificate, so Windows shows the publisher as unknown and SmartScreen may warn on the first install. To check a download, its signature (right-click → Properties → Digital Signatures) should name `files` with thumbprint `5EAA01DFACB29C29C8D7C21F961F616CFB6B3728`. To have Windows trust it, import [assets/files-signing.cer](assets/files-signing.cer) into *Trusted Root Certification Authorities* and *Trusted Publishers*.
 
 Upgrading from a 0.x (Rust) version: uninstall it first in Apps & Features. Settings are not carried over; the old `config.toml` in `%APPDATA%\files` can be deleted.
 

@@ -48,6 +48,13 @@ public sealed class Updater(Func<Settings> settings, string stagingFolder)
 {
     public const string ApplyFlag = "--apply-update";
     private const string Releases = "https://github.com/ibarra000/files/releases";
+
+    /// <summary>
+    /// SHA-1 thumbprint of the release-signing certificate (assets/files-signing.cer).
+    /// Only installers signed with it are installed. A new certificate needs a
+    /// release signed with the old one that carries the new thumbprint.
+    /// </summary>
+    public const string PublisherThumbprint = "5EAA01DFACB29C29C8D7C21F961F616CFB6B3728";
     private const long MaxInstallerBytes = 200L * 1024 * 1024;
     private const int RebootRequired = 3010;
     private const int RebootStarted = 1641;
@@ -84,13 +91,22 @@ public sealed class Updater(Func<Settings> settings, string stagingFolder)
             {
                 throw new IOException("The installer is larger than expected");
             }
-            await using FileStream file = File.Create(msi);
-            await response.Content.CopyToAsync(file, cancel);
+            // Closed before the checks below open the file again.
+            await using (FileStream file = File.Create(msi))
+            {
+                await response.Content.CopyToAsync(file, cancel);
+            }
         }
         if (!await Task.Run(() => HasDigest(msi, manifest.Sha256), cancel))
         {
             File.Delete(msi);
             throw new IOException("The downloaded installer is damaged (its SHA-256 does not match)");
+        }
+        // The digest only proves the download is complete; the signature proves who made it.
+        if (!await Task.Run(() => Signature.IsSignedBy(msi, PublisherThumbprint), cancel))
+        {
+            File.Delete(msi);
+            throw new IOException("The installer is not signed by the files publisher, so it was not installed");
         }
 
         // The running executable cannot be replaced while it runs, so a copy applies the update.
