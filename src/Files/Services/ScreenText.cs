@@ -25,7 +25,10 @@ public static class ScreenText
     private const int MaxLine = 1000;
 
     /// <summary>Punctuation that surrounds a code in running text but is never part of it.</summary>
-    private static readonly char[] Surrounding = ['(', ')', '[', ']', '{', '}', '<', '>', ',', ';', ':', '"', '\'', '`', '.', '!', '?'];
+    private static readonly char[] Surrounding = ['(', ')', '[', ']', '{', '}', '<', '>', ',', ';', ':', '"', '\'', '`'];
+
+    /// <summary>Sentence punctuation after a code; a leading dot stays (".gitignore").</summary>
+    private static readonly char[] Trailing = ['.', '!', '?'];
 
     public static async Task<ScreenRead> UnderCursorAsync()
     {
@@ -53,8 +56,25 @@ public static class ScreenText
             return null;
         }
         string[] tokens = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        string token = tokens.FirstOrDefault(t => t.Contains(trimmed, StringComparison.Ordinal)) ?? trimmed;
-        return Clean(token);
+        // Prefer a token where the word starts at a boundary, so "AB" finds "AB-C" rather than "TAB".
+        string? token = tokens.FirstOrDefault(t => StartsWordAt(t, trimmed));
+        token ??= tokens.FirstOrDefault(t => t.Contains(trimmed, StringComparison.Ordinal));
+        return Clean(token ?? trimmed);
+    }
+
+    /// <summary>Whether <paramref name="word"/> appears in <paramref name="token"/> not preceded by a letter or digit.</summary>
+    private static bool StartsWordAt(string token, string word)
+    {
+        int at = token.IndexOf(word, StringComparison.Ordinal);
+        while (at >= 0)
+        {
+            if (at == 0 || !char.IsLetterOrDigit(token[at - 1]))
+            {
+                return true;
+            }
+            at = token.IndexOf(word, at + 1, StringComparison.Ordinal);
+        }
+        return false;
     }
 
     /// <summary>The word whose box holds <paramref name="point"/>, else the closest one, or null when there are none.</summary>
@@ -79,7 +99,7 @@ public static class ScreenText
     /// <summary>Strips surrounding punctuation; null when nothing is left.</summary>
     public static string? Clean(string token)
     {
-        string cleaned = token.Trim().Trim(Surrounding);
+        string cleaned = token.Trim().TrimStart(Surrounding).TrimEnd([.. Surrounding, .. Trailing]);
         return cleaned.Length > 0 ? cleaned : null;
     }
 
@@ -104,11 +124,17 @@ public static class ScreenText
             TextPatternRange word = ((TextPattern)pattern).RangeFromPoint(point);
             TextPatternRange line = word.Clone();
             word.ExpandToEnclosingUnit(TextUnit.Word);
+            // Over blank space an app returns the nearest word; let OCR look instead.
+            Rect[] boxes = word.GetBoundingRectangles();
+            if (!boxes.Any(box => box.Contains(point)))
+            {
+                return null;
+            }
             line.ExpandToEnclosingUnit(TextUnit.Line);
             return TokenAround(line.GetText(MaxLine), word.GetText(MaxLine));
         }
         catch (Exception error) when (error is ElementNotAvailableException or InvalidOperationException
-            or COMException or ArgumentException)
+            or COMException or ArgumentException or UnauthorizedAccessException or NotSupportedException or TimeoutException)
         {
             // Apps without accessibility text; OCR reads them instead.
             return null;
@@ -125,7 +151,8 @@ public static class ScreenText
         int left = area.X;
         int top = area.Y;
 
-        using SoftwareBitmap bitmap = await GrabAsync(area);
+        // Capturing and encoding off the UI thread keeps the panel responsive.
+        using SoftwareBitmap bitmap = await Task.Run(() => GrabAsync(area));
         OcrResult result = await engine.RecognizeAsync(bitmap);
         var words = new List<(string Text, Rect Box)>();
         foreach (OcrLine line in result.Lines)

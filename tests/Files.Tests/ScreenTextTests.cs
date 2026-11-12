@@ -20,6 +20,19 @@ public sealed class ScreenTextTests
     }
 
     [Fact]
+    public void The_token_where_the_word_starts_wins_over_one_that_merely_contains_it()
+    {
+        Assert.Equal("AB-C", ScreenText.TokenAround("TAB AB-C", "AB"));
+    }
+
+    [Fact]
+    public void A_leading_dot_is_part_of_the_name_but_a_full_stop_is_not()
+    {
+        Assert.Equal(".gitignore", ScreenText.Clean(".gitignore"));
+        Assert.Equal("plan.pdf", ScreenText.Clean("plan.pdf."));
+    }
+
+    [Fact]
     public void A_blank_word_gives_nothing()
     {
         Assert.Null(ScreenText.TokenAround("some line", "  "));

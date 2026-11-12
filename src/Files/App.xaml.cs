@@ -15,12 +15,13 @@ public partial class App : Application
     private const string PersonalizeKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
     private static readonly TimeSpan FirstUpdateCheck = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(4);
-    private static readonly TimeSpan PanelHideDelay = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan PanelHideDelay = TimeSpan.FromMilliseconds(200);
 
     private Mutex? _singleInstance;
     private EventWaitHandle? _summon;
     private Hotkey? _hotkey;
     private Hotkey? _ocrHotkey;
+    private bool _readingScreen;
     private Tray? _tray;
     private SearchWindow? _panel;
     private SettingsWindow? _settingsWindow;
@@ -108,13 +109,22 @@ public partial class App : Application
         SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
         StartUpdateChecks();
 
-        if (settingsProblem is not null || HotkeyProblem is not null)
+        var startProblems = new List<string>();
+        if (settingsProblem is not null)
         {
-            _tray.Notify(settingsProblem ?? $"Hotkey: {HotkeyProblem}");
+            startProblems.Add(settingsProblem);
         }
-        else if (ocrHotkeyProblem is not null)
+        if (HotkeyProblem is not null)
         {
-            _tray.Notify($"Text-under-the-mouse shortcut: {ocrHotkeyProblem}");
+            startProblems.Add($"Hotkey: {HotkeyProblem}");
+        }
+        if (ocrHotkeyProblem is not null)
+        {
+            startProblems.Add($"Text-under-the-mouse shortcut: {ocrHotkeyProblem}");
+        }
+        if (startProblems.Count > 0)
+        {
+            _tray.Notify(string.Join("\n", startProblems));
         }
         if (catalog.All().Count == 0)
         {
@@ -139,20 +149,32 @@ public partial class App : Application
     /// <summary>Reads the word or code under the mouse and searches for it.</summary>
     private async Task SearchUnderCursorAsync()
     {
-        if (_panel is { IsVisible: true })
+        if (_readingScreen)
         {
-            // The panel itself must not be what is read.
-            _panel.HidePanel();
-            await Task.Delay(PanelHideDelay);
+            // A slow app is still being read; a second press would only queue up behind it.
+            return;
         }
+        _readingScreen = true;
         ScreenRead read;
         try
         {
+            if (_panel is { IsVisible: true })
+            {
+                // The panel itself must not be what is read.
+                _panel.HidePanel();
+                await Task.Delay(PanelHideDelay);
+            }
             read = await ScreenText.UnderCursorAsync();
         }
-        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or InvalidOperationException or ArgumentException)
+        catch (Exception error)
         {
+            // Nothing awaits this task, so every failure ends in the panel saying what happened.
+            System.Diagnostics.Trace.WriteLine(error.ToString());
             read = new ScreenRead(null, $"The screen could not be read: {error.Message}");
+        }
+        finally
+        {
+            _readingScreen = false;
         }
         _panel?.ShowWithSearch(read.Text, read.Problem);
     }
