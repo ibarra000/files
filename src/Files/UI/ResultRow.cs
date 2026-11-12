@@ -18,6 +18,12 @@ public sealed record ResultRow(Hit? Hit, string? RecentSearch, string Before, st
     }
 
     public static ResultRow ForRecent(string search) => new(null, search, search, "", "", "Recent search", "");
+
+    /// <summary>The row shown when nothing matched: Enter on it reads the volumes directly.</summary>
+    public static ResultRow ForLiveHint() =>
+        new(null, null, "Search the volumes directly", "", "", "Finds files added since the last read · Shift+Enter", "") { IsLiveHint = true };
+
+    public bool IsLiveHint { get; init; }
 }
 
 /// <summary>The words on the panel's status line.</summary>
@@ -46,6 +52,33 @@ public static class StatusText
                 parts.Add(words);
             }
         }
+        return string.Join(" · ", parts);
+    }
+
+    /// <summary>The status line while a live search runs, or after it ends.</summary>
+    public static string ForLive(SearchResult? result, int foldersRead, bool running, bool stopped, bool capped, IReadOnlyList<string> problems)
+    {
+        int found = result?.Matched ?? 0;
+        string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
+        if (capped)
+        {
+            progress += $" · ranking the first {LiveSearch.MaxKept:N0}, type more to narrow it";
+        }
+        string state;
+        if (running)
+        {
+            state = $"Searching live · {progress} · Esc to stop";
+        }
+        else if (stopped)
+        {
+            state = $"Live search stopped · {progress}";
+        }
+        else
+        {
+            state = $"Live search · {progress}";
+        }
+        var parts = new List<string> { state };
+        parts.AddRange(problems);
         return string.Join(" · ", parts);
     }
 

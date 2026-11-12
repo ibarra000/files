@@ -168,7 +168,7 @@ public sealed class VolumeIndex
     /// in subfolders of a matching folder are found too. Prefix and suffix
     /// searches look at the folder's own name.
     /// </summary>
-    private static int FolderMatch(Query query, ReadOnlySpan<char> relative)
+    internal static int FolderMatch(Query query, ReadOnlySpan<char> relative)
     {
         if (query.Mode == MatchMode.Contains)
         {

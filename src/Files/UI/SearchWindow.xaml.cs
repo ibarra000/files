@@ -13,12 +13,14 @@ public partial class SearchWindow : Window
 {
     private static readonly TimeSpan TypingDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ToastDuration = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan LiveRefresh = TimeSpan.FromMilliseconds(250);
     private const double DefaultTopFraction = 0.18;
     private const int PageRows = 8;
 
     private readonly App _app;
     private readonly DispatcherTimer _typing;
     private readonly DispatcherTimer _toastTimer;
+    private readonly DispatcherTimer _liveTimer;
     private CancellationTokenSource? _searchCancel;
     private int _epoch;
     private SearchResult? _result;
@@ -29,6 +31,13 @@ public partial class SearchWindow : Window
     private Point? _dragStart;
     private HashSet<VolumeIndex> _searchedIndexes = [];
 
+    // The live search on screen (running or finished), and its cancel while it runs.
+    private LiveSearch? _live;
+    private CancellationTokenSource? _liveCancel;
+    private bool _liveStopped;
+    private bool _liveSnapshotPending;
+    private bool _liveSnapshotAgain;
+
     public SearchWindow(App app)
     {
         InitializeComponent();
@@ -37,6 +46,8 @@ public partial class SearchWindow : Window
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
         _toastTimer.Tick += (_, _) => ShowToast(null);
+        _liveTimer = new DispatcherTimer { Interval = LiveRefresh };
+        _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
         Deactivated += (_, _) => OnDeactivated();
@@ -70,6 +81,7 @@ public partial class SearchWindow : Window
             return;
         }
         _app.RecordSearch(Input.Text);
+        StopLiveSearch();
         if (_app.Settings.WindowLeft != Left || _app.Settings.WindowTop != Top)
         {
             _app.ApplySettings(_app.Settings with { WindowLeft = Left, WindowTop = Top });
@@ -106,6 +118,7 @@ public partial class SearchWindow : Window
         Alias? alias = Alias.Resolve(_app.Settings.Aliases, Input.Text);
         AliasHint.Text = alias is null ? "" : $"→ {alias.Code}";
         _typing.Stop();
+        StopLiveSearch();
         if (Input.Text.Trim().Length == 0)
         {
             _searchCancel?.Cancel();
@@ -140,8 +153,8 @@ public partial class SearchWindow : Window
         {
             return;
         }
-        Alias? alias = Alias.Resolve(_app.Settings.Aliases, line);
-        Query query = Query.Parse(alias?.Code ?? line);
+        StopLiveSearch();
+        Query query = ParseInput(line);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -177,12 +190,134 @@ public partial class SearchWindow : Window
         ShowResults(result);
     }
 
+    private Query ParseInput(string line)
+    {
+        Alias? alias = Alias.Resolve(_app.Settings.Aliases, line);
+        return Query.Parse(alias?.Code ?? line);
+    }
+
+    /// <summary>
+    /// Reads every volume now instead of searching the saved lists, so files
+    /// added since the last scan are found. Results stream in as folders are read.
+    /// </summary>
+    private async Task StartLiveSearchAsync()
+    {
+        _typing.Stop();
+        string line = Input.Text;
+        if (line.Trim().Length == 0)
+        {
+            return;
+        }
+        StopLiveSearch();
+        Query query = ParseInput(line);
+        _epoch++;
+        _searchCancel?.Cancel();
+        _queryProblem = query.Problem;
+        if (!query.IsValid)
+        {
+            _result = null;
+            Results.ItemsSource = null;
+            UpdateStatus();
+            return;
+        }
+
+        var volumes = _app.Indexer.Volumes.Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
+        var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
+        var cancel = new CancellationTokenSource();
+        _live = live;
+        _liveCancel = cancel;
+        _liveStopped = false;
+        _result = SearchResult.Empty;
+        Results.ItemsSource = null;
+        UpdateStatus();
+        _liveTimer.Start();
+        try
+        {
+            await Task.Run(() => live.RunAsync(cancel.Token));
+        }
+        catch (OperationCanceledException)
+        {
+            // Stopped with Esc, by typing, or by hiding the panel.
+        }
+        catch (Exception error)
+        {
+            if (_live == live)
+            {
+                ShowToast($"Live search stopped: {error.Message}");
+            }
+        }
+        bool stopped = cancel.IsCancellationRequested;
+        cancel.Dispose();
+        if (_live != live)
+        {
+            // Replaced or cleared meanwhile; StopLiveSearch has tidied up.
+            return;
+        }
+        _liveStopped = stopped;
+        _liveCancel = null;
+        _liveTimer.Stop();
+        try
+        {
+            await ShowLiveAsync();
+        }
+        catch (Exception error)
+        {
+            ShowToast($"Live results could not be shown: {error.Message}");
+        }
+    }
+
+    /// <summary>Cancels a running live search and takes its results off the panel's state.</summary>
+    private void StopLiveSearch()
+    {
+        _liveCancel?.Cancel();
+        _liveCancel = null;
+        _liveTimer.Stop();
+        _live = null;
+    }
+
+    private async Task ShowLiveAsync()
+    {
+        if (_live is not LiveSearch live)
+        {
+            return;
+        }
+        if (_liveSnapshotPending)
+        {
+            // One is being built; take another when it is done, so the last folders read are shown.
+            _liveSnapshotAgain = true;
+            return;
+        }
+        _liveSnapshotPending = true;
+        SearchResult result;
+        try
+        {
+            result = await Task.Run(() => live.Snapshot());
+        }
+        finally
+        {
+            _liveSnapshotPending = false;
+        }
+        if (_live == live)
+        {
+            ShowResults(result);
+        }
+        if (_liveSnapshotAgain)
+        {
+            _liveSnapshotAgain = false;
+            await ShowLiveAsync();
+        }
+    }
+
     private void ShowResults(SearchResult result)
     {
         // Keep the same file selected when the rows move.
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
         List<ResultRow> rows = result.Hits.Select(ResultRow.ForHit).ToList();
+        if (rows.Count == 0 && _live is null)
+        {
+            rows.Add(ResultRow.ForLiveHint());
+        }
         Results.ItemsSource = rows;
         int keep = rows.FindIndex(row => row.Hit?.Path == selectedPath);
         Results.SelectedIndex = keep >= 0 ? keep : (rows.Count > 0 ? 0 : -1);
@@ -206,7 +341,7 @@ public partial class SearchWindow : Window
                 .Select(state => state.Index!)
                 .ToHashSet()
                 .SetEquals(_searchedIndexes);
-            if (IsVisible && indexesChanged && Input.Text.Trim().Length > 0)
+            if (IsVisible && indexesChanged && _live is null && Input.Text.Trim().Length > 0)
             {
                 _ = SearchAsync();
             }
@@ -215,7 +350,18 @@ public partial class SearchWindow : Window
 
     private void UpdateStatus()
     {
-        Status.Text = _toast ?? StatusText.For(_app.Indexer.Volumes, _result, _queryProblem);
+        if (_toast is not null)
+        {
+            Status.Text = _toast;
+        }
+        else if (_live is LiveSearch live)
+        {
+            Status.Text = StatusText.ForLive(_result, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
+        }
+        else
+        {
+            Status.Text = StatusText.For(_app.Indexer.Volumes, _result, _queryProblem);
+        }
     }
 
     private void ShowToast(string? message)
@@ -252,6 +398,9 @@ public partial class SearchWindow : Window
             case Key.O when ctrl:
                 Reveal();
                 break;
+            case Key.Enter when shift:
+                _ = StartLiveSearchAsync();
+                break;
             case Key.Enter:
                 Accept();
                 break;
@@ -263,6 +412,9 @@ public partial class SearchWindow : Window
                 break;
             case Key.C when ctrl && Input.SelectionLength == 0:
                 CopySelected(path: true);
+                break;
+            case Key.Escape when _liveCancel is not null:
+                _liveCancel.Cancel();
                 break;
             case Key.Escape when Input.Text.Length > 0:
                 Input.Clear();
@@ -310,6 +462,11 @@ public partial class SearchWindow : Window
         {
             // Enter before the typing pause ended: search now, then open the best match.
             await SearchAsync();
+        }
+        if (Results.SelectedItem is ResultRow { IsLiveHint: true })
+        {
+            await StartLiveSearchAsync();
+            return;
         }
         Open(OpenWith.ForEnter(_app.Settings));
     }
