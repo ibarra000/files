@@ -67,9 +67,11 @@ public partial class SearchWindow : Window
         Activate();
         Input.Focus();
         Input.SelectAll();
+        _recall.Reset(_app.History);
         if (Input.Text.Length == 0)
         {
-            ShowRecent();
+            _showAllFavorites = false;
+            ShowHome();
         }
         UpdateStatus();
     }
@@ -80,7 +82,6 @@ public partial class SearchWindow : Window
         {
             return;
         }
-        _app.RecordSearch(Input.Text);
         StopLiveSearch();
         if (_app.Settings.WindowLeft != Left || _app.Settings.WindowTop != Top)
         {
@@ -115,34 +116,28 @@ public partial class SearchWindow : Window
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
         Placeholder.Visibility = Input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        Alias? alias = Alias.Resolve(_app.Settings.Aliases, Input.Text);
-        AliasHint.Text = alias is null ? "" : $"→ {alias.Code}";
         _typing.Stop();
         StopLiveSearch();
+        if (!_recalling)
+        {
+            // Typing leaves the recalled search behind.
+            _recall.Reset(_app.History);
+        }
         if (Input.Text.Trim().Length == 0)
         {
             _searchCancel?.Cancel();
-            ShowRecent();
+            ShowHome();
             return;
         }
-        // A paste or an alias is complete already, so it searches at once.
-        if (_pasted || alias is not null)
+        _showAllFavorites = false;
+        // A paste, a recalled search or a saved one is complete already, so it searches at once.
+        if (_pasted || _recalling)
         {
             _pasted = false;
             _ = SearchAsync();
             return;
         }
         _typing.Start();
-    }
-
-    private void ShowRecent()
-    {
-        // A search still running must not replace this list when it finishes.
-        _epoch++;
-        _result = null;
-        _queryProblem = null;
-        Results.ItemsSource = _app.History.Take(20).Select(ResultRow.ForRecent).ToList();
-        UpdateStatus();
     }
 
     private async Task SearchAsync()
@@ -154,7 +149,7 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        Query query = ParseInput(line);
+        Query query = Query.Parse(line);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -190,12 +185,6 @@ public partial class SearchWindow : Window
         ShowResults(result);
     }
 
-    private Query ParseInput(string line)
-    {
-        Alias? alias = Alias.Resolve(_app.Settings.Aliases, line);
-        return Query.Parse(alias?.Code ?? line);
-    }
-
     /// <summary>
     /// Reads every volume now instead of searching the saved lists, so files
     /// added since the last scan are found. Results stream in as folders are read.
@@ -209,7 +198,7 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        Query query = ParseInput(line);
+        Query query = Query.Parse(line);
         _epoch++;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -382,8 +371,14 @@ public partial class SearchWindow : Window
         e.Handled = true;
         switch (e.Key)
         {
+            case Key.Down when _recall.IsActive:
+                ShowRecalled(_recall.Newer());
+                break;
             case Key.Down:
                 Move(1);
+                break;
+            case Key.Up when CanRecall():
+                ShowRecalled(_recall.Older());
                 break;
             case Key.Up:
                 Move(-1);
@@ -405,7 +400,7 @@ public partial class SearchWindow : Window
                 Accept();
                 break;
             case Key.D when ctrl:
-                Open(new OpenWith.CombinedPdf());
+                ToggleFavorite(FavoriteFor(SelectedRow));
                 break;
             case Key.C when ctrl && shift:
                 CopySelected(path: false);
@@ -415,6 +410,10 @@ public partial class SearchWindow : Window
                 break;
             case Key.Escape when _liveCancel is not null:
                 _liveCancel.Cancel();
+                break;
+            case Key.Escape when _showAllFavorites && Input.Text.Length == 0:
+                _showAllFavorites = false;
+                ShowHome();
                 break;
             case Key.Escape when Input.Text.Length > 0:
                 Input.Clear();
@@ -440,93 +439,110 @@ public partial class SearchWindow : Window
 
     private void Move(int by)
     {
-        int count = Results.Items.Count;
-        if (count == 0)
+        if (Results.Items.Count == 0)
         {
             return;
         }
-        Results.SelectedIndex = Math.Clamp(Results.SelectedIndex + by, 0, count - 1);
-        Results.ScrollIntoView(Results.SelectedItem);
+        int step = by > 0 ? 1 : -1;
+        int target = Math.Clamp(Results.SelectedIndex + by, 0, Results.Items.Count - 1);
+        // Section headers cannot be selected: keep going past them, or turn back at the end of the list.
+        int? index = NextSelectable(target, step) ?? NextSelectable(target, -step);
+        if (index is int found)
+        {
+            Results.SelectedIndex = found;
+            Results.ScrollIntoView(Results.SelectedItem);
+        }
     }
 
     private async void Accept()
     {
-        if (Results.SelectedItem is ResultRow { RecentSearch: string search })
-        {
-            Input.Text = search;
-            Input.CaretIndex = search.Length;
-            await SearchAsync();
-            return;
-        }
         if (_typing.IsEnabled)
         {
             // Enter before the typing pause ended: search now, then open the best match.
             await SearchAsync();
         }
-        if (Results.SelectedItem is ResultRow { IsLiveHint: true })
+        switch (SelectedRow)
         {
-            await StartLiveSearchAsync();
-            return;
+            case { Kind: RowKind.LiveHint }:
+                await StartLiveSearchAsync();
+                return;
+            case { Kind: RowKind.SeeAll }:
+                _showAllFavorites = true;
+                ShowHome();
+                return;
+            case { Item.Kind: FavoriteKind.Search } row:
+                RunSearch(row.Item.Target);
+                return;
+            case { Missing: true } row:
+                ShowToast($"{row.Before} was not found · Ctrl+D removes it from favorites");
+                return;
         }
         Open(OpenWith.ForEnter(_app.Settings));
     }
 
-    private Hit? Selected => (Results.SelectedItem as ResultRow)?.Hit;
-
-    private async void Open(OpenWith with, Hit? hit = null)
+    private async void Open(OpenWith with, ResultRow? row = null)
     {
-        hit ??= Selected;
-        if (hit is null)
+        row ??= SelectedRow;
+        if (row?.Path is not string path)
         {
             ShowToast("Nothing to open");
             return;
         }
-        if (with is OpenWith.CombinedPdf && PageSet.BaseOf(hit.Name) is not null)
-        {
-            ShowToast("Opening…");
-        }
         string? problem;
         try
         {
-            problem = await Task.Run(() => _app.Opener.Open(hit, with));
+            problem = await Task.Run(() => Opener.Open(path, with));
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            problem = $"Could not open {hit.Name}: {error.Message}";
+            problem = $"Could not open {path}: {error.Message}";
         }
-        _app.RecordSearch(Input.Text);
-        ShowToast(problem);
-        if (problem is null && _app.Settings.HideAfterOpening)
-        {
-            HidePanel();
-        }
+        AfterOpening(row, problem);
     }
 
-    private void Reveal(Hit? hit = null)
+    private void Reveal(ResultRow? row = null)
     {
-        hit ??= Selected;
-        if (hit is null)
+        row ??= SelectedRow;
+        if (row?.Path is not string path)
         {
             ShowToast("Nothing to show");
             return;
         }
-        string? problem = Opener.Reveal(hit.Path);
+        AfterOpening(row, Opener.Reveal(path));
+    }
+
+    /// <summary>Remembers an opened file and the search that found it, then hides if the settings say so.</summary>
+    private void AfterOpening(ResultRow row, string? problem)
+    {
         ShowToast(problem);
-        if (problem is null && _app.Settings.HideAfterOpening)
+        if (problem is not null)
+        {
+            return;
+        }
+        if (row.Hit is Hit hit)
+        {
+            _app.RecordOpened(hit.Path, Input.Text);
+        }
+        else if (row.Item is { Kind: FavoriteKind.File } item)
+        {
+            _app.RecordOpened(item.Target, "");
+        }
+        _recall.Reset(_app.History);
+        if (_app.Settings.HideAfterOpening)
         {
             HidePanel();
         }
     }
 
-    private void CopySelected(bool path, Hit? hit = null)
+    private void CopySelected(bool path, ResultRow? row = null)
     {
-        hit ??= Selected;
-        if (hit is null)
+        row ??= SelectedRow;
+        if (row?.Path is not string full)
         {
             ShowToast("Nothing to copy");
             return;
         }
-        string text = path ? hit.Path : hit.Name;
+        string text = path ? full : Path.GetFileName(full.TrimEnd('\\'));
         try
         {
             Clipboard.SetText(text);
@@ -548,27 +564,31 @@ public partial class SearchWindow : Window
 
     private void OnResultMenuOpening(object sender, ContextMenuEventArgs e)
     {
-        if (Selected is not Hit hit)
+        if (SelectedRow is not ResultRow row || (row.Path is null && row.Item is null))
         {
             e.Handled = true;
             return;
         }
         var menu = Results.ContextMenu!;
         menu.Items.Clear();
-        AddMenuItem(menu, "Open", "Enter", () => Open(OpenWith.ForEnter(_app.Settings), hit));
-        AddMenuItem(menu, "Open with default app", "", () => Open(new OpenWith.Default(), hit));
-        if (PageSet.BaseOf(hit.Name) is not null)
+        if (row.Path is not null)
         {
-            AddMenuItem(menu, "Open as combined PDF", "Ctrl+D", () => Open(new OpenWith.CombinedPdf(), hit));
+            AddMenuItem(menu, "Open", "Enter", () => Open(OpenWith.ForEnter(_app.Settings), row));
+            AddMenuItem(menu, "Open with default app", "", () => Open(new OpenWith.Default(), row));
+            if (row.Item?.Kind != FavoriteKind.Folder)
+            {
+                foreach (Viewer viewer in _app.Settings.Viewers)
+                {
+                    AddMenuItem(menu, $"Open with {viewer.Name}", "", () => Open(new OpenWith.Program(viewer), row));
+                }
+            }
+            menu.Items.Add(new Separator());
+            AddMenuItem(menu, "Show in folder", "Ctrl+O", () => Reveal(row));
+            AddMenuItem(menu, "Copy path", "Ctrl+C", () => CopySelected(path: true, row));
+            AddMenuItem(menu, "Copy name", "Ctrl+Shift+C", () => CopySelected(path: false, row));
+            menu.Items.Add(new Separator());
         }
-        foreach (Viewer viewer in _app.Settings.Viewers)
-        {
-            AddMenuItem(menu, $"Open with {viewer.Name}", "", () => Open(new OpenWith.Program(viewer), hit));
-        }
-        menu.Items.Add(new Separator());
-        AddMenuItem(menu, "Show in folder", "Ctrl+O", () => Reveal(hit));
-        AddMenuItem(menu, "Copy path", "Ctrl+C", () => CopySelected(path: true, hit));
-        AddMenuItem(menu, "Copy name", "Ctrl+Shift+C", () => CopySelected(path: false, hit));
+        AddFavoriteItems(menu, row);
     }
 
     private static void AddMenuItem(ContextMenu menu, string header, string gesture, Action action)
@@ -583,7 +603,7 @@ public partial class SearchWindow : Window
     /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
     private void OnResultMouseMove(object sender, MouseEventArgs e)
     {
-        if (e.LeftButton != MouseButtonState.Pressed || _dragStart is not Point start || Selected is not Hit hit)
+        if (e.LeftButton != MouseButtonState.Pressed || _dragStart is not Point start || SelectedRow?.Path is not string path)
         {
             return;
         }
@@ -593,7 +613,7 @@ public partial class SearchWindow : Window
         if (farEnough)
         {
             _dragStart = null;
-            DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { hit.Path }), DragDropEffects.Copy);
+            DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Copy);
         }
     }
 

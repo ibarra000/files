@@ -10,22 +10,23 @@ Instant file-name search across folders and network shares on Windows.
 - **Fast matching.** Every name is held in memory and searched in parallel: about a millisecond per million names. Results from every volume are merged into one ranked list. Files inside a folder whose name matches are listed too, below direct matches.
 - **Live search.** <kbd>Shift</kbd>+<kbd>Enter</kbd> reads every volume now instead of using its saved list, so files added since the last read are found too. Results appear as folders are read; <kbd>Esc</kbd> stops it. When a normal search finds nothing, the panel offers a live search.
 - **Search syntax.** `term*` starts with, `*term` ends with (before the extension), and `ext:pdf,dwg` filters by type.
-- **Opening.** <kbd>Enter</kbd> opens with the Windows default, a program you choose, or as a combined PDF. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. Right-click a result for every option. Drag a result into another app to hand it the file.
-- **PDF page sets.** `NAME.pdf`, `NAME_Page2.pdf`, `NAME-p3.pdf`, … in one folder can be merged into one document (<kbd>Ctrl</kbd>+<kbd>D</kbd>).
-- **Typing helpers.** Aliases (a short name that searches for something longer) and recent searches, shown when the box is empty.
+- **Opening.** <kbd>Enter</kbd> opens with the Windows default or a program you add in Settings. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. Right-click a result for every option. Drag a result into another app to hand it the file.
+- **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. Right-click a result to add its folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
+- **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder.
+- **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> in an empty box brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again.
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
 
 ## Keys
 
 | Key | Action |
 |---|---|
-| <kbd>Enter</kbd> | Open (or use the selected recent search) |
+| <kbd>Enter</kbd> | Open (or run the selected saved search) |
 | <kbd>Shift</kbd>+<kbd>Enter</kbd> | Live search: read the volumes now |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> or <kbd>Ctrl</kbd>+<kbd>Enter</kbd> | Show in folder |
-| <kbd>Ctrl</kbd>+<kbd>D</kbd> | Open as combined PDF |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd> | Add to or remove from favorites (the search itself when no file is selected) |
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>C</kbd> | Copy path / copy name (when no text is selected) |
-| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results |
-| <kbd>Esc</kbd> | Stop a live search, clear the box, then hide |
+| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results; <kbd>↑</kbd> at the top of an empty box recalls earlier searches |
+| <kbd>Esc</kbd> | Stop a live search, leave "See all", clear the box, then hide |
 | <kbd>F5</kbd> | Read every volume again |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |

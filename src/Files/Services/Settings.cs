@@ -12,14 +12,12 @@ public enum Theme
 }
 
 /// <summary>A program to open files with.</summary>
-/// <param name="Extensions">File types "Open as combined PDF" sends here instead of merging.</param>
-public sealed record Viewer(string Name, string Program, IReadOnlyList<string> Extensions);
+public sealed record Viewer(string Name, string Program);
 
 /// <summary>Everything the Settings window edits, saved as <c>settings.json</c>. Volumes live in the catalog.</summary>
 public sealed record Settings
 {
     public const string DefaultOpen = "default";
-    public const string PdfOpen = "pdf";
 
     public static readonly string[] DefaultHiddenExtensions =
         ["db", "js", "lnk", "ini", "tmp", "bak", "url", "exe", "dll", "bat", "cmd", "ps1", "vbs"];
@@ -42,14 +40,10 @@ public sealed record Settings
     public int RescanHours { get; init; } = 1;
     public bool HideSystemFiles { get; init; } = true;
     public IReadOnlyList<string> HiddenExtensions { get; init; } = DefaultHiddenExtensions;
-    public IReadOnlyList<Alias> Aliases { get; init; } = [];
 
-    /// <summary>What Enter does: <see cref="DefaultOpen"/>, <see cref="PdfOpen"/> or a viewer's name.</summary>
+    /// <summary>What Enter does: <see cref="DefaultOpen"/> or a viewer's name.</summary>
     public string EnterOpens { get; init; } = DefaultOpen;
     public IReadOnlyList<Viewer> Viewers { get; init; } = [];
-
-    /// <summary>Program for PDFs, or empty for the Windows default.</summary>
-    public string PdfViewer { get; init; } = "";
 
     public bool CheckForUpdates { get; init; } = true;
 
@@ -89,16 +83,10 @@ public sealed record Settings
         {
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
-            Aliases = (loaded.Aliases ?? [])
-                .Where(alias => alias?.Name is not null && alias.Code is not null)
-                .Select(alias => alias with { Note = alias.Note ?? "" })
-                .ToList(),
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,
             Viewers = (loaded.Viewers ?? [])
                 .Where(viewer => viewer?.Name is not null && viewer.Program is not null)
-                .Select(viewer => viewer with { Extensions = viewer.Extensions ?? [] })
                 .ToList(),
-            PdfViewer = loaded.PdfViewer ?? "",
             UpdateFolder = loaded.UpdateFolder ?? "",
         };
     }

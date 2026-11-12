@@ -4,26 +4,100 @@ using Files.Services;
 
 namespace Files.UI;
 
-/// <summary>One line in the panel: a file, or a recent search when the box is empty.</summary>
-public sealed record ResultRow(Hit? Hit, string? RecentSearch, string Before, string Match, string After, string Detail, string Badge)
+public enum RowKind
 {
+    Hit,
+    Header,
+    Favorite,
+    Opened,
+    SeeAll,
+    LiveHint,
+}
+
+/// <summary>
+/// One line in the panel: a search result, or on the home list a section
+/// header, a favorite, a recently opened file, or "See all".
+/// </summary>
+public sealed record ResultRow(RowKind Kind, string Before, string Match, string After, string Detail, string Badge)
+{
+    private const string FileIcon = "\uE8A5";
+    private const string FolderIcon = "\uE8B7";
+    private const string SearchIcon = "\uE721";
+
+    public Hit? Hit { get; init; }
+
+    /// <summary>What a favorite or recently opened row stands for.</summary>
+    public Favorite? Item { get; init; }
+
+    /// <summary>A Segoe Fluent Icons glyph, or empty.</summary>
+    public string Icon { get; init; } = "";
+
+    /// <summary>A favorite file or folder that is no longer at its path.</summary>
+    public bool Missing { get; init; }
+
+    public bool IsHeader => Kind == RowKind.Header;
+
+    /// <summary>The file or folder the row opens, if it opens one.</summary>
+    public string? Path
+    {
+        get
+        {
+            if (Hit is not null)
+            {
+                return Hit.Path;
+            }
+            return Item is { Kind: not FavoriteKind.Search } item ? item.Target : null;
+        }
+    }
+
     public static ResultRow ForHit(Hit hit)
     {
         if (hit.MatchStart < 0)
         {
-            return new ResultRow(hit, null, hit.Name, "", "", hit.Folder, hit.Volume);
+            return new ResultRow(RowKind.Hit, hit.Name, "", "", hit.Folder, hit.Volume) { Hit = hit };
         }
         int end = hit.MatchStart + hit.MatchLength;
-        return new ResultRow(hit, null, hit.Name[..hit.MatchStart], hit.Name[hit.MatchStart..end], hit.Name[end..], hit.Folder, hit.Volume);
+        string before = hit.Name[..hit.MatchStart];
+        string match = hit.Name[hit.MatchStart..end];
+        return new ResultRow(RowKind.Hit, before, match, hit.Name[end..], hit.Folder, hit.Volume) { Hit = hit };
     }
 
-    public static ResultRow ForRecent(string search) => new(null, search, search, "", "", "Recent search", "");
+    public static ResultRow ForHeader(string title) => new(RowKind.Header, title, "", "", "", "");
+
+    public static ResultRow ForFavorite(Favorite favorite, bool missing)
+    {
+        if (favorite.Kind == FavoriteKind.Search)
+        {
+            return new ResultRow(RowKind.Favorite, favorite.Target, "", "", "Saved search", "") { Item = favorite, Icon = SearchIcon };
+        }
+        string icon = favorite.Kind == FavoriteKind.Folder ? FolderIcon : FileIcon;
+        return new ResultRow(RowKind.Favorite, NameOf(favorite.Target), "", "", favorite.Target, missing ? "Not found" : "")
+        {
+            Item = favorite,
+            Icon = icon,
+            Missing = missing,
+        };
+    }
+
+    public static ResultRow ForOpened(string path)
+    {
+        var item = new Favorite(FavoriteKind.File, path);
+        return new ResultRow(RowKind.Opened, NameOf(path), "", "", path, "") { Item = item, Icon = FileIcon };
+    }
+
+    public static ResultRow ForSeeAll(int count) => new(RowKind.SeeAll, $"See all {count} favorites", "", "", "", "");
 
     /// <summary>The row shown when nothing matched: Enter on it reads the volumes directly.</summary>
-    public static ResultRow ForLiveHint() =>
-        new(null, null, "Search the volumes directly", "", "", "Finds files added since the last read · Shift+Enter", "") { IsLiveHint = true };
+    public static ResultRow ForLiveHint()
+    {
+        return new ResultRow(RowKind.LiveHint, "Search the volumes directly", "", "", "Finds files added since the last read · Shift+Enter", "");
+    }
 
-    public bool IsLiveHint { get; init; }
+    private static string NameOf(string path)
+    {
+        string name = System.IO.Path.GetFileName(path.TrimEnd('\\'));
+        return name.Length > 0 ? name : path;
+    }
 }
 
 /// <summary>The words on the panel's status line.</summary>

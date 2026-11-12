@@ -91,22 +91,10 @@
             </TabItem>
 
             <TabItem Header="Search">
-                <DockPanel Margin="12">
-                    <StackPanel DockPanel.Dock="Top">
-                        <TextBlock Text="File types never shown" Style="{StaticResource Heading}" />
-                        <TextBox x:Name="HiddenBox" LostFocus="OnChanged" ToolTip="Extensions separated by commas" />
-                        <TextBlock Text="Aliases: a short name that searches for something longer when typed on its own"
-                                   Style="{StaticResource Heading}" TextWrapping="Wrap" />
-                    </StackPanel>
-                    <DataGrid x:Name="AliasGrid" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True"
-                              HeadersVisibility="Column" RowEditEnding="OnGridEdited" CellEditEnding="OnGridEdited">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="120" />
-                            <DataGridTextColumn Header="Searches for" Binding="{Binding Code}" Width="*" />
-                            <DataGridTextColumn Header="Note" Binding="{Binding Note}" Width="*" />
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </DockPanel>
+                <StackPanel Margin="12">
+                    <TextBlock Text="File types never shown" Style="{StaticResource Heading}" />
+                    <TextBox x:Name="HiddenBox" LostFocus="OnChanged" ToolTip="Extensions separated by commas" />
+                </StackPanel>
             </TabItem>
 
             <TabItem Header="Opening">
@@ -114,8 +102,6 @@
                     <StackPanel DockPanel.Dock="Top">
                         <TextBlock Text="Enter opens with" Style="{StaticResource Heading}" />
                         <ComboBox x:Name="EnterBox" Width="300" HorizontalAlignment="Left" SelectionChanged="OnChanged" />
-                        <TextBlock Text="PDF program (empty for the Windows default)" Style="{StaticResource Heading}" />
-                        <TextBox x:Name="PdfViewerBox" LostFocus="OnChanged" />
                         <TextBlock Text="Programs to open files with" Style="{StaticResource Heading}" />
                     </StackPanel>
                     <DataGrid x:Name="ViewerGrid" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True"
@@ -123,7 +109,6 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="120" />
                             <DataGridTextColumn Header="Program" Binding="{Binding Program}" Width="*" />
-                            <DataGridTextColumn Header="Instead of combining (types)" Binding="{Binding Extensions}" Width="*" />
                         </DataGrid.Columns>
                     </DataGrid>
                 </DockPanel>

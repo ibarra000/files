@@ -33,7 +33,7 @@ Only where .NET has no managed API. Today that is `RegisterHotKey` (`Services/Ho
 | **volume** | a folder the user added to search |
 | **search input** / **term** | what the user types |
 | **folder** | a directory in a volume |
-| **document name** | the name a PDF page set shares (`NAME.pdf`, `NAME_Page2.pdf`, …) |
+| **favorite** | a file, folder or saved search pinned to the home list |
 | **program** | a program set up under Opening to open files with |
 
 Sample data should look like sample data: `AB-C-0704.pdf`, `report.pdf`, `\\server\share`.
