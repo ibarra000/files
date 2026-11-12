@@ -148,6 +148,19 @@ public partial class SearchWindow
         _recalling = false;
     }
 
+    /// <summary>Shows the panel searching for <paramref name="search"/>, or with <paramref name="problem"/> when there is nothing to search.</summary>
+    public void ShowWithSearch(string? search, string? problem)
+    {
+        ShowPanel();
+        if (search is null)
+        {
+            ShowToast(problem);
+            return;
+        }
+        RunSearch(search);
+        Input.SelectAll();
+    }
+
     /// <summary>Puts a saved search in the box and runs it.</summary>
     private void RunSearch(string search)
     {

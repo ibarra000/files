@@ -61,6 +61,15 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Settings_without_the_text_shortcut_get_its_default()
+    {
+        using var temp = new TempFolder();
+        string path = temp.File("settings.json", """{ "Hotkey": "Alt+Space", "OcrHotkey": null }""");
+        (Settings loaded, _) = Settings.Load(path);
+        Assert.Equal(new Settings().OcrHotkey, loaded.OcrHotkey);
+    }
+
+    [Fact]
     public void Hidden_extensions_are_normalized()
     {
         var settings = new Settings { HiddenExtensions = [".TMP", " bak ", ""] };
