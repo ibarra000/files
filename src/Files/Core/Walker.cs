@@ -1,4 +1,5 @@
 using System.IO.Enumeration;
+using System.Runtime.ExceptionServices;
 
 namespace Files.Core;
 
@@ -24,6 +25,13 @@ public static class Walker
 
     private const int BufferBytes = 64 * 1024;
 
+    /// <summary>
+    /// Memory a walk needs per character of names, as a safe estimate: the
+    /// listed string, both arenas, the copy made while an arena grows, and
+    /// per-name overhead, at two bytes a character.
+    /// </summary>
+    private const int BytesPerNameChar = 16;
+
     private sealed record Folder(string Relative, int Depth);
 
     private sealed record Listing(List<string> Files, List<string> Folders);
@@ -33,16 +41,51 @@ public static class Walker
     /// read; a subfolder that cannot be read is counted and skipped. Folder
     /// junctions and other reparse points are never followed.
     /// There is no fixed file count: the walk stops only when the names would
-    /// no longer fit in the index's arenas (<paramref name="maxChars"/>).
+    /// no longer fit in an arena or in memory (see <see cref="CharLimit"/>).
     /// </summary>
     public static WalkResult Walk(string root, bool skipHidden, CancellationToken cancel, Action<int>? progress = null)
     {
-        return Walk(root, skipHidden, cancel, progress, Names.MaxChars);
+        return Walk(root, skipHidden, cancel, progress, CharLimit());
     }
 
-    internal static WalkResult Walk(string root, bool skipHidden, CancellationToken cancel, Action<int>? progress, long maxChars)
+    /// <summary>
+    /// The most characters of names one walk may hold: what fits in an arena,
+    /// and what this machine's memory can take, so a huge volume stops with a
+    /// clear message instead of running out of memory.
+    /// </summary>
+    public static long CharLimit()
     {
-        Listing rootListing = List(root, skipHidden);
+        long available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        return Math.Min(Names.MaxChars, available / BytesPerNameChar);
+    }
+
+    /// <summary>
+    /// Walks <paramref name="root"/> but stores only the files <paramref name="keep"/>
+    /// returns for each folder, and skips folders where it keeps none. Each
+    /// stored folder is also handed to <paramref name="onFolder"/> as soon as it
+    /// is read, so a caller can show results before the walk ends.
+    /// </summary>
+    public static WalkResult Walk(
+        string root,
+        bool skipHidden,
+        CancellationToken cancel,
+        Func<string, List<string>, List<string>> keep,
+        Action<string, IReadOnlyList<string>> onFolder)
+    {
+        return Walk(root, skipHidden, cancel, progress: null, CharLimit(), keep, onFolder);
+    }
+
+    internal static WalkResult Walk(
+        string root,
+        bool skipHidden,
+        CancellationToken cancel,
+        Action<int>? progress,
+        long maxChars,
+        Func<string, List<string>, List<string>>? keep = null,
+        Action<string, IReadOnlyList<string>>? onFolder = null)
+    {
+        Listing rootListing = Filter(List(root, skipHidden), "", keep);
+        onFolder?.Invoke("", rootListing.Files);
         var found = new List<(string Relative, List<string> Files)> { ("", rootListing.Files) };
         var pending = new Stack<Folder>(rootListing.Folders.Select(name => new Folder(name, 1)));
         int busy = 0;
@@ -52,6 +95,7 @@ public static class Walker
         int unreadable = 0;
         int failuresInARow = 0;
         bool truncated = false;
+        Exception? failure = null;
         var gate = new object();
 
         void Work()
@@ -65,7 +109,8 @@ public static class Walker
                     {
                         Monitor.Wait(gate);
                     }
-                    if (pending.Count == 0 || cancel.IsCancellationRequested || failuresInARow >= MaxConsecutiveFailures)
+                    bool stop = cancel.IsCancellationRequested || failuresInARow >= MaxConsecutiveFailures || failure is not null;
+                    if (pending.Count == 0 || stop)
                     {
                         Monitor.PulseAll(gate);
                         return;
@@ -74,13 +119,31 @@ public static class Walker
                     busy++;
                 }
 
-                Listing? listing = TryList(Path.Join(root, folder.Relative), skipHidden, out bool lostContact);
+                Listing? listing = null;
+                bool lostContact = false;
+                Exception? crash = null;
+                try
+                {
+                    listing = TryList(Path.Join(root, folder.Relative), skipHidden, out lostContact);
+                    listing = listing is null ? null : Filter(listing, folder.Relative, keep);
+                }
+                catch (Exception error)
+                {
+                    // Anything unexpected (out of memory, a failing filter) ends the walk
+                    // and is rethrown by Walk; letting it escape would end the process.
+                    crash = error;
+                }
+                bool store = listing is not null && (keep is null || listing.Files.Count > 0);
                 int? report = null;
 
                 lock (gate)
                 {
                     busy--;
-                    if (listing is null)
+                    if (crash is not null)
+                    {
+                        failure ??= crash;
+                    }
+                    else if (listing is null)
                     {
                         unreadable++;
                         failuresInARow = lostContact ? failuresInARow + 1 : failuresInARow;
@@ -88,14 +151,18 @@ public static class Walker
                     else if (fileChars + CharsOf(listing.Files) > maxChars || folderChars + folder.Relative.Length + 1 > maxChars)
                     {
                         truncated = true;
+                        store = false;
                     }
                     else
                     {
                         failuresInARow = 0;
-                        entries += listing.Files.Count;
-                        fileChars += CharsOf(listing.Files);
-                        folderChars += folder.Relative.Length + 1;
-                        found.Add((folder.Relative, listing.Files));
+                        if (store)
+                        {
+                            entries += listing.Files.Count;
+                            fileChars += CharsOf(listing.Files);
+                            folderChars += folder.Relative.Length + 1;
+                            found.Add((folder.Relative, listing.Files));
+                        }
                         if (folder.Depth < MaxDepth)
                         {
                             foreach (string child in listing.Folders)
@@ -108,9 +175,24 @@ public static class Walker
                     Monitor.PulseAll(gate);
                 }
                 // Reported outside the lock, so a slow listener never holds up the other workers.
-                if (report is int count)
+                try
                 {
-                    progress?.Invoke(count);
+                    if (report is int count)
+                    {
+                        progress?.Invoke(count);
+                    }
+                    if (store)
+                    {
+                        onFolder?.Invoke(folder.Relative, listing!.Files);
+                    }
+                }
+                catch (Exception error)
+                {
+                    lock (gate)
+                    {
+                        failure ??= error;
+                        Monitor.PulseAll(gate);
+                    }
                 }
             }
         }
@@ -119,6 +201,10 @@ public static class Walker
         threads.ForEach(thread => thread.Start());
         threads.ForEach(thread => thread.Join());
         cancel.ThrowIfCancellationRequested();
+        if (failure is not null)
+        {
+            ExceptionDispatchInfo.Throw(failure);
+        }
         if (failuresInARow >= MaxConsecutiveFailures)
         {
             throw new IOException($"{MaxConsecutiveFailures} folders in a row could not be read");
@@ -132,6 +218,11 @@ public static class Walker
             builder.AddFolder(relative, files);
         }
         return new WalkResult(builder.Build(), found.Count, unreadable, truncated);
+    }
+
+    private static Listing Filter(Listing listing, string relative, Func<string, List<string>, List<string>>? keep)
+    {
+        return keep is null ? listing : listing with { Files = keep(relative, listing.Files) };
     }
 
     /// <summary>The arena space a folder's names take, one separator each.</summary>

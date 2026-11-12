@@ -45,11 +45,11 @@ The app is self-contained, so the .NET runtime need not be installed. It runs wi
 | Results shown | 300, best first (the count of all matches is shown too) |
 | Files listed per matching folder | 64 |
 | Folder depth | 32 |
-| Files per volume | No fixed number: up to about 2.1 billion characters of names, roughly 70 million files of 30 characters. Each file takes about 130 bytes of memory. |
+| Files per volume | No fixed number. A read stops, and says so, when the names would not fit: at most 2.1 billion characters, and no more than this PC's memory allows (budgeting 16 bytes per character while reading, so about 30 million 30-character names per 16 GB). A loaded volume then takes about 130 bytes per file. |
 | Pages in a combined PDF | 512 |
 | Scans at once | 2 |
 | Recent searches kept | 200 |
 
 ## Freshness
 
-A volume is read again on a schedule (every hour by default; every 4 hours, daily or only on <kbd>F5</kbd> are the other choices) and on <kbd>F5</kbd>. There are no change notifications, so a file added since the last read appears after the next one. While a volume is unreachable, its last file list is still searched, and the status line says how old it is.
+A volume is read again on a schedule (every hour by default; every 4 hours, daily or only on <kbd>F5</kbd> are the other choices) and on <kbd>F5</kbd>. There are no change notifications, so a file added since the last read appears after the next one. To find it sooner, <kbd>Shift</kbd>+<kbd>Enter</kbd> runs a live search, which reads the volumes there and then (it keeps and ranks at most 100,000 matches). While a volume is unreachable, its last file list is still searched, and the status line says how old it is.
