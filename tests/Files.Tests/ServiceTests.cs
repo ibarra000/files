@@ -61,6 +61,17 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Older_settings_keep_history_paused_and_show_recently_opened()
+    {
+        using var temp = new TempFolder();
+        string path = temp.File("settings.json", """{ "RememberSearches": false }""");
+        (Settings loaded, string? problem) = Settings.Load(path);
+        Assert.Null(problem);
+        Assert.False(loaded.RememberSearches);
+        Assert.True(loaded.ShowRecentlyOpened);
+    }
+
+    [Fact]
     public void Settings_without_the_text_shortcut_get_its_default()
     {
         using var temp = new TempFolder();

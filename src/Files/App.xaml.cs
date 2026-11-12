@@ -77,8 +77,8 @@ public partial class App : Application
         }
 
         (Settings, string? settingsProblem) = Settings.Load(AppPaths.Settings);
-        History = Settings.RememberSearches ? LoadOrEmpty(() => Core.History.Load(AppPaths.History)) : [];
-        Opened = Settings.RememberSearches ? LoadOrEmpty(() => Core.History.Load(AppPaths.Opened)) : [];
+        History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
+        Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
         Catalog catalog;
         try
@@ -216,15 +216,11 @@ public partial class App : Application
         {
             ApplyTheme();
         }
-        if (!settings.RememberSearches)
-        {
-            ForgetHistory();
-        }
         SettingsChanged?.Invoke();
         return problem;
     }
 
-    /// <summary>Remembers a file opened or shown in its folder, and the search that found it.</summary>
+    /// <summary>Remembers a file opened or shown in its folder, and the search that found it, unless history is paused.</summary>
     public void RecordOpened(string path, string search)
     {
         if (!Settings.RememberSearches)
@@ -354,15 +350,19 @@ public partial class App : Application
         _updateTimer.Start();
     }
 
-    private void ForgetHistory()
+    /// <summary>Forgets the searches Up and Down recall. Favorites are kept.</summary>
+    public void ClearSearches()
     {
         History = [];
+        // Saves the current list rather than deleting the file, so whichever save runs last writes the newest state.
+        SaveInBackground(() => Core.History.Save(AppPaths.History, History));
+    }
+
+    /// <summary>Forgets the recently opened files. Favorites are kept.</summary>
+    public void ClearOpened()
+    {
         Opened = [];
-        SaveInBackground(() =>
-        {
-            File.Delete(AppPaths.History);
-            File.Delete(AppPaths.Opened);
-        });
+        SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
     }
 
     private static void DeleteFolder(string path)
