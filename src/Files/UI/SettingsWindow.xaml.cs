@@ -41,6 +41,8 @@ public partial class SettingsWindow : Window
     public void ShowPage(Page page)
     {
         Pages.SelectedIndex = (int)page;
+        // Files may have been opened since the window was last shown.
+        UpdateClearButtons();
         Show();
         if (WindowState == WindowState.Minimized)
         {
@@ -58,6 +60,8 @@ public partial class SettingsWindow : Window
         HideOnBlurBox.IsChecked = settings.HideOnBlur;
         HideAfterOpeningBox.IsChecked = settings.HideAfterOpening;
         RememberBox.IsChecked = settings.RememberSearches;
+        ShowOpenedBox.IsChecked = settings.ShowRecentlyOpened;
+        UpdateClearButtons();
         ThemeBox.SelectedIndex = (int)settings.Theme;
         RescanBox.SelectedItem = RescanBox.Items.Cast<ComboBoxItem>()
             .FirstOrDefault(item => (string)item.Tag == settings.RescanHours.ToString()) ?? RescanBox.Items[0];
@@ -74,6 +78,26 @@ public partial class SettingsWindow : Window
         PathsText.Text = $"Settings: {AppPaths.Settings}\nVolumes and file lists: {AppPaths.Local}";
         InstallButton.IsEnabled = _app.UpdateOffer is not null;
         _loading = false;
+    }
+
+    private void UpdateClearButtons()
+    {
+        ClearSearchesButton.IsEnabled = _app.History.Count > 0;
+        ClearOpenedButton.IsEnabled = _app.Opened.Count > 0;
+    }
+
+    private void OnClearSearches(object sender, RoutedEventArgs e)
+    {
+        _app.ClearSearches();
+        UpdateClearButtons();
+        Message.Text = "Recent searches cleared.";
+    }
+
+    private void OnClearOpened(object sender, RoutedEventArgs e)
+    {
+        _app.ClearOpened();
+        UpdateClearButtons();
+        Message.Text = "Recently opened files cleared.";
     }
 
     private void FillEnterChoices(Settings settings)
@@ -102,6 +126,7 @@ public partial class SettingsWindow : Window
             HideOnBlur = HideOnBlurBox.IsChecked == true,
             HideAfterOpening = HideAfterOpeningBox.IsChecked == true,
             RememberSearches = RememberBox.IsChecked == true,
+            ShowRecentlyOpened = ShowOpenedBox.IsChecked == true,
             Theme = (Theme)Math.Max(0, ThemeBox.SelectedIndex),
             RescanHours = int.Parse((string)((ComboBoxItem)RescanBox.SelectedItem).Tag),
             HideSystemFiles = HideSystemBox.IsChecked == true,

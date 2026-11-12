@@ -18,30 +18,39 @@
         <TextBlock x:Name="Message" DockPanel.Dock="Bottom" Margin="4,10,0,0" TextWrapping="Wrap" />
         <TabControl x:Name="Pages">
             <TabItem Header="General">
-                <StackPanel Margin="12">
-                    <TextBlock Text="Shortcut to open files" Style="{StaticResource Heading}" />
-                    <StackPanel Orientation="Horizontal">
-                        <TextBox x:Name="HotkeyBox" Width="240" IsReadOnly="True" IsReadOnlyCaretVisible="False"
-                                 PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Shortcut" />
-                        <TextBlock Text="Click, then press the keys. Delete turns it off." Margin="12,0,0,0"
-                                   VerticalAlignment="Center" Style="{StaticResource Dim}" />
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="12">
+                        <TextBlock Text="Shortcut to open files" Style="{StaticResource Heading}" />
+                        <StackPanel Orientation="Horizontal">
+                            <TextBox x:Name="HotkeyBox" Width="240" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                     PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Shortcut" />
+                            <TextBlock Text="Click, then press the keys. Delete turns it off." Margin="12,0,0,0"
+                                       VerticalAlignment="Center" Style="{StaticResource Dim}" />
+                        </StackPanel>
+                        <TextBlock Text="Shortcut to search for the text under the mouse" Style="{StaticResource Heading}" />
+                        <TextBox x:Name="OcrHotkeyBox" Width="240" HorizontalAlignment="Left" IsReadOnly="True"
+                                 IsReadOnlyCaretVisible="False" PreviewKeyDown="OnHotkeyKey"
+                                 AutomationProperties.Name="Text under the mouse shortcut" />
+                        <TextBlock Text="Behavior" Style="{StaticResource Heading}" />
+                        <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Click="OnStartWithWindows" />
+                        <CheckBox x:Name="HideOnBlurBox" Content="Hide when another window is clicked" Click="OnChanged" />
+                        <CheckBox x:Name="HideAfterOpeningBox" Content="Hide after opening a file" Click="OnChanged" />
+                        <TextBlock Text="History" Style="{StaticResource Heading}" />
+                        <CheckBox x:Name="RememberBox" Content="Remember new searches and opened files" Click="OnChanged" />
+                        <CheckBox x:Name="ShowOpenedBox" Content="Show recently opened files when the search box is empty" Click="OnChanged" />
+                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                            <Button x:Name="ClearSearchesButton" Content="Clear recent searches" Click="OnClearSearches" />
+                            <Button x:Name="ClearOpenedButton" Content="Clear recently opened" Margin="8,0,0,0" Click="OnClearOpened" />
+                        </StackPanel>
+                        <TextBlock Text="Favorites are kept when history is cleared." Margin="0,4,0,0" Style="{StaticResource Dim}" />
+                        <TextBlock Text="Colors" Style="{StaticResource Heading}" />
+                        <ComboBox x:Name="ThemeBox" Width="240" HorizontalAlignment="Left" SelectionChanged="OnChanged">
+                            <ComboBoxItem Content="Follow Windows" />
+                            <ComboBoxItem Content="Light" />
+                            <ComboBoxItem Content="Dark" />
+                        </ComboBox>
                     </StackPanel>
-                    <TextBlock Text="Shortcut to search for the text under the mouse" Style="{StaticResource Heading}" />
-                    <TextBox x:Name="OcrHotkeyBox" Width="240" HorizontalAlignment="Left" IsReadOnly="True"
-                             IsReadOnlyCaretVisible="False" PreviewKeyDown="OnHotkeyKey"
-                             AutomationProperties.Name="Text under the mouse shortcut" />
-                    <TextBlock Text="Behavior" Style="{StaticResource Heading}" />
-                    <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Click="OnStartWithWindows" />
-                    <CheckBox x:Name="HideOnBlurBox" Content="Hide when another window is clicked" Click="OnChanged" />
-                    <CheckBox x:Name="HideAfterOpeningBox" Content="Hide after opening a file" Click="OnChanged" />
-                    <CheckBox x:Name="RememberBox" Content="Remember recent searches" Click="OnChanged" />
-                    <TextBlock Text="Colors" Style="{StaticResource Heading}" />
-                    <ComboBox x:Name="ThemeBox" Width="240" HorizontalAlignment="Left" SelectionChanged="OnChanged">
-                        <ComboBoxItem Content="Follow Windows" />
-                        <ComboBoxItem Content="Light" />
-                        <ComboBoxItem Content="Dark" />
-                    </ComboBox>
-                </StackPanel>
+                </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Volumes">

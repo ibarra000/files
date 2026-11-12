@@ -30,7 +30,9 @@ public partial class SearchWindow
     /// <summary>Lists the home rows, selecting <paramref name="select"/> if it is still there, else the top row.</summary>
     private void ShowHomeRows(Favorite? select)
     {
-        List<ResultRow> rows = HomeRows.Build(_app.Favorites, _app.Opened, _missing, _showAllFavorites);
+        // Hidden, for instance, while the screen is shared.
+        IReadOnlyList<string> opened = _app.Settings.ShowRecentlyOpened ? _app.Opened : [];
+        List<ResultRow> rows = HomeRows.Build(_app.Favorites, opened, _missing, _showAllFavorites);
         Results.ItemsSource = rows;
         int found = -1;
         if (select is not null)

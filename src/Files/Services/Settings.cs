@@ -37,7 +37,11 @@ public sealed record Settings
     public Theme Theme { get; init; } = Theme.System;
     public bool HideOnBlur { get; init; } = true;
     public bool HideAfterOpening { get; init; } = true;
+    /// <summary>Records new searches and opened files; off pauses history without deleting it.</summary>
     public bool RememberSearches { get; init; } = true;
+
+    /// <summary>Lists recently opened files under the favorites while the box is empty.</summary>
+    public bool ShowRecentlyOpened { get; init; } = true;
 
     /// <summary>Hours between automatic rescans of each volume; 0 means only on F5.</summary>
     public int RescanHours { get; init; } = 1;
