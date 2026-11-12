@@ -7,20 +7,18 @@ namespace Files.UI;
 
 /// <summary>
 /// Lets the frameless panel behave like a normal window for Windows snapping:
-/// Win+Arrow, dragging to a screen edge, resizing from its edges, and the
-/// Windows 11 snap-layout flyout over a maximize button the panel draws itself.
+/// Win+Arrow, Win+Z for the snap layouts, dragging to a screen edge, and
+/// resizing from its edges.
 /// </summary>
 /// <remarks>
 /// The window keeps the resizable styles (ResizeMode CanResize) so Windows
 /// treats it as snappable, but answers WM_NCCALCSIZE so the whole window is
 /// client area and no frame is drawn. WM_NCHITTEST then tells Windows where
-/// the edges and the maximize button are; answering HTMAXBUTTON is what makes
-/// Windows 11 show the flyout.
+/// the edges are.
 /// </remarks>
-internal sealed class Snap
+internal static class Snap
 {
     public const int Client = 1;
-    public const int MaxButton = 9;
     public const int Left = 10;
     public const int Right = 11;
     public const int Top = 12;
@@ -33,36 +31,35 @@ internal sealed class Snap
     private const int WmGetMinMaxInfo = 0x0024;
     private const int WmNcCalcSize = 0x0083;
     private const int WmNcHitTest = 0x0084;
-    private const int WmNcLButtonDown = 0x00A1;
-    private const int WmNcMouseLeave = 0x02A2;
+    private const int WmNcActivate = 0x0086;
     private const int MonitorDefaultToNearest = 2;
     private const double ResizeBorder = 6;
 
-    private readonly Window _window;
-    private readonly FrameworkElement _button;
-    private readonly Action<bool> _hover;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpFrameChanged = 0x0020;
 
-    private Snap(Window window, FrameworkElement button, Action<bool> hover)
+    /// <summary>Hooks the window's messages. Keep the returned hook for the window's lifetime so it is never collected.</summary>
+    public static HwndSourceHook? Attach(Window window)
     {
-        _window = window;
-        _button = button;
-        _hover = hover;
-    }
-
-    /// <summary>The pointer is over the snap button, where the flyout may take focus for a moment.</summary>
-    public bool IsOverButton { get; private set; }
-
-    /// <param name="hover">Called with true and false as the pointer enters and leaves the button.</param>
-    public static Snap Attach(Window window, FrameworkElement button, Action<bool> hover)
-    {
-        var snap = new Snap(window, button, hover);
         IntPtr handle = new WindowInteropHelper(window).Handle;
-        HwndSource.FromHwnd(handle)?.AddHook(snap.OnMessage);
-        return snap;
+        if (HwndSource.FromHwnd(handle) is not HwndSource source)
+        {
+            return null;
+        }
+        HwndSourceHook hook = (IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled) =>
+            OnMessage(window, hwnd, message, wParam, lParam, ref handled);
+        source.AddHook(hook);
+        // Windows sized the frame when the window was created, before this hook;
+        // asking again drops it, or a light resize border shows around the panel.
+        SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
+        return hook;
     }
 
     /// <summary>What part of the window <paramref name="cursor"/> is over, as a WM_NCHITTEST code. All in screen pixels.</summary>
-    public static int HitTest(Rect window, Rect button, Point cursor, double border)
+    public static int HitTest(Rect window, Point cursor, double border)
     {
         bool left = cursor.X < window.Left + border;
         bool right = cursor.X >= window.Right - border;
@@ -100,41 +97,7 @@ internal sealed class Snap
         {
             return Right;
         }
-        return button.Contains(cursor) ? MaxButton : Client;
-    }
-
-    private IntPtr OnMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
-    {
-        switch (message)
-        {
-            case WmNcCalcSize when wParam != IntPtr.Zero:
-                // The whole window is client area: Windows draws no frame or caption.
-                handled = true;
-                return IntPtr.Zero;
-            case WmGetMinMaxInfo:
-                // Not handled: WPF still applies MinWidth and MinHeight after this.
-                MaximizeToWorkArea(hwnd, lParam);
-                return IntPtr.Zero;
-            case WmNcHitTest:
-                int hit = HitTestAt(hwnd, lParam);
-                SetOverButton(hit == MaxButton);
-                if (hit == Client)
-                {
-                    return IntPtr.Zero;
-                }
-                handled = true;
-                return hit;
-            case WmNcLButtonDown when wParam == MaxButton:
-                // Handled on press: Windows does not send the release for a button it is not drawing.
-                handled = true;
-                ToggleMaximized();
-                return IntPtr.Zero;
-            case WmNcMouseLeave:
-                SetOverButton(false);
-                return IntPtr.Zero;
-            default:
-                return IntPtr.Zero;
-        }
+        return Client;
     }
 
     /// <summary>Screen coordinates come packed in lParam as two signed 16-bit values; left of or above the main screen they are negative.</summary>
@@ -146,44 +109,43 @@ internal sealed class Snap
         return new Point(x, y);
     }
 
-    /// <summary>Forgets that the pointer was over the button, for when the panel hides.</summary>
-    public void Reset()
+    private static IntPtr OnMessage(Window window, IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        SetOverButton(false);
+        switch (message)
+        {
+            case WmNcCalcSize when wParam != IntPtr.Zero:
+                // The whole window is client area: Windows draws no frame or caption.
+                handled = true;
+                return IntPtr.Zero;
+            case WmNcActivate:
+                // Windows repaints the frame on focus changes; -1 tells it not to,
+                // or the inactive frame shows as a light border around the panel.
+                handled = true;
+                return DefWindowProc(hwnd, message, wParam, new IntPtr(-1));
+            case WmGetMinMaxInfo:
+                // Not handled: WPF still applies MinWidth and MinHeight after this.
+                MaximizeToWorkArea(hwnd, lParam);
+                return IntPtr.Zero;
+            case WmNcHitTest:
+                int hit = HitTestAt(window, hwnd, lParam);
+                if (hit == Client)
+                {
+                    return IntPtr.Zero;
+                }
+                handled = true;
+                return hit;
+            default:
+                return IntPtr.Zero;
+        }
     }
 
-    private int HitTestAt(IntPtr hwnd, IntPtr lParam)
+    private static int HitTestAt(Window window, IntPtr hwnd, IntPtr lParam)
     {
-        Point cursor = CursorFrom(lParam);
         GetWindowRect(hwnd, out Rect32 frame);
-        var window = new Rect(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top);
-        Point topLeft = _button.PointToScreen(new Point(0, 0));
-        Point bottomRight = _button.PointToScreen(new Point(_button.ActualWidth, _button.ActualHeight));
-        var button = new Rect(topLeft, bottomRight);
-        double scale = VisualTreeHelper.GetDpi(_window).DpiScaleX;
-        double border = _window.WindowState == WindowState.Maximized ? 0 : ResizeBorder * scale;
-        return HitTest(window, button, cursor, border);
-    }
-
-    private void ToggleMaximized()
-    {
-        if (_window.WindowState == WindowState.Maximized)
-        {
-            _window.WindowState = WindowState.Normal;
-        }
-        else
-        {
-            _window.WindowState = WindowState.Maximized;
-        }
-    }
-
-    private void SetOverButton(bool over)
-    {
-        if (over != IsOverButton)
-        {
-            IsOverButton = over;
-            _hover(over);
-        }
+        var bounds = new Rect(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top);
+        double scale = VisualTreeHelper.GetDpi(window).DpiScaleX;
+        double border = window.WindowState == WindowState.Maximized ? 0 : ResizeBorder * scale;
+        return HitTest(bounds, CursorFrom(lParam), border);
     }
 
     /// <summary>A maximized window would otherwise hang past the screen by its frame width and cover the taskbar.</summary>
@@ -238,6 +200,12 @@ internal sealed class Snap
 
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect32 rect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr DefWindowProc(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
