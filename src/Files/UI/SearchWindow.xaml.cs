@@ -89,6 +89,8 @@ public partial class SearchWindow : Window
         }
         StopLiveSearch();
         SavePlacement();
+        // The pointer may be on the snap button now and elsewhere next time; no leave message arrives while hidden.
+        _snap?.Reset();
         Hide();
     }
 
@@ -110,13 +112,19 @@ public partial class SearchWindow : Window
 
     private void PlaceWindow()
     {
-        if (WindowState != WindowState.Normal)
+        if (WindowState == WindowState.Minimized)
+        {
+            // Win+Down minimizes it, and with no taskbar button it could never be brought back.
+            WindowState = WindowState.Normal;
+        }
+        if (WindowState == WindowState.Maximized)
         {
             return;
         }
-        Width = Math.Max(_app.Settings.WindowWidth ?? Width, MinWidth);
-        Height = Math.Max(_app.Settings.WindowHeight ?? Height, MinHeight);
         Rect area = SystemParameters.WorkArea;
+        // A size saved on a larger screen still has to fit this one.
+        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width, MinWidth, Math.Max(MinWidth, area.Width));
+        Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
         double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
         double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
         // Pull a position saved on a monitor that is gone back onto the screen.

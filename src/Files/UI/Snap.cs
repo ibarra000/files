@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace Files.UI;
 
@@ -136,16 +137,30 @@ internal sealed class Snap
         }
     }
 
+    /// <summary>Screen coordinates come packed in lParam as two signed 16-bit values; left of or above the main screen they are negative.</summary>
+    public static Point CursorFrom(IntPtr lParam)
+    {
+        long packed = lParam.ToInt64();
+        short x = (short)(packed & 0xFFFF);
+        short y = (short)((packed >> 16) & 0xFFFF);
+        return new Point(x, y);
+    }
+
+    /// <summary>Forgets that the pointer was over the button, for when the panel hides.</summary>
+    public void Reset()
+    {
+        SetOverButton(false);
+    }
+
     private int HitTestAt(IntPtr hwnd, IntPtr lParam)
     {
-        // Screen coordinates come packed as two signed 16-bit values.
-        var cursor = new Point((short)(lParam.ToInt64() & 0xFFFF), (short)((lParam.ToInt64() >> 16) & 0xFFFF));
+        Point cursor = CursorFrom(lParam);
         GetWindowRect(hwnd, out Rect32 frame);
         var window = new Rect(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top);
         Point topLeft = _button.PointToScreen(new Point(0, 0));
         Point bottomRight = _button.PointToScreen(new Point(_button.ActualWidth, _button.ActualHeight));
         var button = new Rect(topLeft, bottomRight);
-        double scale = (bottomRight.X - topLeft.X) / Math.Max(_button.ActualWidth, 1);
+        double scale = VisualTreeHelper.GetDpi(_window).DpiScaleX;
         double border = _window.WindowState == WindowState.Maximized ? 0 : ResizeBorder * scale;
         return HitTest(window, button, cursor, border);
     }
