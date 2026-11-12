@@ -24,7 +24,7 @@ The app is self-contained, so the .NET runtime need not be installed. It runs wi
 |---|---|
 | CPU | x64. Searches use every core, so more cores help on very large volumes |
 | Memory | About 4 bytes per character of file name plus 4 per file: roughly 200 MB for five million files |
-| Local disk | Shards in `%LOCALAPPDATA%\files\volumes`, about the size of the names they hold. Merged PDFs are cached there for 7 days |
+| Local disk | Shards in `%LOCALAPPDATA%\files\volumes`, about the size of the names they hold. |
 | Graphics | Anything WPF runs on, including RDP and virtual machines (software rendering is the fallback) |
 
 ## Storage and protocols
@@ -46,9 +46,9 @@ The app is self-contained, so the .NET runtime need not be installed. It runs wi
 | Files listed per matching folder | 64 |
 | Folder depth | 32 |
 | Files per volume | No fixed number. A read stops, and says so, when the names would not fit: at most 2.1 billion characters, and no more than this PC's memory allows (budgeting 16 bytes per character while reading, so about 30 million 30-character names per 16 GB). A loaded volume then takes about 130 bytes per file. |
-| Pages in a combined PDF | 512 |
+| Favorites on the home list | 5, then "See all" |
 | Scans at once | 2 |
-| Recent searches kept | 200 |
+| Searches and recently opened files kept | 50 each |
 
 ## Freshness
 

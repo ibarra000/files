@@ -8,9 +8,9 @@ It is one WPF executable (`src/Files`, .NET 10, self-contained) with a test proj
 
 | Folder | Role | Depends on |
 |---|---|---|
-| `Core/` | Names, the in-memory index, query parsing, ranking, the folder walk, page sets, aliases, history. No UI, no SQLite | — |
+| `Core/` | Names, the in-memory index, query parsing, ranking, the folder walk, live search, favorites, history and recall. No UI, no SQLite | — |
 | `Data/` | `catalog.db` (the volume list) and the per-volume shards, with an embedded migration runner | Core |
-| `Services/` | Settings, the indexer schedule, opening files, PDF merging, updates, the hotkey, start-up registration | Core, Data |
+| `Services/` | Settings, the indexer schedule, opening files, updates, the hotkey, start-up registration | Core, Data |
 | `UI/` | The search panel, the settings window, the tray icon, the DWM backdrop | everything |
 | `App.xaml.cs` | Start-up, single instance, wiring, and applying settings | everything |
 
@@ -19,10 +19,11 @@ It is one WPF executable (`src/Files`, .NET 10, self-contained) with a test proj
 | What | Where | Format |
 |---|---|---|
 | Settings | `%APPDATA%\files\settings.json` | JSON, written through a temp file and a rename |
-| Recent searches | `%APPDATA%\files\history.txt` | One per line, newest first, at most 200 |
+| Search history | `%APPDATA%\files\history.txt` | Searches a result was opened from; one per line, newest first, at most 50 |
+| Recently opened | `%APPDATA%\files\opened.txt` | Paths opened or shown in their folder; same format, at most 50 |
+| Favorites | `%APPDATA%\files\favorites.json` | JSON array of `{ Kind: File/Folder/Search, Target }`, newest first |
 | Volume list | `%LOCALAPPDATA%\files\catalog.db` | SQLite, `Data/Sql/catalog-1.sql` |
 | File names | `%LOCALAPPDATA%\files\volumes\<uid>.db` | SQLite, one shard per volume, `Data/Sql/shard-1.sql` |
-| Merged PDFs | `%LOCALAPPDATA%\files\pdf` | Named by a hash of their pages, deleted after 7 days |
 | Staged updates | `%LOCALAPPDATA%\files\updates` | The MSI and the update helper |
 
 **Migrations.** `Data/Migrations.cs` runs embedded scripts named `<kind>-<n>.sql` above the database's `PRAGMA user_version`, each in its own transaction. To change a schema, add the next numbered script; never edit one that has shipped.
@@ -52,7 +53,7 @@ VolumeIndex (Core/VolumeIndex.cs)
 
 ## Search
 
-1. **Typing.** The panel waits 150 ms after the last key. A paste or an alias searches at once. Each search gets a new epoch, so a slow answer to an old search is dropped.
+1. **Typing.** The panel waits 150 ms after the last key. A paste, a recalled search or a saved one searches at once. Each search gets a new epoch, so a slow answer to an old search is dropped.
 2. **Parsing** (`Core/Query.cs`). The line is split on whitespace. `ext:a,b` tokens become a type filter; everything else is joined back with single spaces. One `*` at the start means ends-with (compared before the extension), one at the end means starts-with. Problems are reported, never thrown.
 3. **Matching.** The file arena is cut into 8,192-name chunks and scanned in parallel with `MemoryExtensions.IndexOf` (vectorized). Each hit maps to its name by binary search, then the scan jumps past the name, so a name counts once at its leftmost hit. The mode, the `ext:` filter and the hidden extensions are applied before a name is counted.
 4. **Folders.** A folder whose relative path contains the term adds up to 64 of its files as "inherited" results, ranked after direct matches. Files that also matched by their own name are not listed twice.
@@ -72,8 +73,8 @@ There are no change notifications: a periodic rescan is simpler and works the sa
 
 ## UI
 
-- **Panel** (`UI/SearchWindow.xaml`). A borderless, topmost window. `UI/Backdrop.cs` asks DWM for rounded corners, a shadow and the acrylic backdrop. Results are a virtualized `ListBox`; the matched part of each name is bold. The status line shows the match count and any volume that is reading or unreachable; short messages ("Copied …") replace it for four seconds.
-- **Settings** (`UI/SettingsWindow.xaml`). In the same process. Every change is saved at once. Aliases and programs are edited in grids and checked on save; invalid rows are reported and not saved.
+- **Panel** (`UI/SearchWindow.xaml`). A borderless, topmost window. `UI/Backdrop.cs` asks DWM for rounded corners, a shadow and the acrylic backdrop. Results are a virtualized `ListBox`; the matched part of each name is bold. With the box empty it shows the home list (`UI/HomeRows.cs`): a Favorites section (five, then "See all") and Recently opened, under headers that cannot be selected, so the arrow keys pass over them. Whether favorites still exist is checked on a background task each time the list is shown. ↑ on the top row of an empty box steps back through the search history (`Core/Recall.cs`). The status line shows the match count and any volume that is reading or unreachable; short messages ("Copied …") replace it for four seconds.
+- **Settings** (`UI/SettingsWindow.xaml`). In the same process. Every change is saved at once. Programs are edited in a grid and checked on save; invalid rows are reported and not saved.
 - **Tray** (`UI/Tray.cs`). A WinForms `NotifyIcon`, the only WinForms type used.
 - **Hotkey** (`Services/Hotkey.cs`). `RegisterHotKey` on a message-only window.
 - **Single instance.** A named mutex; a second launch sets a named event that makes the first instance show its panel, then exits.
@@ -81,9 +82,8 @@ There are no change notifications: a periodic rescan is simpler and works the sa
 
 ## Opening files
 
-- **Default**: `ShellExecute` on the file. If a PDF program is set, PDFs go to it.
+- **Default**: `ShellExecute` on the file, or on a folder, which opens it in Explorer.
 - **A program**: started with the path quoted (file names cannot contain `"`).
-- **Combined PDF**: if a program claims the extension, that program opens it. Otherwise `Core/PageSet.cs` collects the document's pages from the same folder: the unmarked `NAME.pdf` first, then by page number, at most 512. `Services/PdfMerger.cs` merges them with PDFsharp, skipping pages that are encrypted or unreadable, and reports which.
 - **Show in folder**: `explorer.exe /select,"path"`.
 
 ## Updates

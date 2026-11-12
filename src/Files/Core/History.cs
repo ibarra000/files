@@ -1,16 +1,18 @@
 namespace Files.Core;
 
-/// <summary>Recent searches, newest first, kept in a plain text file one per line.</summary>
+/// <summary>
+/// A newest-first list kept in a plain text file, one entry per line: the
+/// searches that led to an opened file, and the files opened.
+/// </summary>
 public static class History
 {
-    public const int MaxEntries = 200;
+    public const int MaxEntries = 50;
     public const int MaxEntryLength = 512;
 
     /// <summary>
-    /// Returns the list with <paramref name="entry"/> recorded at the front.
-    /// A repeat moves to the front instead of duplicating, ignoring case. A
-    /// search that extends the newest one replaces it, so typing AB-C on the
-    /// way to AB-C-0704 leaves one entry; shortening a search keeps both.
+    /// Returns the list with <paramref name="entry"/> at the front. A repeat
+    /// moves to the front instead of duplicating, ignoring case; the oldest
+    /// entries fall off past <see cref="MaxEntries"/>.
     /// </summary>
     public static IReadOnlyList<string> Record(IReadOnlyList<string> entries, string entry)
     {
@@ -23,11 +25,7 @@ public static class History
         {
             return entries;
         }
-        bool extendsNewest = entries.Count > 0
-            && trimmed.Length > entries[0].Length
-            && trimmed.StartsWith(entries[0], StringComparison.OrdinalIgnoreCase);
-        IEnumerable<string> rest = extendsNewest ? entries.Skip(1) : entries;
-        return rest
+        return entries
             .Where(e => !e.Equals(trimmed, StringComparison.OrdinalIgnoreCase))
             .Prepend(trimmed)
             .Take(MaxEntries)

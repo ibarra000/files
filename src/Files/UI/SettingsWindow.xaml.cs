@@ -23,7 +23,6 @@ public partial class SettingsWindow : Window
     }
 
     private readonly App _app;
-    private readonly ObservableCollection<AliasRow> _aliases = [];
     private readonly ObservableCollection<ViewerRow> _viewers = [];
     private bool _loading = true;
 
@@ -31,7 +30,6 @@ public partial class SettingsWindow : Window
     {
         InitializeComponent();
         _app = app;
-        AliasGrid.ItemsSource = _aliases;
         ViewerGrid.ItemsSource = _viewers;
         Load(app.Settings);
         RefreshVolumes();
@@ -64,16 +62,11 @@ public partial class SettingsWindow : Window
             .FirstOrDefault(item => (string)item.Tag == settings.RescanHours.ToString()) ?? RescanBox.Items[0];
         HideSystemBox.IsChecked = settings.HideSystemFiles;
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
-        foreach (Alias alias in settings.Aliases)
-        {
-            _aliases.Add(new AliasRow { Name = alias.Name, Code = alias.Code, Note = alias.Note });
-        }
         foreach (Viewer viewer in settings.Viewers)
         {
-            _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program, Extensions = string.Join(", ", viewer.Extensions) });
+            _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
         }
         FillEnterChoices(settings);
-        PdfViewerBox.Text = settings.PdfViewer;
         CheckUpdatesBox.IsChecked = settings.CheckForUpdates;
         UpdateFolderBox.Text = settings.UpdateFolder;
         VersionText.Text = $"files {Updater.Current.ToString(3)}";
@@ -86,7 +79,6 @@ public partial class SettingsWindow : Window
     {
         EnterBox.Items.Clear();
         EnterBox.Items.Add(new ComboBoxItem { Content = "The Windows default for the file type", Tag = Settings.DefaultOpen });
-        EnterBox.Items.Add(new ComboBoxItem { Content = "Combine PDF pages into one document", Tag = Settings.PdfOpen });
         foreach (Viewer viewer in settings.Viewers)
         {
             EnterBox.Items.Add(new ComboBoxItem { Content = viewer.Name, Tag = viewer.Name });
@@ -112,10 +104,8 @@ public partial class SettingsWindow : Window
             RescanHours = int.Parse((string)((ComboBoxItem)RescanBox.SelectedItem).Tag),
             HideSystemFiles = HideSystemBox.IsChecked == true,
             HiddenExtensions = SplitList(HiddenBox.Text),
-            Aliases = ValidAliases(problems),
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
-            PdfViewer = PdfViewerBox.Text.Trim(),
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
             UpdateFolder = UpdateFolderBox.Text.Trim(),
         };
@@ -132,38 +122,19 @@ public partial class SettingsWindow : Window
         _loading = false;
     }
 
-    private List<Alias> ValidAliases(List<string> problems)
-    {
-        var valid = new List<Alias>();
-        foreach (AliasRow row in _aliases)
-        {
-            var alias = new Alias(row.Name.Trim(), row.Code.Trim(), row.Note.Trim());
-            string? problem = alias.Problem(valid);
-            if (problem is null)
-            {
-                valid.Add(alias);
-            }
-            else
-            {
-                problems.Add($"Alias \"{row.Name}\" is not saved: {problem}");
-            }
-        }
-        return valid;
-    }
-
     private List<Viewer> ValidViewers(List<string> problems)
     {
         var valid = new List<Viewer>();
         foreach (ViewerRow row in _viewers)
         {
             string name = row.Name.Trim();
-            bool reserved = name is Settings.DefaultOpen or Settings.PdfOpen;
+            bool reserved = name == Settings.DefaultOpen;
             if (name.Length == 0 || row.Program.Trim().Length == 0 || reserved || valid.Any(v => v.Name == name))
             {
                 problems.Add($"Program \"{row.Name}\" is not saved: it needs a unique name and a program");
                 continue;
             }
-            valid.Add(new Viewer(name, row.Program.Trim(), SplitList(row.Extensions)));
+            valid.Add(new Viewer(name, row.Program.Trim()));
         }
         return valid;
     }
@@ -292,18 +263,10 @@ public partial class SettingsWindow : Window
         Message.Text = await _app.InstallUpdateAsync() ?? "";
     }
 
-    public sealed class AliasRow
-    {
-        public string Name { get; set; } = "";
-        public string Code { get; set; } = "";
-        public string Note { get; set; } = "";
-    }
-
     public sealed class ViewerRow
     {
         public string Name { get; set; } = "";
         public string Program { get; set; } = "";
-        public string Extensions { get; set; } = "";
     }
 
     public sealed record VolumeRow(long Id, string Name, string Root, string Files, string LastRead, string Status)

@@ -24,11 +24,20 @@ public partial class App : Application
     private SettingsWindow? _settingsWindow;
     private DispatcherTimer? _updateTimer;
 
+    // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
+    private readonly object _saveGate = new();
+
     public Settings Settings { get; private set; } = new();
     public Indexer Indexer { get; private set; } = null!;
-    public Opener Opener { get; private set; } = null!;
     public Updater Updater { get; private set; } = null!;
+
+    /// <summary>Searches that led to an opened file, newest first.</summary>
     public IReadOnlyList<string> History { get; private set; } = [];
+
+    /// <summary>Files opened or shown in their folder, newest first.</summary>
+    public IReadOnlyList<string> Opened { get; private set; } = [];
+
+    public IReadOnlyList<Favorite> Favorites { get; private set; } = [];
 
     /// <summary>The newer release found by the last check, if any.</summary>
     public Manifest? UpdateOffer { get; private set; }
@@ -65,7 +74,9 @@ public partial class App : Application
         }
 
         (Settings, string? settingsProblem) = Settings.Load(AppPaths.Settings);
-        History = Settings.RememberSearches ? Core.History.Load(AppPaths.History) : [];
+        History = Settings.RememberSearches ? LoadOrEmpty(() => Core.History.Load(AppPaths.History)) : [];
+        Opened = Settings.RememberSearches ? LoadOrEmpty(() => Core.History.Load(AppPaths.Opened)) : [];
+        Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
         Catalog catalog;
         try
         {
@@ -79,7 +90,6 @@ public partial class App : Application
         }
 
         Indexer = new Indexer(catalog, AppPaths.Shards, () => Settings);
-        Opener = new Opener(() => Settings, AppPaths.PdfCache);
         Updater = new Updater(() => Settings, AppPaths.Updates);
         ApplyTheme();
 
@@ -89,7 +99,8 @@ public partial class App : Application
         _hotkey.Pressed += TogglePanel;
         HotkeyProblem = _hotkey.Register(Settings.Hotkey);
         Indexer.Start();
-        Task.Run(() => PdfMerger.CleanUp(AppPaths.PdfCache));
+        // Combined PDFs were removed in 1.2; their cache is no longer needed.
+        SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
         StartUpdateChecks();
 
         if (settingsProblem is not null || HotkeyProblem is not null)
@@ -157,19 +168,34 @@ public partial class App : Application
         return problem;
     }
 
-    public void RecordSearch(string line)
+    /// <summary>Remembers a file opened or shown in its folder, and the search that found it.</summary>
+    public void RecordOpened(string path, string search)
     {
         if (!Settings.RememberSearches)
         {
             return;
         }
-        IReadOnlyList<string> updated = Core.History.Record(History, line);
-        if (ReferenceEquals(updated, History))
+        IReadOnlyList<string> history = Core.History.Record(History, search);
+        if (!ReferenceEquals(history, History))
         {
-            return;
+            History = history;
+            SaveInBackground(() => Core.History.Save(AppPaths.History, History));
         }
-        History = updated;
-        Task.Run(() => SaveHistory(updated));
+        IReadOnlyList<string> opened = Core.History.Record(Opened, path);
+        if (!ReferenceEquals(opened, Opened))
+        {
+            Opened = opened;
+            SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
+        }
+    }
+
+    /// <summary>Adds the favorite, or removes it if it is one already. Returns whether it is a favorite now.</summary>
+    public bool ToggleFavorite(Favorite favorite)
+    {
+        IReadOnlyList<Favorite> favorites = Core.Favorites.Toggle(Favorites, favorite);
+        Favorites = favorites;
+        SaveInBackground(() => Core.Favorites.Save(AppPaths.Favorites, Favorites));
+        return Core.Favorites.Contains(favorites, favorite);
     }
 
     public async Task<string?> CheckForUpdateAsync()
@@ -274,26 +300,51 @@ public partial class App : Application
     private void ForgetHistory()
     {
         History = [];
-        try
+        Opened = [];
+        SaveInBackground(() =>
         {
             File.Delete(AppPaths.History);
-        }
-        catch (IOException)
+            File.Delete(AppPaths.Opened);
+        });
+    }
+
+    private static void DeleteFolder(string path)
+    {
+        if (Directory.Exists(path))
         {
-            // In use; it is overwritten next time searches are remembered.
+            Directory.Delete(path, recursive: true);
         }
     }
 
-    private static void SaveHistory(IReadOnlyList<string> entries)
+    private static IReadOnlyList<T> LoadOrEmpty<T>(Func<IReadOnlyList<T>> load)
     {
         try
         {
-            Core.History.Save(AppPaths.History, entries);
+            return load();
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // Losing a history entry is not worth interrupting the user for.
-            System.Diagnostics.Trace.WriteLine($"history not saved: {error.Message}");
+            System.Diagnostics.Trace.WriteLine($"not loaded: {error.Message}");
+            return [];
         }
+    }
+
+    private void SaveInBackground(Action save)
+    {
+        Task.Run(() =>
+        {
+            try
+            {
+                lock (_saveGate)
+                {
+                    save();
+                }
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // Losing one entry is not worth interrupting the user for.
+                System.Diagnostics.Trace.WriteLine($"not saved: {error.Message}");
+            }
+        });
     }
 }

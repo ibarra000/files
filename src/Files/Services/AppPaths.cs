@@ -14,8 +14,9 @@ public static class AppPaths
 
     public static string Settings => Path.Combine(Roaming, "settings.json");
     public static string History => Path.Combine(Roaming, "history.txt");
+    public static string Opened => Path.Combine(Roaming, "opened.txt");
+    public static string Favorites => Path.Combine(Roaming, "favorites.json");
     public static string Catalog => Path.Combine(Local, "catalog.db");
     public static string Shards => Path.Combine(Local, "volumes");
-    public static string PdfCache => Path.Combine(Local, "pdf");
     public static string Updates => Path.Combine(Local, "updates");
 }

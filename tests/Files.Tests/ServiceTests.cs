@@ -17,8 +17,7 @@ public sealed class ServiceTests
         {
             Hotkey = "Alt+Space",
             Theme = Theme.Dark,
-            Aliases = [new Core.Alias("ex", "AA-A-0000", "note")],
-            Viewers = [new Viewer("sketch", "sketch.exe", ["tif"])],
+            Viewers = [new Viewer("sketch", "sketch.exe")],
         };
 
         settings.Save(path);
@@ -27,8 +26,7 @@ public sealed class ServiceTests
         Assert.Null(problem);
         Assert.Equal("Alt+Space", loaded.Hotkey);
         Assert.Equal(Theme.Dark, loaded.Theme);
-        Assert.Equal("AA-A-0000", Assert.Single(loaded.Aliases).Code);
-        Assert.Equal(["tif"], Assert.Single(loaded.Viewers).Extensions);
+        Assert.Equal("sketch.exe", Assert.Single(loaded.Viewers).Program);
     }
 
     [Fact]
@@ -45,11 +43,21 @@ public sealed class ServiceTests
     public void Nulls_in_a_hand_edited_file_get_the_defaults()
     {
         using var temp = new TempFolder();
-        string path = temp.File("settings.json", """{ "Hotkey": null, "Aliases": null, "Viewers": [ { "Name": "x", "Program": "x.exe", "Extensions": null } ] }""");
+        string path = temp.File("settings.json", """{ "Hotkey": null, "Viewers": [ { "Name": "x", "Program": "x.exe" }, { "Name": null, "Program": "y.exe" } ] }""");
         (Settings loaded, _) = Settings.Load(path);
         Assert.Equal(new Settings().Hotkey, loaded.Hotkey);
-        Assert.Empty(loaded.Aliases);
-        Assert.Empty(Assert.Single(loaded.Viewers).Extensions);
+        Assert.Equal("x", Assert.Single(loaded.Viewers).Name);
+    }
+
+    [Fact]
+    public void Settings_from_older_versions_still_load()
+    {
+        using var temp = new TempFolder();
+        string path = temp.File("settings.json", """{ "Hotkey": "Alt+Space", "Aliases": [ { "Name": "a", "Code": "b" } ], "PdfViewer": "x.exe", "EnterOpens": "pdf" }""");
+        (Settings loaded, string? problem) = Settings.Load(path);
+        Assert.Null(problem);
+        Assert.Equal("Alt+Space", loaded.Hotkey);
+        Assert.IsType<OpenWith.Default>(OpenWith.ForEnter(loaded));
     }
 
     [Fact]
