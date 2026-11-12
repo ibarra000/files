@@ -21,6 +21,11 @@ internal static class Backdrop
     public static void Apply(Window window, bool dark)
     {
         IntPtr handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero)
+        {
+            // Not created yet (the panel before it is first shown); SourceInitialized applies it later.
+            return;
+        }
         if (HwndSource.FromHwnd(handle) is not HwndSource source)
         {
             return;
