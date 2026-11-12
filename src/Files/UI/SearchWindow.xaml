@@ -9,26 +9,16 @@
     <Border Padding="14,14,14,10" Background="Transparent" MouseLeftButtonDown="OnDragWindow">
         <DockPanel>
             <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
                 <TextBox x:Name="Input" FontSize="18" Padding="10,6"
                          AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
-                <TextBlock x:Name="Placeholder" Text="Search file names" FontSize="18" Margin="13,7,0,0"
+                <TextBlock x:Name="Placeholder" Text="Type to Search" FontSize="18" Margin="13,7,0,0"
                            IsHitTestVisible="False" Style="{StaticResource Dim}" />
-                <!-- Hovering shows the Windows 11 snap layouts; clicking maximizes or restores (see UI/Snap.cs). -->
-                <Border x:Name="SnapButton" Grid.Column="1" Width="36" Margin="8,0,0,0" CornerRadius="4"
-                        ToolTip="Snap layouts" AutomationProperties.Name="Snap layouts">
-                    <TextBlock Text="&#xE922;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" />
-                </Border>
             </Grid>
 
             <Grid DockPanel.Dock="Bottom" Margin="4,8,4,0">
                 <TextBlock x:Name="Status" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
                 <TextBlock x:Name="Hint" HorizontalAlignment="Right" Style="{StaticResource Dim}"
-                           Text="Enter open · Ctrl+O show in folder · Ctrl+D favorite · right-click for more" />
+                           Text="Enter to open" />
             </Grid>
 
             <ListBox x:Name="Results" BorderThickness="0" Background="Transparent"

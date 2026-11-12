@@ -1,22 +1,24 @@
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
-using System.Windows.Media;
 
 namespace Files.UI;
 
 /// <summary>
-/// Gives a frameless window the Windows 11 look: rounded corners, a shadow and
-/// the acrylic backdrop that transient windows such as Start search use.
-/// Older Windows ignores the attributes it does not know and shows a plain window.
+/// Gives the frameless panel a plain, solid Windows 11 look: the theme's own
+/// background, rounded corners with their shadow, and no light outline around a
+/// dark panel. Older Windows ignores the attributes it does not know.
 /// </summary>
 internal static class Backdrop
 {
     private const int UseImmersiveDarkMode = 20;
     private const int WindowCornerPreference = 33;
+    private const int BorderColor = 34;
     private const int SystemBackdropType = 38;
     private const int RoundCorners = 2;
-    private const int TransientWindowBackdrop = 3;
+    private const int NoBackdrop = 1;
+    private const int NoBorderColor = unchecked((int)0xFFFFFFFE);
 
     public static void Apply(Window window, bool dark)
     {
@@ -26,18 +28,12 @@ internal static class Backdrop
             // Not created yet (the panel before it is first shown); SourceInitialized applies it later.
             return;
         }
-        if (HwndSource.FromHwnd(handle) is not HwndSource source)
-        {
-            return;
-        }
-        // Let DWM's backdrop show through WPF's own background.
-        window.Background = Brushes.Transparent;
-        source.CompositionTarget.BackgroundColor = Colors.Transparent;
-        var margins = new Margins { Left = -1, Right = -1, Top = -1, Bottom = -1 };
-        DwmExtendFrameIntoClientArea(handle, ref margins);
+        // Solid, following light and dark: no translucent backdrop shows through.
+        window.SetResourceReference(Control.BackgroundProperty, "ApplicationBackgroundBrush");
+        SetAttribute(handle, SystemBackdropType, NoBackdrop);
         SetAttribute(handle, UseImmersiveDarkMode, dark ? 1 : 0);
         SetAttribute(handle, WindowCornerPreference, RoundCorners);
-        SetAttribute(handle, SystemBackdropType, TransientWindowBackdrop);
+        SetAttribute(handle, BorderColor, NoBorderColor);
     }
 
     private static void SetAttribute(IntPtr handle, int attribute, int value)
@@ -45,18 +41,6 @@ internal static class Backdrop
         DwmSetWindowAttribute(handle, attribute, ref value, sizeof(int));
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Margins
-    {
-        public int Left;
-        public int Right;
-        public int Top;
-        public int Bottom;
-    }
-
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
-
-    [DllImport("dwmapi.dll")]
-    private static extern int DwmExtendFrameIntoClientArea(IntPtr hwnd, ref Margins margins);
 }

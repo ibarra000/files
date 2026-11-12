@@ -15,7 +15,7 @@ Instant file-name search across folders and network shares on Windows.
 - **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. Right-click a result to add its folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
 - **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder.
 - **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> in an empty box brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again.
-- **Placing the panel.** Drag it anywhere, resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or hover the button beside the search box for the Windows 11 snap layouts (click it to maximize). Its size and place are remembered.
+- **Placing the panel.** Drag it anywhere, resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
 
 ## Keys

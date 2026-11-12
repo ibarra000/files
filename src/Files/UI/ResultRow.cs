@@ -100,10 +100,10 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     }
 }
 
-/// <summary>The words on the panel's status line.</summary>
+/// <summary>The words on the panel's status line: only what needs attention, never a match count.</summary>
 public static class StatusText
 {
-    public static string For(IReadOnlyList<VolumeState> volumes, SearchResult? result, string? queryProblem)
+    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem)
     {
         if (volumes.Count == 0)
         {
@@ -113,10 +113,6 @@ public static class StatusText
         if (queryProblem is not null)
         {
             parts.Add($"Invalid search · {queryProblem}");
-        }
-        else if (result is not null)
-        {
-            parts.Add(result.Matched == 1 ? "1 match" : $"{result.Matched:N0} matches");
         }
         foreach (VolumeState state in volumes)
         {

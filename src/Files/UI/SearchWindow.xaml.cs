@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Files.Core;
 using Files.Services;
@@ -29,7 +30,6 @@ public partial class SearchWindow : Window
     private bool _pasted;
     private bool _indexerUpdatePending;
     private Point? _dragStart;
-    private Snap? _snap;
     private HashSet<VolumeIndex> _searchedIndexes = [];
 
     // The live search on screen (running or finished), and its cancel while it runs.
@@ -38,6 +38,7 @@ public partial class SearchWindow : Window
     private bool _liveStopped;
     private bool _liveSnapshotPending;
     private bool _liveSnapshotAgain;
+    private HwndSourceHook? _snapHook;
 
     public SearchWindow(App app)
     {
@@ -56,7 +57,7 @@ public partial class SearchWindow : Window
         SourceInitialized += (_, _) =>
         {
             Backdrop.Apply(this, app.IsDark);
-            _snap = Snap.Attach(this, SnapButton, ShowSnapHover);
+            _snapHook = Snap.Attach(this);
         };
         app.SettingsChanged += async () =>
         {
@@ -89,8 +90,6 @@ public partial class SearchWindow : Window
         }
         StopLiveSearch();
         SavePlacement();
-        // The pointer may be on the snap button now and elsewhere next time; no leave message arrives while hidden.
-        _snap?.Reset();
         Hide();
     }
 
@@ -139,9 +138,7 @@ public partial class SearchWindow : Window
     private void OnDeactivated()
     {
         bool menuOpen = Results.ContextMenu?.IsOpen == true;
-        // The snap-layout flyout takes focus for a moment; hiding then would make it impossible to use.
-        bool snapping = _snap?.IsOverButton == true;
-        if (_app.Settings.HideOnBlur && !menuOpen && !snapping)
+        if (_app.Settings.HideOnBlur && !menuOpen)
         {
             HidePanel();
         }
@@ -383,7 +380,7 @@ public partial class SearchWindow : Window
         }
         else
         {
-            Status.Text = StatusText.For(_app.Indexer.Volumes, _result, _queryProblem);
+            Status.Text = StatusText.For(_app.Indexer.Volumes, _queryProblem);
         }
     }
 
@@ -648,18 +645,6 @@ public partial class SearchWindow : Window
         {
             _dragStart = null;
             DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Copy);
-        }
-    }
-
-    private void ShowSnapHover(bool over)
-    {
-        if (over)
-        {
-            SnapButton.SetResourceReference(Border.BackgroundProperty, "SubtleFillColorSecondaryBrush");
-        }
-        else
-        {
-            SnapButton.ClearValue(Border.BackgroundProperty);
         }
     }
 
