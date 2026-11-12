@@ -29,6 +29,7 @@ public partial class SearchWindow : Window
     private bool _pasted;
     private bool _indexerUpdatePending;
     private Point? _dragStart;
+    private Snap? _snap;
     private HashSet<VolumeIndex> _searchedIndexes = [];
 
     // The live search on screen (running or finished), and its cancel while it runs.
@@ -52,7 +53,11 @@ public partial class SearchWindow : Window
         PreviewKeyDown += OnKey;
         Deactivated += (_, _) => OnDeactivated();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
-        SourceInitialized += (_, _) => Backdrop.Apply(this, app.IsDark);
+        SourceInitialized += (_, _) =>
+        {
+            Backdrop.Apply(this, app.IsDark);
+            _snap = Snap.Attach(this, SnapButton, ShowSnapHover);
+        };
         app.SettingsChanged += async () =>
         {
             Backdrop.Apply(this, app.IsDark);
@@ -83,16 +88,43 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        if (_app.Settings.WindowLeft != Left || _app.Settings.WindowTop != Top)
-        {
-            _app.ApplySettings(_app.Settings with { WindowLeft = Left, WindowTop = Top });
-        }
+        SavePlacement();
+        // The pointer may be on the snap button now and elsewhere next time; no leave message arrives while hidden.
+        _snap?.Reset();
         Hide();
+    }
+
+    /// <summary>Remembers where the panel is and how big, unless it is maximized (that state is kept as it is).</summary>
+    private void SavePlacement()
+    {
+        Settings saved = _app.Settings;
+        if (WindowState != WindowState.Normal)
+        {
+            return;
+        }
+        bool moved = saved.WindowLeft != Left || saved.WindowTop != Top;
+        bool resized = saved.WindowWidth != Width || saved.WindowHeight != Height;
+        if (moved || resized)
+        {
+            _app.ApplySettings(saved with { WindowLeft = Left, WindowTop = Top, WindowWidth = Width, WindowHeight = Height });
+        }
     }
 
     private void PlaceWindow()
     {
+        if (WindowState == WindowState.Minimized)
+        {
+            // Win+Down minimizes it, and with no taskbar button it could never be brought back.
+            WindowState = WindowState.Normal;
+        }
+        if (WindowState == WindowState.Maximized)
+        {
+            return;
+        }
         Rect area = SystemParameters.WorkArea;
+        // A size saved on a larger screen still has to fit this one.
+        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width, MinWidth, Math.Max(MinWidth, area.Width));
+        Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
         double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
         double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
         // Pull a position saved on a monitor that is gone back onto the screen.
@@ -107,7 +139,9 @@ public partial class SearchWindow : Window
     private void OnDeactivated()
     {
         bool menuOpen = Results.ContextMenu?.IsOpen == true;
-        if (_app.Settings.HideOnBlur && !menuOpen)
+        // The snap-layout flyout takes focus for a moment; hiding then would make it impossible to use.
+        bool snapping = _snap?.IsOverButton == true;
+        if (_app.Settings.HideOnBlur && !menuOpen && !snapping)
         {
             HidePanel();
         }
@@ -614,6 +648,18 @@ public partial class SearchWindow : Window
         {
             _dragStart = null;
             DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Copy);
+        }
+    }
+
+    private void ShowSnapHover(bool over)
+    {
+        if (over)
+        {
+            SnapButton.SetResourceReference(Border.BackgroundProperty, "SubtleFillColorSecondaryBrush");
+        }
+        else
+        {
+            SnapButton.ClearValue(Border.BackgroundProperty);
         }
     }
 
