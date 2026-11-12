@@ -15,10 +15,12 @@ public partial class App : Application
     private const string PersonalizeKey = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
     private static readonly TimeSpan FirstUpdateCheck = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(4);
+    private static readonly TimeSpan PanelHideDelay = TimeSpan.FromMilliseconds(100);
 
     private Mutex? _singleInstance;
     private EventWaitHandle? _summon;
     private Hotkey? _hotkey;
+    private Hotkey? _ocrHotkey;
     private Tray? _tray;
     private SearchWindow? _panel;
     private SettingsWindow? _settingsWindow;
@@ -98,6 +100,9 @@ public partial class App : Application
         _hotkey = new Hotkey();
         _hotkey.Pressed += TogglePanel;
         HotkeyProblem = _hotkey.Register(Settings.Hotkey);
+        _ocrHotkey = new Hotkey();
+        _ocrHotkey.Pressed += () => _ = SearchUnderCursorAsync();
+        string? ocrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
         Indexer.Start();
         // Combined PDFs were removed in 1.2; their cache is no longer needed.
         SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
@@ -106,6 +111,10 @@ public partial class App : Application
         if (settingsProblem is not null || HotkeyProblem is not null)
         {
             _tray.Notify(settingsProblem ?? $"Hotkey: {HotkeyProblem}");
+        }
+        else if (ocrHotkeyProblem is not null)
+        {
+            _tray.Notify($"Text-under-the-mouse shortcut: {ocrHotkeyProblem}");
         }
         if (catalog.All().Count == 0)
         {
@@ -125,6 +134,27 @@ public partial class App : Application
         {
             ShowPanel();
         }
+    }
+
+    /// <summary>Reads the word or code under the mouse and searches for it.</summary>
+    private async Task SearchUnderCursorAsync()
+    {
+        if (_panel is { IsVisible: true })
+        {
+            // The panel itself must not be what is read.
+            _panel.HidePanel();
+            await Task.Delay(PanelHideDelay);
+        }
+        ScreenRead read;
+        try
+        {
+            read = await ScreenText.UnderCursorAsync();
+        }
+        catch (Exception error) when (error is System.Runtime.InteropServices.ExternalException or InvalidOperationException or ArgumentException)
+        {
+            read = new ScreenRead(null, $"The screen could not be read: {error.Message}");
+        }
+        _panel?.ShowWithSearch(read.Text, read.Problem);
     }
 
     public void ShowSettings(SettingsWindow.Page page = SettingsWindow.Page.General)
@@ -155,6 +185,10 @@ public partial class App : Application
         {
             HotkeyProblem = _hotkey.Register(settings.Hotkey);
             problem ??= HotkeyProblem;
+        }
+        if (settings.OcrHotkey != previous.OcrHotkey && _ocrHotkey is not null)
+        {
+            problem ??= _ocrHotkey.Register(settings.OcrHotkey);
         }
         if (settings.Theme != previous.Theme)
         {
@@ -235,6 +269,7 @@ public partial class App : Application
     {
         _panel?.HidePanel();
         _hotkey?.Dispose();
+        _ocrHotkey?.Dispose();
         _tray?.Dispose();
         Indexer.Dispose();
         _summon?.Dispose();

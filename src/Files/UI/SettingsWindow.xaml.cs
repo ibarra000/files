@@ -53,6 +53,7 @@ public partial class SettingsWindow : Window
     {
         _loading = true;
         HotkeyBox.Text = settings.Hotkey;
+        OcrHotkeyBox.Text = settings.OcrHotkey;
         StartWithWindowsBox.IsChecked = StartWithWindows.IsEnabled;
         HideOnBlurBox.IsChecked = settings.HideOnBlur;
         HideAfterOpeningBox.IsChecked = settings.HideAfterOpening;
@@ -97,6 +98,7 @@ public partial class SettingsWindow : Window
         Settings settings = _app.Settings with
         {
             Hotkey = HotkeyBox.Text,
+            OcrHotkey = OcrHotkeyBox.Text,
             HideOnBlur = HideOnBlurBox.IsChecked == true,
             HideAfterOpening = HideAfterOpeningBox.IsChecked == true,
             RememberSearches = RememberBox.IsChecked == true,
@@ -156,10 +158,11 @@ public partial class SettingsWindow : Window
     private void OnHotkeyKey(object sender, KeyEventArgs e)
     {
         e.Handled = true;
+        var box = (TextBox)sender;
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         if (key is Key.Delete or Key.Back)
         {
-            HotkeyBox.Text = Hotkey.Off;
+            box.Text = Hotkey.Off;
             Save();
             return;
         }
@@ -169,7 +172,7 @@ public partial class SettingsWindow : Window
         {
             return;
         }
-        HotkeyBox.Text = Hotkey.Format(Keyboard.Modifiers, key);
+        box.Text = Hotkey.Format(Keyboard.Modifiers, key);
         Save();
     }
 

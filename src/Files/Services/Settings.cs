@@ -31,6 +31,9 @@ public sealed record Settings
     };
 
     public string Hotkey { get; init; } = "Ctrl+Shift+Space";
+
+    /// <summary>Searches for the word or code under the mouse.</summary>
+    public string OcrHotkey { get; init; } = "Ctrl+Alt+Space";
     public Theme Theme { get; init; } = Theme.System;
     public bool HideOnBlur { get; init; } = true;
     public bool HideAfterOpening { get; init; } = true;
@@ -84,6 +87,7 @@ public sealed record Settings
         return loaded with
         {
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
+            OcrHotkey = loaded.OcrHotkey ?? defaults.OcrHotkey,
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,
             Viewers = (loaded.Viewers ?? [])

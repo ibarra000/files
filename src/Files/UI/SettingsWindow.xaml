@@ -26,6 +26,10 @@
                         <TextBlock Text="Click, then press the keys. Delete turns it off." Margin="12,0,0,0"
                                    VerticalAlignment="Center" Style="{StaticResource Dim}" />
                     </StackPanel>
+                    <TextBlock Text="Shortcut to search for the text under the mouse" Style="{StaticResource Heading}" />
+                    <TextBox x:Name="OcrHotkeyBox" Width="240" HorizontalAlignment="Left" IsReadOnly="True"
+                             IsReadOnlyCaretVisible="False" PreviewKeyDown="OnHotkeyKey"
+                             AutomationProperties.Name="Text under the mouse shortcut" />
                     <TextBlock Text="Behavior" Style="{StaticResource Heading}" />
                     <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Click="OnStartWithWindows" />
                     <CheckBox x:Name="HideOnBlurBox" Content="Hide when another window is clicked" Click="OnChanged" />
