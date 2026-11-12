@@ -11,6 +11,9 @@ public sealed class Names
 {
     public const char Separator = '\0';
 
+    /// <summary>The most characters one arena can hold, separators included.</summary>
+    public const int MaxChars = 0x7FFFFFC7; // Array.MaxLength, which is not a constant.
+
     private Names(char[] lower, char[] orig, int[] offsets)
     {
         Lower = lower;
@@ -52,10 +55,15 @@ public sealed class Names
 
         public void Add(string name)
         {
-            int needed = _length + name.Length + 1;
+            long needed = (long)_length + name.Length + 1;
+            if (needed > MaxChars)
+            {
+                throw new InvalidOperationException($"More than {MaxChars:N0} characters of names do not fit in one list");
+            }
             if (needed > _orig.Length)
             {
-                Array.Resize(ref _orig, Math.Max(needed, _orig.Length * 2));
+                // Doubling, but never past the largest array .NET allows.
+                Array.Resize(ref _orig, (int)Math.Min(MaxChars, Math.Max(needed, 2L * _orig.Length)));
             }
             name.CopyTo(_orig.AsSpan(_length));
             _length += name.Length;

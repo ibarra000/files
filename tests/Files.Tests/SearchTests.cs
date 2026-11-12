@@ -95,6 +95,23 @@ public sealed class SearchTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void Names_survive_the_arena_growing_many_times()
+    {
+        var builder = new Names.Builder();
+        for (int i = 0; i < 20_000; i++)
+        {
+            builder.Add($"Name-{i}");
+        }
+
+        Names names = builder.Build();
+
+        Assert.Equal(20_000, names.Count);
+        Assert.Equal("Name-0", names[0]);
+        Assert.Equal("Name-12345", names[12345]);
+        Assert.Equal("name-19999", names.LowerSpan(19999).ToString());
+    }
+
+    [Fact]
     public void Top_k_keeps_the_lowest_keys_in_order()
     {
         var top = new TopK(3);
