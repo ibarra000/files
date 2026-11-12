@@ -17,6 +17,24 @@ internal sealed class TempFolder : IDisposable
 
     public void Dispose()
     {
+        // A background task of the code under test (an indexer's timer, say) can hold a
+        // file for a moment after the test ends, so the delete is retried briefly.
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                Delete();
+                return;
+            }
+            catch (IOException) when (attempt < 20)
+            {
+                Thread.Sleep(50);
+            }
+        }
+    }
+
+    private void Delete()
+    {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         foreach (string file in Directory.EnumerateFiles(Path, "*", SearchOption.AllDirectories))
         {
