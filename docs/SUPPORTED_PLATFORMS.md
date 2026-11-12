@@ -45,7 +45,7 @@ The app is self-contained, so the .NET runtime need not be installed. It runs wi
 | Results shown | 300, best first (the count of all matches is shown too) |
 | Files listed per matching folder | 64 |
 | Folder depth | 32 |
-| Files per volume | 8 million |
+| Files per volume | No fixed number: up to about 2.1 billion characters of names, roughly 70 million files of 30 characters. Each file takes about 130 bytes of memory. |
 | Pages in a combined PDF | 512 |
 | Scans at once | 2 |
 | Recent searches kept | 200 |

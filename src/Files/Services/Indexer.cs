@@ -271,7 +271,7 @@ public sealed class Indexer : IDisposable
             string? problem = null;
             if (walk.Truncated)
             {
-                problem = $"Stopped at {Walker.MaxEntries:N0} files; add smaller folders as separate volumes";
+                problem = $"Stopped after {walk.Index.FileCount:N0} files because the names no longer fit in memory; add its subfolders as separate volumes";
             }
             else if (walk.Unreadable > 0)
             {

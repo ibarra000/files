@@ -64,7 +64,7 @@ VolumeIndex (Core/VolumeIndex.cs)
 
 - **Start-up.** Every shard is loaded on a background task, so search works at once even when shares are offline. A `scanning` status left by a crash is reset to `offline`.
 - **Schedule.** Once a minute, any volume never read, or last read longer ago than the rescan interval (1 h by default, or never), is queued. <kbd>F5</kbd> queues them all. At most two scans run at once.
-- **Walk** (`Core/Walker.cs`). Eight threads share a stack of folders, because on a network share each listing is mostly waiting. Listing uses `FileSystemEnumerable` with a 64 KiB buffer, so one round trip returns many names. Limits: depth 32, 8 million files. Junctions and other reparse points are not followed. A folder that cannot be read is counted and skipped; 32 failures in a row abort the walk, so a share that drops mid-walk fails fast.
+- **Walk** (`Core/Walker.cs`). Eight threads share a stack of folders, because on a network share each listing is mostly waiting. Listing uses `FileSystemEnumerable` with a 64 KiB buffer, so one round trip returns many names. Limits: depth 32, and about 2.1 billion characters of names per volume, the most one arena can hold (there is no fixed file count). Junctions and other reparse points are not followed. A folder that cannot be read is counted and skipped; 32 failures in a row abort the walk, so a share that drops mid-walk fails fast.
 - **Failure.** A failed scan keeps the last good index, marks the volume `offline` with its reason, and is retried after 5 minutes.
 
 There are no change notifications: a periodic rescan is simpler and works the same on every server.

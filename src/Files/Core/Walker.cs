@@ -2,7 +2,7 @@ using System.IO.Enumeration;
 
 namespace Files.Core;
 
-/// <param name="Truncated">The walk stopped at <see cref="Walker.MaxEntries"/> files.</param>
+/// <param name="Truncated">The walk stopped because the names no longer fit in memory.</param>
 public sealed record WalkResult(VolumeIndex Index, int Folders, int Unreadable, bool Truncated);
 
 /// <summary>
@@ -14,7 +14,6 @@ public static class Walker
 {
     public const int Workers = 8;
     public const int MaxDepth = 32;
-    public const int MaxEntries = 8_000_000;
 
     /// <summary>
     /// After this many folders in a row fail with I/O errors, the share is
@@ -33,14 +32,23 @@ public static class Walker
     /// Walks <paramref name="root"/>. Throws when the root itself cannot be
     /// read; a subfolder that cannot be read is counted and skipped. Folder
     /// junctions and other reparse points are never followed.
+    /// There is no fixed file count: the walk stops only when the names would
+    /// no longer fit in the index's arenas (<paramref name="maxChars"/>).
     /// </summary>
     public static WalkResult Walk(string root, bool skipHidden, CancellationToken cancel, Action<int>? progress = null)
+    {
+        return Walk(root, skipHidden, cancel, progress, Names.MaxChars);
+    }
+
+    internal static WalkResult Walk(string root, bool skipHidden, CancellationToken cancel, Action<int>? progress, long maxChars)
     {
         Listing rootListing = List(root, skipHidden);
         var found = new List<(string Relative, List<string> Files)> { ("", rootListing.Files) };
         var pending = new Stack<Folder>(rootListing.Folders.Select(name => new Folder(name, 1)));
         int busy = 0;
         int entries = rootListing.Files.Count;
+        long fileChars = CharsOf(rootListing.Files);
+        long folderChars = 1;
         int unreadable = 0;
         int failuresInARow = 0;
         bool truncated = false;
@@ -77,7 +85,7 @@ public static class Walker
                         unreadable++;
                         failuresInARow = lostContact ? failuresInARow + 1 : failuresInARow;
                     }
-                    else if (entries + listing.Files.Count > MaxEntries)
+                    else if (fileChars + CharsOf(listing.Files) > maxChars || folderChars + folder.Relative.Length + 1 > maxChars)
                     {
                         truncated = true;
                     }
@@ -85,6 +93,8 @@ public static class Walker
                     {
                         failuresInARow = 0;
                         entries += listing.Files.Count;
+                        fileChars += CharsOf(listing.Files);
+                        folderChars += folder.Relative.Length + 1;
                         found.Add((folder.Relative, listing.Files));
                         if (folder.Depth < MaxDepth)
                         {
@@ -122,6 +132,17 @@ public static class Walker
             builder.AddFolder(relative, files);
         }
         return new WalkResult(builder.Build(), found.Count, unreadable, truncated);
+    }
+
+    /// <summary>The arena space a folder's names take, one separator each.</summary>
+    private static long CharsOf(List<string> names)
+    {
+        long chars = 0;
+        foreach (string name in names)
+        {
+            chars += name.Length + 1;
+        }
+        return chars;
     }
 
     /// <summary>

@@ -40,6 +40,43 @@ public sealed class WalkerTests
     }
 
     [Fact]
+    public void A_walk_without_a_limit_hint_is_not_truncated()
+    {
+        using var temp = new TempFolder();
+        for (int i = 0; i < 50; i++)
+        {
+            temp.File($@"f{i % 5}\file{i}.txt");
+        }
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None);
+
+        Assert.False(walk.Truncated);
+        Assert.Equal(50, walk.Index.FileCount);
+    }
+
+    [Fact]
+    public void A_walk_stops_when_the_names_no_longer_fit_and_keeps_whole_folders()
+    {
+        using var temp = new TempFolder();
+        temp.File("root.txt");
+        for (int folder = 0; folder < 10; folder++)
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                temp.File($@"d{folder}\n{i}.txt");
+            }
+        }
+
+        // "root.txt" plus room for two folders of four 6-char names.
+        long limit = "root.txt".Length + 1 + 2 * 4 * ("n0.txt".Length + 1);
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, progress: null, maxChars: limit);
+
+        Assert.True(walk.Truncated);
+        Assert.Equal(1 + 2 * 4, walk.Index.FileCount);
+        Assert.Equal(3, walk.Folders);
+    }
+
+    [Fact]
     public void A_cancelled_walk_stops()
     {
         using var temp = new TempFolder();
