@@ -14,7 +14,7 @@
     <NoWarn>$(NoWarn);WPF0001;WFO0003</NoWarn>
     <AssemblyName>files</AssemblyName>
     <RootNamespace>Files</RootNamespace>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Product>files</Product>
     <Description>files - nfs &amp; smb indexer</Description>
     <ApplicationIcon>..\..\assets\files.ico</ApplicationIcon>
