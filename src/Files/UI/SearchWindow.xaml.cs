@@ -30,6 +30,7 @@ public partial class SearchWindow : Window
     private CancellationTokenSource? _searchCancel;
     private Task? _searching;
     private bool _accepting;
+    private bool _hiding;
     private int _epoch;
     private SearchResult? _result;
     private string? _queryProblem;
@@ -128,9 +129,9 @@ public partial class SearchWindow : Window
         string searchSettings = SearchSettingsOf(_app.Settings);
         bool searchChanged = searchSettings != _searchSettings;
         _searchSettings = searchSettings;
-        if (!IsVisible)
+        if (!IsVisible || _hiding)
         {
-            // ShowPanel rebuilds the list; a hidden panel does no work for it.
+            // ShowPanel rebuilds the list; a hidden or hiding panel does no work for it.
             return;
         }
         if (IsHome)
@@ -157,7 +158,8 @@ public partial class SearchWindow : Window
     public void ShowPanel()
     {
         // Only a hidden panel goes back to its saved place; a visible one stays where the user put it.
-        if (!IsVisible)
+        bool wasHidden = !IsVisible;
+        if (wasHidden)
         {
             PlaceWindow();
         }
@@ -171,9 +173,10 @@ public partial class SearchWindow : Window
             _showAllFavorites = false;
             ShowHome();
         }
-        else
+        else if (wasHidden)
         {
             // What was found before may come from a live search that hiding stopped, or from lists read since: search again (the selection is kept).
+            // A panel that was already showing keeps what it shows, a live search included.
             _ = SearchAsync();
         }
         UpdateStatus();
@@ -188,8 +191,17 @@ public partial class SearchWindow : Window
         StopLiveSearch();
         CloseMenus();
         StopPreview();
-        SavePlacement();
-        // After saving: a settings change raised by the save can update the status, which must not restart the icon.
+        // Saving the place raises a settings change while the panel is still visible; it must not rebuild the list,
+        // restart a preview read or check favorites for a panel about to hide.
+        _hiding = true;
+        try
+        {
+            SavePlacement();
+        }
+        finally
+        {
+            _hiding = false;
+        }
         SetSpinning(false);
         Hide();
     }
@@ -484,10 +496,22 @@ public partial class SearchWindow : Window
             // Enter before the typing pause ended: search now, then open the best match.
             await SearchAsync();
         }
-        else if (_searching is { IsCompleted: false } running)
+        else
         {
             // A paste, recall, saved search or screen read is still being searched: open its best match, not the old row.
-            await running;
+            // Waits for the newest one, since a search started meanwhile replaces the one awaited.
+            try
+            {
+                while (_searching is { IsCompleted: false } running)
+                {
+                    await running;
+                }
+            }
+            catch (Exception error) when (error is InvalidOperationException or ArgumentException or IOException)
+            {
+                ShowToast($"The search failed: {error.Message}");
+                return;
+            }
         }
         if (_queryProblem is not null)
         {

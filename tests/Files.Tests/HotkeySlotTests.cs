@@ -64,6 +64,15 @@ public sealed class HotkeySlotTests
     }
 
     [Fact]
+    public void The_same_keys_written_another_way_are_the_same_shortcut()
+    {
+        var (slot, windows) = NewSlot();
+        slot.Register("Ctrl+Shift+Space");
+        Assert.Null(slot.Register("Shift+Ctrl+Space"));
+        Assert.Single(windows.Held);
+    }
+
+    [Fact]
     public void A_combination_that_failed_at_start_is_tried_again()
     {
         var (slot, windows) = NewSlot();

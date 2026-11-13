@@ -366,9 +366,9 @@ public sealed class Indexer : IDisposable
         {
             File.Delete(Shard.PathFor(_shardFolder, volume.Uid));
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // Open elsewhere; a stale shard is ignored because its uid no longer exists.
+            // Open elsewhere, or not ours to delete; a stale shard is ignored because its uid no longer exists.
         }
     }
 

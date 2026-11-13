@@ -35,8 +35,10 @@ public sealed class HotkeySlot(Func<int, uint, uint, bool> register, Func<int, b
         {
             return $"\"{text}\" is not a shortcut";
         }
-        if (Active == text)
+        // The same keys written another way ("Shift+Ctrl+Space") are the same shortcut, already held.
+        if (Active is string active && Hotkey.Parse(active) == (modifiers, key))
         {
+            Active = text;
             return null;
         }
         int next = _id == 1 ? 2 : 1;

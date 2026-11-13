@@ -76,8 +76,9 @@ public partial class App : Application
     /// <summary>Takes the shortcuts back once recording ends. A combination that cannot be had gives way to the one held before.</summary>
     public string? ResumeHotkeys()
     {
-        if (!_hotkeysSuspended || _hotkey is null || _ocrHotkey is null)
+        if (!_hotkeysSuspended || _hotkey is null || _ocrHotkey is null || IsQuitting)
         {
+            // While quitting the shortcuts are already let go for good.
             return null;
         }
         _hotkeysSuspended = false;
