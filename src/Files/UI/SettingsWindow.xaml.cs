@@ -35,7 +35,31 @@ public partial class SettingsWindow : Window
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
         app.Indexer.Changed += onIndexerChanged;
-        Closed += (_, _) => app.Indexer.Changed -= onIndexerChanged;
+        // The title bar and body take the panel's colors, and follow a change of Colors at once.
+        Action onSettingsChanged = () => Backdrop.Apply(this, app.IsDark);
+        SourceInitialized += (_, _) => onSettingsChanged();
+        app.SettingsChanged += onSettingsChanged;
+        Closed += (_, _) =>
+        {
+            app.Indexer.Changed -= onIndexerChanged;
+            app.SettingsChanged -= onSettingsChanged;
+        };
+    }
+
+    /// <summary>Shows the page picked in the sidebar; the pages sit in PageHost in the order of <see cref="Page"/>.</summary>
+    private void OnPageChanged(object sender, SelectionChangedEventArgs e)
+    {
+        int shown = Pages.SelectedIndex;
+        if (shown < 0 || PageHost is null)
+        {
+            return;
+        }
+        for (int i = 0; i < PageHost.Children.Count; i++)
+        {
+            PageHost.Children[i].Visibility = i == shown ? Visibility.Visible : Visibility.Collapsed;
+        }
+        PageTitle.Text = ((Page)shown).ToString();
+        PageScroll.ScrollToTop();
     }
 
     public void ShowPage(Page page)
@@ -76,6 +100,7 @@ public partial class SettingsWindow : Window
         CheckUpdatesBox.IsChecked = settings.CheckForUpdates;
         UpdateFolderBox.Text = settings.UpdateFolder;
         VersionText.Text = $"files {Updater.Current.ToString(3)}";
+        SidebarVersion.Text = $"Version {Updater.Current.ToString(3)}";
         PathsText.Text = $"Settings: {AppPaths.Settings}\nVolumes and file lists: {AppPaths.Local}";
         InstallButton.IsEnabled = _app.UpdateOffer is not null;
         _loading = false;

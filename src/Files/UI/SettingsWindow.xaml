@@ -1,149 +1,397 @@
 <Window x:Class="Files.UI.SettingsWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="files settings" Width="760" Height="560" MinWidth="560" MinHeight="420"
-        WindowStartupLocation="CenterScreen">
+        Title="files settings" Width="880" Height="600" MinWidth="680" MinHeight="460"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="{DynamicResource UiFont}" Foreground="{DynamicResource Text}">
     <Window.Resources>
-        <Style x:Key="Heading" TargetType="TextBlock">
-            <Setter Property="FontSize" Value="14" />
-            <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Margin" Value="0,16,0,6" />
-        </Style>
-        <Style TargetType="CheckBox" BasedOn="{StaticResource {x:Type CheckBox}}">
-            <Setter Property="Margin" Value="0,4" />
-        </Style>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="SettingsStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Window.Resources>
 
-    <DockPanel Margin="16">
-        <TextBlock x:Name="Message" DockPanel.Dock="Bottom" Margin="4,10,0,0" TextWrapping="Wrap" />
-        <TabControl x:Name="Pages">
-            <TabItem Header="General">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel Margin="12">
-                        <TextBlock Text="Shortcut to open files" Style="{StaticResource Heading}" />
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="210" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- The pages, as the panel lists its results (SettingsWindow.Page is in this order). -->
+        <Border Background="{DynamicResource PanelFooter}" BorderBrush="{DynamicResource Divider}" BorderThickness="0,0,1,0">
+            <DockPanel Margin="12,16,12,12">
+                <StackPanel DockPanel.Dock="Top" Margin="10,0,0,16">
+                    <TextBlock Text="files" FontSize="16" FontWeight="SemiBold" />
+                    <TextBlock x:Name="SidebarVersion" FontSize="12" Foreground="{DynamicResource TextDim}" />
+                </StackPanel>
+                <ListBox x:Name="Pages" BorderThickness="0" Background="Transparent" ItemContainerStyle="{StaticResource NavItem}"
+                         SelectionChanged="OnPageChanged" AutomationProperties.Name="Settings pages">
+                    <ListBoxItem>
                         <StackPanel Orientation="Horizontal">
-                            <TextBox x:Name="HotkeyBox" Width="240" IsReadOnly="True" IsReadOnlyCaretVisible="False"
-                                     PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Shortcut" />
-                            <TextBlock Text="Click, then press the keys. Delete turns it off." Margin="12,0,0,0"
-                                       VerticalAlignment="Center" Style="{StaticResource Dim}" />
+                            <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
+                            <TextBlock Text="General" FontSize="13" />
                         </StackPanel>
-                        <TextBlock Text="Shortcut to search for the text under the mouse" Style="{StaticResource Heading}" />
-                        <TextBox x:Name="OcrHotkeyBox" Width="240" HorizontalAlignment="Left" IsReadOnly="True"
-                                 IsReadOnlyCaretVisible="False" PreviewKeyDown="OnHotkeyKey"
-                                 AutomationProperties.Name="Text under the mouse shortcut" />
-                        <TextBlock Text="Behavior" Style="{StaticResource Heading}" />
-                        <CheckBox x:Name="StartWithWindowsBox" Content="Start with Windows" Click="OnStartWithWindows" />
-                        <CheckBox x:Name="HideOnBlurBox" Content="Hide when another window is clicked" Click="OnChanged" />
-                        <CheckBox x:Name="HideAfterOpeningBox" Content="Hide after opening a file" Click="OnChanged" />
-                        <TextBlock Text="History" Style="{StaticResource Heading}" />
-                        <CheckBox x:Name="RememberBox" Content="Remember new searches and opened files" Click="OnChanged" />
-                        <CheckBox x:Name="ShowOpenedBox" Content="Show recently opened files when the search box is empty" Click="OnChanged" />
-                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                            <Button x:Name="ClearSearchesButton" Content="Clear recent searches" Click="OnClearSearches" />
-                            <Button x:Name="ClearOpenedButton" Content="Clear recently opened" Margin="8,0,0,0" Click="OnClearOpened" />
+                    </ListBoxItem>
+                    <ListBoxItem>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xEDA2;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
+                            <TextBlock Text="Volumes" FontSize="13" />
                         </StackPanel>
-                        <TextBlock Text="Favorites are kept when history is cleared." Margin="0,4,0,0" Style="{StaticResource Dim}" />
-                        <TextBlock Text="Colors" Style="{StaticResource Heading}" />
-                        <ComboBox x:Name="ThemeBox" Width="240" HorizontalAlignment="Left" SelectionChanged="OnChanged">
-                            <ComboBoxItem Content="Follow Windows" />
-                            <ComboBoxItem Content="Light" />
-                            <ComboBoxItem Content="Dark" />
-                        </ComboBox>
-                    </StackPanel>
-                </ScrollViewer>
-            </TabItem>
-
-            <TabItem Header="Volumes">
-                <DockPanel Margin="12">
-                    <StackPanel DockPanel.Dock="Bottom">
-                        <TextBlock Text="Add a folder" Style="{StaticResource Heading}" />
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="160" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <TextBlock Text="Name" Margin="2,0,0,4" Style="{StaticResource Dim}" />
-                            <TextBlock Grid.Column="1" Text="Folder, drive or \\server\share" Margin="10,0,0,4" Style="{StaticResource Dim}" />
-                            <TextBox x:Name="NewVolumeName" Grid.Row="1" AutomationProperties.Name="Name" />
-                            <TextBox x:Name="NewVolumePath" Grid.Row="1" Grid.Column="1" Margin="8,0" AutomationProperties.Name="Folder" />
-                            <Button Grid.Row="1" Grid.Column="2" Content="Browse…" Click="OnBrowse" />
-                            <Button Grid.Row="1" Grid.Column="3" Content="Add" Margin="8,0,0,0" Click="OnAddVolume" />
-                        </Grid>
-                        <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
-                            <TextBlock Text="Read every volume again" VerticalAlignment="Center" />
-                            <ComboBox x:Name="RescanBox" Width="150" Margin="10,0" SelectionChanged="OnChanged">
-                                <ComboBoxItem Content="every hour" Tag="1" />
-                                <ComboBoxItem Content="every 4 hours" Tag="4" />
-                                <ComboBoxItem Content="every day" Tag="24" />
-                                <ComboBoxItem Content="only on F5" Tag="0" />
-                            </ComboBox>
+                    </ListBoxItem>
+                    <ListBoxItem>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
+                            <TextBlock Text="Search" FontSize="13" />
                         </StackPanel>
-                        <CheckBox x:Name="HideSystemBox" Content="Skip hidden and system files (applies at the next read)" Click="OnChanged" />
-                    </StackPanel>
-                    <StackPanel DockPanel.Dock="Right" Margin="8,0,0,0">
-                        <Button Content="Read again" Click="OnRescanVolume" Margin="0,0,0,8" />
-                        <Button Content="Remove" Click="OnRemoveVolume" />
-                    </StackPanel>
-                    <DataGrid x:Name="VolumeGrid" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single"
-                              HeadersVisibility="Column" GridLinesVisibility="None">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" />
-                            <DataGridTextColumn Header="Folder" Binding="{Binding Root}" Width="*" />
-                            <DataGridTextColumn Header="Files" Binding="{Binding Files}" />
-                            <DataGridTextColumn Header="Read" Binding="{Binding LastRead}" />
-                            <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="1.2*" />
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </DockPanel>
-            </TabItem>
+                    </ListBoxItem>
+                    <ListBoxItem>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE8E5;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
+                            <TextBlock Text="Opening" FontSize="13" />
+                        </StackPanel>
+                    </ListBoxItem>
+                    <ListBoxItem>
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE946;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
+                            <TextBlock Text="About" FontSize="13" />
+                        </StackPanel>
+                    </ListBoxItem>
+                </ListBox>
+            </DockPanel>
+        </Border>
 
-            <TabItem Header="Search">
-                <StackPanel Margin="12">
-                    <TextBlock Text="File types never shown" Style="{StaticResource Heading}" />
-                    <TextBox x:Name="HiddenBox" LostFocus="OnChanged" ToolTip="Extensions separated by commas" />
-                    <TextBlock Text="Results" Style="{StaticResource Heading}" />
-                    <CheckBox x:Name="ShowFoldersBox" Content="Show each result's folder on its own line" Click="OnChanged" />
-                </StackPanel>
-            </TabItem>
+        <DockPanel Grid.Column="1">
+            <!-- What the last change said; hidden while there is nothing to say. -->
+            <Border x:Name="MessageBar" DockPanel.Dock="Bottom" Background="{DynamicResource PanelFooter}"
+                    BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="24,8">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding Text, ElementName=Message}" Value="">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+                <TextBlock x:Name="Message" FontSize="12" TextWrapping="Wrap" Foreground="{DynamicResource TextDim}" />
+            </Border>
 
-            <TabItem Header="Opening">
-                <DockPanel Margin="12">
-                    <StackPanel DockPanel.Dock="Top">
-                        <TextBlock Text="Enter opens with" Style="{StaticResource Heading}" />
-                        <ComboBox x:Name="EnterBox" Width="300" HorizontalAlignment="Left" SelectionChanged="OnChanged" />
-                        <TextBlock Text="Programs to open files with" Style="{StaticResource Heading}" />
-                    </StackPanel>
-                    <DataGrid x:Name="ViewerGrid" AutoGenerateColumns="False" CanUserAddRows="True" CanUserDeleteRows="True"
-                              HeadersVisibility="Column" RowEditEnding="OnGridEdited" CellEditEnding="OnGridEdited">
-                        <DataGrid.Columns>
-                            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="120" />
-                            <DataGridTextColumn Header="Program" Binding="{Binding Program}" Width="*" />
-                        </DataGrid.Columns>
-                    </DataGrid>
-                </DockPanel>
-            </TabItem>
+            <TextBlock x:Name="PageTitle" DockPanel.Dock="Top" Text="General" Margin="28,20,28,0" Style="{StaticResource PageTitle}" />
 
-            <TabItem Header="About">
-                <StackPanel Margin="12">
-                    <TextBlock x:Name="VersionText" FontSize="16" FontWeight="SemiBold" Margin="0,8,0,0" />
-                    <TextBlock Text="Updates" Style="{StaticResource Heading}" />
-                    <CheckBox x:Name="CheckUpdatesBox" Content="Check for updates every few hours" Click="OnChanged" />
-                    <TextBlock Text="Update folder (empty for GitHub releases)" Margin="0,8,0,4" />
-                    <TextBox x:Name="UpdateFolderBox" LostFocus="OnChanged" />
-                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                        <Button Content="Check now" Click="OnCheckUpdate" />
-                        <Button x:Name="InstallButton" Content="Install and restart" Margin="8,0,0,0" Click="OnInstallUpdate" />
+            <ScrollViewer x:Name="PageScroll" VerticalScrollBarVisibility="Auto" Padding="24,0,24,24">
+                <!-- Every page as wide as the window allows, up to 900 px, aligned left. -->
+                <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MaxWidth="900" />
+                </Grid.ColumnDefinitions>
+                <Grid x:Name="PageHost">
+
+                    <!-- General -->
+                    <StackPanel>
+                        <TextBlock Text="SHORTCUTS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Open files" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Click the box, then press the keys. Delete turns it off." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <TextBox x:Name="HotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                             PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Shortcut" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Search the text under the mouse" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <TextBox x:Name="OcrHotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                             PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Text under the mouse shortcut" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="BEHAVIOR" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Start with Windows" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="StartWithWindowsBox" Grid.Column="1" AutomationProperties.Name="Start with Windows" Click="OnStartWithWindows" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Hide when another window is clicked" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="HideOnBlurBox" Grid.Column="1" AutomationProperties.Name="Hide when another window is clicked" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Hide after opening a file" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="HideAfterOpeningBox" Grid.Column="1" AutomationProperties.Name="Hide after opening a file" Click="OnChanged" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="HISTORY" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Remember new searches and opened files" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Off pauses history; nothing is deleted." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="RememberBox" Grid.Column="1" AutomationProperties.Name="Remember new searches and opened files" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Show recently opened files when the search box is empty" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="ShowOpenedBox" Grid.Column="1" AutomationProperties.Name="Show recently opened files" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Clear history" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Favorites are kept." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button x:Name="ClearSearchesButton" Content="Clear recent searches" Style="{StaticResource SettingsButton}" Click="OnClearSearches" />
+                                        <Button x:Name="ClearOpenedButton" Content="Clear recently opened" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnClearOpened" />
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="APPEARANCE" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Colors" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                <ComboBox x:Name="ThemeBox" Grid.Column="1" Width="220" AutomationProperties.Name="Colors" SelectionChanged="OnChanged">
+                                    <ComboBoxItem Content="Follow Windows" />
+                                    <ComboBoxItem Content="Light" />
+                                    <ComboBoxItem Content="Dark" />
+                                </ComboBox>
+                            </Grid>
+                        </Border>
                     </StackPanel>
-                    <TextBlock Text="Data" Style="{StaticResource Heading}" />
-                    <TextBlock x:Name="PathsText" TextWrapping="Wrap" Style="{StaticResource Dim}" />
-                </StackPanel>
-            </TabItem>
-        </TabControl>
-    </DockPanel>
+
+                    <!-- Volumes -->
+                    <StackPanel Visibility="Collapsed">
+                        <TextBlock Text="VOLUMES" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <DataGrid x:Name="VolumeGrid" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="NAME" Binding="{Binding Name}" />
+                                        <DataGridTextColumn Header="FOLDER" Binding="{Binding Root}" Width="*" />
+                                        <DataGridTextColumn Header="FILES" Binding="{Binding Files}" />
+                                        <DataGridTextColumn Header="READ" Binding="{Binding LastRead}" />
+                                        <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="1.2*" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                                <StackPanel Orientation="Horizontal" Margin="16,10,16,14">
+                                    <Button Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume" />
+                                    <Button Content="Remove" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnRemoveVolume" />
+                                    <TextBlock Text="With none selected, Read again reads them all." Margin="12,0,0,0" VerticalAlignment="Center"
+                                               Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="ADD A FOLDER" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="160" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <TextBlock Text="Name" Margin="2,0,0,6" Style="{StaticResource RowDescription}" />
+                                <TextBlock Grid.Column="1" Text="Folder, drive or \\server\share" Margin="10,0,0,6" Style="{StaticResource RowDescription}" />
+                                <TextBox x:Name="NewVolumeName" Grid.Row="1" AutomationProperties.Name="Name" />
+                                <TextBox x:Name="NewVolumePath" Grid.Row="1" Grid.Column="1" Margin="8,0" AutomationProperties.Name="Folder" />
+                                <Button Grid.Row="1" Grid.Column="2" Content="Browse…" Style="{StaticResource SettingsButton}" Click="OnBrowse" />
+                                <Button Grid.Row="1" Grid.Column="3" Content="Add" Margin="8,0,0,0" Padding="18,0" MinWidth="64"
+                                        Style="{StaticResource SettingsAccentButton}" Click="OnAddVolume" />
+                            </Grid>
+                        </Border>
+
+                        <TextBlock Text="READING" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Read every volume again" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <ComboBox x:Name="RescanBox" Grid.Column="1" Width="180" AutomationProperties.Name="Read every volume again" SelectionChanged="OnChanged">
+                                        <ComboBoxItem Content="every hour" Tag="1" />
+                                        <ComboBoxItem Content="every 4 hours" Tag="4" />
+                                        <ComboBoxItem Content="every day" Tag="24" />
+                                        <ComboBoxItem Content="only on F5" Tag="0" />
+                                    </ComboBox>
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Skip hidden and system files" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Applies at the next read." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="HideSystemBox" Grid.Column="1" AutomationProperties.Name="Skip hidden and system files" Click="OnChanged" />
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Search -->
+                    <StackPanel Visibility="Collapsed">
+                        <TextBlock Text="FILTERS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <TextBlock Text="File types never shown" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Extensions separated by commas." Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <TextBox x:Name="HiddenBox" Grid.Column="1" Width="300" AutomationProperties.Name="File types never shown" LostFocus="OnChanged" />
+                            </Grid>
+                        </Border>
+
+                        <TextBlock Text="RESULTS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Show each result's folder on its own line" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Off puts the folder after the name, for one line per file." Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show each result's folder on its own line" Click="OnChanged" />
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Opening -->
+                    <StackPanel Visibility="Collapsed">
+                        <TextBlock Text="DEFAULT" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="Enter opens with" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                <ComboBox x:Name="EnterBox" Grid.Column="1" Width="300" AutomationProperties.Name="Enter opens with" SelectionChanged="OnChanged" />
+                            </Grid>
+                        </Border>
+
+                        <TextBlock Text="PROGRAMS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <DataGrid x:Name="ViewerGrid" Margin="8,4,8,0" MaxHeight="260" AutoGenerateColumns="False" CanUserAddRows="True"
+                                          CanUserDeleteRows="True" RowEditEnding="OnGridEdited" CellEditEnding="OnGridEdited">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="140" EditingElementStyle="{StaticResource GridField}" />
+                                        <DataGridTextColumn Header="PROGRAM" Binding="{Binding Program}" Width="*" EditingElementStyle="{StaticResource GridField}" />
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                                <TextBlock Text="Type in the empty last row to add a program; select a row and press Delete to remove it."
+                                           Margin="16,10,16,14" Style="{StaticResource RowDescription}" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- About -->
+                    <StackPanel Visibility="Collapsed">
+                        <TextBlock x:Name="VersionText" FontSize="16" FontWeight="SemiBold" Margin="4,22,0,0" />
+                        <TextBlock Text="UPDATES" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Check for updates every few hours" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="CheckUpdatesBox" Grid.Column="1" AutomationProperties.Name="Check for updates every few hours" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Text="Update folder" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Empty for GitHub releases." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <TextBox x:Name="UpdateFolderBox" Grid.Column="1" Width="300" AutomationProperties.Name="Update folder" LostFocus="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <StackPanel Orientation="Horizontal" Margin="16,12">
+                                    <Button Content="Check now" Style="{StaticResource SettingsButton}" Click="OnCheckUpdate" />
+                                    <Button x:Name="InstallButton" Content="Install and restart" Margin="8,0,0,0" Padding="14,0"
+                                            Style="{StaticResource SettingsAccentButton}" Click="OnInstallUpdate" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <TextBlock Text="DATA" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <TextBlock x:Name="PathsText" Margin="16,12" FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                       TextWrapping="Wrap" Foreground="{DynamicResource TextDim}" />
+                        </Border>
+                    </StackPanel>
+                </Grid>
+                </Grid>
+            </ScrollViewer>
+        </DockPanel>
+    </Grid>
 </Window>
