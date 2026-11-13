@@ -7,9 +7,9 @@ using System.Windows.Media;
 namespace Files.UI;
 
 /// <summary>
-/// Gives the frameless panel a plain, solid Windows 11 look: the theme's own
-/// background, rounded corners with their shadow, and no light outline around a
-/// dark panel. Older Windows ignores the attributes it does not know.
+/// Gives the panel and Settings a plain, solid Windows 11 look: the panel's own
+/// background (with a title bar, if any, in the same color), rounded corners with
+/// their shadow, and no light outline. Older Windows ignores the attributes it does not know.
 /// </summary>
 internal static class Backdrop
 {

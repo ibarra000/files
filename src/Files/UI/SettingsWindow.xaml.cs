@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Files.Core;
 using Files.Data;
@@ -44,6 +45,39 @@ public partial class SettingsWindow : Window
             app.Indexer.Changed -= onIndexerChanged;
             app.SettingsChanged -= onSettingsChanged;
         };
+    }
+
+    /// <summary>
+    /// A grid inside the page takes the mouse wheel even when it has nothing to scroll; then the page scrolls instead.
+    /// </summary>
+    private void OnGridWheel(object sender, MouseWheelEventArgs e)
+    {
+        ScrollViewer? own = FindScrollViewer((DependencyObject)sender);
+        bool down = e.Delta < 0;
+        bool canScroll = own is not null && (down ? own.VerticalOffset < own.ScrollableHeight : own.VerticalOffset > 0);
+        if (canScroll)
+        {
+            return;
+        }
+        e.Handled = true;
+        PageScroll.ScrollToVerticalOffset(PageScroll.VerticalOffset - e.Delta);
+    }
+
+    private static ScrollViewer? FindScrollViewer(DependencyObject node)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(node, i);
+            if (child is ScrollViewer viewer)
+            {
+                return viewer;
+            }
+            if (FindScrollViewer(child) is ScrollViewer nested)
+            {
+                return nested;
+            }
+        }
+        return null;
     }
 
     /// <summary>Shows the page picked in the sidebar; the pages sit in PageHost in the order of <see cref="Page"/>.</summary>

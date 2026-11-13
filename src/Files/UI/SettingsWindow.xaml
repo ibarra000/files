@@ -27,7 +27,7 @@
                 </StackPanel>
                 <ListBox x:Name="Pages" BorderThickness="0" Background="Transparent" ItemContainerStyle="{StaticResource NavItem}"
                          SelectionChanged="OnPageChanged" AutomationProperties.Name="Settings pages">
-                    <ListBoxItem>
+                    <ListBoxItem IsSelected="True">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="14" Width="26" VerticalAlignment="Center" />
                             <TextBlock Text="General" FontSize="13" />
@@ -212,7 +212,7 @@
                         <TextBlock Text="VOLUMES" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
-                                <DataGrid x:Name="VolumeGrid" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
+                                <DataGrid x:Name="VolumeGrid" PreviewMouseWheel="OnGridWheel" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="NAME" Binding="{Binding Name}" />
                                         <DataGridTextColumn Header="FOLDER" Binding="{Binding Root}" Width="*" />
@@ -335,7 +335,7 @@
                         <TextBlock Text="PROGRAMS" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
-                                <DataGrid x:Name="ViewerGrid" Margin="8,4,8,0" MaxHeight="260" AutoGenerateColumns="False" CanUserAddRows="True"
+                                <DataGrid x:Name="ViewerGrid" PreviewMouseWheel="OnGridWheel" Margin="8,4,8,0" MaxHeight="260" AutoGenerateColumns="False" CanUserAddRows="True"
                                           CanUserDeleteRows="True" RowEditEnding="OnGridEdited" CellEditEnding="OnGridEdited">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="NAME" Binding="{Binding Name}" Width="140" EditingElementStyle="{StaticResource GridField}" />

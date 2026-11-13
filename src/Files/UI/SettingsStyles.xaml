@@ -99,12 +99,23 @@
         </Style.Triggers>
     </Style>
 
+    <!-- The ring around a switch reached with Tab; a click does not leave it behind. -->
+    <Style x:Key="SwitchFocus">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Border Margin="-3" CornerRadius="13" BorderThickness="2" BorderBrush="{DynamicResource Text}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- A switch: a rounded track that fills with the accent when on. -->
     <Style TargetType="CheckBox">
         <Setter Property="Foreground" Value="{DynamicResource Text}" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="VerticalAlignment" Value="Center" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SwitchFocus}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -125,10 +136,6 @@
                             <Setter TargetName="Thumb" Property="Width" Value="14" />
                             <Setter TargetName="Thumb" Property="Height" Value="14" />
                             <Setter TargetName="Thumb" Property="Margin" Value="3,0" />
-                        </Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Track" Property="BorderThickness" Value="2" />
-                            <Setter TargetName="Track" Property="BorderBrush" Value="{DynamicResource Text}" />
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter Property="Opacity" Value="0.5" />
@@ -266,6 +273,19 @@
         </Setter>
     </Style>
 
+    <!-- The invisible edge of a column header that resizes the column. -->
+    <Style x:Key="HeaderGripper" TargetType="Thumb">
+        <Setter Property="Width" Value="8" />
+        <Setter Property="Cursor" Value="SizeWE" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Thumb">
+                    <Border Background="Transparent" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- A grid of volumes or programs: hairlines between rows, faint capital headers, the panel's selection. -->
     <Style TargetType="DataGridColumnHeader">
         <Setter Property="FontSize" Value="11" />
@@ -274,15 +294,37 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="DataGridColumnHeader">
-                    <Border Padding="8,6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Divider}" Background="Transparent">
-                        <ContentPresenter />
-                    </Border>
+                    <Grid>
+                        <Border Padding="8,6" BorderThickness="0,0,0,1" BorderBrush="{DynamicResource Divider}" Background="Transparent">
+                            <StackPanel Orientation="Horizontal">
+                                <ContentPresenter VerticalAlignment="Center" />
+                                <!-- Shows the sort order after a click on the header. -->
+                                <TextBlock x:Name="SortArrow" FontFamily="{StaticResource IconFont}" FontSize="9" Margin="6,1,0,0"
+                                           VerticalAlignment="Center" Visibility="Collapsed" />
+                            </StackPanel>
+                        </Border>
+                        <!-- WPF finds these by name to let the column edges be dragged. -->
+                        <Thumb x:Name="PART_LeftHeaderGripper" HorizontalAlignment="Left" Style="{StaticResource HeaderGripper}" />
+                        <Thumb x:Name="PART_RightHeaderGripper" HorizontalAlignment="Right" Style="{StaticResource HeaderGripper}" />
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="SortDirection" Value="Ascending">
+                            <Setter TargetName="SortArrow" Property="Text" Value="&#xE70E;" />
+                            <Setter TargetName="SortArrow" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="SortDirection" Value="Descending">
+                            <Setter TargetName="SortArrow" Property="Text" Value="&#xE70D;" />
+                            <Setter TargetName="SortArrow" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
     </Style>
     <Style TargetType="DataGridCell">
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <!-- A style setter, so the theme's white selected-cell text never lands on the pale selection. -->
+        <Setter Property="Foreground" Value="{DynamicResource Text}" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="DataGridCell">
