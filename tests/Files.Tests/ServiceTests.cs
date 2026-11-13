@@ -85,6 +85,19 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void The_preview_pane_starts_closed_and_its_choice_is_kept()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        Assert.False(new Settings().ShowPreview);
+
+        new Settings { ShowPreview = true }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+
+        Assert.True(loaded.ShowPreview);
+    }
+
+    [Fact]
     public void Settings_without_the_text_shortcut_get_its_default()
     {
         using var temp = new TempFolder();

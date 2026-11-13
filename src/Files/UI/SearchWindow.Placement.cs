@@ -14,11 +14,13 @@ public partial class SearchWindow
         {
             return;
         }
+        // The width the panel has without the preview pane, which adds its own when shown.
+        double width = Width - _previewAdded;
         bool moved = saved.WindowLeft != Left || saved.WindowTop != Top;
-        bool resized = saved.WindowWidth != Width || saved.WindowHeight != Height;
+        bool resized = saved.WindowWidth != width || saved.WindowHeight != Height;
         if (moved || resized)
         {
-            _app.ApplySettings(saved with { WindowLeft = Left, WindowTop = Top, WindowWidth = Width, WindowHeight = Height });
+            _app.ApplySettings(saved with { WindowLeft = Left, WindowTop = Top, WindowWidth = width, WindowHeight = Height });
         }
     }
 
@@ -35,8 +37,9 @@ public partial class SearchWindow
         }
         Rect area = SystemParameters.WorkArea;
         // A size saved on a larger screen still has to fit this one.
-        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width, MinWidth, Math.Max(MinWidth, area.Width));
+        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width - _previewAdded, MinWidth, Math.Max(MinWidth, area.Width));
         Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
+        _previewAdded = 0;
         double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
         double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
         // Pull a position saved on a monitor that is gone back onto the screen.
@@ -46,6 +49,10 @@ public partial class SearchWindow
             && top + Height <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
         Left = onScreen ? left : area.Left + (area.Width - Width) / 2;
         Top = onScreen ? top : area.Top + area.Height * DefaultTopFraction;
+        if (PreviewShown)
+        {
+            WidenForPreview();
+        }
     }
 
     /// <summary>

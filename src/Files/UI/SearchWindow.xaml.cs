@@ -71,6 +71,7 @@ public partial class SearchWindow : Window
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
         ApplyTheme();
         ApplyRowLayout();
+        ApplyPreview(app.Settings.ShowPreview);
         SourceInitialized += (_, _) =>
         {
             Backdrop.Apply(this, app.IsDark);
@@ -81,6 +82,7 @@ public partial class SearchWindow : Window
             ApplyTheme();
             Backdrop.Apply(this, app.IsDark);
             ApplyRowLayout();
+            ApplyPreview(app.Settings.ShowPreview);
             await SearchAsync();
         };
     }
@@ -320,6 +322,9 @@ public partial class SearchWindow : Window
                 break;
             case Key.Q when ctrl:
                 _app.Quit();
+                break;
+            case Key.P when ctrl:
+                TogglePreview();
                 break;
             case >= Key.D1 and <= Key.D5 when ctrl:
                 SetFilter((SearchFilter)(e.Key - Key.D1));

@@ -155,7 +155,7 @@ public static class StatusText
     public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning)
     {
         KeyHint first = noHits && !liveRunning ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
-        return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path")];
+        return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
     }
 
     /// <summary>The footer when all is well: how much is searchable and how fresh it is.</summary>

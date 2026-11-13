@@ -46,6 +46,9 @@ public sealed record Settings
     /// <summary>Shows each result's folder on a second line; off keeps one line per result, the folder on hover.</summary>
     public bool ShowFolders { get; init; } = true;
 
+    /// <summary>The preview pane beside the results (Ctrl+P); the window is that much wider while it shows.</summary>
+    public bool ShowPreview { get; init; }
+
     /// <summary>Hours between automatic rescans of each volume; 0 means only on F5.</summary>
     public int RescanHours { get; init; } = 1;
     public bool HideSystemFiles { get; init; } = true;

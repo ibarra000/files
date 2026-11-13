@@ -86,7 +86,82 @@
                 </Grid>
             </Border>
 
+            <!-- The preview pane (Ctrl+P): details and first lines of the selected file (SearchWindow.Preview.cs). -->
+            <Border x:Name="PreviewPane" DockPanel.Dock="Right" Width="400" Visibility="Collapsed" Padding="18,16"
+                    Background="{DynamicResource PanelFooter}" BorderBrush="{DynamicResource Divider}" BorderThickness="1,0,0,0">
+                <DockPanel>
+                    <Grid DockPanel.Dock="Top">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="36" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="PreviewIcon" FontFamily="{StaticResource IconFont}" FontSize="24"
+                                   Foreground="{DynamicResource TextFaint}" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                            <TextBlock x:Name="PreviewName" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="PreviewPath" Margin="0,2,0,0" Style="{StaticResource RowPath}" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid DockPanel.Dock="Top" Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="1.4*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Text="Size" Style="{StaticResource PreviewLabel}" />
+                            <TextBlock x:Name="PreviewSize" Text="–" Style="{StaticResource PreviewValue}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1">
+                            <TextBlock Text="Modified" Style="{StaticResource PreviewLabel}" />
+                            <TextBlock x:Name="PreviewModified" Text="–" Style="{StaticResource PreviewValue}" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="Type" Style="{StaticResource PreviewLabel}" />
+                            <TextBlock x:Name="PreviewKind" Text="–" Style="{StaticResource PreviewValue}" />
+                        </StackPanel>
+                    </Grid>
+                    <Grid DockPanel.Dock="Bottom" Margin="0,14,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="8" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="8" />
+                            <ColumnDefinition Width="40" />
+                        </Grid.ColumnDefinitions>
+                        <Button Content="Open" Style="{StaticResource AccentButton}" Click="OnPreviewOpen" />
+                        <Button Grid.Column="2" Content="Show in folder" Style="{StaticResource ControlButton}" Click="OnPreviewReveal" />
+                        <Button Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
+                                AutomationProperties.Name="Copy path" Click="OnPreviewCopy">
+                            <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13" />
+                        </Button>
+                    </Grid>
+                    <!-- The body: numbered lines, an image, a folder's entries, or a note. -->
+                    <Grid Margin="0,14,0,0">
+                        <Rectangle x:Name="PreviewFrame" RadiusX="8" RadiusY="8" StrokeThickness="1"
+                                   Stroke="{DynamicResource Divider}" Fill="{DynamicResource PanelBackground}" />
+                        <ScrollViewer x:Name="PreviewText" Margin="1" Padding="0,10" VerticalScrollBarVisibility="Auto"
+                                      HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="PreviewNumbers" Margin="12,0,12,0" TextAlignment="Right" FontFamily="{StaticResource MonoFont}"
+                                           FontSize="12" LineHeight="20" LineStackingStrategy="BlockLineHeight" Foreground="{DynamicResource TextFaint}" />
+                                <TextBlock x:Name="PreviewLines" Grid.Column="1" FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                           LineHeight="20" LineStackingStrategy="BlockLineHeight" TextWrapping="NoWrap" />
+                            </Grid>
+                        </ScrollViewer>
+                        <Image x:Name="PreviewImage" Margin="10" Stretch="Uniform" Visibility="Collapsed" />
+                        <TextBlock x:Name="PreviewNote" Margin="16" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   TextWrapping="Wrap" TextAlignment="Center" FontSize="13" Foreground="{DynamicResource TextDim}" />
+                    </Grid>
+                </DockPanel>
+            </Border>
+
             <ListBox x:Name="Results" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
+                     SelectionChanged="OnResultSelectionChanged"
                      ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
                      VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
