@@ -188,6 +188,8 @@ public partial class App : Application
 
     public void ShowSettings(SettingsWindow.Page page = SettingsWindow.Page.General)
     {
+        // The panel stays above every window, so it steps aside rather than cover Settings.
+        _panel?.HidePanel();
         if (_settingsWindow is null)
         {
             _settingsWindow = new SettingsWindow(this);

@@ -101,11 +101,14 @@ public partial class SettingsWindow : Window
         Pages.SelectedIndex = (int)page;
         // Files may have been opened since the window was last shown.
         UpdateClearButtons();
-        Show();
         if (WindowState == WindowState.Minimized)
         {
             WindowState = WindowState.Normal;
         }
+        Show();
+        // Activate alone does not raise a window already open behind others; a moment on top does.
+        Topmost = true;
+        Topmost = false;
         Activate();
     }
 
