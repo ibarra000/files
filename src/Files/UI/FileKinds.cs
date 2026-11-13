@@ -18,7 +18,7 @@ public static class FileKinds
         ("\uF012", Set("zip", "7z", "rar", "tar", "gz")), // ZipFolder
         ("\uE714", Set("mp4", "mov", "avi", "mkv", "wmv")), // Video
         ("\uE8D6", Set("mp3", "wav", "flac", "m4a", "ogg")), // Audio
-        ("\uE943", Set("cs", "js", "ts", "py", "json", "xml", "html", "css", "sql", "ps1", "cpp", "h")), // Code
+        ("\uE943", Set("cs", "js", "ts", "py", "json", "xml", "html", "css", "sql", "ps1", "c", "cpp", "h", "asm", "java", "go", "rs")), // Code
     ];
 
     public static string Glyph(string name)

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -45,6 +45,7 @@ public partial class SearchWindow : Window
     private bool _liveSnapshotPending;
     private bool _liveSnapshotAgain;
     private HwndSourceHook? _snapHook;
+    private ResourceDictionary? _themeColors;
 
     public SearchWindow(App app)
     {
@@ -65,7 +66,10 @@ public partial class SearchWindow : Window
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
         Deactivated += (_, _) => OnDeactivated();
+        // The footer keeps as many key hints as the width allows.
+        SizeChanged += (_, _) => UpdateStatus();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
+        ApplyTheme();
         ApplyRowLayout();
         SourceInitialized += (_, _) =>
         {
@@ -74,16 +78,32 @@ public partial class SearchWindow : Window
         };
         app.SettingsChanged += async () =>
         {
+            ApplyTheme();
             Backdrop.Apply(this, app.IsDark);
             ApplyRowLayout();
             await SearchAsync();
         };
     }
 
-    /// <summary>Shows or hides the folder line under each result.</summary>
+    /// <summary>Puts the light or dark panel colors (UI/PanelTheme.*.xaml) in front of the styles that use them.</summary>
+    private void ApplyTheme()
+    {
+        string name = _app.IsDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
+        var colors = new ResourceDictionary { Source = new Uri($"/files;component/UI/{name}", UriKind.Relative) };
+        Collection<ResourceDictionary> merged = Resources.MergedDictionaries;
+        if (_themeColors is not null)
+        {
+            merged.Remove(_themeColors);
+        }
+        merged.Insert(0, colors);
+        _themeColors = colors;
+    }
+
+    /// <summary>The folder on its own line under each name, or after it on the same line.</summary>
     private void ApplyRowLayout()
     {
-        Results.Resources["DetailVisibility"] = _app.Settings.ShowFolders ? Visibility.Visible : Visibility.Collapsed;
+        string template = _app.Settings.ShowFolders ? "TwoLineRow" : "OneLineRow";
+        Results.ItemTemplate = (DataTemplate)FindResource(template);
     }
 
     public void ShowPanel()
@@ -112,48 +132,6 @@ public partial class SearchWindow : Window
         SetSpinning(false);
         SavePlacement();
         Hide();
-    }
-
-    /// <summary>Remembers where the panel is and how big, unless it is maximized (that state is kept as it is).</summary>
-    private void SavePlacement()
-    {
-        Settings saved = _app.Settings;
-        if (WindowState != WindowState.Normal)
-        {
-            return;
-        }
-        bool moved = saved.WindowLeft != Left || saved.WindowTop != Top;
-        bool resized = saved.WindowWidth != Width || saved.WindowHeight != Height;
-        if (moved || resized)
-        {
-            _app.ApplySettings(saved with { WindowLeft = Left, WindowTop = Top, WindowWidth = Width, WindowHeight = Height });
-        }
-    }
-
-    private void PlaceWindow()
-    {
-        if (WindowState == WindowState.Minimized)
-        {
-            // Win+Down minimizes it, and with no taskbar button it could never be brought back.
-            WindowState = WindowState.Normal;
-        }
-        if (WindowState == WindowState.Maximized)
-        {
-            return;
-        }
-        Rect area = SystemParameters.WorkArea;
-        // A size saved on a larger screen still has to fit this one.
-        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width, MinWidth, Math.Max(MinWidth, area.Width));
-        Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
-        double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
-        double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
-        // Pull a position saved on a monitor that is gone back onto the screen.
-        bool onScreen = left >= SystemParameters.VirtualScreenLeft
-            && top >= SystemParameters.VirtualScreenTop
-            && left + Width <= SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth
-            && top + Height <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
-        Left = onScreen ? left : area.Left + (area.Width - Width) / 2;
-        Top = onScreen ? top : area.Top + area.Height * DefaultTopFraction;
     }
 
     private void OnDeactivated()
@@ -237,118 +215,6 @@ public partial class SearchWindow : Window
         ShowResults(result);
     }
 
-    /// <summary>
-    /// Reads every volume now instead of searching the saved lists, so files
-    /// added since the last scan are found. Results stream in as folders are read.
-    /// </summary>
-    private async Task StartLiveSearchAsync()
-    {
-        _typing.Stop();
-        string line = Input.Text;
-        if (line.Trim().Length == 0)
-        {
-            return;
-        }
-        StopLiveSearch();
-        Query query = Query.Parse(line);
-        _epoch++;
-        _searchCancel?.Cancel();
-        _queryProblem = query.Problem;
-        if (!query.IsValid)
-        {
-            _result = null;
-            Results.ItemsSource = null;
-            UpdateStatus();
-            return;
-        }
-
-        var volumes = _app.Indexer.Volumes.Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
-        var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
-        var cancel = new CancellationTokenSource();
-        _live = live;
-        _liveCancel = cancel;
-        _liveStopped = false;
-        _result = SearchResult.Empty;
-        Results.ItemsSource = null;
-        UpdateStatus();
-        _liveTimer.Start();
-        try
-        {
-            await Task.Run(() => live.RunAsync(cancel.Token));
-        }
-        catch (OperationCanceledException)
-        {
-            // Stopped with Esc, by typing, or by hiding the panel.
-        }
-        catch (Exception error)
-        {
-            if (_live == live)
-            {
-                ShowToast($"Live search stopped: {error.Message}");
-            }
-        }
-        bool stopped = cancel.IsCancellationRequested;
-        cancel.Dispose();
-        if (_live != live)
-        {
-            // Replaced or cleared meanwhile; StopLiveSearch has tidied up.
-            return;
-        }
-        _liveStopped = stopped;
-        _liveCancel = null;
-        _liveTimer.Stop();
-        try
-        {
-            await ShowLiveAsync();
-        }
-        catch (Exception error)
-        {
-            ShowToast($"Live results could not be shown: {error.Message}");
-        }
-    }
-
-    /// <summary>Cancels a running live search and takes its results off the panel's state.</summary>
-    private void StopLiveSearch()
-    {
-        _liveCancel?.Cancel();
-        _liveCancel = null;
-        _liveTimer.Stop();
-        _live = null;
-    }
-
-    private async Task ShowLiveAsync()
-    {
-        if (_live is not LiveSearch live)
-        {
-            return;
-        }
-        if (_liveSnapshotPending)
-        {
-            // One is being built; take another when it is done, so the last folders read are shown.
-            _liveSnapshotAgain = true;
-            return;
-        }
-        _liveSnapshotPending = true;
-        SearchResult result;
-        try
-        {
-            result = await Task.Run(() => live.Snapshot());
-        }
-        finally
-        {
-            _liveSnapshotPending = false;
-        }
-        if (_live == live)
-        {
-            ShowResults(result);
-        }
-        if (_liveSnapshotAgain)
-        {
-            _liveSnapshotAgain = false;
-            await ShowLiveAsync();
-        }
-    }
-
     private void ShowResults(SearchResult result)
     {
         // Keep the same file selected when the rows move.
@@ -384,70 +250,6 @@ public partial class SearchWindow : Window
                 _ = SearchAsync();
             }
         });
-    }
-
-    private void UpdateStatus()
-    {
-        Hint.Text = StatusText.Hint(HasNoHits, liveRunning: _liveCancel is not null);
-        IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
-        Placeholder.Text = StatusText.Placeholder(volumes.Sum(state => (long)(state.Index?.FileCount ?? 0)));
-        // The glyph turns only beside the words "Scanning…", not beside a message or a live search.
-        bool scanning = false;
-        if (_toast is not null)
-        {
-            Status.Text = _toast;
-        }
-        else if (_live is LiveSearch live)
-        {
-            Status.Text = StatusText.ForLive(_result, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
-        }
-        else
-        {
-            bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
-            Status.Text = StatusText.For(volumes, _queryProblem, rescanRequested);
-            scanning = rescanRequested || volumes.Any(state => state.ScannedSoFar is not null);
-        }
-        SetSpinning(IsVisible && scanning);
-    }
-
-    /// <summary>F5: reads every volume again and shows it for at least a moment, so a fast read is still seen.</summary>
-    private void Rescan()
-    {
-        _app.Indexer.RescanAll();
-        _rescanShownUntil = DateTime.UtcNow + MinScanShown;
-        _rescanTimer.Stop();
-        _rescanTimer.Start();
-        // A message such as "Copied …" would hide it.
-        ShowToast(null);
-    }
-
-    /// <summary>Turns the glyph beside "Scanning…", or stops and hides it. Still, not turning, when Windows animations are off.</summary>
-    private void SetSpinning(bool spinning)
-    {
-        bool shown = Spinner.Visibility == Visibility.Visible;
-        if (spinning == shown)
-        {
-            return;
-        }
-        Spinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
-        DoubleAnimation? turn = spinning && SystemParameters.ClientAreaAnimation
-            ? new DoubleAnimation(0, 360, SpinDuration) { RepeatBehavior = RepeatBehavior.Forever }
-            : null;
-        SpinnerTurn.BeginAnimation(RotateTransform.AngleProperty, turn);
-    }
-
-    /// <summary>A search is on screen and found nothing (the home list has no result).</summary>
-    private bool HasNoHits => _result is { Hits.Count: 0 };
-
-    private void ShowToast(string? message)
-    {
-        _toastTimer.Stop();
-        _toast = message;
-        if (message is not null)
-        {
-            _toastTimer.Start();
-        }
-        UpdateStatus();
     }
 
     private void OnKey(object sender, KeyEventArgs e)
@@ -569,88 +371,6 @@ public partial class SearchWindow : Window
         Open(OpenWith.ForEnter(_app.Settings));
     }
 
-    private async void Open(OpenWith with, ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string path)
-        {
-            ShowToast("Nothing to open");
-            return;
-        }
-        string? problem;
-        try
-        {
-            problem = await Task.Run(() => Opener.Open(path, with));
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            problem = $"Could not open {path}: {error.Message}";
-        }
-        AfterOpening(row, problem);
-    }
-
-    private void Reveal(ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string path)
-        {
-            ShowToast("Nothing to show");
-            return;
-        }
-        AfterOpening(row, Opener.Reveal(path));
-    }
-
-    /// <summary>Remembers an opened file and the search that found it, then hides if the settings say so.</summary>
-    private void AfterOpening(ResultRow row, string? problem)
-    {
-        ShowToast(problem);
-        if (problem is not null)
-        {
-            return;
-        }
-        if (row.Hit is Hit hit)
-        {
-            _app.RecordOpened(hit.Path, Input.Text);
-        }
-        else if (row.Item is { Kind: FavoriteKind.File } item)
-        {
-            _app.RecordOpened(item.Target, "");
-        }
-        _recall.Reset(_app.History);
-        if (_app.Settings.HideAfterOpening)
-        {
-            HidePanel();
-        }
-    }
-
-    private void CopySelected(bool path, ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string full)
-        {
-            ShowToast("Nothing to copy");
-            return;
-        }
-        string text = path ? full : Path.GetFileName(full.TrimEnd('\\'));
-        try
-        {
-            Clipboard.SetText(text);
-            ShowToast($"Copied {text}");
-        }
-        catch (COMException)
-        {
-            ShowToast("The clipboard is busy · try again");
-        }
-    }
-
-    private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (e.OriginalSource is FrameworkElement { DataContext: ResultRow })
-        {
-            Accept();
-        }
-    }
-
     private void OnResultMenuOpening(object sender, ContextMenuEventArgs e)
     {
         if (SelectedRow is not ResultRow row || (row.Path is null && row.Item is null))
@@ -689,43 +409,4 @@ public partial class SearchWindow : Window
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => _app.ShowSettings();
 
-    private void OnResultMouseDown(object sender, MouseButtonEventArgs e) => _dragStart = e.GetPosition(Results);
-
-    /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
-    private void OnResultMouseMove(object sender, MouseEventArgs e)
-    {
-        if (e.LeftButton != MouseButtonState.Pressed || _dragStart is not Point start || SelectedRow?.Path is not string path)
-        {
-            return;
-        }
-        Vector moved = e.GetPosition(Results) - start;
-        bool farEnough = Math.Abs(moved.X) > SystemParameters.MinimumHorizontalDragDistance
-            || Math.Abs(moved.Y) > SystemParameters.MinimumVerticalDragDistance;
-        if (farEnough)
-        {
-            _dragStart = null;
-            DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Copy);
-        }
-    }
-
-    /// <summary>
-    /// Whether <paramref name="screen"/> (in screen pixels) is over the empty padding rather than the box, a result or the footer.
-    /// Windows then drags the panel itself, which also works while it is maximized or snapped, where DragMove does nothing.
-    /// </summary>
-    private bool IsOverDragArea(Point screen)
-    {
-        if (PresentationSource.FromVisual(this) is null)
-        {
-            return false;
-        }
-        try
-        {
-            return InputHitTest(PointFromScreen(screen)) == DragArea;
-        }
-        catch (InvalidOperationException)
-        {
-            // The window is being torn down; this runs on every mouse move, so it must not report an error.
-            return false;
-        }
-    }
 }

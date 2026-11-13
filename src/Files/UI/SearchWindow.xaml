@@ -5,108 +5,74 @@
         Width="680" Height="460"
         MinWidth="420" MinHeight="240"
         WindowStyle="None" ResizeMode="CanResize" ShowInTaskbar="False" Topmost="True"
-        WindowStartupLocation="Manual">
-    <!-- The empty padding drags the panel like a title bar (see UI/Snap.cs). -->
-    <Border x:Name="DragArea" Padding="12,12,12,8" Background="Transparent">
+        WindowStartupLocation="Manual"
+        FontFamily="{DynamicResource UiFont}" Foreground="{DynamicResource Text}">
+    <Window.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="PanelStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <!-- The empty space around the header drags the panel like a title bar (see UI/Snap.cs). -->
+    <Border x:Name="DragArea" Background="Transparent">
         <DockPanel>
             <!-- The box is the panel's header: a search icon and no box chrome, then a divider. -->
-            <Grid DockPanel.Dock="Top" Margin="0,0,0,8">
-                <TextBox x:Name="Input" FontSize="18" Padding="34,6,10,6" BorderThickness="0" Background="Transparent"
-                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
-                <TextBlock Text="&#xE721;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16" Margin="10,0,0,0"
-                           VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Dim}" />
-                <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"
-                           IsHitTestVisible="False" Style="{StaticResource Dim}" />
-            </Grid>
-            <Border DockPanel.Dock="Top" Height="1" Margin="0,0,0,4" Background="{DynamicResource DividerStrokeColorDefaultBrush}" />
-
-            <Grid DockPanel.Dock="Bottom" Margin="0,8,4,0">
+            <Grid DockPanel.Dock="Top" Margin="12,10,16,10">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <!-- Not focusable, so the search box keeps the keyboard. -->
-                <Button x:Name="SettingsButton" Content="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"
-                        Padding="6,3" Margin="0,0,8,0" MinWidth="0" MinHeight="0" Background="Transparent" BorderThickness="0"
-                        Focusable="False" VerticalAlignment="Center" ToolTip="Settings (Ctrl+,)"
-                        AutomationProperties.Name="Settings" Click="OnSettingsClick" />
-                <!-- Turns while volumes are scanned (SearchWindow.SetSpinning). -->
-                <TextBlock x:Name="Spinner" Grid.Column="1" Text="&#xE895;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12"
-                           Margin="0,0,6,0" VerticalAlignment="Center" Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
-                    <TextBlock.RenderTransform>
-                        <RotateTransform x:Name="SpinnerTurn" />
-                    </TextBlock.RenderTransform>
-                </TextBlock>
-                <TextBlock x:Name="Status" Grid.Column="2" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" VerticalAlignment="Center" />
-                <TextBlock x:Name="Hint" Grid.Column="3" Style="{StaticResource Dim}" VerticalAlignment="Center"
-                           Text="Enter to open" />
+                <TextBox x:Name="Input" FontSize="18" Padding="34,6,10,6" BorderThickness="0" Background="Transparent"
+                         Foreground="{DynamicResource Text}" CaretBrush="{DynamicResource Text}"
+                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
+                <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="16" Margin="10,0,0,0"
+                           VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
+                <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"
+                           IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
+                <StackPanel x:Name="HeaderRight" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" />
             </Grid>
+            <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Divider}" />
 
-            <ListBox x:Name="Results" BorderThickness="0" Background="Transparent"
+            <!-- Footer bar: index health on the left, key hints and settings on the right. -->
+            <Border DockPanel.Dock="Bottom" Background="{DynamicResource PanelFooter}" BorderBrush="{DynamicResource Divider}"
+                    BorderThickness="0,1,0,0" Padding="16,6,8,6">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Grid Width="14" Margin="0,0,8,0" VerticalAlignment="Center">
+                        <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource Ok}" />
+                        <!-- Turns while volumes are scanned (SearchWindow.SetSpinning). -->
+                        <TextBlock x:Name="Spinner" Text="&#xE895;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                   Foreground="{DynamicResource TextDim}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Visibility="Collapsed" RenderTransformOrigin="0.5,0.5">
+                            <TextBlock.RenderTransform>
+                                <RotateTransform x:Name="SpinnerTurn" />
+                            </TextBlock.RenderTransform>
+                        </TextBlock>
+                    </Grid>
+                    <TextBlock x:Name="Status" Grid.Column="1" FontSize="12" Foreground="{DynamicResource TextDim}"
+                               TextTrimming="CharacterEllipsis" Margin="0,0,12,0" VerticalAlignment="Center" />
+                    <StackPanel x:Name="Hints" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" />
+                    <Button x:Name="SettingsButton" Grid.Column="3" Content="&#xE713;" Margin="8,0,0,0" Style="{StaticResource IconButton}"
+                            ToolTip="Settings (Ctrl+,)" AutomationProperties.Name="Settings" Click="OnSettingsClick" />
+                </Grid>
+            </Border>
+
+            <ListBox x:Name="Results" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
+                     ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
                      VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                      MouseDoubleClick="OnResultDoubleClick" ContextMenuOpening="OnResultMenuOpening"
                      PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
-                <ListBox.ItemContainerStyle>
-                    <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
-                        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Padding" Value="8,2" />
-                        <Style.Triggers>
-                            <!-- Section headers cannot be selected or clicked. -->
-                            <DataTrigger Binding="{Binding IsHeader}" Value="True">
-                                <Setter Property="IsEnabled" Value="False" />
-                                <Setter Property="Padding" Value="8,8,8,0" />
-                            </DataTrigger>
-                            <DataTrigger Binding="{Binding Missing}" Value="True">
-                                <Setter Property="Opacity" Value="0.5" />
-                            </DataTrigger>
-                        </Style.Triggers>
-                    </Style>
-                </ListBox.ItemContainerStyle>
                 <ListBox.ContextMenu>
                     <ContextMenu />
                 </ListBox.ContextMenu>
-                <ListBox.ItemTemplate>
-                    <DataTemplate>
-                        <Grid Margin="0,2" ToolTip="{Binding ToolTipText}">
-                            <Grid.ColumnDefinitions>
-                                <!-- Fixed, so names line up whatever the icon. -->
-                                <ColumnDefinition Width="28" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="{Binding Icon}" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="16"
-                                       VerticalAlignment="Center" Style="{StaticResource Dim}" />
-                            <StackPanel Grid.Column="1">
-                                <TextBlock x:Name="Name" FontSize="14" TextTrimming="CharacterEllipsis">
-                                    <Run Text="{Binding Before, Mode=OneWay}" /><Run x:Name="MatchRun" Text="{Binding Match, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="{Binding After, Mode=OneWay}" />
-                                </TextBlock>
-                                <!-- DetailVisibility follows the ShowFolders setting (SearchWindow.ApplyRowLayout); headers have no second line. -->
-                                <Border x:Name="DetailLine">
-                                    <TextBlock Text="{Binding Detail}" FontSize="12" TextTrimming="CharacterEllipsis"
-                                               Visibility="{DynamicResource DetailVisibility}" Style="{StaticResource Dim}" />
-                                </Border>
-                            </StackPanel>
-                            <TextBlock Grid.Column="2" Text="{Binding Badge}" FontSize="12" Margin="10,0,0,0"
-                                       VerticalAlignment="Center" Style="{StaticResource Dim}" />
-                        </Grid>
-                        <DataTemplate.Triggers>
-                            <!-- Section headers read as small labels, not rows. -->
-                            <DataTrigger Binding="{Binding IsHeader}" Value="True">
-                                <Setter TargetName="Name" Property="FontSize" Value="12" />
-                                <Setter TargetName="Name" Property="FontWeight" Value="SemiBold" />
-                                <Setter TargetName="Name" Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
-                                <Setter TargetName="DetailLine" Property="Visibility" Value="Collapsed" />
-                            </DataTrigger>
-                            <!-- The match is in the accent color, except on the accent-colored selection, where it keeps the row's text color. -->
-                            <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="False">
-                                <Setter TargetName="MatchRun" Property="Foreground" Value="{DynamicResource AccentTextFillColorPrimaryBrush}" />
-                            </DataTrigger>
-                        </DataTemplate.Triggers>
-                    </DataTemplate>
-                </ListBox.ItemTemplate>
             </ListBox>
         </DockPanel>
     </Border>

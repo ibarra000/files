@@ -37,7 +37,7 @@ public static class HomeRows
             .ToList();
         if (recent.Count > 0)
         {
-            rows.Add(ResultRow.ForHeader("Recently opened"));
+            rows.Add(ResultRow.ForHeader("Recent"));
             rows.AddRange(recent.Select(ResultRow.ForOpened));
         }
         return rows;

@@ -20,7 +20,6 @@ public enum RowKind
 public sealed record ResultRow(RowKind Kind, string Before, string Match, string After, string Detail, string Badge)
 {
     private const string SearchIcon = "\uE721";
-    private const string Breadcrumb = " \u203A ";
 
     public Hit? Hit { get; init; }
 
@@ -54,34 +53,16 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     /// <param name="showVolume">Name the volume, which only tells results apart when there are several.</param>
     public static ResultRow ForHit(Hit hit, bool showVolume)
     {
-        string folder = FolderText(hit.Folder, hit.Index.Root);
         string badge = showVolume ? hit.Volume : "";
         string icon = FileKinds.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
-            return new ResultRow(RowKind.Hit, hit.Name, "", "", folder, badge) { Hit = hit, Icon = icon };
+            return new ResultRow(RowKind.Hit, hit.Name, "", "", hit.Folder, badge) { Hit = hit, Icon = icon };
         }
         int end = hit.MatchStart + hit.MatchLength;
         string before = hit.Name[..hit.MatchStart];
         string match = hit.Name[hit.MatchStart..end];
-        return new ResultRow(RowKind.Hit, before, match, hit.Name[end..], folder, badge) { Hit = hit, Icon = icon };
-    }
-
-    /// <summary>
-    /// The folder within its volume as a breadcrumb ("2024 › site A"): the volume's own
-    /// path is the same on every result, so it is left out. A file at the root shows the root.
-    /// </summary>
-    public static string FolderText(string folder, string root)
-    {
-        string trimmedRoot = root.TrimEnd('\\');
-        bool inside = folder.StartsWith(trimmedRoot, StringComparison.OrdinalIgnoreCase)
-            && (folder.Length == trimmedRoot.Length || folder[trimmedRoot.Length] == '\\');
-        if (!inside)
-        {
-            return folder;
-        }
-        string[] parts = folder[trimmedRoot.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length == 0 ? root : string.Join(Breadcrumb, parts);
+        return new ResultRow(RowKind.Hit, before, match, hit.Name[end..], hit.Folder, badge) { Hit = hit, Icon = icon };
     }
 
     public static ResultRow ForHeader(string title) => new(RowKind.Header, title, "", "", "", "");
@@ -93,7 +74,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
             return new ResultRow(RowKind.Favorite, favorite.Target, "", "", "Saved search", "") { Item = favorite, Icon = SearchIcon };
         }
         string icon = favorite.Kind == FavoriteKind.Folder ? FileKinds.Folder : FileKinds.Glyph(favorite.Target);
-        return new ResultRow(RowKind.Favorite, NameOf(favorite.Target), "", "", favorite.Target, missing ? "Not found" : "")
+        return new ResultRow(RowKind.Favorite, NameOf(favorite.Target), "", "", FolderOf(favorite.Target), missing ? "Not found" : "")
         {
             Item = favorite,
             Icon = icon,
@@ -104,10 +85,13 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     public static ResultRow ForOpened(string path)
     {
         var item = new Favorite(FavoriteKind.File, path);
-        return new ResultRow(RowKind.Opened, NameOf(path), "", "", path, "") { Item = item, Icon = FileKinds.Glyph(path) };
+        return new ResultRow(RowKind.Opened, NameOf(path), "", "", FolderOf(path), "") { Item = item, Icon = FileKinds.Glyph(path) };
     }
 
     public static ResultRow ForSeeAll(int count) => new(RowKind.SeeAll, $"See all {count} favorites", "", "", "", "");
+
+    /// <summary>The folder holding <paramref name="path"/>, as a result's second line shows it; the path itself for a drive or share root.</summary>
+    private static string FolderOf(string path) => System.IO.Path.GetDirectoryName(path.TrimEnd('\\')) ?? path;
 
     private static string NameOf(string path)
     {
@@ -116,7 +100,10 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     }
 }
 
-/// <summary>The words on the panel's status line: only what needs attention, never a match count.</summary>
+/// <summary>A key cap and what it does, shown in the footer.</summary>
+public sealed record KeyHint(string Keys, string Label);
+
+/// <summary>The words in the panel's footer and header.</summary>
 public static class StatusText
 {
     /// <param name="rescanRequested">F5 was just pressed: say "Scanning…" even before a volume reports, so a fast read still shows.</param>
@@ -150,10 +137,21 @@ public static class StatusText
     /// <summary>The empty box says how much it searches.</summary>
     public static string Placeholder(long files) => files == 0 ? "Type to search" : $"Search {files:N0} files";
 
-    /// <summary>The key hint at the bottom right: a search that found nothing offers to read the volumes directly.</summary>
-    public static string Hint(bool noHits, bool liveRunning)
+    /// <summary>
+    /// The key caps at the bottom right, most useful first (a narrow panel shows only the first few).
+    /// A search that found nothing offers to read the volumes directly.
+    /// </summary>
+    public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning)
     {
-        return noHits && !liveRunning ? "Shift+Enter to search live" : "Enter to open";
+        KeyHint first = noHits && !liveRunning ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
+        return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path")];
+    }
+
+    /// <summary>The footer when all is well: how much is searchable and how fresh it is.</summary>
+    public static string Indexed(long files, DateTime? newestScan)
+    {
+        string count = files == 1 ? "1 file indexed" : $"{files:N0} files indexed";
+        return newestScan is null ? count : $"{count} · updated {Age(newestScan)}";
     }
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>

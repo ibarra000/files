@@ -64,7 +64,7 @@ public sealed class FavoritesTests
              RowKind.SeeAll, RowKind.Header, RowKind.Opened],
             rows.Select(row => row.Kind));
         Assert.Equal("Favorites", rows[0].Before);
-        Assert.Equal("Recently opened", rows[7].Before);
+        Assert.Equal("Recent", rows[7].Before);
     }
 
     [Fact]

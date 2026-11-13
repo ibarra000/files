@@ -34,12 +34,21 @@ public sealed class StatusTextTests
     }
 
     [Theory]
-    [InlineData(false, false, "Enter to open")]
-    [InlineData(true, false, "Shift+Enter to search live")]
-    [InlineData(true, true, "Enter to open")]
-    public void The_hint_offers_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
+    [InlineData(false, false, "Open")]
+    [InlineData(true, false, "Search live")]
+    [InlineData(true, true, "Open")]
+    public void The_hints_offer_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
     {
-        Assert.Equal(expected, StatusText.Hint(noHits, liveRunning));
+        IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits, liveRunning);
+        // The most useful key comes first, since a narrow panel shows only the first.
+        Assert.Equal(expected, hints[0].Label);
+    }
+
+    [Fact]
+    public void The_footer_says_how_many_files_are_indexed_and_when()
+    {
+        Assert.Equal($"{1_199_227:N0} files indexed · updated just now", StatusText.Indexed(1_199_227, DateTime.UtcNow));
+        Assert.Equal("1 file indexed", StatusText.Indexed(1, null));
     }
 
     [Fact]
