@@ -20,6 +20,13 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void A_rescan_just_requested_shows_scanning_before_any_volume_reports()
+    {
+        string text = StatusText.For([State("drawings", null)], queryProblem: null, rescanRequested: true);
+        Assert.Equal("Scanning… · drawings not read yet", text);
+    }
+
+    [Fact]
     public void A_volume_that_needs_attention_is_still_named()
     {
         string text = StatusText.For([State("drawings", 120), State("reports", null)], queryProblem: null);
@@ -27,12 +34,31 @@ public sealed class StatusTextTests
     }
 
     [Theory]
-    [InlineData(false, false, "Enter to open")]
-    [InlineData(true, false, "Shift+Enter to search live")]
-    [InlineData(true, true, "Enter to open")]
-    public void The_hint_offers_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
+    [InlineData(false, false, "Open")]
+    [InlineData(true, false, "Search live")]
+    [InlineData(true, true, "Open")]
+    public void The_hints_offer_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
     {
-        Assert.Equal(expected, StatusText.Hint(noHits, liveRunning));
+        IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits, liveRunning);
+        // The most useful key comes first, since a narrow panel shows only the first.
+        Assert.Equal(expected, hints[0].Label);
+    }
+
+    [Fact]
+    public void The_header_counts_the_results_and_says_how_long_the_search_took()
+    {
+        Assert.Equal("1 result · 9 ms", StatusText.Count(1, TimeSpan.FromMilliseconds(9.4)));
+        Assert.Equal($"{14_200:N0} results · 0 ms", StatusText.Count(14_200, TimeSpan.FromMilliseconds(0.2)));
+        Assert.Equal("No results", StatusText.Count(0, TimeSpan.FromMilliseconds(3)));
+        // A live search reports its own time in the footer.
+        Assert.Equal("3 results", StatusText.Count(3, took: null));
+    }
+
+    [Fact]
+    public void The_footer_says_how_many_files_are_indexed_and_when()
+    {
+        Assert.Equal($"{1_199_227:N0} files indexed · updated just now", StatusText.Indexed(1_199_227, DateTime.UtcNow));
+        Assert.Equal("1 file indexed", StatusText.Indexed(1, null));
     }
 
     [Fact]

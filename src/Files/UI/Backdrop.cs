@@ -28,8 +28,8 @@ internal static class Backdrop
             // Not created yet (the panel before it is first shown); SourceInitialized applies it later.
             return;
         }
-        // Solid, following light and dark: no translucent backdrop shows through.
-        window.SetResourceReference(Control.BackgroundProperty, "ApplicationBackgroundBrush");
+        // Solid, following light and dark: no translucent backdrop shows through. The color is the panel's (UI/PanelTheme.*.xaml).
+        window.SetResourceReference(Control.BackgroundProperty, "PanelBackground");
         SetAttribute(handle, SystemBackdropType, NoBackdrop);
         SetAttribute(handle, UseImmersiveDarkMode, dark ? 1 : 0);
         SetAttribute(handle, WindowCornerPreference, RoundCorners);

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,6 +16,7 @@ public partial class SearchWindow : Window
 {
     private static readonly TimeSpan TypingDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ToastDuration = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan MinScanShown = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LiveRefresh = TimeSpan.FromMilliseconds(250);
     private static readonly Duration SpinDuration = new(TimeSpan.FromSeconds(1));
     private const double DefaultTopFraction = 0.18;
@@ -25,6 +26,8 @@ public partial class SearchWindow : Window
     private readonly DispatcherTimer _typing;
     private readonly DispatcherTimer _toastTimer;
     private readonly DispatcherTimer _liveTimer;
+    private readonly DispatcherTimer _rescanTimer;
+    private DateTime _rescanShownUntil;
     private CancellationTokenSource? _searchCancel;
     private int _epoch;
     private SearchResult? _result;
@@ -42,6 +45,7 @@ public partial class SearchWindow : Window
     private bool _liveSnapshotPending;
     private bool _liveSnapshotAgain;
     private HwndSourceHook? _snapHook;
+    private ResourceDictionary? _themeColors;
 
     public SearchWindow(App app)
     {
@@ -51,13 +55,26 @@ public partial class SearchWindow : Window
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
         _toastTimer.Tick += (_, _) => ShowToast(null);
+        _rescanTimer = new DispatcherTimer { Interval = MinScanShown };
+        _rescanTimer.Tick += (_, _) =>
+        {
+            _rescanTimer.Stop();
+            UpdateStatus();
+        };
         _liveTimer = new DispatcherTimer { Interval = LiveRefresh };
         _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
+        PreviewTextInput += OnActionText;
         Deactivated += (_, _) => OnDeactivated();
+        // The footer keeps as many key hints as the width allows.
+        SizeChanged += (_, _) => UpdateStatus();
+        // The preview pane's width is added or taken off once a maximized panel is restored.
+        StateChanged += (_, _) => FitPreviewWidth();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
+        ApplyTheme();
         ApplyRowLayout();
+        ApplyPreview(app.Settings.ShowPreview);
         SourceInitialized += (_, _) =>
         {
             Backdrop.Apply(this, app.IsDark);
@@ -65,16 +82,33 @@ public partial class SearchWindow : Window
         };
         app.SettingsChanged += async () =>
         {
+            ApplyTheme();
             Backdrop.Apply(this, app.IsDark);
             ApplyRowLayout();
+            ApplyPreview(app.Settings.ShowPreview);
             await SearchAsync();
         };
     }
 
-    /// <summary>Shows or hides the folder line under each result.</summary>
+    /// <summary>Puts the light or dark panel colors (UI/PanelTheme.*.xaml) in front of the styles that use them.</summary>
+    private void ApplyTheme()
+    {
+        string name = _app.IsDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
+        var colors = new ResourceDictionary { Source = new Uri($"/files;component/UI/{name}", UriKind.Relative) };
+        Collection<ResourceDictionary> merged = Resources.MergedDictionaries;
+        if (_themeColors is not null)
+        {
+            merged.Remove(_themeColors);
+        }
+        merged.Insert(0, colors);
+        _themeColors = colors;
+    }
+
+    /// <summary>The folder on its own line under each name, or after it on the same line.</summary>
     private void ApplyRowLayout()
     {
-        Results.Resources["DetailVisibility"] = _app.Settings.ShowFolders ? Visibility.Visible : Visibility.Collapsed;
+        string template = _app.Settings.ShowFolders ? "TwoLineRow" : "OneLineRow";
+        Results.ItemTemplate = (DataTemplate)FindResource(template);
     }
 
     public void ShowPanel()
@@ -105,51 +139,9 @@ public partial class SearchWindow : Window
         Hide();
     }
 
-    /// <summary>Remembers where the panel is and how big, unless it is maximized (that state is kept as it is).</summary>
-    private void SavePlacement()
-    {
-        Settings saved = _app.Settings;
-        if (WindowState != WindowState.Normal)
-        {
-            return;
-        }
-        bool moved = saved.WindowLeft != Left || saved.WindowTop != Top;
-        bool resized = saved.WindowWidth != Width || saved.WindowHeight != Height;
-        if (moved || resized)
-        {
-            _app.ApplySettings(saved with { WindowLeft = Left, WindowTop = Top, WindowWidth = Width, WindowHeight = Height });
-        }
-    }
-
-    private void PlaceWindow()
-    {
-        if (WindowState == WindowState.Minimized)
-        {
-            // Win+Down minimizes it, and with no taskbar button it could never be brought back.
-            WindowState = WindowState.Normal;
-        }
-        if (WindowState == WindowState.Maximized)
-        {
-            return;
-        }
-        Rect area = SystemParameters.WorkArea;
-        // A size saved on a larger screen still has to fit this one.
-        Width = Math.Clamp(_app.Settings.WindowWidth ?? Width, MinWidth, Math.Max(MinWidth, area.Width));
-        Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
-        double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
-        double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
-        // Pull a position saved on a monitor that is gone back onto the screen.
-        bool onScreen = left >= SystemParameters.VirtualScreenLeft
-            && top >= SystemParameters.VirtualScreenTop
-            && left + Width <= SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth
-            && top + Height <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
-        Left = onScreen ? left : area.Left + (area.Width - Width) / 2;
-        Top = onScreen ? top : area.Top + area.Height * DefaultTopFraction;
-    }
-
     private void OnDeactivated()
     {
-        bool menuOpen = Results.ContextMenu?.IsOpen == true;
+        bool menuOpen = ActionMenu.IsOpen || ScopeButton.ContextMenu?.IsOpen == true;
         if (_app.Settings.HideOnBlur && !menuOpen)
         {
             HidePanel();
@@ -192,7 +184,7 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        Query query = Query.Parse(line);
+        Query query = SearchFilters.Narrow(Query.Parse(line), _filter);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -206,12 +198,13 @@ public partial class SearchWindow : Window
 
         var cancel = new CancellationTokenSource();
         _searchCancel = cancel;
-        var volumes = _app.Indexer.Volumes
+        var volumes = ScopedVolumes()
             .Where(state => state.Index is not null)
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
         IReadOnlySet<string> hidden = _app.Settings.HiddenExtensionSet;
         SearchResult result;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token), cancel.Token);
@@ -225,119 +218,8 @@ public partial class SearchWindow : Window
             return;
         }
         _searchedIndexes = volumes.Select(v => v.Index).ToHashSet();
+        _searchTook = clock.Elapsed;
         ShowResults(result);
-    }
-
-    /// <summary>
-    /// Reads every volume now instead of searching the saved lists, so files
-    /// added since the last scan are found. Results stream in as folders are read.
-    /// </summary>
-    private async Task StartLiveSearchAsync()
-    {
-        _typing.Stop();
-        string line = Input.Text;
-        if (line.Trim().Length == 0)
-        {
-            return;
-        }
-        StopLiveSearch();
-        Query query = Query.Parse(line);
-        _epoch++;
-        _searchCancel?.Cancel();
-        _queryProblem = query.Problem;
-        if (!query.IsValid)
-        {
-            _result = null;
-            Results.ItemsSource = null;
-            UpdateStatus();
-            return;
-        }
-
-        var volumes = _app.Indexer.Volumes.Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
-        var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
-        var cancel = new CancellationTokenSource();
-        _live = live;
-        _liveCancel = cancel;
-        _liveStopped = false;
-        _result = SearchResult.Empty;
-        Results.ItemsSource = null;
-        UpdateStatus();
-        _liveTimer.Start();
-        try
-        {
-            await Task.Run(() => live.RunAsync(cancel.Token));
-        }
-        catch (OperationCanceledException)
-        {
-            // Stopped with Esc, by typing, or by hiding the panel.
-        }
-        catch (Exception error)
-        {
-            if (_live == live)
-            {
-                ShowToast($"Live search stopped: {error.Message}");
-            }
-        }
-        bool stopped = cancel.IsCancellationRequested;
-        cancel.Dispose();
-        if (_live != live)
-        {
-            // Replaced or cleared meanwhile; StopLiveSearch has tidied up.
-            return;
-        }
-        _liveStopped = stopped;
-        _liveCancel = null;
-        _liveTimer.Stop();
-        try
-        {
-            await ShowLiveAsync();
-        }
-        catch (Exception error)
-        {
-            ShowToast($"Live results could not be shown: {error.Message}");
-        }
-    }
-
-    /// <summary>Cancels a running live search and takes its results off the panel's state.</summary>
-    private void StopLiveSearch()
-    {
-        _liveCancel?.Cancel();
-        _liveCancel = null;
-        _liveTimer.Stop();
-        _live = null;
-    }
-
-    private async Task ShowLiveAsync()
-    {
-        if (_live is not LiveSearch live)
-        {
-            return;
-        }
-        if (_liveSnapshotPending)
-        {
-            // One is being built; take another when it is done, so the last folders read are shown.
-            _liveSnapshotAgain = true;
-            return;
-        }
-        _liveSnapshotPending = true;
-        SearchResult result;
-        try
-        {
-            result = await Task.Run(() => live.Snapshot());
-        }
-        finally
-        {
-            _liveSnapshotPending = false;
-        }
-        if (_live == live)
-        {
-            ShowResults(result);
-        }
-        if (_liveSnapshotAgain)
-        {
-            _liveSnapshotAgain = false;
-            await ShowLiveAsync();
-        }
     }
 
     private void ShowResults(SearchResult result)
@@ -346,10 +228,11 @@ public partial class SearchWindow : Window
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = result.Hits.Select(hit => ResultRow.ForHit(hit, showVolume)).ToList();
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
-        int keep = rows.FindIndex(row => row.Hit?.Path == selectedPath);
-        Results.SelectedIndex = keep >= 0 ? keep : (rows.Count > 0 ? 0 : -1);
+        int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        // The first row is a section label, so the first result is the next one that can be selected.
+        Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         UpdateStatus();
     }
 
@@ -365,7 +248,7 @@ public partial class SearchWindow : Window
         {
             _indexerUpdatePending = false;
             UpdateStatus();
-            bool indexesChanged = !_app.Indexer.Volumes
+            bool indexesChanged = !ScopedVolumes()
                 .Where(state => state.Index is not null)
                 .Select(state => state.Index!)
                 .ToHashSet()
@@ -377,65 +260,26 @@ public partial class SearchWindow : Window
         });
     }
 
-    private void UpdateStatus()
-    {
-        Hint.Text = StatusText.Hint(HasNoHits, liveRunning: _liveCancel is not null);
-        IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
-        Placeholder.Text = StatusText.Placeholder(volumes.Sum(state => (long)(state.Index?.FileCount ?? 0)));
-        // The glyph turns only beside the words "Scanning…", not beside a message or a live search.
-        bool scanning = false;
-        if (_toast is not null)
-        {
-            Status.Text = _toast;
-        }
-        else if (_live is LiveSearch live)
-        {
-            Status.Text = StatusText.ForLive(_result, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
-        }
-        else
-        {
-            Status.Text = StatusText.For(volumes, _queryProblem);
-            scanning = volumes.Any(state => state.ScannedSoFar is not null);
-        }
-        SetSpinning(IsVisible && scanning);
-    }
-
-    /// <summary>Turns the glyph beside "Scanning…", or stops and hides it. Still, not turning, when Windows animations are off.</summary>
-    private void SetSpinning(bool spinning)
-    {
-        bool shown = Spinner.Visibility == Visibility.Visible;
-        if (spinning == shown)
-        {
-            return;
-        }
-        Spinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
-        DoubleAnimation? turn = spinning && SystemParameters.ClientAreaAnimation
-            ? new DoubleAnimation(0, 360, SpinDuration) { RepeatBehavior = RepeatBehavior.Forever }
-            : null;
-        SpinnerTurn.BeginAnimation(RotateTransform.AngleProperty, turn);
-    }
-
-    /// <summary>A search is on screen and found nothing (the home list has no result).</summary>
-    private bool HasNoHits => _result is { Hits.Count: 0 };
-
-    private void ShowToast(string? message)
-    {
-        _toastTimer.Stop();
-        _toast = message;
-        if (message is not null)
-        {
-            _toastTimer.Start();
-        }
-        UpdateStatus();
-    }
-
     private void OnKey(object sender, KeyEventArgs e)
     {
         bool ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
         bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        if (ActionMenu.IsOpen)
+        {
+            // Shortcuts such as Ctrl+V would change the search under the open menu, so they do nothing here.
+            bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            e.Handled = chord || OnActionKey(e.Key);
+            return;
+        }
         e.Handled = true;
         switch (e.Key)
         {
+            case Key.Tab when !ctrl:
+                OpenActions();
+                break;
+            case Key.Delete when Input.Text.Length == 0 && SelectedRow is { Kind: RowKind.Opened } recent:
+                RemoveRecent(recent);
+                break;
             case Key.Down when _recall.IsActive:
                 ShowRecalled(_recall.Newer());
                 break;
@@ -487,14 +331,19 @@ public partial class SearchWindow : Window
                 HidePanel();
                 break;
             case Key.F5:
-                _app.Indexer.RescanAll();
-                ShowToast("Scanning every volume again");
+                Rescan();
                 break;
             case Key.OemComma when ctrl:
                 _app.ShowSettings();
                 break;
             case Key.Q when ctrl:
                 _app.Quit();
+                break;
+            case Key.P when ctrl:
+                TogglePreview();
+                break;
+            case >= Key.D1 and <= Key.D5 when ctrl:
+                SetFilter((SearchFilter)(e.Key - Key.D1));
                 break;
             default:
                 e.Handled = false;
@@ -549,163 +398,6 @@ public partial class SearchWindow : Window
         Open(OpenWith.ForEnter(_app.Settings));
     }
 
-    private async void Open(OpenWith with, ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string path)
-        {
-            ShowToast("Nothing to open");
-            return;
-        }
-        string? problem;
-        try
-        {
-            problem = await Task.Run(() => Opener.Open(path, with));
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            problem = $"Could not open {path}: {error.Message}";
-        }
-        AfterOpening(row, problem);
-    }
-
-    private void Reveal(ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string path)
-        {
-            ShowToast("Nothing to show");
-            return;
-        }
-        AfterOpening(row, Opener.Reveal(path));
-    }
-
-    /// <summary>Remembers an opened file and the search that found it, then hides if the settings say so.</summary>
-    private void AfterOpening(ResultRow row, string? problem)
-    {
-        ShowToast(problem);
-        if (problem is not null)
-        {
-            return;
-        }
-        if (row.Hit is Hit hit)
-        {
-            _app.RecordOpened(hit.Path, Input.Text);
-        }
-        else if (row.Item is { Kind: FavoriteKind.File } item)
-        {
-            _app.RecordOpened(item.Target, "");
-        }
-        _recall.Reset(_app.History);
-        if (_app.Settings.HideAfterOpening)
-        {
-            HidePanel();
-        }
-    }
-
-    private void CopySelected(bool path, ResultRow? row = null)
-    {
-        row ??= SelectedRow;
-        if (row?.Path is not string full)
-        {
-            ShowToast("Nothing to copy");
-            return;
-        }
-        string text = path ? full : Path.GetFileName(full.TrimEnd('\\'));
-        try
-        {
-            Clipboard.SetText(text);
-            ShowToast($"Copied {text}");
-        }
-        catch (COMException)
-        {
-            ShowToast("The clipboard is busy · try again");
-        }
-    }
-
-    private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (e.OriginalSource is FrameworkElement { DataContext: ResultRow })
-        {
-            Accept();
-        }
-    }
-
-    private void OnResultMenuOpening(object sender, ContextMenuEventArgs e)
-    {
-        if (SelectedRow is not ResultRow row || (row.Path is null && row.Item is null))
-        {
-            e.Handled = true;
-            return;
-        }
-        var menu = Results.ContextMenu!;
-        menu.Items.Clear();
-        if (row.Path is not null)
-        {
-            AddMenuItem(menu, "Open", "Enter", () => Open(OpenWith.ForEnter(_app.Settings), row));
-            AddMenuItem(menu, "Open with default app", "", () => Open(new OpenWith.Default(), row));
-            if (row.Item?.Kind != FavoriteKind.Folder)
-            {
-                foreach (Viewer viewer in _app.Settings.Viewers)
-                {
-                    AddMenuItem(menu, $"Open with {viewer.Name}", "", () => Open(new OpenWith.Program(viewer), row));
-                }
-            }
-            menu.Items.Add(new Separator());
-            AddMenuItem(menu, "Show in folder", "Ctrl+O", () => Reveal(row));
-            AddMenuItem(menu, "Copy path", "Ctrl+C", () => CopySelected(path: true, row));
-            AddMenuItem(menu, "Copy name", "Ctrl+Shift+C", () => CopySelected(path: false, row));
-            menu.Items.Add(new Separator());
-        }
-        AddFavoriteItems(menu, row);
-    }
-
-    private static void AddMenuItem(ContextMenu menu, string header, string gesture, Action action)
-    {
-        var item = new MenuItem { Header = header, InputGestureText = gesture };
-        item.Click += (_, _) => action();
-        menu.Items.Add(item);
-    }
-
     private void OnSettingsClick(object sender, RoutedEventArgs e) => _app.ShowSettings();
 
-    private void OnResultMouseDown(object sender, MouseButtonEventArgs e) => _dragStart = e.GetPosition(Results);
-
-    /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
-    private void OnResultMouseMove(object sender, MouseEventArgs e)
-    {
-        if (e.LeftButton != MouseButtonState.Pressed || _dragStart is not Point start || SelectedRow?.Path is not string path)
-        {
-            return;
-        }
-        Vector moved = e.GetPosition(Results) - start;
-        bool farEnough = Math.Abs(moved.X) > SystemParameters.MinimumHorizontalDragDistance
-            || Math.Abs(moved.Y) > SystemParameters.MinimumVerticalDragDistance;
-        if (farEnough)
-        {
-            _dragStart = null;
-            DragDrop.DoDragDrop(Results, new DataObject(DataFormats.FileDrop, new[] { path }), DragDropEffects.Copy);
-        }
-    }
-
-    /// <summary>
-    /// Whether <paramref name="screen"/> (in screen pixels) is over the empty padding rather than the box, a result or the footer.
-    /// Windows then drags the panel itself, which also works while it is maximized or snapped, where DragMove does nothing.
-    /// </summary>
-    private bool IsOverDragArea(Point screen)
-    {
-        if (PresentationSource.FromVisual(this) is null)
-        {
-            return false;
-        }
-        try
-        {
-            return InputHitTest(PointFromScreen(screen)) == DragArea;
-        }
-        catch (InvalidOperationException)
-        {
-            // The window is being torn down; this runs on every mouse move, so it must not report an error.
-            return false;
-        }
-    }
 }

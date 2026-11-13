@@ -108,7 +108,7 @@
                     <TextBlock Text="File types never shown" Style="{StaticResource Heading}" />
                     <TextBox x:Name="HiddenBox" LostFocus="OnChanged" ToolTip="Extensions separated by commas" />
                     <TextBlock Text="Results" Style="{StaticResource Heading}" />
-                    <CheckBox x:Name="ShowFoldersBox" Content="Show each result's folder under its name" Click="OnChanged" />
+                    <CheckBox x:Name="ShowFoldersBox" Content="Show each result's folder on its own line" Click="OnChanged" />
                 </StackPanel>
             </TabItem>
 

@@ -95,6 +95,41 @@ public sealed class SearchTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void A_folder_is_found_by_its_own_name()
+    {
+        VolumeIndex index = Index(@"C:\v", ("", []), ("Projects", ["x.txt"]), (@"Projects\Budget 2024", ["notes.txt"]));
+        Hit folder = Assert.Single(Search(index, "budget").Folders);
+        Assert.True(folder.IsFolder);
+        Assert.Equal("Budget 2024", folder.Name);
+        Assert.Equal(@"C:\v\Projects", folder.Folder);
+        Assert.Equal(@"C:\v\Projects\Budget 2024", folder.Path);
+        Assert.Equal(0, folder.MatchStart);
+    }
+
+    [Fact]
+    public void Subfolders_of_a_matching_folder_are_not_folder_results()
+    {
+        VolumeIndex index = Index(@"C:\v", ("", []), ("budget", []), (@"budget\2024", []), (@"budget\2024\final", []));
+        Assert.Equal(["budget"], Search(index, "budget").Folders.Select(hit => hit.Name));
+    }
+
+    [Fact]
+    public void Folder_results_rank_like_files_and_merge_across_volumes()
+    {
+        VolumeIndex first = Index(@"C:\a", ("", []), ("old plans", []));
+        VolumeIndex second = Index(@"D:\b", ("", []), ("plans", []));
+        SearchResult result = Searcher.Search([("a", first), ("b", second)], Query.Parse("plans"), NothingHidden, CancellationToken.None);
+        Assert.Equal(["plans", "old plans"], result.Folders.Select(hit => hit.Name));
+    }
+
+    [Fact]
+    public void A_type_filter_leaves_folders_out()
+    {
+        VolumeIndex index = Index(@"C:\v", ("", []), ("reports", ["reports.pdf"]));
+        Assert.Empty(Search(index, "reports ext:pdf").Folders);
+    }
+
+    [Fact]
     public void Names_survive_the_arena_growing_many_times()
     {
         var builder = new Names.Builder();

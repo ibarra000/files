@@ -4,6 +4,33 @@ namespace Files.Tests;
 
 public sealed class QueryTests
 {
+    private static readonly HashSet<string> Documents = ["pdf", "docx"];
+
+    [Fact]
+    public void Narrowing_a_search_without_types_keeps_only_those_types()
+    {
+        Query narrowed = Query.Parse("plan").Within(Documents);
+        Assert.Equal(Documents, narrowed.Extensions);
+        Assert.Equal("plan", narrowed.Term);
+        Assert.Equal("plan", narrowed.Needle);
+    }
+
+    [Fact]
+    public void Narrowing_keeps_the_typed_types_that_are_also_allowed()
+    {
+        Query narrowed = Query.Parse("plan ext:pdf,dwg").Within(Documents);
+        Assert.Equal(new HashSet<string> { "pdf" }, narrowed.Extensions);
+    }
+
+    [Fact]
+    public void Narrowing_to_types_that_were_not_typed_matches_nothing()
+    {
+        VolumeIndex index = SearchTests.Index(@"C:\v", ("", ["plan.dwg", "plan.pdf"]));
+        Query narrowed = Query.Parse("plan ext:dwg").Within(Documents);
+        SearchResult result = Searcher.Search([("v", index)], narrowed, new HashSet<string>(), CancellationToken.None);
+        Assert.Empty(result.Hits);
+    }
+
     [Fact]
     public void Inner_spaces_collapse_and_the_ends_are_trimmed()
     {

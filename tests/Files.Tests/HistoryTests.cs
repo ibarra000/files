@@ -12,6 +12,19 @@ public sealed class HistoryTests
     }
 
     [Fact]
+    public void Removing_an_entry_ignores_case_and_keeps_the_order()
+    {
+        Assert.Equal(["gamma", "alpha"], History.Remove(["gamma", "BETA", "alpha"], "beta"));
+    }
+
+    [Fact]
+    public void Removing_an_entry_that_is_not_there_changes_nothing()
+    {
+        IReadOnlyList<string> history = ["alpha"];
+        Assert.Same(history, History.Remove(history, "beta"));
+    }
+
+    [Fact]
     public void A_longer_search_is_its_own_entry()
     {
         Assert.Equal(["AB-C-0704", "AB-C"], History.Record(["AB-C"], "AB-C-0704"));

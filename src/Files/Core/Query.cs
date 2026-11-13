@@ -89,6 +89,21 @@ public sealed record Query(string Term, MatchMode Mode, IReadOnlySet<string> Ext
         return new Query(term, mode, extensions, problem);
     }
 
+    /// <summary>
+    /// The same search kept to <paramref name="allowed"/> types (a filter such as Documents).
+    /// Types typed with <c>ext:</c> stay only where they are allowed; when none are, nothing matches.
+    /// </summary>
+    public Query Within(IReadOnlySet<string> allowed)
+    {
+        IReadOnlySet<string> narrowed = Extensions.Count == 0
+            ? allowed
+            : Extensions.Where(allowed.Contains).ToHashSet(StringComparer.Ordinal);
+        return this with { Extensions = narrowed.Count > 0 ? narrowed : NoExtension };
+    }
+
+    /// <summary>An extension no file can have (Windows forbids <c>*</c> in names), so a filter matches nothing.</summary>
+    private static readonly IReadOnlySet<string> NoExtension = new HashSet<string> { "*" };
+
     private static bool IsValidExtension(string ext) =>
         ext.Length <= MaxExtensionLength
         && ext.All(char.IsAscii)
