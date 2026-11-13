@@ -26,6 +26,10 @@ public partial class App : Application
     private SearchWindow? _panel;
     private SettingsWindow? _settingsWindow;
     private ResourceDictionary? _themeColors;
+
+    // The engines for the text under the mouse; PaddleOCR loads its models only when chosen.
+    private readonly WindowsTextReader _windowsReader = new();
+    private readonly PaddleTextReader _paddleReader = new(PaddleTextReader.DefaultModelFolder);
     private DispatcherTimer? _updateTimer;
 
     // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
@@ -97,6 +101,7 @@ public partial class App : Application
         Updater = new Updater(() => Settings, AppPaths.Updates);
         ApplyTheme();
 
+        WarmTextReader();
         _panel = new SearchWindow(this);
         _tray = new Tray(this);
         _hotkey = new Hotkey();
@@ -165,7 +170,8 @@ public partial class App : Application
                 _panel.HidePanel();
                 await Task.Delay(PanelHideDelay);
             }
-            read = await ScreenText.UnderCursorAsync();
+            ITextReader reader = Settings.OcrEngine == OcrChoice.Paddle ? _paddleReader : _windowsReader;
+            read = await ScreenText.UnderCursorAsync(reader, _windowsReader);
         }
         catch (Exception error)
         {
@@ -208,6 +214,10 @@ public partial class App : Application
         {
             HotkeyProblem = _hotkey.Register(settings.Hotkey);
             problem ??= HotkeyProblem;
+        }
+        if (settings.OcrEngine != previous.OcrEngine)
+        {
+            WarmTextReader();
         }
         if (settings.OcrHotkey != previous.OcrHotkey && _ocrHotkey is not null)
         {
@@ -289,11 +299,21 @@ public partial class App : Application
         _panel?.HidePanel();
         _hotkey?.Dispose();
         _ocrHotkey?.Dispose();
+        _paddleReader.Dispose();
         _tray?.Dispose();
         Indexer.Dispose();
         _summon?.Dispose();
         _singleInstance?.Dispose();
         Shutdown();
+    }
+
+    /// <summary>Loads PaddleOCR's models in the background once it is chosen, so the first Ctrl+Alt+Space is not slowed by it.</summary>
+    private void WarmTextReader()
+    {
+        if (Settings.OcrEngine == OcrChoice.Paddle)
+        {
+            _ = _paddleReader.WarmAsync();
+        }
     }
 
     private bool ClaimSingleInstance()

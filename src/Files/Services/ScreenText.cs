@@ -1,11 +1,7 @@
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.WindowsRuntime;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Automation.Text;
-using Windows.Graphics.Imaging;
-using Windows.Media.Ocr;
-using Windows.Storage.Streams;
 
 namespace Files.Services;
 
@@ -14,8 +10,9 @@ public sealed record ScreenRead(string? Text, string? Problem);
 
 /// <summary>
 /// Reads the word or code under the mouse: from the app's accessibility text
-/// when it offers one, else with the OCR engine built into Windows on the
-/// screen around the pointer. Follows ibarra000/hover (Capture.cs, Ocr.cs).
+/// when it offers one, else with a text-recognition engine (Windows OCR, or
+/// PaddleOCR when chosen in Settings) on the screen around the pointer.
+/// Follows ibarra000/hover (Capture.cs, Ocr.cs).
 /// </summary>
 public static class ScreenText
 {
@@ -24,16 +21,15 @@ public static class ScreenText
     private const int CropHalfHeight = 100;
     private const int MaxLine = 1000;
 
-    /// <summary>Windows OCR misreads letters at screen size; three times larger it reads them far better (1800×600, well under its limit).</summary>
-    private const int OcrScale = 3;
-
     /// <summary>Punctuation that surrounds a code in running text but is never part of it.</summary>
     private static readonly char[] Surrounding = ['(', ')', '[', ']', '{', '}', '<', '>', ',', ';', ':', '"', '\'', '`'];
 
     /// <summary>Sentence punctuation after a code; a leading dot stays (".gitignore").</summary>
     private static readonly char[] Trailing = ['.', '!', '?'];
 
-    public static async Task<ScreenRead> UnderCursorAsync()
+    /// <param name="reader">The engine chosen in Settings.</param>
+    /// <param name="fallback">Windows OCR, used when <paramref name="reader"/> cannot run on this PC.</param>
+    public static async Task<ScreenRead> UnderCursorAsync(ITextReader reader, ITextReader fallback)
     {
         GetCursorPos(out Point32 cursor);
         string? text = await FromAutomationAsync(cursor);
@@ -41,13 +37,37 @@ public static class ScreenText
         {
             return new ScreenRead(text, null);
         }
-        OcrEngine? engine = OcrEngine.TryCreateFromUserProfileLanguages();
-        if (engine is null)
+        System.Drawing.Rectangle area = CropAround(cursor);
+        try
         {
-            return new ScreenRead(null, "Windows has no text recognition for your languages; add one in Settings → Time & language");
+            // Capturing and encoding off the UI thread keeps the panel responsive.
+            var (words, scale) = await ReadWithFallbackAsync(reader, fallback, s => Task.Run(() => Grab(area, s)), CancellationToken.None);
+            // The word boxes are in the enlarged image.
+            text = Nearest(words, new Point((cursor.X - area.X) * scale, (cursor.Y - area.Y) * scale));
         }
-        text = await FromOcrAsync(engine, cursor);
+        catch (TextRecognitionUnavailableException error)
+        {
+            return new ScreenRead(null, error.Message);
+        }
         return text is null ? new ScreenRead(null, "No text under the mouse") : new ScreenRead(text, null);
+    }
+
+    /// <summary>
+    /// Reads with <paramref name="reader"/>, grabbing the crop at its scale; if its models or runtime
+    /// cannot load, reads with <paramref name="fallback"/> instead. Returns the words and the scale they were read at.
+    /// </summary>
+    public static async Task<(IReadOnlyList<(string Text, Rect Box)> Words, int Scale)> ReadWithFallbackAsync(
+        ITextReader reader, ITextReader fallback, Func<int, Task<byte[]>> grab, CancellationToken cancel)
+    {
+        try
+        {
+            return (await reader.ReadWordsAsync(await grab(reader.Scale), cancel), reader.Scale);
+        }
+        catch (Exception error) when (!ReferenceEquals(reader, fallback) && PaddleTextReader.IsLoadFailure(error))
+        {
+            System.Diagnostics.Trace.WriteLine($"Reading with {reader.GetType().Name} failed, so Windows OCR reads instead: {error}");
+        }
+        return (await fallback.ReadWordsAsync(await grab(fallback.Scale), cancel), fallback.Scale);
     }
 
     /// <summary>The whitespace-separated token of <paramref name="line"/> that holds <paramref name="word"/>, so AB-C-0704_Page1 stays whole.</summary>
@@ -144,40 +164,25 @@ public static class ScreenText
         }
     }
 
-    private static async Task<string?> FromOcrAsync(OcrEngine engine, Point32 cursor)
+    /// <summary>The crop around the pointer, moved back onto the screen near its edges.</summary>
+    private static System.Drawing.Rectangle CropAround(Point32 cursor)
     {
-        // The crop around the pointer, moved back onto the screen near its edges.
         System.Drawing.Rectangle screen = System.Windows.Forms.SystemInformation.VirtualScreen;
         var area = new System.Drawing.Rectangle(cursor.X - CropHalfWidth, cursor.Y - CropHalfHeight, 2 * CropHalfWidth, 2 * CropHalfHeight);
         area.X = Math.Max(screen.Left, Math.Min(area.X, screen.Right - area.Width));
         area.Y = Math.Max(screen.Top, Math.Min(area.Y, screen.Bottom - area.Height));
-        int left = area.X;
-        int top = area.Y;
-
-        // Capturing and encoding off the UI thread keeps the panel responsive.
-        using SoftwareBitmap bitmap = await Task.Run(() => GrabAsync(area));
-        OcrResult result = await engine.RecognizeAsync(bitmap);
-        var words = new List<(string Text, Rect Box)>();
-        foreach (OcrLine line in result.Lines)
-        {
-            foreach (OcrWord word in line.Words)
-            {
-                var box = new Rect(word.BoundingRect.X, word.BoundingRect.Y, word.BoundingRect.Width, word.BoundingRect.Height);
-                words.Add((word.Text, box));
-            }
-        }
-        // The word boxes are in the enlarged image.
-        return Nearest(words, new Point((cursor.X - left) * OcrScale, (cursor.Y - top) * OcrScale));
+        return area;
     }
 
-    private static async Task<SoftwareBitmap> GrabAsync(System.Drawing.Rectangle area)
+    /// <summary>The screen in <paramref name="area"/>, enlarged <paramref name="scale"/> times with bicubic scaling, as PNG.</summary>
+    private static byte[] Grab(System.Drawing.Rectangle area, int scale)
     {
         using var screen = new System.Drawing.Bitmap(area.Width, area.Height);
         using (var graphics = System.Drawing.Graphics.FromImage(screen))
         {
             graphics.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
         }
-        using var image = new System.Drawing.Bitmap(area.Width * OcrScale, area.Height * OcrScale);
+        using var image = new System.Drawing.Bitmap(area.Width * scale, area.Height * scale);
         using (var graphics = System.Drawing.Graphics.FromImage(image))
         {
             graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
@@ -186,11 +191,7 @@ public static class ScreenText
         }
         using var png = new MemoryStream();
         image.Save(png, System.Drawing.Imaging.ImageFormat.Png);
-        using var stream = new InMemoryRandomAccessStream();
-        await stream.WriteAsync(png.ToArray().AsBuffer());
-        stream.Seek(0);
-        BitmapDecoder decoder = await BitmapDecoder.CreateAsync(stream);
-        return await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied);
+        return png.ToArray();
     }
 
     [StructLayout(LayoutKind.Sequential)]

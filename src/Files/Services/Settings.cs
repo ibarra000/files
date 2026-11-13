@@ -11,6 +11,16 @@ public enum Theme
     Dark,
 }
 
+/// <summary>The engine that reads the text under the mouse when the app does not offer it.</summary>
+public enum OcrChoice
+{
+    /// <summary>Built into Windows; good with digits, weaker with letters.</summary>
+    Windows,
+
+    /// <summary>PaddleOCR on this PC (Services/PaddleTextReader.cs); better with letters.</summary>
+    Paddle,
+}
+
 /// <summary>A program to open files with.</summary>
 public sealed record Viewer(string Name, string Program);
 
@@ -34,6 +44,9 @@ public sealed record Settings
 
     /// <summary>Searches for the word or code under the mouse.</summary>
     public string OcrHotkey { get; init; } = "Ctrl+Alt+Space";
+
+    /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
+    public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
     public Theme Theme { get; init; } = Theme.System;
     public bool HideOnBlur { get; init; } = true;
     public bool HideAfterOpening { get; init; } = true;
