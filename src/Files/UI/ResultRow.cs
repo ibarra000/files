@@ -54,7 +54,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     public static ResultRow ForHit(Hit hit, bool showVolume)
     {
         string badge = showVolume ? hit.Volume : "";
-        string icon = FileKinds.Glyph(hit.Name);
+        string icon = hit.IsFolder ? FileKinds.Folder : FileKinds.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
             return new ResultRow(RowKind.Hit, hit.Name, "", "", hit.Folder, badge) { Hit = hit, Icon = icon };

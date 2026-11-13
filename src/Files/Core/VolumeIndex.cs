@@ -6,6 +6,9 @@ public sealed record Hit(string Volume, VolumeIndex Index, int File, string Name
     public string Path => System.IO.Path.Join(Folder, Name);
 
     public bool Inherited => RankKey.IsInherited(Key);
+
+    /// <summary>A folder found by its own name: <see cref="File"/> is then its folder ordinal and <see cref="Folder"/> its parent.</summary>
+    public bool IsFolder { get; init; }
 }
 
 /// <summary>The file names under one volume root, held in memory and immutable.</summary>
@@ -84,6 +87,53 @@ public sealed class VolumeIndex
             hits.Add(ToHit(volume, query, key));
         }
         return (hits, matched);
+    }
+
+    /// <summary>
+    /// The best <paramref name="limit"/> folders whose own name matches, ranked the way files are.
+    /// A folder's subfolders do not match through it, and a type filter (<c>ext:</c>) leaves folders out.
+    /// </summary>
+    public List<Hit> SearchFolders(string volume, Query query, int limit, CancellationToken cancel)
+    {
+        var folders = new List<Hit>();
+        if (query.Extensions.Count > 0)
+        {
+            return folders;
+        }
+        var top = new TopK(limit);
+        // Folder 0 is the volume root, which has no name of its own.
+        for (int folder = 1; folder < Folders.Count; folder++)
+        {
+            if ((folder & 0xFFFF) == 0)
+            {
+                cancel.ThrowIfCancellationRequested();
+            }
+            ReadOnlySpan<char> own = OwnName(Folders.LowerSpan(folder));
+            int at = query.MatchAt(own, own.IndexOf(query.Needle, StringComparison.Ordinal));
+            if (at >= 0)
+            {
+                top.Add(RankKey.Make(false, at, own.Length, folder));
+            }
+        }
+        foreach (ulong key in top.Sorted())
+        {
+            folders.Add(ToFolderHit(volume, query, key));
+        }
+        return folders;
+    }
+
+    private static ReadOnlySpan<char> OwnName(ReadOnlySpan<char> relative) => relative[(relative.LastIndexOf('\\') + 1)..];
+
+    private Hit ToFolderHit(string volume, Query query, ulong key)
+    {
+        int folder = RankKey.File(key);
+        string relative = Folders[folder];
+        int slash = relative.LastIndexOf('\\');
+        string name = relative[(slash + 1)..];
+        string parent = Path.Join(Root, slash < 0 ? "" : relative[..slash]);
+        ReadOnlySpan<char> own = OwnName(Folders.LowerSpan(folder));
+        int start = query.MatchAt(own, own.IndexOf(query.Needle, StringComparison.Ordinal));
+        return new Hit(volume, this, folder, name, parent, start, query.Needle.Length, key) { IsFolder = true };
     }
 
     private int SweepFiles(Query query, Filter filter, TopK top, CancellationToken cancel)

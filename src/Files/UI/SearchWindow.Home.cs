@@ -79,7 +79,7 @@ public partial class SearchWindow
     {
         if (row?.Hit is Hit hit)
         {
-            return new Favorite(FavoriteKind.File, hit.Path);
+            return new Favorite(hit.IsFolder ? FavoriteKind.Folder : FavoriteKind.File, hit.Path);
         }
         if (row?.Item is Favorite item)
         {

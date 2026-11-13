@@ -97,7 +97,7 @@ public partial class SearchWindow
     }
 
     /// <summary>A search is on screen and found nothing (the home list has no result).</summary>
-    private bool HasNoHits => _result is { Hits.Count: 0 };
+    private bool HasNoHits => _result is { Hits.Count: 0, Folders.Count: 0 };
 
     private void ShowToast(string? message)
     {

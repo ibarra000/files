@@ -221,10 +221,11 @@ public partial class SearchWindow : Window
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = result.Hits.Select(hit => ResultRow.ForHit(hit, showVolume)).ToList();
+        List<ResultRow> rows = SearchRows.Build(result, showVolume);
         Results.ItemsSource = rows;
-        int keep = rows.FindIndex(row => row.Hit?.Path == selectedPath);
-        Results.SelectedIndex = keep >= 0 ? keep : (rows.Count > 0 ? 0 : -1);
+        int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        // The first row is a section label, so the first result is the next one that can be selected.
+        Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         UpdateStatus();
     }
 
