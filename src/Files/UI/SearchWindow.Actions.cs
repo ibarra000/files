@@ -195,7 +195,7 @@ public partial class SearchWindow
         }
         _app.RemoveOpened(path);
         ShowToast($"Removed {row.Before} from recent");
-        if (Input.Text.Length == 0)
+        if (IsHome)
         {
             ShowHome();
         }

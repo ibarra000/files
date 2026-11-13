@@ -28,6 +28,8 @@ public partial class SearchWindow : Window
     private readonly DispatcherTimer _rescanTimer;
     private DateTime _rescanShownUntil;
     private CancellationTokenSource? _searchCancel;
+    private Task? _searching;
+    private bool _accepting;
     private int _epoch;
     private SearchResult? _result;
     private string? _queryProblem;
@@ -60,7 +62,18 @@ public partial class SearchWindow : Window
             UpdateStatus();
         };
         _liveTimer = new DispatcherTimer { Interval = LiveRefresh };
-        _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
+        _liveTimer.Tick += async (_, _) =>
+        {
+            try
+            {
+                await ShowLiveAsync();
+            }
+            catch (Exception error) when (error is InvalidOperationException or ArgumentException or IOException)
+            {
+                // A timer callback must not let an exception end the process.
+                ShowToast($"Live results could not be shown: {error.Message}");
+            }
+        };
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
         PreviewTextInput += OnActionText;
@@ -153,10 +166,15 @@ public partial class SearchWindow : Window
         Input.Focus();
         Input.SelectAll();
         _recall.Reset(_app.History);
-        if (Input.Text.Length == 0)
+        if (IsHome)
         {
             _showAllFavorites = false;
             ShowHome();
+        }
+        else
+        {
+            // What was found before may come from a live search that hiding stopped, or from lists read since: search again (the selection is kept).
+            _ = SearchAsync();
         }
         UpdateStatus();
     }
@@ -212,29 +230,41 @@ public partial class SearchWindow : Window
         Placeholder.Visibility = Input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         _typing.Stop();
         StopLiveSearch();
+        // A paste, a recalled search or a saved one is complete already, so it searches at once.
+        // Read and cleared on every change, so it can never carry over to the next keystroke.
+        bool complete = _pasted || _recalling;
+        _pasted = false;
         if (!_recalling)
         {
             // Typing leaves the recalled search behind.
             _recall.Reset(_app.History);
         }
-        if (Input.Text.Trim().Length == 0)
+        if (IsHome)
         {
             _searchCancel?.Cancel();
             ShowHome();
             return;
         }
         _showAllFavorites = false;
-        // A paste, a recalled search or a saved one is complete already, so it searches at once.
-        if (_pasted || _recalling)
+        if (complete)
         {
-            _pasted = false;
             _ = SearchAsync();
             return;
         }
         _typing.Start();
+        // The chips, count and footer follow at once, not when the results arrive.
+        UpdateStatus();
     }
 
-    private async Task SearchAsync()
+    private Task SearchAsync()
+    {
+        // Kept so Enter can wait for the search that is still running for what is in the box.
+        Task search = SearchCoreAsync();
+        _searching = search;
+        return search;
+    }
+
+    private async Task SearchCoreAsync()
     {
         _typing.Stop();
         string line = Input.Text;
@@ -307,13 +337,14 @@ public partial class SearchWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
             _indexerUpdatePending = false;
-            UpdateStatus();
+            // Resolved first, so a volume removed in Settings also leaves the scope label.
             bool indexesChanged = !ScopedVolumes()
                 .Where(state => state.Index is not null)
                 .Select(state => state.Index!)
                 .ToHashSet()
                 .SetEquals(_searchedIndexes);
-            if (IsVisible && indexesChanged && _live is null && Input.Text.Trim().Length > 0)
+            UpdateStatus();
+            if (IsVisible && indexesChanged && _live is null && !IsHome)
             {
                 _ = SearchAsync();
             }
@@ -337,7 +368,7 @@ public partial class SearchWindow : Window
             case Key.Tab when !ctrl:
                 OpenActions();
                 break;
-            case Key.Delete when Input.Text.Length == 0 && SelectedRow is { Kind: RowKind.Opened } recent:
+            case Key.Delete when IsHome && SelectedRow is { Kind: RowKind.Opened } recent:
                 RemoveRecent(recent);
                 break;
             case Key.Down when _recall.IsActive:
@@ -380,7 +411,7 @@ public partial class SearchWindow : Window
             case Key.Escape when _liveCancel is not null:
                 _liveCancel.Cancel();
                 break;
-            case Key.Escape when _showAllFavorites && Input.Text.Length == 0:
+            case Key.Escape when _showAllFavorites && IsHome:
                 _showAllFavorites = false;
                 ShowHome();
                 break;
@@ -430,15 +461,43 @@ public partial class SearchWindow : Window
 
     private async void Accept()
     {
+        if (_accepting)
+        {
+            // Already waiting for the search to finish; a second Enter must not open another file.
+            return;
+        }
+        _accepting = true;
+        try
+        {
+            await AcceptAsync();
+        }
+        finally
+        {
+            _accepting = false;
+        }
+    }
+
+    private async Task AcceptAsync()
+    {
         if (_typing.IsEnabled)
         {
             // Enter before the typing pause ended: search now, then open the best match.
             await SearchAsync();
         }
+        else if (_searching is { IsCompleted: false } running)
+        {
+            // A paste, recall, saved search or screen read is still being searched: open its best match, not the old row.
+            await running;
+        }
+        if (_queryProblem is not null)
+        {
+            // The footer already says what is wrong with the search.
+            return;
+        }
         switch (SelectedRow)
         {
-            case null when HasNoHits && _liveCancel is not null:
-                // A live search is still reading; Enter must not restart it.
+            case null when HasNoHits && _live is not null:
+                // A live search is reading, or has read everything and found nothing; Enter does not start another.
                 return;
             case null when HasNoHits:
                 // Nothing matched: Enter reads the volumes directly, as Shift+Enter does.

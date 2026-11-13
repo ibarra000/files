@@ -52,7 +52,8 @@ public partial class SearchWindow
     {
         IReadOnlyList<Favorite> favorites = _app.Favorites;
         IReadOnlySet<string> missing = await Task.Run(() => HomeRows.FindMissing(favorites));
-        if (epoch != _epoch || missing.SetEquals(_missing))
+        // Typing starts a search only after a pause, so the epoch alone does not show that the home list is gone.
+        if (epoch != _epoch || !IsHome || missing.SetEquals(_missing))
         {
             return;
         }
@@ -99,7 +100,7 @@ public partial class SearchWindow
         bool added = _app.ToggleFavorite(favorite);
         string name = favorite.Kind == FavoriteKind.Search ? $"\"{favorite.Target}\"" : Path.GetFileName(favorite.Target.TrimEnd('\\'));
         ShowToast(added ? $"Added {name} to favorites" : $"Removed {name} from favorites");
-        if (Input.Text.Length == 0)
+        if (IsHome)
         {
             ShowHome(keepSelection: true);
         }
@@ -108,7 +109,7 @@ public partial class SearchWindow
     /// <summary>Up recalls past searches while the box is empty or showing one, and the top row is selected.</summary>
     private bool CanRecall()
     {
-        bool boxFree = Input.Text.Length == 0 || _recall.IsActive;
+        bool boxFree = IsHome || _recall.IsActive;
         int top = NextSelectable(0, 1) ?? -1;
         return boxFree && Results.SelectedIndex <= top;
     }

@@ -55,6 +55,21 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void An_invalid_search_or_a_live_search_that_found_nothing_offers_to_clear()
+    {
+        Assert.Equal(new KeyHint("Esc", "Clear"), Assert.Single(StatusText.Hints(noHits: true, liveRunning: false, invalid: true)));
+        // Searching live again would read every volume again for the same answer.
+        Assert.Equal(new KeyHint("Esc", "Clear"), Assert.Single(StatusText.Hints(noHits: true, liveRunning: false, liveFinished: true)));
+    }
+
+    [Fact]
+    public void Live_progress_counts_what_the_header_counts()
+    {
+        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, running: true, stopped: false, capped: false, []));
+        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, running: false, stopped: false, capped: false, []));
+    }
+
+    [Fact]
     public void The_footer_says_how_many_files_are_indexed_and_when()
     {
         Assert.Equal($"{1_199_227:N0} files indexed · updated just now", StatusText.Indexed(1_199_227, DateTime.UtcNow));

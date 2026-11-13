@@ -152,8 +152,14 @@ public static class StatusText
     /// The key caps at the bottom right, most useful first (a narrow panel shows only the first few).
     /// A search that found nothing offers to read the volumes directly.
     /// </summary>
-    public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning)
+    /// <param name="invalid">The search cannot run; only clearing it helps.</param>
+    /// <param name="liveFinished">A live search read everything; searching live again would find the same.</param>
+    public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning, bool invalid = false, bool liveFinished = false)
     {
+        if (invalid || (noHits && liveFinished && !liveRunning))
+        {
+            return [new KeyHint("Esc", "Clear")];
+        }
         KeyHint first = noHits && !liveRunning ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
         return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
     }
@@ -169,9 +175,9 @@ public static class StatusText
     }
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
-    public static string ForLive(SearchResult? result, int foldersRead, bool running, bool stopped, bool capped, IReadOnlyList<string> problems)
+    /// <param name="found">The same count the header shows, folders included.</param>
+    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, IReadOnlyList<string> problems)
     {
-        int found = result?.Matched ?? 0;
         string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
         if (capped)
         {
