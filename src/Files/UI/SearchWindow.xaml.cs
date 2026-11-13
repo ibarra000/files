@@ -67,6 +67,15 @@ public partial class SearchWindow : Window
         Deactivated += (_, _) => OnDeactivated();
         // The footer keeps as many key hints as the width allows.
         SizeChanged += (_, _) => UpdateStatus();
+        // A click selects a row by focusing it; the keyboard goes straight back to the search box,
+        // so typing, Backspace and Ctrl+C keep working after a click.
+        Results.IsKeyboardFocusWithinChanged += (_, e) =>
+        {
+            if (e.NewValue is true)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, () => Input.Focus());
+            }
+        };
         // The preview pane's width is added or taken off once a maximized panel is restored.
         StateChanged += (_, _) => FitPreviewWidth();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);

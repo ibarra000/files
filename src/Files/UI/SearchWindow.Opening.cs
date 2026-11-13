@@ -85,7 +85,8 @@ public partial class SearchWindow
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (e.OriginalSource is FrameworkElement { DataContext: ResultRow })
+        // Over a name the source is a Run, not a FrameworkElement; the row it belongs to is what counts.
+        if (ElementTree.AncestorOf<System.Windows.Controls.ListBoxItem>(e.OriginalSource)?.DataContext is ResultRow { IsHeader: false })
         {
             Accept();
         }

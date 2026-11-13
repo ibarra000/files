@@ -1,7 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Media;
 using Files.Core;
 using Files.Services;
 
@@ -113,7 +112,7 @@ public partial class SearchWindow
 
     private void OnActionClicked(object sender, MouseButtonEventArgs e)
     {
-        if (ItemUnder(e.OriginalSource)?.DataContext is RowAction action)
+        if (ElementTree.AncestorOf<ListBoxItem>(e.OriginalSource)?.DataContext is RowAction action)
         {
             RunAction(action);
         }
@@ -124,25 +123,13 @@ public partial class SearchWindow
     /// <summary>Right-click selects the row under the mouse and opens its actions.</summary>
     private void OnResultRightClick(object sender, MouseButtonEventArgs e)
     {
-        if (ItemUnder(e.OriginalSource) is not ListBoxItem { DataContext: ResultRow { IsHeader: false } row })
+        if (ElementTree.AncestorOf<ListBoxItem>(e.OriginalSource) is not { DataContext: ResultRow { IsHeader: false } row })
         {
             return;
         }
         Results.SelectedItem = row;
         OpenActions();
         e.Handled = true;
-    }
-
-    private static ListBoxItem? ItemUnder(object source)
-    {
-        for (var node = source as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
-        {
-            if (node is ListBoxItem item)
-            {
-                return item;
-            }
-        }
-        return null;
     }
 
     private void RunAction(RowAction action)
