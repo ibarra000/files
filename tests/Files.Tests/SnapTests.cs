@@ -18,13 +18,13 @@ public sealed class SnapTests
     [InlineData(699, 300, Snap.Right)]
     public void The_edges_and_corners_resize(double x, double y, int expected)
     {
-        Assert.Equal(expected, Snap.HitTest(Window, new Point(x, y), border: 6));
+        Assert.Equal(expected, Snap.HitTest(Window, new Point(x, y), border: 6, overDragArea: true));
     }
 
     [Fact]
     public void Everything_else_is_the_panel_itself()
     {
-        Assert.Equal(Snap.Client, Snap.HitTest(Window, new Point(300, 250), border: 6));
+        Assert.Equal(Snap.Client, Snap.HitTest(Window, new Point(300, 250), border: 6, overDragArea: false));
     }
 
     [Theory]
@@ -39,6 +39,18 @@ public sealed class SnapTests
     [Fact]
     public void A_maximized_panel_has_no_resize_edges()
     {
-        Assert.Equal(Snap.Client, Snap.HitTest(Window, new Point(101, 300), border: 0));
+        Assert.Equal(Snap.Client, Snap.HitTest(Window, new Point(101, 300), border: 0, overDragArea: false));
+    }
+
+    [Fact]
+    public void The_empty_padding_drags_like_a_title_bar()
+    {
+        Assert.Equal(Snap.Caption, Snap.HitTest(Window, new Point(300, 250), border: 6, overDragArea: true));
+    }
+
+    [Fact]
+    public void A_maximized_panel_still_drags_from_its_padding()
+    {
+        Assert.Equal(Snap.Caption, Snap.HitTest(Window, new Point(101, 300), border: 0, overDragArea: true));
     }
 }

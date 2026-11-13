@@ -8,15 +8,16 @@ Instant file-name search across folders and network shares on Windows.
 
 - **Volumes.** Add any folder, drive or `\\server\share` in Settings. Each one is read in the background and read again on a schedule (every hour by default) or when you press <kbd>F5</kbd>.
 - **Fast matching.** Every name is held in memory and searched in parallel: about a millisecond per million names. Results from every volume are merged into one ranked list. Files inside a folder whose name matches are listed too, below direct matches.
-- **Live search.** <kbd>Shift</kbd>+<kbd>Enter</kbd> reads every volume now instead of using its saved list, so files added since the last read are found too. Results appear as folders are read; <kbd>Esc</kbd> stops it. When a normal search finds nothing, the panel offers a live search.
+- **Live search.** <kbd>Shift</kbd>+<kbd>Enter</kbd> reads every volume now instead of using its saved list, so files added since the last read are found too. Results appear as folders are read; <kbd>Esc</kbd> stops it. When a normal search finds nothing, the footer offers <kbd>Shift</kbd>+<kbd>Enter</kbd> for a live search (<kbd>Enter</kbd> starts one too).
 - **Search what you are looking at.** Point at a file name or drawing number anywhere on screen (an email, a PDF, a scanned sheet) and press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>: the panel opens searching for it. The text comes from the app when it shares it, else from the text recognition built into Windows, and a code such as `AB-C-0704_Page1.pdf` is kept whole. The shortcut can be changed or turned off in Settings.
+- **Compact results.** Settings → Search → Results can hide the folder line under each result, for one line per file; the folder still shows on hover.
 - **Search syntax.** `term*` starts with, `*term` ends with (before the extension), and `ext:pdf,dwg` filters by type.
 - **Opening.** <kbd>Enter</kbd> opens with the Windows default or a program you add in Settings. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. Right-click a result for every option. Drag a result into another app to hand it the file.
 - **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. Right-click a result to add its folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
 - **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder.
 - **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> in an empty box brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again.
 - **History control.** So file names don't show up while your screen is shared, Settings → General → History can pause history (nothing new is recorded, nothing is deleted), hide Recently opened from the home list, and clear recent searches or recently opened files separately. Favorites are never cleared.
-- **Placing the panel.** Drag it anywhere, resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
+- **Placing the panel.** Drag it anywhere by its edge padding (also out of maximized or snapped; double-click there maximizes or restores), resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
 
 ## Keys
@@ -31,7 +32,7 @@ Instant file-name search across folders and network shares on Windows.
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results; <kbd>↑</kbd> at the top of an empty box recalls earlier searches |
 | <kbd>Esc</kbd> | Stop a live search, leave "See all", clear the box, then hide |
 | <kbd>F5</kbd> | Read every volume again |
-| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings |
+| <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings (or the gear at the bottom left) |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 
 ## Install

@@ -11,7 +11,6 @@ public enum RowKind
     Favorite,
     Opened,
     SeeAll,
-    LiveHint,
 }
 
 /// <summary>
@@ -87,12 +86,6 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
 
     public static ResultRow ForSeeAll(int count) => new(RowKind.SeeAll, $"See all {count} favorites", "", "", "", "");
 
-    /// <summary>The row shown when nothing matched: Enter on it reads the volumes directly.</summary>
-    public static ResultRow ForLiveHint()
-    {
-        return new ResultRow(RowKind.LiveHint, "Search the volumes directly", "", "", "Finds files added since the last read · Shift+Enter", "");
-    }
-
     private static string NameOf(string path)
     {
         string name = System.IO.Path.GetFileName(path.TrimEnd('\\'));
@@ -114,6 +107,11 @@ public static class StatusText
         {
             parts.Add($"Invalid search · {queryProblem}");
         }
+        // Which volume is being read, and how far, is on the Volumes page in Settings.
+        if (volumes.Any(state => state.ScannedSoFar is not null))
+        {
+            parts.Add("Scanning…");
+        }
         foreach (VolumeState state in volumes)
         {
             string? words = VolumeWords(state);
@@ -123,6 +121,12 @@ public static class StatusText
             }
         }
         return string.Join(" · ", parts);
+    }
+
+    /// <summary>The key hint at the bottom right: a search that found nothing offers to read the volumes directly.</summary>
+    public static string Hint(bool noHits, bool liveRunning)
+    {
+        return noHits && !liveRunning ? "Shift+Enter to search live" : "Enter to open";
     }
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
@@ -156,9 +160,10 @@ public static class StatusText
     private static string? VolumeWords(VolumeState state)
     {
         string name = state.Volume.Name;
-        if (state.ScannedSoFar is int files)
+        if (state.ScannedSoFar is not null)
         {
-            return $"Reading {name}… {files:N0} files";
+            // Covered by the one "Scanning…" for all volumes.
+            return null;
         }
         if (state.Index is null)
         {

@@ -8,17 +8,19 @@ namespace Files.UI;
 /// <summary>
 /// Lets the frameless panel behave like a normal window for Windows snapping:
 /// Win+Arrow, Win+Z for the snap layouts, dragging to a screen edge, and
-/// resizing from its edges.
+/// resizing from its edges. Its empty padding is a title bar, so it drags
+/// out of maximized or snapped like any window.
 /// </summary>
 /// <remarks>
 /// The window keeps the resizable styles (ResizeMode CanResize) so Windows
 /// treats it as snappable, but answers WM_NCCALCSIZE so the whole window is
 /// client area and no frame is drawn. WM_NCHITTEST then tells Windows where
-/// the edges are.
+/// the edges and the title bar are.
 /// </remarks>
 internal static class Snap
 {
     public const int Client = 1;
+    public const int Caption = 2;
     public const int Left = 10;
     public const int Right = 11;
     public const int Top = 12;
@@ -42,7 +44,8 @@ internal static class Snap
     private const uint SwpFrameChanged = 0x0020;
 
     /// <summary>Hooks the window's messages. Keep the returned hook for the window's lifetime so it is never collected.</summary>
-    public static HwndSourceHook? Attach(Window window)
+    /// <param name="isDragArea">Whether a point, in screen pixels, is over the part of the window that moves it.</param>
+    public static HwndSourceHook? Attach(Window window, Func<Point, bool> isDragArea)
     {
         IntPtr handle = new WindowInteropHelper(window).Handle;
         if (HwndSource.FromHwnd(handle) is not HwndSource source)
@@ -50,7 +53,7 @@ internal static class Snap
             return null;
         }
         HwndSourceHook hook = (IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled) =>
-            OnMessage(window, hwnd, message, wParam, lParam, ref handled);
+            OnMessage(window, isDragArea, hwnd, message, wParam, lParam, ref handled);
         source.AddHook(hook);
         // Windows sized the frame when the window was created, before this hook;
         // asking again drops it, or a light resize border shows around the panel.
@@ -59,7 +62,8 @@ internal static class Snap
     }
 
     /// <summary>What part of the window <paramref name="cursor"/> is over, as a WM_NCHITTEST code. All in screen pixels.</summary>
-    public static int HitTest(Rect window, Point cursor, double border)
+    /// <param name="overDragArea">The cursor is over empty padding, which drags the window like a title bar.</param>
+    public static int HitTest(Rect window, Point cursor, double border, bool overDragArea)
     {
         bool left = cursor.X < window.Left + border;
         bool right = cursor.X >= window.Right - border;
@@ -97,7 +101,7 @@ internal static class Snap
         {
             return Right;
         }
-        return Client;
+        return overDragArea ? Caption : Client;
     }
 
     /// <summary>Screen coordinates come packed in lParam as two signed 16-bit values; left of or above the main screen they are negative.</summary>
@@ -109,7 +113,7 @@ internal static class Snap
         return new Point(x, y);
     }
 
-    private static IntPtr OnMessage(Window window, IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    private static IntPtr OnMessage(Window window, Func<Point, bool> isDragArea, IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
         switch (message)
         {
@@ -127,7 +131,7 @@ internal static class Snap
                 MaximizeToWorkArea(hwnd, lParam);
                 return IntPtr.Zero;
             case WmNcHitTest:
-                int hit = HitTestAt(window, hwnd, lParam);
+                int hit = HitTestAt(window, isDragArea, hwnd, lParam);
                 if (hit == Client)
                 {
                     return IntPtr.Zero;
@@ -139,13 +143,14 @@ internal static class Snap
         }
     }
 
-    private static int HitTestAt(Window window, IntPtr hwnd, IntPtr lParam)
+    private static int HitTestAt(Window window, Func<Point, bool> isDragArea, IntPtr hwnd, IntPtr lParam)
     {
         GetWindowRect(hwnd, out Rect32 frame);
         var bounds = new Rect(frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top);
         double scale = VisualTreeHelper.GetDpi(window).DpiScaleX;
         double border = window.WindowState == WindowState.Maximized ? 0 : ResizeBorder * scale;
-        return HitTest(bounds, CursorFrom(lParam), border);
+        Point cursor = CursorFrom(lParam);
+        return HitTest(bounds, cursor, border, isDragArea(cursor));
     }
 
     /// <summary>A maximized window would otherwise hang past the screen by its frame width and cover the taskbar.</summary>

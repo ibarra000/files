@@ -43,6 +43,9 @@ public sealed record Settings
     /// <summary>Lists recently opened files under the favorites while the box is empty.</summary>
     public bool ShowRecentlyOpened { get; init; } = true;
 
+    /// <summary>Shows each result's folder on a second line; off keeps one line per result, the folder on hover.</summary>
+    public bool ShowFolders { get; init; } = true;
+
     /// <summary>Hours between automatic rescans of each volume; 0 means only on F5.</summary>
     public int RescanHours { get; init; } = 1;
     public bool HideSystemFiles { get; init; } = true;
