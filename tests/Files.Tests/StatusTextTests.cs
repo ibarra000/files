@@ -20,6 +20,13 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void A_rescan_just_requested_shows_scanning_before_any_volume_reports()
+    {
+        string text = StatusText.For([State("drawings", null)], queryProblem: null, rescanRequested: true);
+        Assert.Equal("Scanning… · drawings not read yet", text);
+    }
+
+    [Fact]
     public void A_volume_that_needs_attention_is_still_named()
     {
         string text = StatusText.For([State("drawings", 120), State("reports", null)], queryProblem: null);

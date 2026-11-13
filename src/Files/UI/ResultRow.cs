@@ -119,7 +119,8 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
 /// <summary>The words on the panel's status line: only what needs attention, never a match count.</summary>
 public static class StatusText
 {
-    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem)
+    /// <param name="rescanRequested">F5 was just pressed: say "Scanning…" even before a volume reports, so a fast read still shows.</param>
+    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem, bool rescanRequested = false)
     {
         if (volumes.Count == 0)
         {
@@ -131,7 +132,7 @@ public static class StatusText
             parts.Add($"Invalid search · {queryProblem}");
         }
         // Which volume is being read, and how far, is on the Volumes page in Settings.
-        if (volumes.Any(state => state.ScannedSoFar is not null))
+        if (rescanRequested || volumes.Any(state => state.ScannedSoFar is not null))
         {
             parts.Add("Scanning…");
         }

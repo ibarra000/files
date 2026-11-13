@@ -16,6 +16,7 @@ public partial class SearchWindow : Window
 {
     private static readonly TimeSpan TypingDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ToastDuration = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan MinScanShown = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan LiveRefresh = TimeSpan.FromMilliseconds(250);
     private static readonly Duration SpinDuration = new(TimeSpan.FromSeconds(1));
     private const double DefaultTopFraction = 0.18;
@@ -25,6 +26,8 @@ public partial class SearchWindow : Window
     private readonly DispatcherTimer _typing;
     private readonly DispatcherTimer _toastTimer;
     private readonly DispatcherTimer _liveTimer;
+    private readonly DispatcherTimer _rescanTimer;
+    private DateTime _rescanShownUntil;
     private CancellationTokenSource? _searchCancel;
     private int _epoch;
     private SearchResult? _result;
@@ -51,6 +54,12 @@ public partial class SearchWindow : Window
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
         _toastTimer.Tick += (_, _) => ShowToast(null);
+        _rescanTimer = new DispatcherTimer { Interval = MinScanShown };
+        _rescanTimer.Tick += (_, _) =>
+        {
+            _rescanTimer.Stop();
+            UpdateStatus();
+        };
         _liveTimer = new DispatcherTimer { Interval = LiveRefresh };
         _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
@@ -394,10 +403,22 @@ public partial class SearchWindow : Window
         }
         else
         {
-            Status.Text = StatusText.For(volumes, _queryProblem);
-            scanning = volumes.Any(state => state.ScannedSoFar is not null);
+            bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
+            Status.Text = StatusText.For(volumes, _queryProblem, rescanRequested);
+            scanning = rescanRequested || volumes.Any(state => state.ScannedSoFar is not null);
         }
         SetSpinning(IsVisible && scanning);
+    }
+
+    /// <summary>F5: reads every volume again and shows it for at least a moment, so a fast read is still seen.</summary>
+    private void Rescan()
+    {
+        _app.Indexer.RescanAll();
+        _rescanShownUntil = DateTime.UtcNow + MinScanShown;
+        _rescanTimer.Stop();
+        _rescanTimer.Start();
+        // A message such as "Copied …" would hide it.
+        ShowToast(null);
     }
 
     /// <summary>Turns the glyph beside "Scanning…", or stops and hides it. Still, not turning, when Windows animations are off.</summary>
@@ -487,8 +508,7 @@ public partial class SearchWindow : Window
                 HidePanel();
                 break;
             case Key.F5:
-                _app.Indexer.RescanAll();
-                ShowToast("Scanning every volume again");
+                Rescan();
                 break;
             case Key.OemComma when ctrl:
                 _app.ShowSettings();
