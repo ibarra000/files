@@ -24,6 +24,9 @@ public static class ScreenText
     private const int CropHalfHeight = 100;
     private const int MaxLine = 1000;
 
+    /// <summary>Windows OCR misreads letters at screen size; three times larger it reads them far better (1800×600, well under its limit).</summary>
+    private const int OcrScale = 3;
+
     /// <summary>Punctuation that surrounds a code in running text but is never part of it.</summary>
     private static readonly char[] Surrounding = ['(', ')', '[', ']', '{', '}', '<', '>', ',', ';', ':', '"', '\'', '`'];
 
@@ -163,15 +166,23 @@ public static class ScreenText
                 words.Add((word.Text, box));
             }
         }
-        return Nearest(words, new Point(cursor.X - left, cursor.Y - top));
+        // The word boxes are in the enlarged image.
+        return Nearest(words, new Point((cursor.X - left) * OcrScale, (cursor.Y - top) * OcrScale));
     }
 
     private static async Task<SoftwareBitmap> GrabAsync(System.Drawing.Rectangle area)
     {
-        using var image = new System.Drawing.Bitmap(area.Width, area.Height);
-        using (var graphics = System.Drawing.Graphics.FromImage(image))
+        using var screen = new System.Drawing.Bitmap(area.Width, area.Height);
+        using (var graphics = System.Drawing.Graphics.FromImage(screen))
         {
             graphics.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
+        }
+        using var image = new System.Drawing.Bitmap(area.Width * OcrScale, area.Height * OcrScale);
+        using (var graphics = System.Drawing.Graphics.FromImage(image))
+        {
+            graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+            graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+            graphics.DrawImage(screen, 0, 0, image.Width, image.Height);
         }
         using var png = new MemoryStream();
         image.Save(png, System.Drawing.Imaging.ImageFormat.Png);
