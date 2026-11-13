@@ -117,6 +117,26 @@
                             </StackPanel>
                         </Border>
 
+                        <TextBlock Text="TEXT RECOGNITION" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Engine for the text under the mouse" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="PaddleOCR reads letters more reliably. It runs on this PC; nothing leaves it."
+                                               Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <ComboBox x:Name="OcrEngineBox" Grid.Column="1" Width="220" AutomationProperties.Name="Text recognition engine"
+                                          SelectionChanged="OnChanged">
+                                    <ComboBoxItem Content="Windows (built in)" />
+                                    <ComboBoxItem Content="PaddleOCR (more accurate)" />
+                                </ComboBox>
+                            </Grid>
+                        </Border>
+
                         <TextBlock Text="BEHAVIOR" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>

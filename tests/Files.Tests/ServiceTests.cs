@@ -85,6 +85,20 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Text_recognition_starts_with_Windows_and_the_choice_is_kept()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        Assert.Equal(OcrChoice.Windows, new Settings().OcrEngine);
+
+        new Settings { OcrEngine = OcrChoice.Paddle }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+
+        Assert.Equal(OcrChoice.Paddle, loaded.OcrEngine);
+        Assert.Contains("\"Paddle\"", File.ReadAllText(path));
+    }
+
+    [Fact]
     public void The_preview_pane_starts_closed_and_its_choice_is_kept()
     {
         using var temp = new TempFolder();

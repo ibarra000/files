@@ -3,8 +3,9 @@
   The installer, written by hand against the WiX 5 schema.
   Build it with `tools/make_msi.ps1`.
 
-  Installs one self-contained executable into Program Files, one Start-menu
-  shortcut and, optionally, a sign-in startup entry. It does not modify `PATH`.
+  Installs one self-contained executable into Program Files with the PaddleOCR
+  models beside it, one Start-menu shortcut and, optionally, a sign-in startup
+  entry. It does not modify `PATH`.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -37,6 +38,26 @@
         <Component Id="MainExe" Bitness="always64">
           <File Id="filesExe" Source="$(var.TargetDir)\files.exe" KeyPath="yes" />
         </Component>
+
+        <!-- PaddleOCR's models (Services/PaddleTextReader.cs), read beside files.exe;
+             they are data, so they stay out of the single-file executable. -->
+        <Directory Id="ModelsFolder" Name="models">
+          <Directory Id="ModelsV5Folder" Name="v5">
+            <!-- One file per component, so WiX can give each a stable generated GUID. -->
+            <Component Id="PaddleDet" Bitness="always64">
+              <File Id="paddleDet" Source="$(var.TargetDir)\models\v5\ch_PP-OCRv5_mobile_det.onnx" KeyPath="yes" />
+            </Component>
+            <Component Id="PaddleCls" Bitness="always64">
+              <File Id="paddleCls" Source="$(var.TargetDir)\models\v5\ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx" KeyPath="yes" />
+            </Component>
+            <Component Id="PaddleRec" Bitness="always64">
+              <File Id="paddleRec" Source="$(var.TargetDir)\models\v5\latin_PP-OCRv5_rec_mobile_infer.onnx" KeyPath="yes" />
+            </Component>
+            <Component Id="PaddleKeys" Bitness="always64">
+              <File Id="paddleKeys" Source="$(var.TargetDir)\models\v5\ppocrv5_latin_dict.txt" KeyPath="yes" />
+            </Component>
+          </Directory>
+        </Directory>
 
       </Directory>
     </StandardDirectory>
@@ -79,6 +100,10 @@
              Level="1"
              AllowAbsent="no">
       <ComponentRef Id="MainExe" />
+      <ComponentRef Id="PaddleDet" />
+      <ComponentRef Id="PaddleCls" />
+      <ComponentRef Id="PaddleRec" />
+      <ComponentRef Id="PaddleKeys" />
       <ComponentRef Id="StartMenuShortcut" />
 
       <!-- Selected by default. The installer, the Settings window's General page

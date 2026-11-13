@@ -114,6 +114,7 @@ public partial class SettingsWindow : Window
         _loading = true;
         HotkeyBox.Text = settings.Hotkey;
         OcrHotkeyBox.Text = settings.OcrHotkey;
+        OcrEngineBox.SelectedIndex = (int)settings.OcrEngine;
         StartWithWindowsBox.IsChecked = StartWithWindows.IsEnabled;
         HideOnBlurBox.IsChecked = settings.HideOnBlur;
         HideAfterOpeningBox.IsChecked = settings.HideAfterOpening;
@@ -183,6 +184,7 @@ public partial class SettingsWindow : Window
         {
             Hotkey = HotkeyBox.Text,
             OcrHotkey = OcrHotkeyBox.Text,
+            OcrEngine = (OcrChoice)Math.Max(0, OcrEngineBox.SelectedIndex),
             HideOnBlur = HideOnBlurBox.IsChecked == true,
             HideAfterOpening = HideAfterOpeningBox.IsChecked == true,
             RememberSearches = RememberBox.IsChecked == true,
