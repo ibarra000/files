@@ -17,6 +17,8 @@ public partial class SearchWindow
             ShowToast("Nothing to open");
             return;
         }
+        // The search that found it, taken now: the box may change while a slow file opens.
+        string search = Input.Text;
         string? problem;
         try
         {
@@ -26,7 +28,7 @@ public partial class SearchWindow
         {
             problem = $"Could not open {path}: {error.Message}";
         }
-        AfterOpening(row, problem);
+        AfterOpening(row, problem, search);
     }
 
     private void Reveal(ResultRow? row = null)
@@ -37,11 +39,11 @@ public partial class SearchWindow
             ShowToast("Nothing to show");
             return;
         }
-        AfterOpening(row, Opener.Reveal(path));
+        AfterOpening(row, Opener.Reveal(path), Input.Text);
     }
 
     /// <summary>Remembers an opened file and the search that found it, then hides if the settings say so.</summary>
-    private void AfterOpening(ResultRow row, string? problem)
+    private void AfterOpening(ResultRow row, string? problem, string search)
     {
         ShowToast(problem);
         if (problem is not null)
@@ -50,7 +52,7 @@ public partial class SearchWindow
         }
         if (row.Hit is Hit hit)
         {
-            _app.RecordOpened(hit.Path, Input.Text);
+            _app.RecordOpened(hit.Path, search);
         }
         else if (row.Item is { Kind: FavoriteKind.File } item)
         {
@@ -85,7 +87,8 @@ public partial class SearchWindow
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (e.OriginalSource is FrameworkElement { DataContext: ResultRow })
+        // Over a name the source is a Run, not a FrameworkElement; the row it belongs to is what counts.
+        if (ElementTree.AncestorOf<System.Windows.Controls.ListBoxItem>(e.OriginalSource)?.DataContext is ResultRow { IsHeader: false })
         {
             Accept();
         }

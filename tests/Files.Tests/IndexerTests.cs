@@ -56,6 +56,38 @@ public sealed class IndexerTests
     }
 
     [Fact]
+    public async Task A_volume_removed_while_it_is_read_leaves_no_file_list_behind()
+    {
+        using var temp = new TempFolder();
+        string share = Directory.CreateDirectory(Path.Combine(temp.Path, "share")).FullName;
+        for (int folder = 0; folder < 40; folder++)
+        {
+            string sub = Directory.CreateDirectory(Path.Combine(share, $"f{folder}")).FullName;
+            for (int file = 0; file < 50; file++)
+            {
+                File.WriteAllText(Path.Combine(sub, $"report-{file}.pdf"), "");
+            }
+        }
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        string shards = Path.Combine(temp.Path, "volumes");
+        using var indexer = new Indexer(catalog, shards, () => new Settings { RescanHours = 0 });
+        indexer.Start();
+
+        Assert.Null(indexer.Add("share", share));
+        Volume added = Assert.Single(catalog.All());
+        Assert.Null(indexer.Remove(added.Id));
+
+        DateTime giveUp = DateTime.UtcNow + Patience;
+        while (indexer.IsScanning && DateTime.UtcNow < giveUp)
+        {
+            await Task.Delay(25);
+        }
+        Assert.False(indexer.IsScanning);
+        Assert.Empty(indexer.Volumes);
+        Assert.False(File.Exists(Shard.PathFor(shards, added.Uid)));
+    }
+
+    [Fact]
     public async Task An_unreachable_folder_is_marked_offline_with_the_reason()
     {
         using var temp = new TempFolder();

@@ -31,6 +31,10 @@ public sealed class Indexer : IDisposable
     private readonly ConcurrentDictionary<long, CancellationTokenSource> _running = new();
     private readonly ConcurrentDictionary<long, DateTime> _retryAt = new();
     private readonly object _gate = new();
+    private readonly object _shardGate = new();
+
+    // Volumes removed since start, so loading at start-up cannot bring one back. Guarded by _gate.
+    private readonly HashSet<long> _removed = [];
     private ImmutableDictionary<long, VolumeState> _states = ImmutableDictionary<long, VolumeState>.Empty;
     private Timer? _timer;
 
@@ -110,19 +114,26 @@ public sealed class Indexer : IDisposable
         {
             return null;
         }
-        try
+        // Held while a scan checks for its volume and writes its file list, so one removed meanwhile leaves no file behind.
+        lock (_shardGate)
         {
-            _catalog.Remove(id);
+            try
+            {
+                _catalog.Remove(id);
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException error)
+            {
+                // The read was stopped above; it must not stay "Reading…" until the next one.
+                Update(id, current => current with { ScannedSoFar = null });
+                return $"The volume list could not be changed: {error.Message}";
+            }
+            lock (_gate)
+            {
+                _states = _states.Remove(id);
+                _removed.Add(id);
+            }
+            DeleteShard(state.Volume);
         }
-        catch (Microsoft.Data.Sqlite.SqliteException error)
-        {
-            return $"The volume list could not be changed: {error.Message}";
-        }
-        lock (_gate)
-        {
-            _states = _states.Remove(id);
-        }
-        DeleteShard(state.Volume);
         Changed?.Invoke();
         return null;
     }
@@ -226,7 +237,8 @@ public sealed class Indexer : IDisposable
             }
             catch (OperationCanceledException)
             {
-                // Removed or shutting down.
+                // Removed or shutting down; a volume still listed must not stay "Reading…".
+                Update(volume.Id, state => state with { ScannedSoFar = null });
             }
             catch (Exception error)
             {
@@ -246,12 +258,20 @@ public sealed class Indexer : IDisposable
     private void RunScan(Volume volume, CancellationToken cancel)
     {
         SetStatus(volume.Id, VolumeStatus.Scanning, null, problem: null, scannedSoFar: 0);
+        // Reported from several reading threads at once: one report at a time, and the count never goes back.
+        var progressGate = new object();
         DateTime lastReport = DateTime.MinValue;
+        int lastFiles = 0;
         void Progress(int files)
         {
-            if (DateTime.UtcNow - lastReport >= ProgressInterval)
+            lock (progressGate)
             {
+                if (files <= lastFiles || DateTime.UtcNow - lastReport < ProgressInterval)
+                {
+                    return;
+                }
                 lastReport = DateTime.UtcNow;
+                lastFiles = files;
                 Update(volume.Id, state => state with { ScannedSoFar = files });
             }
         }
@@ -259,12 +279,14 @@ public sealed class Indexer : IDisposable
         try
         {
             WalkResult walk = Walker.Walk(volume.Root, _settings().HideSystemFiles, cancel, Progress);
-            Shard.Write(Shard.PathFor(_shardFolder, volume.Uid), volume.Uid, walk.Index);
-            if (!_states.ContainsKey(volume.Id))
+            // Checked and written under the lock Remove holds, so a volume removed meanwhile never gets its file list back.
+            lock (_shardGate)
             {
-                // Removed while the shard was being written.
-                DeleteShard(volume);
-                return;
+                if (!_states.ContainsKey(volume.Id))
+                {
+                    return;
+                }
+                Shard.Write(Shard.PathFor(_shardFolder, volume.Uid), volume.Uid, walk.Index);
             }
             _catalog.MarkScanned(volume.Id);
             _retryAt.TryRemove(volume.Id, out _);
@@ -314,7 +336,8 @@ public sealed class Indexer : IDisposable
     {
         lock (_gate)
         {
-            if (_states.ContainsKey(state.Volume.Id))
+            // Not brought back by loading at start-up after it was removed.
+            if (_states.ContainsKey(state.Volume.Id) || _removed.Contains(state.Volume.Id))
             {
                 return;
             }
@@ -343,9 +366,9 @@ public sealed class Indexer : IDisposable
         {
             File.Delete(Shard.PathFor(_shardFolder, volume.Uid));
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
-            // Open elsewhere; a stale shard is ignored because its uid no longer exists.
+            // Open elsewhere, or not ours to delete; a stale shard is ignored because its uid no longer exists.
         }
     }
 

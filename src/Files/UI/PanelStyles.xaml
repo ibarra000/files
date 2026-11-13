@@ -188,6 +188,8 @@
     <!-- A result row: rounded, a soft accent fill and outline when selected. -->
     <Style x:Key="ResultItem" TargetType="ListBoxItem">
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <!-- The full path on hover, over the whole row. -->
+        <Setter Property="ToolTip" Value="{Binding ToolTipText}" />
         <Setter Property="Padding" Value="8,6" />
         <Setter Property="Foreground" Value="{DynamicResource Text}" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
@@ -250,7 +252,7 @@
 
     <!-- Two lines: the name, then the folder (board 2). -->
     <DataTemplate x:Key="TwoLineRow">
-        <Grid ToolTip="{Binding ToolTipText}">
+        <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="28" />
                 <ColumnDefinition Width="*" />
@@ -258,7 +260,8 @@
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="Icon" Text="{Binding Icon}" Style="{StaticResource RowIcon}" />
             <StackPanel x:Name="Body" Grid.Column="1">
-                <TextBlock x:Name="Name" Style="{StaticResource RowName}">
+                <!-- Not hit-testable: its Runs are not Visuals, and a mouse event from one broke the row's click handling. -->
+                <TextBlock x:Name="Name" IsHitTestVisible="False" Style="{StaticResource RowName}">
                     <Run x:Name="Before" Text="{Binding Before, Mode=OneWay}" /><Run x:Name="MatchRun" Text="{Binding Match, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="{Binding After, Mode=OneWay}" />
                 </TextBlock>
                 <TextBlock x:Name="DetailLine" Text="{Binding Detail}" Margin="0,2,0,0" Style="{StaticResource RowPath}" />
@@ -284,14 +287,15 @@
 
     <!-- One line: the folder follows the name (board 4). -->
     <DataTemplate x:Key="OneLineRow">
-        <Grid ToolTip="{Binding ToolTipText}">
+        <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="28" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <TextBlock x:Name="Icon" Text="{Binding Icon}" Style="{StaticResource RowIcon}" />
-            <TextBlock x:Name="Name" Grid.Column="1" Style="{StaticResource RowName}">
+            <!-- Not hit-testable: its Runs are not Visuals, and a mouse event from one broke the row's click handling. -->
+            <TextBlock x:Name="Name" Grid.Column="1" IsHitTestVisible="False" Style="{StaticResource RowName}">
                 <Run x:Name="Before" Text="{Binding Before, Mode=OneWay}" /><Run x:Name="MatchRun" Text="{Binding Match, Mode=OneWay}" FontWeight="SemiBold" /><Run Text="{Binding After, Mode=OneWay}" /><Run x:Name="InlinePath" Text="{Binding Detail, Mode=OneWay, StringFormat='{}   {0}'}"
                     FontFamily="{StaticResource MonoFont}" FontSize="12" FontWeight="Normal" Foreground="{DynamicResource TextDim}" />
             </TextBlock>

@@ -71,6 +71,25 @@ public sealed class TextReaderTests
     }
 
     [Fact]
+    public async Task Closing_while_the_models_load_does_not_wait_and_frees_them_afterwards()
+    {
+        var reader = new PaddleTextReader(ModelFolder);
+        byte[] png = Render(reader.Scale, Color.Black, Color.White);
+        Task<IReadOnlyList<(string Text, Rect Box)>> reading = reader.ReadWordsAsync(png, CancellationToken.None);
+        // The first read loads the models, which takes far longer than this.
+        await Task.Delay(50);
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        reader.Dispose();
+        clock.Stop();
+
+        // Quit must not freeze behind the load.
+        Assert.True(clock.ElapsedMilliseconds < 200, $"Dispose waited {clock.ElapsedMilliseconds} ms");
+        Assert.Contains(await reading, word => ScreenText.Clean(word.Text) == Code);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => reader.ReadWordsAsync(png, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task A_closed_reader_refuses_to_read()
     {
         var reader = new PaddleTextReader(ModelFolder);

@@ -28,6 +28,9 @@ public partial class SearchWindow : Window
     private readonly DispatcherTimer _rescanTimer;
     private DateTime _rescanShownUntil;
     private CancellationTokenSource? _searchCancel;
+    private Task? _searching;
+    private bool _accepting;
+    private bool _hiding;
     private int _epoch;
     private SearchResult? _result;
     private string? _queryProblem;
@@ -60,15 +63,42 @@ public partial class SearchWindow : Window
             UpdateStatus();
         };
         _liveTimer = new DispatcherTimer { Interval = LiveRefresh };
-        _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
+        _liveTimer.Tick += async (_, _) =>
+        {
+            try
+            {
+                await ShowLiveAsync();
+            }
+            catch (Exception error) when (error is InvalidOperationException or ArgumentException or IOException)
+            {
+                // A timer callback must not let an exception end the process.
+                ShowToast($"Live results could not be shown: {error.Message}");
+            }
+        };
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
         PreviewTextInput += OnActionText;
         Deactivated += (_, _) => OnDeactivated();
+        Closing += OnClosing;
         // The footer keeps as many key hints as the width allows.
         SizeChanged += (_, _) => UpdateStatus();
+        // A click selects a row by focusing it; the keyboard goes straight back to the search box,
+        // so typing, Backspace and Ctrl+C keep working after a click.
+        Results.IsKeyboardFocusWithinChanged += (_, e) =>
+        {
+            if (e.NewValue is true)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Input, () => Input.Focus());
+            }
+        };
         // The preview pane's width is added or taken off once a maximized panel is restored.
-        StateChanged += (_, _) => FitPreviewWidth();
+        StateChanged += (_, _) =>
+        {
+            CloseMenus();
+            FitPreviewWidth();
+        };
+        // A popup does not follow its window, so the menus close rather than float where the panel was.
+        LocationChanged += (_, _) => CloseMenus();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
         ApplyRowLayout();
         ApplyPreview(app.Settings.ShowPreview);
@@ -77,13 +107,45 @@ public partial class SearchWindow : Window
             Backdrop.Apply(this, app.IsDark);
             _snapHook = Snap.Attach(this, IsOverDragArea);
         };
-        app.SettingsChanged += async () =>
+        _searchSettings = SearchSettingsOf(app.Settings);
+        app.SettingsChanged += OnSettingsChanged;
+    }
+
+    /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
+    private string _searchSettings;
+
+    private static string SearchSettingsOf(Settings settings) => string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+
+    /// <summary>
+    /// Settings change for many reasons (Ctrl+P, saving the panel's place on hide, the update check, an edit in
+    /// Settings). The look always follows; the list is only rebuilt when what it shows depends on the change,
+    /// and a live search is never interrupted.
+    /// </summary>
+    private async void OnSettingsChanged()
+    {
+        Backdrop.Apply(this, _app.IsDark);
+        ApplyRowLayout();
+        ApplyPreview(_app.Settings.ShowPreview);
+        string searchSettings = SearchSettingsOf(_app.Settings);
+        bool searchChanged = searchSettings != _searchSettings;
+        _searchSettings = searchSettings;
+        if (!IsVisible || _hiding)
         {
-            Backdrop.Apply(this, app.IsDark);
-            ApplyRowLayout();
-            ApplyPreview(app.Settings.ShowPreview);
+            // ShowPanel rebuilds the list; a hidden or hiding panel does no work for it.
+            return;
+        }
+        if (IsHome)
+        {
+            // Show recently opened, or favorites, may have changed.
+            ShowHome(keepSelection: true);
+            return;
+        }
+        if (searchChanged && _live is null)
+        {
             await SearchAsync();
-        };
+            return;
+        }
+        UpdateStatus();
     }
 
     /// <summary>The folder on its own line under each name, or after it on the same line.</summary>
@@ -95,16 +157,27 @@ public partial class SearchWindow : Window
 
     public void ShowPanel()
     {
-        PlaceWindow();
+        // Only a hidden panel goes back to its saved place; a visible one stays where the user put it.
+        bool wasHidden = !IsVisible;
+        if (wasHidden)
+        {
+            PlaceWindow();
+        }
         Show();
         Activate();
         Input.Focus();
         Input.SelectAll();
         _recall.Reset(_app.History);
-        if (Input.Text.Length == 0)
+        if (IsHome)
         {
             _showAllFavorites = false;
             ShowHome();
+        }
+        else if (wasHidden)
+        {
+            // What was found before may come from a live search that hiding stopped, or from lists read since: search again (the selection is kept).
+            // A panel that was already showing keeps what it shows, a live search included.
+            _ = SearchAsync();
         }
         UpdateStatus();
     }
@@ -116,18 +189,52 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
+        CloseMenus();
+        StopPreview();
+        // Saving the place raises a settings change while the panel is still visible; it must not rebuild the list,
+        // restart a preview read or check favorites for a panel about to hide.
+        _hiding = true;
+        try
+        {
+            SavePlacement();
+        }
+        finally
+        {
+            _hiding = false;
+        }
         SetSpinning(false);
-        SavePlacement();
         Hide();
+    }
+
+    /// <summary>The action menu and the volume menu belong to what is on screen; they never outlive it.</summary>
+    private void CloseMenus()
+    {
+        ActionMenu.IsOpen = false;
+        if (_scopeMenu is not null)
+        {
+            _scopeMenu.IsOpen = false;
+        }
     }
 
     private void OnDeactivated()
     {
-        bool menuOpen = ActionMenu.IsOpen || ScopeButton.ContextMenu?.IsOpen == true;
-        if (_app.Settings.HideOnBlur && !menuOpen)
+        // The menus are popups that never take activation, so a click elsewhere means the user moved on.
+        CloseMenus();
+        if (_app.Settings.HideOnBlur)
         {
             HidePanel();
         }
+    }
+
+    /// <summary>Alt+F4 or Close in the system menu would destroy the panel for good; it only hides, until the app quits.</summary>
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_app.IsQuitting)
+        {
+            return;
+        }
+        e.Cancel = true;
+        HidePanel();
     }
 
     private void OnInputChanged(object sender, TextChangedEventArgs e)
@@ -135,29 +242,41 @@ public partial class SearchWindow : Window
         Placeholder.Visibility = Input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         _typing.Stop();
         StopLiveSearch();
+        // A paste, a recalled search or a saved one is complete already, so it searches at once.
+        // Read and cleared on every change, so it can never carry over to the next keystroke.
+        bool complete = _pasted || _recalling;
+        _pasted = false;
         if (!_recalling)
         {
             // Typing leaves the recalled search behind.
             _recall.Reset(_app.History);
         }
-        if (Input.Text.Trim().Length == 0)
+        if (IsHome)
         {
             _searchCancel?.Cancel();
             ShowHome();
             return;
         }
         _showAllFavorites = false;
-        // A paste, a recalled search or a saved one is complete already, so it searches at once.
-        if (_pasted || _recalling)
+        if (complete)
         {
-            _pasted = false;
             _ = SearchAsync();
             return;
         }
         _typing.Start();
+        // The chips, count and footer follow at once, not when the results arrive.
+        UpdateStatus();
     }
 
-    private async Task SearchAsync()
+    private Task SearchAsync()
+    {
+        // Kept so Enter can wait for the search that is still running for what is in the box.
+        Task search = SearchCoreAsync();
+        _searching = search;
+        return search;
+    }
+
+    private async Task SearchCoreAsync()
     {
         _typing.Stop();
         string line = Input.Text;
@@ -212,6 +331,7 @@ public partial class SearchWindow : Window
         bool showVolume = _app.Indexer.Volumes.Count > 1;
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
+        KeepActionsFor(rows);
         int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
@@ -229,13 +349,14 @@ public partial class SearchWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
             _indexerUpdatePending = false;
-            UpdateStatus();
+            // Resolved first, so a volume removed in Settings also leaves the scope label.
             bool indexesChanged = !ScopedVolumes()
                 .Where(state => state.Index is not null)
                 .Select(state => state.Index!)
                 .ToHashSet()
                 .SetEquals(_searchedIndexes);
-            if (IsVisible && indexesChanged && _live is null && Input.Text.Trim().Length > 0)
+            UpdateStatus();
+            if (IsVisible && indexesChanged && _live is null && !IsHome)
             {
                 _ = SearchAsync();
             }
@@ -259,7 +380,7 @@ public partial class SearchWindow : Window
             case Key.Tab when !ctrl:
                 OpenActions();
                 break;
-            case Key.Delete when Input.Text.Length == 0 && SelectedRow is { Kind: RowKind.Opened } recent:
+            case Key.Delete when IsHome && SelectedRow is { Kind: RowKind.Opened } recent:
                 RemoveRecent(recent);
                 break;
             case Key.Down when _recall.IsActive:
@@ -302,7 +423,7 @@ public partial class SearchWindow : Window
             case Key.Escape when _liveCancel is not null:
                 _liveCancel.Cancel();
                 break;
-            case Key.Escape when _showAllFavorites && Input.Text.Length == 0:
+            case Key.Escape when _showAllFavorites && IsHome:
                 _showAllFavorites = false;
                 ShowHome();
                 break;
@@ -352,15 +473,55 @@ public partial class SearchWindow : Window
 
     private async void Accept()
     {
+        if (_accepting)
+        {
+            // Already waiting for the search to finish; a second Enter must not open another file.
+            return;
+        }
+        _accepting = true;
+        try
+        {
+            await AcceptAsync();
+        }
+        finally
+        {
+            _accepting = false;
+        }
+    }
+
+    private async Task AcceptAsync()
+    {
         if (_typing.IsEnabled)
         {
             // Enter before the typing pause ended: search now, then open the best match.
             await SearchAsync();
         }
+        else
+        {
+            // A paste, recall, saved search or screen read is still being searched: open its best match, not the old row.
+            // Waits for the newest one, since a search started meanwhile replaces the one awaited.
+            try
+            {
+                while (_searching is { IsCompleted: false } running)
+                {
+                    await running;
+                }
+            }
+            catch (Exception error) when (error is InvalidOperationException or ArgumentException or IOException)
+            {
+                ShowToast($"The search failed: {error.Message}");
+                return;
+            }
+        }
+        if (_queryProblem is not null)
+        {
+            // The footer already says what is wrong with the search.
+            return;
+        }
         switch (SelectedRow)
         {
-            case null when HasNoHits && _liveCancel is not null:
-                // A live search is still reading; Enter must not restart it.
+            case null when HasNoHits && _live is not null:
+                // A live search is reading, or has read everything and found nothing; Enter does not start another.
                 return;
             case null when HasNoHits:
                 // Nothing matched: Enter reads the volumes directly, as Shift+Enter does.

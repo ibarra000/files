@@ -24,7 +24,10 @@ public partial class SearchWindow
         long files = volumes.Sum(state => (long)(state.Index?.FileCount ?? 0));
         Placeholder.Text = StatusText.Placeholder(files);
         UpdateHeader(volumes);
-        ShowHints(ActionMenu.IsOpen ? StatusText.MenuHints : StatusText.Hints(HasNoHits, liveRunning: _liveCancel is not null));
+        bool liveRunning = _liveCancel is not null;
+        ShowHints(ActionMenu.IsOpen
+            ? StatusText.MenuHints
+            : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
         string attention = StatusText.For(volumes, _queryProblem, rescanRequested);
@@ -41,7 +44,8 @@ public partial class SearchWindow
         }
         else if (_live is LiveSearch live)
         {
-            Status.Text = StatusText.ForLive(_result, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
+            int found = _result is SearchResult shown ? Shown(shown) : 0;
+            Status.Text = StatusText.ForLive(found, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
         }
         else
         {
