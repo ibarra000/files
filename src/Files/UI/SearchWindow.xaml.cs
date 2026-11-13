@@ -3,6 +3,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Files.Core;
 using Files.Services;
@@ -15,6 +17,7 @@ public partial class SearchWindow : Window
     private static readonly TimeSpan TypingDelay = TimeSpan.FromMilliseconds(150);
     private static readonly TimeSpan ToastDuration = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan LiveRefresh = TimeSpan.FromMilliseconds(250);
+    private static readonly Duration SpinDuration = new(TimeSpan.FromSeconds(1));
     private const double DefaultTopFraction = 0.18;
     private const int PageRows = 8;
 
@@ -97,6 +100,7 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
+        SetSpinning(false);
         SavePlacement();
         Hide();
     }
@@ -341,7 +345,8 @@ public partial class SearchWindow : Window
         // Keep the same file selected when the rows move.
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
-        List<ResultRow> rows = result.Hits.Select(ResultRow.ForHit).ToList();
+        bool showVolume = _app.Indexer.Volumes.Count > 1;
+        List<ResultRow> rows = result.Hits.Select(hit => ResultRow.ForHit(hit, showVolume)).ToList();
         Results.ItemsSource = rows;
         int keep = rows.FindIndex(row => row.Hit?.Path == selectedPath);
         Results.SelectedIndex = keep >= 0 ? keep : (rows.Count > 0 ? 0 : -1);
@@ -375,6 +380,10 @@ public partial class SearchWindow : Window
     private void UpdateStatus()
     {
         Hint.Text = StatusText.Hint(HasNoHits, liveRunning: _liveCancel is not null);
+        IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
+        Placeholder.Text = StatusText.Placeholder(volumes.Sum(state => (long)(state.Index?.FileCount ?? 0)));
+        // The glyph turns only beside the words "Scanning…", not beside a message or a live search.
+        bool scanning = false;
         if (_toast is not null)
         {
             Status.Text = _toast;
@@ -385,8 +394,25 @@ public partial class SearchWindow : Window
         }
         else
         {
-            Status.Text = StatusText.For(_app.Indexer.Volumes, _queryProblem);
+            Status.Text = StatusText.For(volumes, _queryProblem);
+            scanning = volumes.Any(state => state.ScannedSoFar is not null);
         }
+        SetSpinning(IsVisible && scanning);
+    }
+
+    /// <summary>Turns the glyph beside "Scanning…", or stops and hides it. Still, not turning, when Windows animations are off.</summary>
+    private void SetSpinning(bool spinning)
+    {
+        bool shown = Spinner.Visibility == Visibility.Visible;
+        if (spinning == shown)
+        {
+            return;
+        }
+        Spinner.Visibility = spinning ? Visibility.Visible : Visibility.Collapsed;
+        DoubleAnimation? turn = spinning && SystemParameters.ClientAreaAnimation
+            ? new DoubleAnimation(0, 360, SpinDuration) { RepeatBehavior = RepeatBehavior.Forever }
+            : null;
+        SpinnerTurn.BeginAnimation(RotateTransform.AngleProperty, turn);
     }
 
     /// <summary>A search is on screen and found nothing (the home list has no result).</summary>

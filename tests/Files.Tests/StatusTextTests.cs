@@ -34,4 +34,12 @@ public sealed class StatusTextTests
     {
         Assert.Equal(expected, StatusText.Hint(noHits, liveRunning));
     }
+
+    [Fact]
+    public void The_placeholder_says_how_many_files_can_be_searched()
+    {
+        Assert.Equal("Type to search", StatusText.Placeholder(0));
+        // Grouped the way this PC writes numbers.
+        Assert.Equal($"Search {1_234_567:N0} files", StatusText.Placeholder(1_234_567));
+    }
 }

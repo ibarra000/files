@@ -19,9 +19,8 @@ public enum RowKind
 /// </summary>
 public sealed record ResultRow(RowKind Kind, string Before, string Match, string After, string Detail, string Badge)
 {
-    private const string FileIcon = "\uE8A5";
-    private const string FolderIcon = "\uE8B7";
     private const string SearchIcon = "\uE721";
+    private const string Breadcrumb = " \u203A ";
 
     public Hit? Hit { get; init; }
 
@@ -36,6 +35,9 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
 
     public bool IsHeader => Kind == RowKind.Header;
 
+    /// <summary>Shown on hover: the full path, since the second line may shorten it or be hidden.</summary>
+    public string? ToolTipText => Path ?? (Detail.Length > 0 ? Detail : null);
+
     /// <summary>The file or folder the row opens, if it opens one.</summary>
     public string? Path
     {
@@ -49,16 +51,37 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
         }
     }
 
-    public static ResultRow ForHit(Hit hit)
+    /// <param name="showVolume">Name the volume, which only tells results apart when there are several.</param>
+    public static ResultRow ForHit(Hit hit, bool showVolume)
     {
+        string folder = FolderText(hit.Folder, hit.Index.Root);
+        string badge = showVolume ? hit.Volume : "";
+        string icon = FileKinds.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
-            return new ResultRow(RowKind.Hit, hit.Name, "", "", hit.Folder, hit.Volume) { Hit = hit };
+            return new ResultRow(RowKind.Hit, hit.Name, "", "", folder, badge) { Hit = hit, Icon = icon };
         }
         int end = hit.MatchStart + hit.MatchLength;
         string before = hit.Name[..hit.MatchStart];
         string match = hit.Name[hit.MatchStart..end];
-        return new ResultRow(RowKind.Hit, before, match, hit.Name[end..], hit.Folder, hit.Volume) { Hit = hit };
+        return new ResultRow(RowKind.Hit, before, match, hit.Name[end..], folder, badge) { Hit = hit, Icon = icon };
+    }
+
+    /// <summary>
+    /// The folder within its volume as a breadcrumb ("2024 › site A"): the volume's own
+    /// path is the same on every result, so it is left out. A file at the root shows the root.
+    /// </summary>
+    public static string FolderText(string folder, string root)
+    {
+        string trimmedRoot = root.TrimEnd('\\');
+        bool inside = folder.StartsWith(trimmedRoot, StringComparison.OrdinalIgnoreCase)
+            && (folder.Length == trimmedRoot.Length || folder[trimmedRoot.Length] == '\\');
+        if (!inside)
+        {
+            return folder;
+        }
+        string[] parts = folder[trimmedRoot.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length == 0 ? root : string.Join(Breadcrumb, parts);
     }
 
     public static ResultRow ForHeader(string title) => new(RowKind.Header, title, "", "", "", "");
@@ -69,7 +92,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
         {
             return new ResultRow(RowKind.Favorite, favorite.Target, "", "", "Saved search", "") { Item = favorite, Icon = SearchIcon };
         }
-        string icon = favorite.Kind == FavoriteKind.Folder ? FolderIcon : FileIcon;
+        string icon = favorite.Kind == FavoriteKind.Folder ? FileKinds.Folder : FileKinds.Glyph(favorite.Target);
         return new ResultRow(RowKind.Favorite, NameOf(favorite.Target), "", "", favorite.Target, missing ? "Not found" : "")
         {
             Item = favorite,
@@ -81,7 +104,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     public static ResultRow ForOpened(string path)
     {
         var item = new Favorite(FavoriteKind.File, path);
-        return new ResultRow(RowKind.Opened, NameOf(path), "", "", path, "") { Item = item, Icon = FileIcon };
+        return new ResultRow(RowKind.Opened, NameOf(path), "", "", path, "") { Item = item, Icon = FileKinds.Glyph(path) };
     }
 
     public static ResultRow ForSeeAll(int count) => new(RowKind.SeeAll, $"See all {count} favorites", "", "", "", "");
@@ -122,6 +145,9 @@ public static class StatusText
         }
         return string.Join(" · ", parts);
     }
+
+    /// <summary>The empty box says how much it searches.</summary>
+    public static string Placeholder(long files) => files == 0 ? "Type to search" : $"Search {files:N0} files";
 
     /// <summary>The key hint at the bottom right: a search that found nothing offers to read the volumes directly.</summary>
     public static string Hint(bool noHits, bool liveRunning)
