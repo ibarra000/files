@@ -93,13 +93,45 @@ public partial class SearchWindow : Window
             Backdrop.Apply(this, app.IsDark);
             _snapHook = Snap.Attach(this, IsOverDragArea);
         };
-        app.SettingsChanged += async () =>
+        _searchSettings = SearchSettingsOf(app.Settings);
+        app.SettingsChanged += OnSettingsChanged;
+    }
+
+    /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
+    private string _searchSettings;
+
+    private static string SearchSettingsOf(Settings settings) => string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+
+    /// <summary>
+    /// Settings change for many reasons (Ctrl+P, saving the panel's place on hide, the update check, an edit in
+    /// Settings). The look always follows; the list is only rebuilt when what it shows depends on the change,
+    /// and a live search is never interrupted.
+    /// </summary>
+    private async void OnSettingsChanged()
+    {
+        Backdrop.Apply(this, _app.IsDark);
+        ApplyRowLayout();
+        ApplyPreview(_app.Settings.ShowPreview);
+        string searchSettings = SearchSettingsOf(_app.Settings);
+        bool searchChanged = searchSettings != _searchSettings;
+        _searchSettings = searchSettings;
+        if (!IsVisible)
         {
-            Backdrop.Apply(this, app.IsDark);
-            ApplyRowLayout();
-            ApplyPreview(app.Settings.ShowPreview);
+            // ShowPanel rebuilds the list; a hidden panel does no work for it.
+            return;
+        }
+        if (IsHome)
+        {
+            // Show recently opened, or favorites, may have changed.
+            ShowHome(keepSelection: true);
+            return;
+        }
+        if (searchChanged && _live is null)
+        {
             await SearchAsync();
-        };
+            return;
+        }
+        UpdateStatus();
     }
 
     /// <summary>The folder on its own line under each name, or after it on the same line.</summary>

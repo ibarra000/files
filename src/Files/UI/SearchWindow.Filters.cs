@@ -37,9 +37,13 @@ public partial class SearchWindow
         {
             return;
         }
+        // All, Files and Folders only choose among the results already found; Code and Documents change the search.
+        bool queryChanged = ChangesQuery(_filter) || ChangesQuery(filter);
         _filter = filter;
-        RunAgain();
+        RunAgain(queryChanged);
     }
+
+    private static bool ChangesQuery(SearchFilter filter) => filter is SearchFilter.Code or SearchFilter.Documents;
 
     /// <summary>Ctrl+1 to Ctrl+5 pick a chip.</summary>
     private void SetFilter(SearchFilter filter)
@@ -70,17 +74,24 @@ public partial class SearchWindow
         item.Click += (_, _) =>
         {
             _scope = scope;
-            RunAgain();
+            RunAgain(queryChanged: true);
         };
         menu.Items.Add(item);
     }
 
     /// <summary>Repeats the search on screen with the new chip or volume, live if it was live.</summary>
-    private void RunAgain()
+    /// <param name="queryChanged">False when only the rows change: they are rebuilt from the result on screen,
+    /// so a live search keeps the folders it has already read.</param>
+    private void RunAgain(bool queryChanged)
     {
         UpdateStatus();
-        if (Input.Text.Trim().Length == 0)
+        if (IsHome)
         {
+            return;
+        }
+        if (!queryChanged && _result is SearchResult result)
+        {
+            ShowResults(result);
             return;
         }
         _ = _live is not null ? StartLiveSearchAsync() : SearchAsync();

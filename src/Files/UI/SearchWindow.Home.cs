@@ -62,6 +62,9 @@ public partial class SearchWindow
 
     private ResultRow? SelectedRow => Results.SelectedItem as ResultRow;
 
+    /// <summary>The box holds nothing but spaces, so the home list is what shows.</summary>
+    private bool IsHome => Input.Text.Trim().Length == 0;
+
     /// <summary>The first row at or after <paramref name="from"/>, stepping by <paramref name="step"/>, that is not a section header.</summary>
     private int? NextSelectable(int from, int step)
     {
