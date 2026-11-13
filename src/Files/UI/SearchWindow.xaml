@@ -51,10 +51,10 @@
                 <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"
                            IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock x:Name="Count" FontSize="12" Foreground="{DynamicResource TextDim}" Margin="12,0"
+                    <TextBlock x:Name="Count" FontSize="12" Foreground="{DynamicResource TextDim}" Margin="12,0,0,0"
                                VerticalAlignment="Center" Visibility="Collapsed" />
-                    <!-- Narrows the search to one volume; shown when there is more than one. -->
-                    <Button x:Name="ScopeButton" Style="{StaticResource ControlButton}" Visibility="Collapsed"
+                    <!-- Narrows the search to one volume; shown when there is more than one. Its own margin keeps it off the box when no count shows. -->
+                    <Button x:Name="ScopeButton" Margin="12,0,0,0" Style="{StaticResource ControlButton}" Visibility="Collapsed"
                             AutomationProperties.Name="Volumes to search" Click="OnScopeClick">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock x:Name="ScopeLabel" Text="All volumes" />
