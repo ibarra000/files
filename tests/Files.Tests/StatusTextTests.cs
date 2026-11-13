@@ -45,6 +45,16 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void The_header_counts_the_results_and_says_how_long_the_search_took()
+    {
+        Assert.Equal("1 result · 9 ms", StatusText.Count(1, TimeSpan.FromMilliseconds(9.4)));
+        Assert.Equal($"{14_200:N0} results · 0 ms", StatusText.Count(14_200, TimeSpan.FromMilliseconds(0.2)));
+        Assert.Equal("No results", StatusText.Count(0, TimeSpan.FromMilliseconds(3)));
+        // A live search reports its own time in the footer.
+        Assert.Equal("3 results", StatusText.Count(3, took: null));
+    }
+
+    [Fact]
     public void The_footer_says_how_many_files_are_indexed_and_when()
     {
         Assert.Equal($"{1_199_227:N0} files indexed · updated just now", StatusText.Indexed(1_199_227, DateTime.UtcNow));

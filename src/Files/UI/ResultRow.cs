@@ -54,7 +54,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     public static ResultRow ForHit(Hit hit, bool showVolume)
     {
         string badge = showVolume ? hit.Volume : "";
-        string icon = hit.IsFolder ? FileKinds.Folder : FileKinds.Glyph(hit.Name);
+        string icon = hit.IsFolder ? FileIcons.Folder : FileIcons.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
             return new ResultRow(RowKind.Hit, hit.Name, "", "", hit.Folder, badge) { Hit = hit, Icon = icon };
@@ -73,7 +73,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
         {
             return new ResultRow(RowKind.Favorite, favorite.Target, "", "", "Saved search", "") { Item = favorite, Icon = SearchIcon };
         }
-        string icon = favorite.Kind == FavoriteKind.Folder ? FileKinds.Folder : FileKinds.Glyph(favorite.Target);
+        string icon = favorite.Kind == FavoriteKind.Folder ? FileIcons.Folder : FileIcons.Glyph(favorite.Target);
         return new ResultRow(RowKind.Favorite, NameOf(favorite.Target), "", "", FolderOf(favorite.Target), missing ? "Not found" : "")
         {
             Item = favorite,
@@ -85,7 +85,7 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     public static ResultRow ForOpened(string path)
     {
         var item = new Favorite(FavoriteKind.File, path);
-        return new ResultRow(RowKind.Opened, NameOf(path), "", "", FolderOf(path), "") { Item = item, Icon = FileKinds.Glyph(path) };
+        return new ResultRow(RowKind.Opened, NameOf(path), "", "", FolderOf(path), "") { Item = item, Icon = FileIcons.Glyph(path) };
     }
 
     public static ResultRow ForSeeAll(int count) => new(RowKind.SeeAll, $"See all {count} favorites", "", "", "", "");
@@ -136,6 +136,17 @@ public static class StatusText
 
     /// <summary>The empty box says how much it searches.</summary>
     public static string Placeholder(long files) => files == 0 ? "Type to search" : $"Search {files:N0} files";
+
+    /// <summary>The header beside the box: how many results and, for a search of the saved lists, how long it took.</summary>
+    public static string Count(int results, TimeSpan? took)
+    {
+        if (results == 0)
+        {
+            return "No results";
+        }
+        string count = results == 1 ? "1 result" : $"{results:N0} results";
+        return took is TimeSpan time ? $"{count} · {Math.Round(time.TotalMilliseconds):N0} ms" : count;
+    }
 
     /// <summary>
     /// The key caps at the bottom right, most useful first (a narrow panel shows only the first few).

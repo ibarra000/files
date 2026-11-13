@@ -18,7 +18,7 @@ public partial class SearchWindow
             return;
         }
         StopLiveSearch();
-        Query query = Query.Parse(line);
+        Query query = SearchFilters.Narrow(Query.Parse(line), _filter);
         _epoch++;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -30,7 +30,8 @@ public partial class SearchWindow
             return;
         }
 
-        var volumes = _app.Indexer.Volumes.Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
+        var volumes = ScopedVolumes().Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
+        _searchTook = null;
         var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
         var cancel = new CancellationTokenSource();
         _live = live;

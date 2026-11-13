@@ -1,6 +1,7 @@
 <Window x:Class="Files.UI.SearchWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Files.UI"
         Title="files"
         Width="680" Height="460"
         MinWidth="420" MinHeight="240"
@@ -31,9 +32,30 @@
                            VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
                 <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"
                            IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
-                <StackPanel x:Name="HeaderRight" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="Count" FontSize="12" Foreground="{DynamicResource TextDim}" Margin="12,0"
+                               VerticalAlignment="Center" Visibility="Collapsed" />
+                    <!-- Narrows the search to one volume; shown when there is more than one. -->
+                    <Button x:Name="ScopeButton" Style="{StaticResource ControlButton}" Visibility="Collapsed"
+                            AutomationProperties.Name="Volumes to search" Click="OnScopeClick">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="ScopeLabel" Text="All volumes" />
+                            <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="9" Margin="6,1,0,0"
+                                       VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
             </Grid>
             <Border DockPanel.Dock="Top" Height="1" Background="{DynamicResource Divider}" />
+
+            <!-- Filter chips, shown while searching (Ctrl+1 to Ctrl+5). -->
+            <WrapPanel x:Name="Chips" DockPanel.Dock="Top" Margin="20,10,20,0" Visibility="Collapsed">
+                <RadioButton Content="All" Tag="{x:Static ui:SearchFilter.All}" IsChecked="True" Style="{StaticResource Chip}" Checked="OnChipChecked" />
+                <RadioButton Content="Files" Tag="{x:Static ui:SearchFilter.Files}" Style="{StaticResource Chip}" Checked="OnChipChecked" />
+                <RadioButton Content="Folders" Tag="{x:Static ui:SearchFilter.Folders}" Style="{StaticResource Chip}" Checked="OnChipChecked" />
+                <RadioButton Content="Code" Tag="{x:Static ui:SearchFilter.Code}" Style="{StaticResource Chip}" Checked="OnChipChecked" />
+                <RadioButton Content="Documents" Tag="{x:Static ui:SearchFilter.Documents}" Style="{StaticResource Chip}" Checked="OnChipChecked" />
+            </WrapPanel>
 
             <!-- Footer bar: index health on the left, key hints and settings on the right. -->
             <Border DockPanel.Dock="Bottom" Background="{DynamicResource PanelFooter}" BorderBrush="{DynamicResource Divider}"

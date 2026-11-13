@@ -23,6 +23,7 @@ public partial class SearchWindow
         IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
         long files = volumes.Sum(state => (long)(state.Index?.FileCount ?? 0));
         Placeholder.Text = StatusText.Placeholder(files);
+        UpdateHeader(volumes);
         ShowHints(StatusText.Hints(HasNoHits, liveRunning: _liveCancel is not null));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;

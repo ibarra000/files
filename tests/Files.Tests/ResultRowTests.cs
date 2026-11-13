@@ -25,7 +25,7 @@ public sealed class ResultRowTests
     public void A_result_shows_its_type_its_folder_and_its_full_path_on_hover()
     {
         ResultRow row = ResultRow.ForHit(HitIn(@"\\server\share\2024", "AB-C-0704.pdf"), showVolume: false);
-        Assert.Equal(FileKinds.Glyph("AB-C-0704.pdf"), row.Icon);
+        Assert.Equal(FileIcons.Glyph("AB-C-0704.pdf"), row.Icon);
         Assert.Equal(@"\\server\share\2024", row.Detail);
         Assert.Equal(@"\\server\share\2024\AB-C-0704.pdf", row.ToolTipText);
     }

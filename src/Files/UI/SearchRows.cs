@@ -11,25 +11,21 @@ public static class SearchRows
     /// <summary>Folders listed among the files; more would push the files out of sight.</summary>
     public const int FoldersShown = 5;
 
-    public static List<ResultRow> Build(SearchResult result, bool showVolume)
+    /// <param name="filter">Files leaves folders out; Folders lists every folder found and no files.</param>
+    public static List<ResultRow> Build(SearchResult result, bool showVolume, SearchFilter filter = SearchFilter.All)
     {
         var rows = new List<ResultRow>();
-        IEnumerable<Hit> files = result.Hits;
-        IEnumerable<Hit> folders = result.Folders.Take(FoldersShown);
-        Hit? best = result.Hits.FirstOrDefault() ?? result.Folders.FirstOrDefault();
+        IReadOnlyList<Hit> allFiles = filter == SearchFilter.Folders ? [] : result.Hits;
+        IReadOnlyList<Hit> allFolders = filter == SearchFilter.Files ? [] : result.Folders;
+        int foldersShown = filter == SearchFilter.Folders ? allFolders.Count : FoldersShown;
+        Hit? best = allFiles.FirstOrDefault() ?? allFolders.FirstOrDefault();
         if (best is null)
         {
             return rows;
         }
         // The best match is not listed again in its group.
-        if (best.IsFolder)
-        {
-            folders = result.Folders.Skip(1).Take(FoldersShown);
-        }
-        else
-        {
-            files = result.Hits.Skip(1);
-        }
+        IEnumerable<Hit> files = best.IsFolder ? allFiles : allFiles.Skip(1);
+        IEnumerable<Hit> folders = (best.IsFolder ? allFolders.Skip(1) : allFolders).Take(foldersShown);
         rows.Add(ResultRow.ForHeader("Best match"));
         rows.Add(ResultRow.ForHit(best, showVolume));
         AddGroup(rows, "Folders", folders, showVolume);

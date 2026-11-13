@@ -136,7 +136,7 @@ public partial class SearchWindow : Window
 
     private void OnDeactivated()
     {
-        bool menuOpen = Results.ContextMenu?.IsOpen == true;
+        bool menuOpen = Results.ContextMenu?.IsOpen == true || ScopeButton.ContextMenu?.IsOpen == true;
         if (_app.Settings.HideOnBlur && !menuOpen)
         {
             HidePanel();
@@ -179,7 +179,7 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        Query query = Query.Parse(line);
+        Query query = SearchFilters.Narrow(Query.Parse(line), _filter);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
         _queryProblem = query.Problem;
@@ -193,12 +193,13 @@ public partial class SearchWindow : Window
 
         var cancel = new CancellationTokenSource();
         _searchCancel = cancel;
-        var volumes = _app.Indexer.Volumes
+        var volumes = ScopedVolumes()
             .Where(state => state.Index is not null)
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
         IReadOnlySet<string> hidden = _app.Settings.HiddenExtensionSet;
         SearchResult result;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token), cancel.Token);
@@ -212,6 +213,7 @@ public partial class SearchWindow : Window
             return;
         }
         _searchedIndexes = volumes.Select(v => v.Index).ToHashSet();
+        _searchTook = clock.Elapsed;
         ShowResults(result);
     }
 
@@ -221,7 +223,7 @@ public partial class SearchWindow : Window
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = SearchRows.Build(result, showVolume);
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
         int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
@@ -241,7 +243,7 @@ public partial class SearchWindow : Window
         {
             _indexerUpdatePending = false;
             UpdateStatus();
-            bool indexesChanged = !_app.Indexer.Volumes
+            bool indexesChanged = !ScopedVolumes()
                 .Where(state => state.Index is not null)
                 .Select(state => state.Index!)
                 .ToHashSet()
@@ -318,6 +320,9 @@ public partial class SearchWindow : Window
                 break;
             case Key.Q when ctrl:
                 _app.Quit();
+                break;
+            case >= Key.D1 and <= Key.D5 when ctrl:
+                SetFilter((SearchFilter)(e.Key - Key.D1));
                 break;
             default:
                 e.Handled = false;
