@@ -69,6 +69,8 @@ public partial class SearchWindow : Window
         Deactivated += (_, _) => OnDeactivated();
         // The footer keeps as many key hints as the width allows.
         SizeChanged += (_, _) => UpdateStatus();
+        // The preview pane's width is added or taken off once a maximized panel is restored.
+        StateChanged += (_, _) => FitPreviewWidth();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
         ApplyTheme();
         ApplyRowLayout();
@@ -264,7 +266,9 @@ public partial class SearchWindow : Window
         bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
         if (ActionMenu.IsOpen)
         {
-            e.Handled = OnActionKey(e.Key);
+            // Shortcuts such as Ctrl+V would change the search under the open menu, so they do nothing here.
+            bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            e.Handled = chord || OnActionKey(e.Key);
             return;
         }
         e.Handled = true;

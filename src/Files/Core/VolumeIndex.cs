@@ -108,11 +108,12 @@ public sealed class VolumeIndex
             {
                 cancel.ThrowIfCancellationRequested();
             }
-            ReadOnlySpan<char> own = OwnName(Folders.LowerSpan(folder));
-            int at = query.MatchAt(own, own.IndexOf(query.Needle, StringComparison.Ordinal));
+            ReadOnlySpan<char> relative = Folders.LowerSpan(folder);
+            int at = OwnNameMatch(query, relative);
             if (at >= 0)
             {
-                top.Add(RankKey.Make(false, at, own.Length, folder));
+                int ownLength = relative.Length - (relative.LastIndexOf('\\') + 1);
+                top.Add(RankKey.Make(false, at, ownLength, folder));
             }
         }
         foreach (ulong key in top.Sorted())
@@ -122,7 +123,12 @@ public sealed class VolumeIndex
         return folders;
     }
 
-    private static ReadOnlySpan<char> OwnName(ReadOnlySpan<char> relative) => relative[(relative.LastIndexOf('\\') + 1)..];
+    /// <summary>Where the term matches a folder's own name (the last part of its lowercased relative path), or -1.</summary>
+    internal static int OwnNameMatch(Query query, ReadOnlySpan<char> lowerRelative)
+    {
+        ReadOnlySpan<char> own = lowerRelative[(lowerRelative.LastIndexOf('\\') + 1)..];
+        return query.MatchAt(own, own.IndexOf(query.Needle, StringComparison.Ordinal));
+    }
 
     private Hit ToFolderHit(string volume, Query query, ulong key)
     {
@@ -131,8 +137,7 @@ public sealed class VolumeIndex
         int slash = relative.LastIndexOf('\\');
         string name = relative[(slash + 1)..];
         string parent = Path.Join(Root, slash < 0 ? "" : relative[..slash]);
-        ReadOnlySpan<char> own = OwnName(Folders.LowerSpan(folder));
-        int start = query.MatchAt(own, own.IndexOf(query.Needle, StringComparison.Ordinal));
+        int start = OwnNameMatch(query, Folders.LowerSpan(folder));
         return new Hit(volume, this, folder, name, parent, start, query.Needle.Length, key) { IsFolder = true };
     }
 

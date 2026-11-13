@@ -14,6 +14,9 @@ public partial class SearchWindow
 {
     /// <summary>The pane's width; the window widens by this much to show it.</summary>
     private const double PreviewWidth = 400;
+
+    /// <summary>The narrowest the panel goes without the pane (MinWidth in SearchWindow.xaml).</summary>
+    private const double ListMinWidth = 420;
     private const int PreviewImageWidth = 360;
     private static readonly TimeSpan PreviewDelay = TimeSpan.FromMilliseconds(120);
 
@@ -40,21 +43,32 @@ public partial class SearchWindow
             return;
         }
         PreviewPane.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        if (WindowState == WindowState.Normal && IsVisible)
-        {
-            if (show)
-            {
-                WidenForPreview();
-            }
-            else
-            {
-                Width = Math.Max(MinWidth, Width - _previewAdded);
-                _previewAdded = 0;
-            }
-        }
+        FitPreviewWidth();
         if (show)
         {
             SchedulePreview();
+        }
+    }
+
+    /// <summary>
+    /// Makes the window's width agree with the pane: wider by the pane while it shows, back to the saved width once it hides.
+    /// Only a normal, visible window is resized; a maximized one catches up when it is restored (<see cref="Window.StateChanged"/>).
+    /// </summary>
+    private void FitPreviewWidth()
+    {
+        if (WindowState != WindowState.Normal || !IsVisible)
+        {
+            return;
+        }
+        if (PreviewShown && _previewAdded == 0)
+        {
+            WidenForPreview();
+        }
+        else if (!PreviewShown && _previewAdded > 0)
+        {
+            MinWidth = ListMinWidth;
+            Width = Math.Max(MinWidth, Width - _previewAdded);
+            _previewAdded = 0;
         }
     }
 
@@ -65,6 +79,8 @@ public partial class SearchWindow
         double wider = Math.Min(Width + PreviewWidth, area.Width);
         _previewAdded = wider - Width;
         Width = wider;
+        // The list keeps room for itself beside the pane, unless the screen is too narrow for both.
+        MinWidth = Math.Min(ListMinWidth + PreviewWidth, area.Width);
         if (Left + Width > area.Right)
         {
             Left = Math.Max(area.Left, area.Right - Width);
@@ -86,7 +102,19 @@ public partial class SearchWindow
             _previewTimer.Tick += async (_, _) =>
             {
                 _previewTimer.Stop();
-                await ShowPreviewAsync(SelectedRow);
+                if (!PreviewShown)
+                {
+                    return;
+                }
+                try
+                {
+                    await ShowPreviewAsync(SelectedRow);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                {
+                    // A timer callback must not let an exception end the process.
+                    ShowPreviewNote($"Could not read it: {error.Message}");
+                }
             };
         }
         _previewTimer.Stop();
@@ -142,8 +170,10 @@ public partial class SearchWindow
             return image;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or NotSupportedException
-            or UriFormatException or ArgumentException or InvalidOperationException)
+            or FormatException or InvalidDataException or System.Runtime.InteropServices.COMException
+            or ArgumentException or InvalidOperationException)
         {
+            // A damaged or unsupported image (FileFormatException is a FormatException, WIC errors are COM ones).
             return null;
         }
     }
@@ -191,7 +221,8 @@ public partial class SearchWindow
         }
         else
         {
-            ShowPreviewNote(info.IsImage ? "Could not show this image" : info.Note ?? "");
+            string note = info.IsImage ? "Could not show this image" : info.Note ?? "";
+            ShowPreviewNote(note.Length == 0 && info.Lines is { Count: 0 } ? "Empty file" : note);
         }
     }
 

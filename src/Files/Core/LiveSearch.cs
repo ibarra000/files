@@ -19,6 +19,9 @@ public sealed class LiveSearch
     /// <summary>The most files kept from a matching folder that do not match by name, as indexed search shows.</summary>
     private const int MaxInheritedPerFolder = 64;
 
+    /// <summary>The most matching folders remembered per volume; the panel ranks and shows far fewer.</summary>
+    private const int MaxMatchingFolders = 1000;
+
     private readonly IReadOnlyList<(string Name, string Root)> _volumes;
     private readonly Query _query;
     private readonly IReadOnlySet<string> _hiddenExtensions;
@@ -27,6 +30,9 @@ public sealed class LiveSearch
     private readonly object _gate = new();
     private readonly List<(string Relative, IReadOnlyList<string> Files)>[] _found;
     private readonly List<string> _problems = [];
+
+    /// <summary>Folders whose own name matches, kept even when they hold no matching file (the walk only keeps those that do).</summary>
+    private readonly List<string>[] _matchingFolders;
     private int _foldersRead;
     private int _kept;
     private int _notKept;
@@ -39,6 +45,7 @@ public sealed class LiveSearch
         _skipHidden = skipHidden;
         _maxKept = maxKept;
         _found = volumes.Select(_ => new List<(string, IReadOnlyList<string>)>()).ToArray();
+        _matchingFolders = volumes.Select(_ => new List<string>()).ToArray();
     }
 
     public int FoldersRead => Volatile.Read(ref _foldersRead);
@@ -83,6 +90,8 @@ public sealed class LiveSearch
             lock (_gate)
             {
                 folders = [.. _found[volume]];
+                var listed = folders.Select(folder => folder.Relative).ToHashSet(StringComparer.Ordinal);
+                folders.AddRange(_matchingFolders[volume].Where(listed.Add).Select(relative => (relative, (IReadOnlyList<string>)[])));
             }
             folders.Sort((a, b) => string.CompareOrdinal(a.Relative, b.Relative));
             var builder = new VolumeIndex.Builder(_volumes[volume].Root);
@@ -101,7 +110,7 @@ public sealed class LiveSearch
         var (name, root) = _volumes[volume];
         try
         {
-            Walker.Walk(root, _skipHidden, cancel, Keep, (relative, files) =>
+            Walker.Walk(root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
             {
                 lock (_gate)
                 {
@@ -119,15 +128,32 @@ public sealed class LiveSearch
         }
     }
 
+    /// <summary>Remembers a folder found by its own name, up to <see cref="MaxMatchingFolders"/> per volume.</summary>
+    private void NoteMatchingFolder(int volume, string relative)
+    {
+        lock (_gate)
+        {
+            if (_matchingFolders[volume].Count < MaxMatchingFolders)
+            {
+                _matchingFolders[volume].Add(relative);
+            }
+        }
+    }
+
     /// <summary>
     /// Keeps the files that match by name. In a folder whose path matches,
     /// also keeps up to 64 others, which indexed search lists as inherited
     /// (indexed search counts all of them, so its match count can be higher).
     /// </summary>
-    private List<string> Keep(string relative, List<string> files)
+    private List<string> Keep(int volume, string relative, List<string> files)
     {
         Interlocked.Increment(ref _foldersRead);
-        bool folderMatches = relative.Length > 0 && VolumeIndex.FolderMatch(_query, Names.Fold(relative)) >= 0;
+        string lowerRelative = Names.Fold(relative);
+        bool folderMatches = relative.Length > 0 && VolumeIndex.FolderMatch(_query, lowerRelative) >= 0;
+        if (relative.Length > 0 && VolumeIndex.OwnNameMatch(_query, lowerRelative) >= 0)
+        {
+            NoteMatchingFolder(volume, relative);
+        }
         var kept = new List<string>();
         int inherited = 0;
         foreach (string file in files)

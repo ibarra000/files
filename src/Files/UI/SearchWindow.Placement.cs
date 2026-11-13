@@ -36,6 +36,8 @@ public partial class SearchWindow
             return;
         }
         Rect area = SystemParameters.WorkArea;
+        // The saved size is without the preview pane, which WidenForPreview adds back below.
+        MinWidth = ListMinWidth;
         // A size saved on a larger screen still has to fit this one.
         Width = Math.Clamp(_app.Settings.WindowWidth ?? Width - _previewAdded, MinWidth, Math.Max(MinWidth, area.Width));
         Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));

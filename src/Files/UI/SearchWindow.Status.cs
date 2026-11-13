@@ -101,8 +101,8 @@ public partial class SearchWindow
         SpinnerTurn.BeginAnimation(RotateTransform.AngleProperty, turn);
     }
 
-    /// <summary>A search is on screen and found nothing (the home list has no result).</summary>
-    private bool HasNoHits => _result is { Hits.Count: 0, Folders.Count: 0 };
+    /// <summary>A search is on screen and lists nothing under the chosen chip (the home list has no result).</summary>
+    private bool HasNoHits => _result is not null && Results.Items.Count == 0;
 
     private void ShowToast(string? message)
     {

@@ -55,7 +55,8 @@ public static class Preview
             }
             return ForFile(empty with { Kind = KindLabel(name), Size = file.Length, Modified = file.LastWriteTime }, file, cancel);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException
+            or NotSupportedException or ArgumentException)
         {
             return empty with { Note = $"Could not read it: {error.Message}" };
         }

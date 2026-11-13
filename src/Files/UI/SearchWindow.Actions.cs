@@ -103,6 +103,10 @@ public partial class SearchWindow
             return;
         }
         e.Handled = true;
+        if (e.Text.Any(char.IsControl))
+        {
+            return;
+        }
         _actionFilter += e.Text;
         ShowActions();
     }

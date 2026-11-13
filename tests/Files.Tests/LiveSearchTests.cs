@@ -30,6 +30,18 @@ public sealed class LiveSearchTests
     }
 
     [Fact]
+    public async Task A_matching_folder_is_found_live_too()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"jobs\plans\notes.txt");
+        Directory.CreateDirectory(Path.Combine(temp.Path, "empty plans"));
+
+        (_, SearchResult result) = await Run("plans", null, ("v", temp.Path));
+
+        Assert.Equal(["plans", "empty plans"], result.Folders.Select(hit => hit.Name));
+    }
+
+    [Fact]
     public async Task Ext_filters_and_hidden_extensions_apply()
     {
         using var temp = new TempFolder();
