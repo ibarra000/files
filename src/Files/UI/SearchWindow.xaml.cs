@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -45,7 +44,6 @@ public partial class SearchWindow : Window
     private bool _liveSnapshotPending;
     private bool _liveSnapshotAgain;
     private HwndSourceHook? _snapHook;
-    private ResourceDictionary? _themeColors;
 
     public SearchWindow(App app)
     {
@@ -72,7 +70,6 @@ public partial class SearchWindow : Window
         // The preview pane's width is added or taken off once a maximized panel is restored.
         StateChanged += (_, _) => FitPreviewWidth();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
-        ApplyTheme();
         ApplyRowLayout();
         ApplyPreview(app.Settings.ShowPreview);
         SourceInitialized += (_, _) =>
@@ -82,26 +79,11 @@ public partial class SearchWindow : Window
         };
         app.SettingsChanged += async () =>
         {
-            ApplyTheme();
             Backdrop.Apply(this, app.IsDark);
             ApplyRowLayout();
             ApplyPreview(app.Settings.ShowPreview);
             await SearchAsync();
         };
-    }
-
-    /// <summary>Puts the light or dark panel colors (UI/PanelTheme.*.xaml) in front of the styles that use them.</summary>
-    private void ApplyTheme()
-    {
-        string name = _app.IsDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
-        var colors = new ResourceDictionary { Source = new Uri($"/files;component/UI/{name}", UriKind.Relative) };
-        Collection<ResourceDictionary> merged = Resources.MergedDictionaries;
-        if (_themeColors is not null)
-        {
-            merged.Remove(_themeColors);
-        }
-        merged.Insert(0, colors);
-        _themeColors = colors;
     }
 
     /// <summary>The folder on its own line under each name, or after it on the same line.</summary>

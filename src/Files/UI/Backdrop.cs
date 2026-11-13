@@ -2,19 +2,21 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 
 namespace Files.UI;
 
 /// <summary>
-/// Gives the frameless panel a plain, solid Windows 11 look: the theme's own
-/// background, rounded corners with their shadow, and no light outline around a
-/// dark panel. Older Windows ignores the attributes it does not know.
+/// Gives the panel and Settings a plain, solid Windows 11 look: the panel's own
+/// background (with a title bar, if any, in the same color), rounded corners with
+/// their shadow, and no light outline. Older Windows ignores the attributes it does not know.
 /// </summary>
 internal static class Backdrop
 {
     private const int UseImmersiveDarkMode = 20;
     private const int WindowCornerPreference = 33;
     private const int BorderColor = 34;
+    private const int CaptionColor = 35;
     private const int SystemBackdropType = 38;
     private const int RoundCorners = 2;
     private const int NoBackdrop = 1;
@@ -34,6 +36,11 @@ internal static class Backdrop
         SetAttribute(handle, UseImmersiveDarkMode, dark ? 1 : 0);
         SetAttribute(handle, WindowCornerPreference, RoundCorners);
         SetAttribute(handle, BorderColor, NoBorderColor);
+        // A window with a title bar (Settings) gets it in the same color as its body; the frameless panel has none.
+        if (window.TryFindResource("PanelBackground") is SolidColorBrush { Color: var color })
+        {
+            SetAttribute(handle, CaptionColor, color.R | color.G << 8 | color.B << 16);
+        }
     }
 
     private static void SetAttribute(IntPtr handle, int attribute, int value)

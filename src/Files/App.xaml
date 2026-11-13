@@ -4,8 +4,14 @@
              ThemeMode="System"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
-        <Style x:Key="Dim" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
-        </Style>
+        <!-- App.ApplyTheme puts the light or dark colors (UI/PanelTheme.*.xaml) ahead of these. -->
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="UI/PanelStyles.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+            <Style x:Key="Dim" TargetType="TextBlock">
+                <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
+            </Style>
+        </ResourceDictionary>
     </Application.Resources>
 </Application>
