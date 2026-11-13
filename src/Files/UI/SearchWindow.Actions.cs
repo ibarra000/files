@@ -43,6 +43,15 @@ public partial class SearchWindow
         UpdateStatus();
     }
 
+    /// <summary>The list changed under an open menu: it stays only while its row is still listed.</summary>
+    private void KeepActionsFor(IReadOnlyList<ResultRow> rows)
+    {
+        if (ActionMenu.IsOpen && (_actionRow is null || !rows.Contains(_actionRow)))
+        {
+            ActionMenu.IsOpen = false;
+        }
+    }
+
     private void ShowActions()
     {
         IReadOnlyList<RowAction> shown = RowActions.Filter(_actions, _actionFilter);

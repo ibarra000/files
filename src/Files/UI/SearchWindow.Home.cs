@@ -34,6 +34,7 @@ public partial class SearchWindow
         IReadOnlyList<string> opened = _app.Settings.ShowRecentlyOpened ? _app.Opened : [];
         List<ResultRow> rows = HomeRows.Build(_app.Favorites, opened, _missing, _showAllFavorites);
         Results.ItemsSource = rows;
+        KeepActionsFor(rows);
         int found = -1;
         if (select is not null)
         {

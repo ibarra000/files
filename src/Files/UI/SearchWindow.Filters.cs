@@ -10,6 +10,7 @@ namespace Files.UI;
 public partial class SearchWindow
 {
     private SearchFilter _filter = SearchFilter.All;
+    private ContextMenu? _scopeMenu;
 
     /// <summary>The one volume searched, by name, or null for all of them; kept until the app closes.</summary>
     private string? _scope;
@@ -58,7 +59,8 @@ public partial class SearchWindow
         {
             AddScopeItem(menu, state.Volume.Name, state.Volume.Name);
         }
-        ScopeButton.ContextMenu = menu;
+        // Kept here, not as the button's context menu, so a right-click can never reopen an old one.
+        _scopeMenu = menu;
         menu.IsOpen = true;
     }
 

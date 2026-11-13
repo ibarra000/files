@@ -296,8 +296,12 @@ public partial class App : Application
         return null;
     }
 
+    /// <summary>Set once Quit starts, so windows that only hide on Close let it close them.</summary>
+    public bool IsQuitting { get; private set; }
+
     public void Quit()
     {
+        IsQuitting = true;
         _panel?.HidePanel();
         _hotkey?.Dispose();
         _ocrHotkey?.Dispose();

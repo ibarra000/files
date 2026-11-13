@@ -89,6 +89,13 @@ public partial class SearchWindow
 
     private void OnResultSelectionChanged(object sender, SelectionChangedEventArgs e) => SchedulePreview();
 
+    /// <summary>A hidden panel reads nothing: the pending read is dropped and one in progress is cancelled.</summary>
+    private void StopPreview()
+    {
+        _previewTimer?.Stop();
+        _previewCancel?.Cancel();
+    }
+
     /// <summary>Reads the selection after a short pause, so moving quickly through results does not read each one.</summary>
     private void SchedulePreview()
     {

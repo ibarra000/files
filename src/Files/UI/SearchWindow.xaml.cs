@@ -65,6 +65,7 @@ public partial class SearchWindow : Window
         PreviewKeyDown += OnKey;
         PreviewTextInput += OnActionText;
         Deactivated += (_, _) => OnDeactivated();
+        Closing += OnClosing;
         // The footer keeps as many key hints as the width allows.
         SizeChanged += (_, _) => UpdateStatus();
         // A click selects a row by focusing it; the keyboard goes straight back to the search box,
@@ -77,7 +78,13 @@ public partial class SearchWindow : Window
             }
         };
         // The preview pane's width is added or taken off once a maximized panel is restored.
-        StateChanged += (_, _) => FitPreviewWidth();
+        StateChanged += (_, _) =>
+        {
+            CloseMenus();
+            FitPreviewWidth();
+        };
+        // A popup does not follow its window, so the menus close rather than float where the panel was.
+        LocationChanged += (_, _) => CloseMenus();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
         ApplyRowLayout();
         ApplyPreview(app.Settings.ShowPreview);
@@ -104,7 +111,11 @@ public partial class SearchWindow : Window
 
     public void ShowPanel()
     {
-        PlaceWindow();
+        // Only a hidden panel goes back to its saved place; a visible one stays where the user put it.
+        if (!IsVisible)
+        {
+            PlaceWindow();
+        }
         Show();
         Activate();
         Input.Focus();
@@ -125,18 +136,43 @@ public partial class SearchWindow : Window
             return;
         }
         StopLiveSearch();
-        SetSpinning(false);
+        CloseMenus();
+        StopPreview();
         SavePlacement();
+        // After saving: a settings change raised by the save can update the status, which must not restart the icon.
+        SetSpinning(false);
         Hide();
+    }
+
+    /// <summary>The action menu and the volume menu belong to what is on screen; they never outlive it.</summary>
+    private void CloseMenus()
+    {
+        ActionMenu.IsOpen = false;
+        if (_scopeMenu is not null)
+        {
+            _scopeMenu.IsOpen = false;
+        }
     }
 
     private void OnDeactivated()
     {
-        bool menuOpen = ActionMenu.IsOpen || ScopeButton.ContextMenu?.IsOpen == true;
-        if (_app.Settings.HideOnBlur && !menuOpen)
+        // The menus are popups that never take activation, so a click elsewhere means the user moved on.
+        CloseMenus();
+        if (_app.Settings.HideOnBlur)
         {
             HidePanel();
         }
+    }
+
+    /// <summary>Alt+F4 or Close in the system menu would destroy the panel for good; it only hides, until the app quits.</summary>
+    private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (_app.IsQuitting)
+        {
+            return;
+        }
+        e.Cancel = true;
+        HidePanel();
     }
 
     private void OnInputChanged(object sender, TextChangedEventArgs e)
@@ -221,6 +257,7 @@ public partial class SearchWindow : Window
         bool showVolume = _app.Indexer.Volumes.Count > 1;
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
+        KeepActionsFor(rows);
         int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
