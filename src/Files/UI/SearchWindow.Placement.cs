@@ -35,18 +35,20 @@ public partial class SearchWindow
         {
             return;
         }
-        Rect area = SystemParameters.WorkArea;
+        // The monitor the panel was last on, or the one with the mouse the first time.
+        double? savedLeft = _app.Settings.WindowLeft;
+        double? savedTop = _app.Settings.WindowTop;
+        Rect area = savedLeft is double atLeft && savedTop is double atTop ? WorkAreaAt(atLeft, atTop) : WorkAreaUnderMouse();
         // The saved size is without the preview pane, which WidenForPreview adds back below.
         MinWidth = ListMinWidth;
         // A size saved on a larger screen still has to fit this one.
         Width = Math.Clamp(_app.Settings.WindowWidth ?? Width - _previewAdded, MinWidth, Math.Max(MinWidth, area.Width));
         Height = Math.Clamp(_app.Settings.WindowHeight ?? Height, MinHeight, Math.Max(MinHeight, area.Height));
         _previewAdded = 0;
-        double left = _app.Settings.WindowLeft ?? area.Left + (area.Width - Width) / 2;
-        double top = _app.Settings.WindowTop ?? area.Top + area.Height * DefaultTopFraction;
-        // Pull a position saved on a monitor that is gone back onto the screen.
-        bool onScreen = left >= SystemParameters.VirtualScreenLeft
-            && top >= SystemParameters.VirtualScreenTop
+        double left = savedLeft ?? area.Left + (area.Width - Width) / 2;
+        double top = savedTop ?? area.Top + area.Height * DefaultTopFraction;
+        // Pull a position saved on a monitor that is gone, or in a gap between monitors, back onto one.
+        bool onScreen = area.Contains(left, top)
             && left + Width <= SystemParameters.VirtualScreenLeft + SystemParameters.VirtualScreenWidth
             && top + Height <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight;
         Left = onScreen ? left : area.Left + (area.Width - Width) / 2;
@@ -55,6 +57,33 @@ public partial class SearchWindow
         {
             WidenForPreview();
         }
+    }
+
+    /// <summary>The work area (the screen less the taskbar), in WPF units, of the monitor the panel is on.</summary>
+    private Rect CurrentWorkArea()
+    {
+        IntPtr handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+        System.Windows.Forms.Screen screen = handle == IntPtr.Zero
+            ? System.Windows.Forms.Screen.PrimaryScreen ?? System.Windows.Forms.Screen.AllScreens[0]
+            : System.Windows.Forms.Screen.FromHandle(handle);
+        return InWpfUnits(screen.WorkingArea);
+    }
+
+    /// <summary>The work area of the monitor holding a point given in WPF units, or the nearest one.</summary>
+    private Rect WorkAreaAt(double left, double top)
+    {
+        DpiScale dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+        var pixel = new System.Drawing.Point((int)(left * dpi.DpiScaleX), (int)(top * dpi.DpiScaleY));
+        return InWpfUnits(System.Windows.Forms.Screen.FromPoint(pixel).WorkingArea);
+    }
+
+    private Rect WorkAreaUnderMouse() =>
+        InWpfUnits(System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea);
+
+    private Rect InWpfUnits(System.Drawing.Rectangle pixels)
+    {
+        DpiScale dpi = System.Windows.Media.VisualTreeHelper.GetDpi(this);
+        return new Rect(pixels.Left / dpi.DpiScaleX, pixels.Top / dpi.DpiScaleY, pixels.Width / dpi.DpiScaleX, pixels.Height / dpi.DpiScaleY);
     }
 
     /// <summary>

@@ -64,18 +64,23 @@ public partial class SearchWindow
         {
             WidenForPreview();
         }
-        else if (!PreviewShown && _previewAdded > 0)
+        else if (!PreviewShown)
         {
+            // Also when no width was added (the window was already as wide as the screen): the list's own minimum returns.
             MinWidth = ListMinWidth;
-            Width = Math.Max(MinWidth, Width - _previewAdded);
-            _previewAdded = 0;
+            if (_previewAdded > 0)
+            {
+                Width = Math.Max(MinWidth, Width - _previewAdded);
+                _previewAdded = 0;
+            }
         }
     }
 
     /// <summary>Adds the pane's width, as far as the screen allows, moving left if the window would run off it.</summary>
     private void WidenForPreview()
     {
-        Rect area = SystemParameters.WorkArea;
+        // The monitor the panel is on, not the main one, or it would be pulled across to it.
+        Rect area = CurrentWorkArea();
         double wider = Math.Min(Width + PreviewWidth, area.Width);
         _previewAdded = wider - Width;
         Width = wider;
@@ -113,14 +118,18 @@ public partial class SearchWindow
                 {
                     return;
                 }
+                ResultRow? row = SelectedRow;
                 try
                 {
-                    await ShowPreviewAsync(SelectedRow);
+                    await ShowPreviewAsync(row);
                 }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
                 {
-                    // A timer callback must not let an exception end the process.
-                    ShowPreviewNote($"Could not read it: {error.Message}");
+                    // A timer callback must not let an exception end the process; and an old read says nothing over a newer one.
+                    if (SelectedRow == row)
+                    {
+                        ShowPreviewNote($"Could not read it: {error.Message}");
+                    }
                 }
             };
         }
