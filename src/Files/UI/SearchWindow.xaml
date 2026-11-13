@@ -6,7 +6,8 @@
         MinWidth="420" MinHeight="240"
         WindowStyle="None" ResizeMode="CanResize" ShowInTaskbar="False" Topmost="True"
         WindowStartupLocation="Manual">
-    <Border Padding="14,14,14,10" Background="Transparent" MouseLeftButtonDown="OnDragWindow">
+    <!-- The empty padding drags the panel like a title bar (see UI/Snap.cs). -->
+    <Border x:Name="DragArea" Padding="14,14,14,10" Background="Transparent">
         <DockPanel>
             <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
                 <TextBox x:Name="Input" FontSize="18" Padding="10,6"
@@ -15,9 +16,19 @@
                            IsHitTestVisible="False" Style="{StaticResource Dim}" />
             </Grid>
 
-            <Grid DockPanel.Dock="Bottom" Margin="4,8,4,0">
-                <TextBlock x:Name="Status" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" />
-                <TextBlock x:Name="Hint" HorizontalAlignment="Right" Style="{StaticResource Dim}"
+            <Grid DockPanel.Dock="Bottom" Margin="0,6,4,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <!-- Not focusable, so the search box keeps the keyboard. -->
+                <Button x:Name="SettingsButton" Content="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"
+                        Padding="6,3" Margin="0,0,8,0" MinWidth="0" MinHeight="0" Background="Transparent" BorderThickness="0"
+                        Focusable="False" VerticalAlignment="Center" ToolTip="Settings (Ctrl+,)"
+                        AutomationProperties.Name="Settings" Click="OnSettingsClick" />
+                <TextBlock x:Name="Status" Grid.Column="1" TextTrimming="CharacterEllipsis" Margin="0,0,12,0" VerticalAlignment="Center" />
+                <TextBlock x:Name="Hint" Grid.Column="2" Style="{StaticResource Dim}" VerticalAlignment="Center"
                            Text="Enter to open" />
             </Grid>
 
@@ -29,7 +40,7 @@
                 <ListBox.ItemContainerStyle>
                     <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Padding" Value="10,3" />
+                        <Setter Property="Padding" Value="8,1" />
                         <Style.Triggers>
                             <!-- Section headers cannot be selected or clicked. -->
                             <DataTrigger Binding="{Binding IsHeader}" Value="True">
@@ -47,7 +58,7 @@
                 </ListBox.ContextMenu>
                 <ListBox.ItemTemplate>
                     <DataTemplate>
-                        <Grid Margin="2,3" ToolTip="{Binding Detail}">
+                        <Grid Margin="2,1" ToolTip="{Binding Detail}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
@@ -59,8 +70,9 @@
                                 <TextBlock FontSize="14" TextTrimming="CharacterEllipsis">
                                     <Run Text="{Binding Before, Mode=OneWay}" /><Run Text="{Binding Match, Mode=OneWay}" FontWeight="Bold" /><Run Text="{Binding After, Mode=OneWay}" />
                                 </TextBlock>
+                                <!-- DetailVisibility follows the ShowFolders setting (SearchWindow.ApplyRowLayout). -->
                                 <TextBlock Text="{Binding Detail}" FontSize="12" TextTrimming="CharacterEllipsis"
-                                           Style="{StaticResource Dim}" />
+                                           Visibility="{DynamicResource DetailVisibility}" Style="{StaticResource Dim}" />
                             </StackPanel>
                             <TextBlock Grid.Column="2" Text="{Binding Badge}" FontSize="12" Margin="10,0,0,0"
                                        VerticalAlignment="Center" Style="{StaticResource Dim}" />

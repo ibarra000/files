@@ -72,6 +72,19 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Folders_show_under_results_unless_turned_off()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        Assert.True(new Settings().ShowFolders);
+
+        new Settings { ShowFolders = false }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+
+        Assert.False(loaded.ShowFolders);
+    }
+
+    [Fact]
     public void Settings_without_the_text_shortcut_get_its_default()
     {
         using var temp = new TempFolder();

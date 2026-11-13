@@ -54,16 +54,24 @@ public partial class SearchWindow : Window
         PreviewKeyDown += OnKey;
         Deactivated += (_, _) => OnDeactivated();
         app.Indexer.Changed += () => Dispatcher.BeginInvoke(OnIndexerChanged);
+        ApplyRowLayout();
         SourceInitialized += (_, _) =>
         {
             Backdrop.Apply(this, app.IsDark);
-            _snapHook = Snap.Attach(this);
+            _snapHook = Snap.Attach(this, IsOverDragArea);
         };
         app.SettingsChanged += async () =>
         {
             Backdrop.Apply(this, app.IsDark);
+            ApplyRowLayout();
             await SearchAsync();
         };
+    }
+
+    /// <summary>Shows or hides the folder line under each result.</summary>
+    private void ApplyRowLayout()
+    {
+        Results.Resources["DetailVisibility"] = _app.Settings.ShowFolders ? Visibility.Visible : Visibility.Collapsed;
     }
 
     public void ShowPanel()
@@ -334,10 +342,6 @@ public partial class SearchWindow : Window
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
         _result = result;
         List<ResultRow> rows = result.Hits.Select(ResultRow.ForHit).ToList();
-        if (rows.Count == 0 && _live is null)
-        {
-            rows.Add(ResultRow.ForLiveHint());
-        }
         Results.ItemsSource = rows;
         int keep = rows.FindIndex(row => row.Hit?.Path == selectedPath);
         Results.SelectedIndex = keep >= 0 ? keep : (rows.Count > 0 ? 0 : -1);
@@ -370,6 +374,7 @@ public partial class SearchWindow : Window
 
     private void UpdateStatus()
     {
+        Hint.Text = StatusText.Hint(HasNoHits, liveRunning: _liveCancel is not null);
         if (_toast is not null)
         {
             Status.Text = _toast;
@@ -383,6 +388,9 @@ public partial class SearchWindow : Window
             Status.Text = StatusText.For(_app.Indexer.Volumes, _queryProblem);
         }
     }
+
+    /// <summary>A search is on screen and found nothing (the home list has no result).</summary>
+    private bool HasNoHits => _result is { Hits.Count: 0 };
 
     private void ShowToast(string? message)
     {
@@ -454,7 +462,7 @@ public partial class SearchWindow : Window
                 break;
             case Key.F5:
                 _app.Indexer.RescanAll();
-                ShowToast("Reading every volume again");
+                ShowToast("Scanning every volume again");
                 break;
             case Key.OemComma when ctrl:
                 _app.ShowSettings();
@@ -494,7 +502,11 @@ public partial class SearchWindow : Window
         }
         switch (SelectedRow)
         {
-            case { Kind: RowKind.LiveHint }:
+            case null when HasNoHits && _liveCancel is not null:
+                // A live search is still reading; Enter must not restart it.
+                return;
+            case null when HasNoHits:
+                // Nothing matched: Enter reads the volumes directly, as Shift+Enter does.
                 await StartLiveSearchAsync();
                 return;
             case { Kind: RowKind.SeeAll }:
@@ -629,6 +641,8 @@ public partial class SearchWindow : Window
         menu.Items.Add(item);
     }
 
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => _app.ShowSettings();
+
     private void OnResultMouseDown(object sender, MouseButtonEventArgs e) => _dragStart = e.GetPosition(Results);
 
     /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
@@ -648,11 +662,24 @@ public partial class SearchWindow : Window
         }
     }
 
-    private void OnDragWindow(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// Whether <paramref name="screen"/> (in screen pixels) is over the empty padding rather than the box, a result or the footer.
+    /// Windows then drags the panel itself, which also works while it is maximized or snapped, where DragMove does nothing.
+    /// </summary>
+    private bool IsOverDragArea(Point screen)
     {
-        if (e.OriginalSource == sender && e.ButtonState == MouseButtonState.Pressed)
+        if (PresentationSource.FromVisual(this) is null)
         {
-            DragMove();
+            return false;
+        }
+        try
+        {
+            return InputHitTest(PointFromScreen(screen)) == DragArea;
+        }
+        catch (InvalidOperationException)
+        {
+            // The window is being torn down; this runs on every mouse move, so it must not report an error.
+            return false;
         }
     }
 }

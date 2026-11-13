@@ -67,6 +67,7 @@ public partial class SettingsWindow : Window
             .FirstOrDefault(item => (string)item.Tag == settings.RescanHours.ToString()) ?? RescanBox.Items[0];
         HideSystemBox.IsChecked = settings.HideSystemFiles;
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
+        ShowFoldersBox.IsChecked = settings.ShowFolders;
         foreach (Viewer viewer in settings.Viewers)
         {
             _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
@@ -131,6 +132,7 @@ public partial class SettingsWindow : Window
             RescanHours = int.Parse((string)((ComboBoxItem)RescanBox.SelectedItem).Tag),
             HideSystemFiles = HideSystemBox.IsChecked == true,
             HiddenExtensions = SplitList(HiddenBox.Text),
+            ShowFolders = ShowFoldersBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
