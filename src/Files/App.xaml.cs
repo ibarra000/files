@@ -223,6 +223,11 @@ public partial class App : Application
         {
             _readingScreen = false;
         }
+        if (IsQuitting)
+        {
+            // A read cut short by quitting has nothing to show.
+            return;
+        }
         _panel?.ShowWithSearch(read.Text, read.Problem);
     }
 

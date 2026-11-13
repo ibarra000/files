@@ -25,6 +25,7 @@ public partial class SettingsWindow : Window
 
     private readonly App _app;
     private readonly ObservableCollection<ViewerRow> _viewers = [];
+    private readonly ObservableCollection<VolumeRow> _volumeRows = [];
     private bool _loading = true;
 
     public SettingsWindow(App app)
@@ -32,6 +33,7 @@ public partial class SettingsWindow : Window
         InitializeComponent();
         _app = app;
         ViewerGrid.ItemsSource = _viewers;
+        VolumeGrid.ItemsSource = _volumeRows;
         Load(app.Settings);
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
@@ -348,12 +350,32 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>
+    /// Updates the rows in place, so the grid keeps its sort and scroll while volumes are read
+    /// (progress arrives several times a second); only a different set of volumes rebuilds it.
+    /// </summary>
     private void RefreshVolumes()
     {
         long? selected = (VolumeGrid.SelectedItem as VolumeRow)?.Id;
         List<VolumeRow> rows = _app.Indexer.Volumes.Select(VolumeRow.From).ToList();
-        VolumeGrid.ItemsSource = rows;
-        VolumeGrid.SelectedItem = rows.FirstOrDefault(row => row.Id == selected);
+        bool sameVolumes = rows.Select(row => row.Id).Order().SequenceEqual(_volumeRows.Select(row => row.Id).Order());
+        if (!sameVolumes)
+        {
+            _volumeRows.Clear();
+            rows.ForEach(_volumeRows.Add);
+        }
+        else
+        {
+            foreach (VolumeRow row in rows)
+            {
+                int at = _volumeRows.ToList().FindIndex(shown => shown.Id == row.Id);
+                if (_volumeRows[at] != row)
+                {
+                    _volumeRows[at] = row;
+                }
+            }
+        }
+        VolumeGrid.SelectedItem = _volumeRows.FirstOrDefault(row => row.Id == selected);
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
@@ -385,7 +407,7 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void OnRemoveVolume(object sender, RoutedEventArgs e)
+    private async void OnRemoveVolume(object sender, RoutedEventArgs e)
     {
         if (VolumeGrid.SelectedItem is not VolumeRow row)
         {
@@ -396,7 +418,9 @@ public partial class SettingsWindow : Window
             MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (answer == MessageBoxResult.OK)
         {
-            Message.Text = _app.Indexer.Remove(row.Id) ?? "";
+            // Off the UI thread: it waits for a read that is writing the volume's file list to finish.
+            Message.Text = "Removing…";
+            Message.Text = await Task.Run(() => _app.Indexer.Remove(row.Id)) ?? "";
         }
     }
 

@@ -28,7 +28,7 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
     // A failed load leaves _ocr null, so the next read tries again (and the caller falls back meanwhile).
     private readonly object _gate = new();
     private RapidOcr? _ocr;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public PaddleTextReader(string modelFolder)
     {
@@ -49,6 +49,7 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
             lock (_gate)
             {
                 Engine();
+                FreeIfClosed();
             }
         }
         catch (TextReaderLoadException error)
@@ -63,9 +64,36 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
 
     public void Dispose()
     {
-        lock (_gate)
+        // Quit must not wait for a load or read in progress: it frees the engine at once if it can,
+        // otherwise the load or read that holds it does so when it ends (FreeIfClosed).
+        _disposed = true;
+        if (Monitor.TryEnter(_gate))
         {
-            _disposed = true;
+            try
+            {
+                FreeIfClosed();
+            }
+            finally
+            {
+                Monitor.Exit(_gate);
+            }
+            return;
+        }
+        // Busy: free it as soon as the lock is let go, without holding up the caller.
+        _ = Task.Run(() =>
+        {
+            lock (_gate)
+            {
+                FreeIfClosed();
+            }
+        });
+    }
+
+    /// <summary>Frees the engine once the reader is closed. Call with <see cref="_gate"/> held.</summary>
+    private void FreeIfClosed()
+    {
+        if (_disposed)
+        {
             _ocr?.Dispose();
             _ocr = null;
         }
@@ -85,6 +113,7 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
         lock (_gate)
         {
             result = Engine().Detect(image, Options, cancel);
+            FreeIfClosed();
         }
         var words = new List<(string Text, Rect Box)>();
         foreach (TextBlock block in result.TextBlocks)
