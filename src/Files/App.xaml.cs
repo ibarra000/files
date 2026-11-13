@@ -25,6 +25,7 @@ public partial class App : Application
     private Tray? _tray;
     private SearchWindow? _panel;
     private SettingsWindow? _settingsWindow;
+    private ResourceDictionary? _themeColors;
     private DispatcherTimer? _updateTimer;
 
     // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
@@ -329,6 +330,15 @@ public partial class App : Application
             Theme.Dark => ThemeMode.Dark,
             _ => ThemeMode.System,
         };
+        // The panel's and settings' own colors (UI/PanelTheme.*.xaml), ahead of the styles that use them (UI/PanelStyles.xaml).
+        string name = IsDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
+        var colors = new ResourceDictionary { Source = new Uri($"/files;component/UI/{name}", UriKind.Relative) };
+        if (_themeColors is not null)
+        {
+            Resources.MergedDictionaries.Remove(_themeColors);
+        }
+        Resources.MergedDictionaries.Insert(0, colors);
+        _themeColors = colors;
     }
 
     private void StartUpdateChecks()

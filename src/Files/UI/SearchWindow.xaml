@@ -8,14 +8,6 @@
         WindowStyle="None" ResizeMode="CanResize" ShowInTaskbar="False" Topmost="True"
         WindowStartupLocation="Manual"
         FontFamily="{DynamicResource UiFont}" Foreground="{DynamicResource Text}">
-    <Window.Resources>
-        <ResourceDictionary>
-            <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="PanelStyles.xaml" />
-            </ResourceDictionary.MergedDictionaries>
-        </ResourceDictionary>
-    </Window.Resources>
-
     <!-- The empty space around the header drags the panel like a title bar (see UI/Snap.cs). -->
     <Border x:Name="DragArea" Background="Transparent">
         <DockPanel>
