@@ -158,6 +158,9 @@ public static class StatusText
         return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
     }
 
+    /// <summary>The key caps while the action menu is open.</summary>
+    public static IReadOnlyList<KeyHint> MenuHints { get; } = [new KeyHint("↵", "Run"), new KeyHint("Esc", "Back")];
+
     /// <summary>The footer when all is well: how much is searchable and how fresh it is.</summary>
     public static string Indexed(long files, DateTime? newestScan)
     {

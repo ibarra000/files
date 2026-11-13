@@ -19,6 +19,24 @@
     <!-- The empty space around the header drags the panel like a title bar (see UI/Snap.cs). -->
     <Border x:Name="DragArea" Background="Transparent">
         <DockPanel>
+            <!-- The action menu (Tab or right-click on a result), opened beside the row (SearchWindow.Actions.cs). -->
+            <Popup x:Name="ActionMenu" DockPanel.Dock="Top" PlacementTarget="{Binding ElementName=Results}" Placement="Relative"
+                   StaysOpen="False" AllowsTransparency="True" Closed="OnActionMenuClosed">
+                <Border Width="300" Margin="0,0,16,16" Padding="6" CornerRadius="10" BorderThickness="1"
+                        Background="{DynamicResource ControlFill}" BorderBrush="{DynamicResource ControlStroke}">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="24" ShadowDepth="8" Direction="270" Opacity="0.35" />
+                    </Border.Effect>
+                    <DockPanel>
+                        <TextBlock x:Name="ActionTitle" DockPanel.Dock="Top" FontSize="11" Margin="10,6,10,8"
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextDim}" />
+                        <Border DockPanel.Dock="Top" Height="1" Margin="0,0,0,4" Background="{DynamicResource Divider}" />
+                        <ListBox x:Name="ActionList" MaxHeight="360" BorderThickness="0" Background="Transparent" Focusable="False"
+                                 ItemContainerStyle="{StaticResource ActionItem}" ItemTemplate="{StaticResource ActionLine}"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" PreviewMouseLeftButtonUp="OnActionClicked" />
+                    </DockPanel>
+                </Border>
+            </Popup>
             <!-- The box is the panel's header: a search icon and no box chrome, then a divider. -->
             <Grid DockPanel.Dock="Top" Margin="12,10,16,10">
                 <Grid.ColumnDefinitions>
@@ -165,11 +183,8 @@
                      ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
                      VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                     MouseDoubleClick="OnResultDoubleClick" ContextMenuOpening="OnResultMenuOpening"
+                     MouseDoubleClick="OnResultDoubleClick" PreviewMouseRightButtonUp="OnResultRightClick"
                      PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
-                <ListBox.ContextMenu>
-                    <ContextMenu />
-                </ListBox.ContextMenu>
             </ListBox>
         </DockPanel>
     </Border>

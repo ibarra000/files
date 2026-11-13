@@ -24,14 +24,18 @@ public partial class SearchWindow
         long files = volumes.Sum(state => (long)(state.Index?.FileCount ?? 0));
         Placeholder.Text = StatusText.Placeholder(files);
         UpdateHeader(volumes);
-        ShowHints(StatusText.Hints(HasNoHits, liveRunning: _liveCancel is not null));
+        ShowHints(ActionMenu.IsOpen ? StatusText.MenuHints : StatusText.Hints(HasNoHits, liveRunning: _liveCancel is not null));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
         string attention = StatusText.For(volumes, _queryProblem, rescanRequested);
         StatusDot.SetResourceReference(Shape.FillProperty, attention.Length == 0 ? "Ok" : "Warn");
         // The glyph turns only beside the words "Scanning…", not beside a message or a live search.
         bool scanning = false;
-        if (_toast is not null)
+        if (ActionMenu.IsOpen)
+        {
+            Status.Text = "Type to filter actions";
+        }
+        else if (_toast is not null)
         {
             Status.Text = _toast;
         }

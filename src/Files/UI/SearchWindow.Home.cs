@@ -77,13 +77,9 @@ public partial class SearchWindow
     /// <summary>What Ctrl+D adds or removes: the selected file or home item, else the search in the box.</summary>
     private Favorite? FavoriteFor(ResultRow? row)
     {
-        if (row?.Hit is Hit hit)
+        if (row is not null && RowActions.FavoriteOf(row) is Favorite favorite)
         {
-            return new Favorite(hit.IsFolder ? FavoriteKind.Folder : FavoriteKind.File, hit.Path);
-        }
-        if (row?.Item is Favorite item)
-        {
-            return item;
+            return favorite;
         }
         string search = Input.Text.Trim();
         return search.Length > 0 ? new Favorite(FavoriteKind.Search, search) : null;
@@ -103,30 +99,6 @@ public partial class SearchWindow
         {
             ShowHome(keepSelection: true);
         }
-    }
-
-    private void AddFavoriteItems(ContextMenu menu, ResultRow row)
-    {
-        if (FavoriteFor(row) is Favorite favorite)
-        {
-            AddToggleItem(menu, favorite, "Add to favorites", "Remove from favorites", "Ctrl+D");
-        }
-        if (row.Hit is not Hit hit)
-        {
-            return;
-        }
-        AddToggleItem(menu, new Favorite(FavoriteKind.Folder, hit.Folder), "Add its folder to favorites", "Remove its folder from favorites", "");
-        string search = Input.Text.Trim();
-        if (search.Length > 0)
-        {
-            AddToggleItem(menu, new Favorite(FavoriteKind.Search, search), "Save this search", "Remove this saved search", "");
-        }
-    }
-
-    private void AddToggleItem(ContextMenu menu, Favorite favorite, string add, string remove, string gesture)
-    {
-        string header = Favorites.Contains(_app.Favorites, favorite) ? remove : add;
-        AddMenuItem(menu, header, gesture, () => ToggleFavorite(favorite));
     }
 
     /// <summary>Up recalls past searches while the box is empty or showing one, and the top row is selected.</summary>

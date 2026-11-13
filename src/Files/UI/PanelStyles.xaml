@@ -134,6 +134,57 @@
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
     </Style>
 
+    <!-- A line of the action menu (board 3): a separator above when it starts a group, the shortcut on the right. -->
+    <Style x:Key="ActionItem" TargetType="ListBoxItem">
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Foreground" Value="{DynamicResource Text}" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBoxItem">
+                    <StackPanel>
+                        <Border x:Name="Separator" Height="1" Margin="6,4" Background="{DynamicResource Divider}" Visibility="Collapsed" />
+                        <Border x:Name="Chrome" CornerRadius="6" Padding="10,7" Background="Transparent">
+                            <ContentPresenter />
+                        </Border>
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <DataTrigger Binding="{Binding SeparatorBefore}" Value="True">
+                            <Setter TargetName="Separator" Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding Danger}" Value="True">
+                            <Setter Property="Foreground" Value="{DynamicResource Danger}" />
+                        </DataTrigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource HoverFill}" />
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectionFill}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <DataTemplate x:Key="ActionLine">
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="{Binding Label}" FontSize="13" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <Border x:Name="Cap" Grid.Column="1" Style="{StaticResource Kbd}" Margin="10,0,0,0">
+                <TextBlock Text="{Binding Gesture}" Style="{StaticResource KbdText}" />
+            </Border>
+        </Grid>
+        <DataTemplate.Triggers>
+            <DataTrigger Binding="{Binding Gesture}" Value="">
+                <Setter TargetName="Cap" Property="Visibility" Value="Collapsed" />
+            </DataTrigger>
+        </DataTemplate.Triggers>
+    </DataTemplate>
+
     <!-- A result row: rounded, a soft accent fill and outline when selected. -->
     <Style x:Key="ResultItem" TargetType="ListBoxItem">
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />

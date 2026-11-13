@@ -65,6 +65,7 @@ public partial class SearchWindow : Window
         _liveTimer.Tick += async (_, _) => await ShowLiveAsync();
         DataObject.AddPastingHandler(Input, (_, _) => _pasted = true);
         PreviewKeyDown += OnKey;
+        PreviewTextInput += OnActionText;
         Deactivated += (_, _) => OnDeactivated();
         // The footer keeps as many key hints as the width allows.
         SizeChanged += (_, _) => UpdateStatus();
@@ -138,7 +139,7 @@ public partial class SearchWindow : Window
 
     private void OnDeactivated()
     {
-        bool menuOpen = Results.ContextMenu?.IsOpen == true || ScopeButton.ContextMenu?.IsOpen == true;
+        bool menuOpen = ActionMenu.IsOpen || ScopeButton.ContextMenu?.IsOpen == true;
         if (_app.Settings.HideOnBlur && !menuOpen)
         {
             HidePanel();
@@ -261,9 +262,20 @@ public partial class SearchWindow : Window
     {
         bool ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
         bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        if (ActionMenu.IsOpen)
+        {
+            e.Handled = OnActionKey(e.Key);
+            return;
+        }
         e.Handled = true;
         switch (e.Key)
         {
+            case Key.Tab when !ctrl:
+                OpenActions();
+                break;
+            case Key.Delete when Input.Text.Length == 0 && SelectedRow is { Kind: RowKind.Opened } recent:
+                RemoveRecent(recent);
+                break;
             case Key.Down when _recall.IsActive:
                 ShowRecalled(_recall.Newer());
                 break;
@@ -380,42 +392,6 @@ public partial class SearchWindow : Window
                 return;
         }
         Open(OpenWith.ForEnter(_app.Settings));
-    }
-
-    private void OnResultMenuOpening(object sender, ContextMenuEventArgs e)
-    {
-        if (SelectedRow is not ResultRow row || (row.Path is null && row.Item is null))
-        {
-            e.Handled = true;
-            return;
-        }
-        var menu = Results.ContextMenu!;
-        menu.Items.Clear();
-        if (row.Path is not null)
-        {
-            AddMenuItem(menu, "Open", "Enter", () => Open(OpenWith.ForEnter(_app.Settings), row));
-            AddMenuItem(menu, "Open with default app", "", () => Open(new OpenWith.Default(), row));
-            if (row.Item?.Kind != FavoriteKind.Folder)
-            {
-                foreach (Viewer viewer in _app.Settings.Viewers)
-                {
-                    AddMenuItem(menu, $"Open with {viewer.Name}", "", () => Open(new OpenWith.Program(viewer), row));
-                }
-            }
-            menu.Items.Add(new Separator());
-            AddMenuItem(menu, "Show in folder", "Ctrl+O", () => Reveal(row));
-            AddMenuItem(menu, "Copy path", "Ctrl+C", () => CopySelected(path: true, row));
-            AddMenuItem(menu, "Copy name", "Ctrl+Shift+C", () => CopySelected(path: false, row));
-            menu.Items.Add(new Separator());
-        }
-        AddFavoriteItems(menu, row);
-    }
-
-    private static void AddMenuItem(ContextMenu menu, string header, string gesture, Action action)
-    {
-        var item = new MenuItem { Header = header, InputGestureText = gesture };
-        item.Click += (_, _) => action();
-        menu.Items.Add(item);
     }
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => _app.ShowSettings();

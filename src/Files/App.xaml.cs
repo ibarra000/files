@@ -358,6 +358,17 @@ public partial class App : Application
         SaveInBackground(() => Core.History.Save(AppPaths.History, History));
     }
 
+    /// <summary>Forgets one recently opened file.</summary>
+    public void RemoveOpened(string path)
+    {
+        IReadOnlyList<string> opened = Core.History.Remove(Opened, path);
+        if (!ReferenceEquals(opened, Opened))
+        {
+            Opened = opened;
+            SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
+        }
+    }
+
     /// <summary>Forgets the recently opened files. Favorites are kept.</summary>
     public void ClearOpened()
     {

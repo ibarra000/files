@@ -32,6 +32,16 @@ public static class History
             .ToList();
     }
 
+    /// <summary>Returns the list without <paramref name="entry"/>, ignoring case; the same list when it is not there.</summary>
+    public static IReadOnlyList<string> Remove(IReadOnlyList<string> entries, string entry)
+    {
+        if (!entries.Any(e => e.Equals(entry, StringComparison.OrdinalIgnoreCase)))
+        {
+            return entries;
+        }
+        return entries.Where(e => !e.Equals(entry, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
     public static IReadOnlyList<string> Load(string path)
     {
         if (!File.Exists(path))
