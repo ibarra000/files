@@ -36,15 +36,71 @@ public partial class SettingsWindow : Window
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
         app.Indexer.Changed += onIndexerChanged;
-        // The title bar and body take the panel's colors, and follow a change of Colors at once.
-        Action onSettingsChanged = () => Backdrop.Apply(this, app.IsDark);
+        // The title bar and body take the panel's colors, and follow a change of Colors at once;
+        // the Install button follows an update found while the window is open.
+        Action onSettingsChanged = () =>
+        {
+            Backdrop.Apply(this, app.IsDark);
+            InstallButton.IsEnabled = app.UpdateOffer is not null;
+        };
         SourceInitialized += (_, _) => onSettingsChanged();
         app.SettingsChanged += onSettingsChanged;
+        // A deleted program row raises no edit event, so the list itself says when one goes.
+        _viewers.CollectionChanged += (_, e) =>
+        {
+            if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Remove)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, Save);
+            }
+        };
+        foreach (TextBox box in new[] { HotkeyBox, OcrHotkeyBox })
+        {
+            // While a shortcut is being recorded, the current ones are let go so pressing them reaches the box.
+            box.GotKeyboardFocus += (_, _) => app.SuspendHotkeys();
+            box.LostKeyboardFocus += (_, _) => ResumeHotkeys();
+        }
+        // Typing in a text field is saved even if the window is left or closed without moving focus.
+        Deactivated += (_, _) => SaveTypedText();
+        Closing += (_, _) =>
+        {
+            ViewerGrid.CommitEdit(DataGridEditingUnit.Row, exitEditingMode: true);
+            SaveTypedText();
+        };
         Closed += (_, _) =>
         {
             app.Indexer.Changed -= onIndexerChanged;
             app.SettingsChanged -= onSettingsChanged;
+            app.ResumeHotkeys();
         };
+    }
+
+    private void ResumeHotkeys()
+    {
+        string? problem = _app.ResumeHotkeys();
+        ShowShortcuts();
+        if (problem is not null)
+        {
+            Message.Text = problem;
+        }
+    }
+
+    /// <summary>The shortcut boxes show the combinations that are kept, which may be the old ones after a problem.</summary>
+    private void ShowShortcuts()
+    {
+        HotkeyBox.Text = _app.Settings.Hotkey;
+        OcrHotkeyBox.Text = _app.Settings.OcrHotkey;
+    }
+
+    /// <summary>Saves the two typed fields when they differ from what is saved; they otherwise save only when focus leaves them.</summary>
+    private void SaveTypedText()
+    {
+        Settings saved = _app.Settings;
+        bool hiddenChanged = !SplitList(HiddenBox.Text).SequenceEqual(saved.HiddenExtensions);
+        bool folderChanged = UpdateFolderBox.Text.Trim() != saved.UpdateFolder;
+        if (hiddenChanged || folderChanged)
+        {
+            Save();
+        }
     }
 
     /// <summary>
@@ -172,6 +228,12 @@ public partial class SettingsWindow : Window
         {
             EnterBox.Items.Add(new ComboBoxItem { Content = viewer.Name, Tag = viewer.Name });
         }
+        bool missing = settings.EnterOpens != Settings.DefaultOpen && settings.Viewers.All(viewer => viewer.Name != settings.EnterOpens);
+        if (missing)
+        {
+            // Its program row is being edited or renamed: the choice is kept rather than quietly becoming the default.
+            EnterBox.Items.Add(new ComboBoxItem { Content = $"{settings.EnterOpens} (not set up)", Tag = settings.EnterOpens });
+        }
         EnterBox.SelectedItem = EnterBox.Items.Cast<ComboBoxItem>()
             .FirstOrDefault(item => (string)item.Tag == settings.EnterOpens) ?? EnterBox.Items[0];
     }
@@ -209,9 +271,10 @@ public partial class SettingsWindow : Window
         }
         Message.Text = string.Join("\n", problems);
 
-        // The viewer list feeds the Enter choices.
+        // The viewer list feeds the Enter choices; a shortcut that could not be had shows the one kept.
         _loading = true;
-        FillEnterChoices(settings);
+        FillEnterChoices(_app.Settings);
+        ShowShortcuts();
         _loading = false;
     }
 
@@ -248,9 +311,14 @@ public partial class SettingsWindow : Window
 
     private void OnHotkeyKey(object sender, KeyEventArgs e)
     {
-        e.Handled = true;
         var box = (TextBox)sender;
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Tab && Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift)
+        {
+            // Tab and Shift+Tab move on, so the boxes can be left with the keyboard.
+            return;
+        }
+        e.Handled = true;
         if (key is Key.Delete or Key.Back)
         {
             box.Text = Hotkey.Off;

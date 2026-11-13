@@ -53,6 +53,45 @@ public partial class App : Application
     /// <summary>Why the hotkey could not be registered, if it could not.</summary>
     public string? HotkeyProblem { get; private set; }
 
+    /// <summary>Why the text-under-the-mouse shortcut does not work, or null.</summary>
+    public string? OcrHotkeyProblem { get; private set; }
+
+    // Both shortcuts are let go while one is being recorded in Settings (see SuspendHotkeys).
+    private bool _hotkeysSuspended;
+    private bool _installing;
+    private bool _appliedDark;
+
+    /// <summary>Lets both shortcuts go while a shortcut box in Settings records keys, so the current combination reaches the box.</summary>
+    public void SuspendHotkeys()
+    {
+        if (_hotkeysSuspended)
+        {
+            return;
+        }
+        _hotkeysSuspended = true;
+        _hotkey?.Suspend();
+        _ocrHotkey?.Suspend();
+    }
+
+    /// <summary>Takes the shortcuts back once recording ends. A combination that cannot be had gives way to the one held before.</summary>
+    public string? ResumeHotkeys()
+    {
+        if (!_hotkeysSuspended || _hotkey is null || _ocrHotkey is null)
+        {
+            return null;
+        }
+        _hotkeysSuspended = false;
+        var (hotkey, hotkeyProblem) = _hotkey.Resume(Settings.Hotkey);
+        var (ocrHotkey, ocrProblem) = _ocrHotkey.Resume(Settings.OcrHotkey);
+        HotkeyProblem = hotkeyProblem;
+        OcrHotkeyProblem = ocrProblem;
+        if (hotkey != Settings.Hotkey || ocrHotkey != Settings.OcrHotkey)
+        {
+            ApplySettings(Settings with { Hotkey = hotkey, OcrHotkey = ocrHotkey });
+        }
+        return hotkeyProblem ?? ocrProblem;
+    }
+
     /// <summary>Raised on the UI thread after settings or the update offer change.</summary>
     public event Action? SettingsChanged;
 
@@ -109,7 +148,8 @@ public partial class App : Application
         HotkeyProblem = _hotkey.Register(Settings.Hotkey);
         _ocrHotkey = new Hotkey();
         _ocrHotkey.Pressed += () => _ = SearchUnderCursorAsync();
-        string? ocrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
+        OcrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         Indexer.Start();
         // Combined PDFs were removed in 1.2; their cache is no longer needed.
         SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
@@ -124,9 +164,9 @@ public partial class App : Application
         {
             startProblems.Add($"Hotkey: {HotkeyProblem}");
         }
-        if (ocrHotkeyProblem is not null)
+        if (OcrHotkeyProblem is not null)
         {
-            startProblems.Add($"Text-under-the-mouse shortcut: {ocrHotkeyProblem}");
+            startProblems.Add($"Text-under-the-mouse shortcut: {OcrHotkeyProblem}");
         }
         if (startProblems.Count > 0)
         {
@@ -202,8 +242,28 @@ public partial class App : Application
     public string? ApplySettings(Settings settings)
     {
         Settings previous = Settings;
-        Settings = settings;
         string? problem = null;
+        // A shortcut is registered before it is saved: one another program holds is not kept, and the working one stays.
+        // One that failed before (at start, say) is tried again whenever settings are applied.
+        if (_hotkey is not null && !_hotkeysSuspended && (settings.Hotkey != previous.Hotkey || HotkeyProblem is not null))
+        {
+            HotkeyProblem = _hotkey.Register(settings.Hotkey);
+            if (HotkeyProblem is not null && _hotkey.Active is string working)
+            {
+                settings = settings with { Hotkey = working };
+            }
+            problem ??= HotkeyProblem;
+        }
+        if (_ocrHotkey is not null && !_hotkeysSuspended && (settings.OcrHotkey != previous.OcrHotkey || OcrHotkeyProblem is not null))
+        {
+            OcrHotkeyProblem = _ocrHotkey.Register(settings.OcrHotkey);
+            if (OcrHotkeyProblem is not null && _ocrHotkey.Active is string working)
+            {
+                settings = settings with { OcrHotkey = working };
+            }
+            problem ??= OcrHotkeyProblem;
+        }
+        Settings = settings;
         try
         {
             settings.Save(AppPaths.Settings);
@@ -212,18 +272,9 @@ public partial class App : Application
         {
             problem = $"Settings could not be saved: {error.Message}";
         }
-        if (settings.Hotkey != previous.Hotkey && _hotkey is not null)
-        {
-            HotkeyProblem = _hotkey.Register(settings.Hotkey);
-            problem ??= HotkeyProblem;
-        }
         if (settings.OcrEngine != previous.OcrEngine)
         {
             WarmTextReader();
-        }
-        if (settings.OcrHotkey != previous.OcrHotkey && _ocrHotkey is not null)
-        {
-            problem ??= _ocrHotkey.Register(settings.OcrHotkey);
         }
         if (settings.Theme != previous.Theme)
         {
@@ -284,6 +335,12 @@ public partial class App : Application
         {
             return "No update is available";
         }
+        if (_installing)
+        {
+            // From Settings and from the tray at once: two installers would fight over the same file.
+            return "The update is already being installed";
+        }
+        _installing = true;
         try
         {
             await Updater.InstallAsync(UpdateOffer, CancellationToken.None);
@@ -291,6 +348,10 @@ public partial class App : Application
         catch (Exception error) when (error is IOException or HttpRequestException or TaskCanceledException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
         {
             return $"The update could not be installed: {error.Message}";
+        }
+        finally
+        {
+            _installing = false;
         }
         Quit();
         return null;
@@ -302,6 +363,7 @@ public partial class App : Application
     public void Quit()
     {
         IsQuitting = true;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
         _panel?.HidePanel();
         _hotkey?.Dispose();
         _ocrHotkey?.Dispose();
@@ -348,6 +410,21 @@ public partial class App : Application
         e.Handled = true;
     }
 
+    /// <summary>With Follow Windows, a switch of Windows between light and dark is followed at once.</summary>
+    private void OnUserPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+    {
+        // Raised on a system thread.
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (IsQuitting || Settings.Theme != Theme.System || IsDark == _appliedDark)
+            {
+                return;
+            }
+            ApplyTheme();
+            SettingsChanged?.Invoke();
+        });
+    }
+
     private void ApplyTheme()
     {
         ThemeMode = Settings.Theme switch
@@ -357,7 +434,8 @@ public partial class App : Application
             _ => ThemeMode.System,
         };
         // The panel's and settings' own colors (UI/PanelTheme.*.xaml), ahead of the styles that use them (UI/PanelStyles.xaml).
-        string name = IsDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
+        _appliedDark = IsDark;
+        string name = _appliedDark ? "PanelTheme.Dark.xaml" : "PanelTheme.Light.xaml";
         var colors = new ResourceDictionary { Source = new Uri($"/files;component/UI/{name}", UriKind.Relative) };
         if (_themeColors is not null)
         {
@@ -373,12 +451,14 @@ public partial class App : Application
         _updateTimer.Tick += async (_, _) =>
         {
             _updateTimer.Interval = UpdateCheckInterval;
-            if (!Settings.CheckForUpdates || UpdateOffer is not null)
+            if (!Settings.CheckForUpdates || _installing)
             {
                 return;
             }
+            // Checked even while an update is offered, so a newer one replaces it; only a new offer is announced.
+            string? offered = UpdateOffer?.Version;
             await CheckForUpdateAsync();
-            if (UpdateOffer is not null)
+            if (UpdateOffer is not null && UpdateOffer.Version != offered)
             {
                 _tray?.Notify($"Version {UpdateOffer.Version} is available. Install it from the tray menu.");
             }

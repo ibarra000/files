@@ -9,41 +9,33 @@ public sealed class Hotkey : IDisposable
 {
     public const string Off = "Off";
     private const int WmHotkey = 0x0312;
-    private const int Id = 1;
-    private const uint ModNoRepeat = 0x4000;
 
     private readonly HwndSource _window;
-    private bool _registered;
+    private readonly HotkeySlot _slot;
 
     public Hotkey()
     {
         // HWND_MESSAGE (-3): a message-only window, never shown.
         _window = new HwndSource(new HwndSourceParameters("files-hotkey") { ParentWindow = new IntPtr(-3) });
         _window.AddHook(OnMessage);
+        _slot = new HotkeySlot(
+            (id, modifiers, key) => RegisterHotKey(_window.Handle, id, modifiers, key),
+            id => UnregisterHotKey(_window.Handle, id));
     }
 
     public event Action? Pressed;
 
-    /// <summary>Registers <paramref name="text"/>, replacing any earlier shortcut. Returns a problem in words, or null.</summary>
-    public string? Register(string text)
-    {
-        if (_registered)
-        {
-            UnregisterHotKey(_window.Handle, Id);
-            _registered = false;
-        }
-        if (text.Equals(Off, StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-        if (Parse(text) is not (ModifierKeys modifiers, Key key))
-        {
-            return $"\"{text}\" is not a shortcut";
-        }
-        int virtualKey = KeyInterop.VirtualKeyFromKey(key);
-        _registered = RegisterHotKey(_window.Handle, Id, (uint)modifiers | ModNoRepeat, (uint)virtualKey);
-        return _registered ? null : $"{text} is already used by another program";
-    }
+    /// <summary>The combination that works now, or null.</summary>
+    public string? Active => _slot.Active;
+
+    /// <summary>Makes <paramref name="text"/> the shortcut; on a problem the old one keeps working. Returns the problem in words, or null.</summary>
+    public string? Register(string text) => _slot.Register(text);
+
+    /// <summary>Lets the combination go while it is being recorded in Settings.</summary>
+    public void Suspend() => _slot.Suspend();
+
+    /// <summary>Takes <paramref name="wanted"/>, or the combination held before if it cannot. Returns the one kept.</summary>
+    public (string Kept, string? Problem) Resume(string wanted) => _slot.Resume(wanted);
 
     /// <summary>Parses text such as "Ctrl+Shift+Space". A shortcut needs at least one modifier.</summary>
     public static (ModifierKeys, Key)? Parse(string text)
@@ -100,7 +92,7 @@ public sealed class Hotkey : IDisposable
 
     private IntPtr OnMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (message == WmHotkey && wParam.ToInt32() == Id)
+        if (message == WmHotkey && _slot.Owns(wParam.ToInt32()))
         {
             handled = true;
             Pressed?.Invoke();
