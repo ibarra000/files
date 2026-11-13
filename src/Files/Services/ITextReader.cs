@@ -14,3 +14,6 @@ public interface ITextReader
 
 /// <summary>An engine that cannot read at all on this PC, with what the user can do about it.</summary>
 public sealed class TextRecognitionUnavailableException(string message) : Exception(message);
+
+/// <summary>An engine whose models or native runtime could not be loaded; another engine reads instead.</summary>
+public sealed class TextReaderLoadException(string message, Exception? inner = null) : Exception(message, inner);

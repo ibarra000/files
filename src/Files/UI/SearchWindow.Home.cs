@@ -133,6 +133,11 @@ public partial class SearchWindow
         }
         RunSearch(search);
         Input.SelectAll();
+        if (problem is not null)
+        {
+            // Something worth knowing about how it was read, such as a fallback to Windows OCR.
+            ShowToast(problem);
+        }
     }
 
     /// <summary>Puts a saved search in the box and runs it.</summary>

@@ -51,17 +51,41 @@ public sealed class TextReaderTests
     public async Task PaddleOCR_without_its_models_says_which_file_is_missing()
     {
         using var reader = new PaddleTextReader(Path.Combine(ModelFolder, "missing"));
-        await Assert.ThrowsAsync<FileNotFoundException>(() => reader.ReadWordsAsync(Render(1, Color.Black, Color.White), CancellationToken.None));
+        var error = await Assert.ThrowsAsync<TextReaderLoadException>(() => reader.ReadWordsAsync(Render(1, Color.Black, Color.White), CancellationToken.None));
+        Assert.Contains("det.onnx", error.Message);
+    }
+
+    [Fact]
+    public async Task A_warm_up_racing_reads_loads_the_models_once_and_both_read()
+    {
+        using var reader = new PaddleTextReader(ModelFolder);
+        byte[] png = Render(reader.Scale, Color.Black, Color.White);
+
+        Task warm = reader.WarmAsync();
+        Task<IReadOnlyList<(string Text, Rect Box)>> first = reader.ReadWordsAsync(png, CancellationToken.None);
+        Task<IReadOnlyList<(string Text, Rect Box)>> second = reader.ReadWordsAsync(png, CancellationToken.None);
+        await warm;
+
+        Assert.Contains(await first, word => ScreenText.Clean(word.Text) == Code);
+        Assert.Contains(await second, word => ScreenText.Clean(word.Text) == Code);
+    }
+
+    [Fact]
+    public async Task A_closed_reader_refuses_to_read()
+    {
+        var reader = new PaddleTextReader(ModelFolder);
+        reader.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => reader.ReadWordsAsync(Render(1, Color.Black, Color.White), CancellationToken.None));
     }
 
     [Fact]
     public async Task An_engine_that_cannot_run_falls_back_to_the_other()
     {
-        var broken = new StubReader(2, new FileNotFoundException("no model"));
+        var broken = new StubReader(2, new TextReaderLoadException("no model"));
         var windows = new StubReader(3, words: [("plan.pdf", new Rect(0, 0, 10, 10))]);
         var scalesGrabbed = new List<int>();
 
-        (IReadOnlyList<(string Text, Rect Box)> words, int scale) = await ScreenText.ReadWithFallbackAsync(broken, windows, s =>
+        (IReadOnlyList<(string Text, Rect Box)> words, int scale, bool fellBack) = await ScreenText.ReadWithFallbackAsync(broken, windows, s =>
         {
             scalesGrabbed.Add(s);
             return Task.FromResult(Array.Empty<byte>());
@@ -69,15 +93,17 @@ public sealed class TextReaderTests
 
         Assert.Equal("plan.pdf", Assert.Single(words).Text);
         Assert.Equal(3, scale);
+        Assert.True(fellBack);
         Assert.Equal([2, 3], scalesGrabbed);
     }
 
     [Fact]
     public async Task An_unexpected_error_is_not_hidden_by_the_fallback()
     {
-        var broken = new StubReader(2, new ArgumentNullException("png"));
+        // A capture that cannot be decoded, say: reading it with another engine would not help.
+        var broken = new StubReader(2, new InvalidDataException("png"));
         var windows = new StubReader(3, words: []);
-        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
             ScreenText.ReadWithFallbackAsync(broken, windows, _ => Task.FromResult(Array.Empty<byte>()), CancellationToken.None));
     }
 

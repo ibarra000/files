@@ -23,13 +23,16 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
 
     private readonly string _modelFolder;
 
-    // Not cached when loading fails, so a later read tries again (and the caller falls back meanwhile).
-    private readonly Lazy<RapidOcr> _ocr;
+    // One engine, loaded once. Loading, reading and disposing all hold this lock, so a warm-up racing
+    // the first read never builds a second engine, and closing the app never frees one mid-read.
+    // A failed load leaves _ocr null, so the next read tries again (and the caller falls back meanwhile).
+    private readonly object _gate = new();
+    private RapidOcr? _ocr;
+    private bool _disposed;
 
     public PaddleTextReader(string modelFolder)
     {
         _modelFolder = modelFolder;
-        _ocr = new Lazy<RapidOcr>(Load, LazyThreadSafetyMode.PublicationOnly);
     }
 
     /// <summary>Twice the screen's size is enough for its text detector, and faster than more.</summary>
@@ -43,32 +46,46 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
     {
         try
         {
-            _ = _ocr.Value;
+            lock (_gate)
+            {
+                Engine();
+            }
         }
-        catch (Exception error) when (IsLoadFailure(error))
+        catch (TextReaderLoadException error)
         {
             System.Diagnostics.Trace.WriteLine($"PaddleOCR could not be loaded: {error}");
         }
+        catch (ObjectDisposedException)
+        {
+            // The app closed before the warm-up ran.
+        }
     });
-
-    /// <summary>The ways the models can fail to load or run: missing or damaged files, or the native runtime.</summary>
-    public static bool IsLoadFailure(Exception error) =>
-        error is IOException or UnauthorizedAccessException or DllNotFoundException or BadImageFormatException
-            or InvalidOperationException or Microsoft.ML.OnnxRuntime.OnnxRuntimeException or TypeInitializationException;
 
     public void Dispose()
     {
-        if (_ocr.IsValueCreated)
+        lock (_gate)
         {
-            _ocr.Value.Dispose();
+            _disposed = true;
+            _ocr?.Dispose();
+            _ocr = null;
         }
+    }
+
+    /// <summary>The loaded engine, loading it first if needed. Call with <see cref="_gate"/> held.</summary>
+    private RapidOcr Engine()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _ocr ??= Load();
     }
 
     private IReadOnlyList<(string Text, Rect Box)> Read(byte[] png, CancellationToken cancel)
     {
-        RapidOcr ocr = _ocr.Value;
-        using SKBitmap image = SKBitmap.Decode(png) ?? throw new InvalidOperationException("The screen capture could not be decoded");
-        RapidOcrNet.OcrResult result = ocr.Detect(image, Options, cancel);
+        using SKBitmap image = SKBitmap.Decode(png) ?? throw new InvalidDataException("The screen capture could not be decoded");
+        RapidOcrNet.OcrResult result;
+        lock (_gate)
+        {
+            result = Engine().Detect(image, Options, cancel);
+        }
         var words = new List<(string Text, Rect Box)>();
         foreach (TextBlock block in result.TextBlocks)
         {
@@ -87,18 +104,21 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
         string? missing = paths.FirstOrDefault(path => !File.Exists(path));
         if (missing is not null)
         {
-            throw new FileNotFoundException("A PaddleOCR model is missing", missing);
+            throw new TextReaderLoadException($"A PaddleOCR model is missing: {missing}", new FileNotFoundException(null, missing));
         }
-        var ocr = new RapidOcr();
+        RapidOcr? ocr = null;
         try
         {
+            ocr = new RapidOcr();
             ocr.InitModels(paths[0], paths[1], paths[2], paths[3]);
             return ocr;
         }
-        catch
+        catch (Exception error) when (error is Microsoft.ML.OnnxRuntime.OnnxRuntimeException or DllNotFoundException
+            or BadImageFormatException or TypeInitializationException or IOException or UnauthorizedAccessException)
         {
-            ocr.Dispose();
-            throw;
+            // A damaged model, or ONNX Runtime or Skia that cannot load on this PC.
+            ocr?.Dispose();
+            throw new TextReaderLoadException($"PaddleOCR could not be loaded: {error.Message}", error);
         }
     }
 

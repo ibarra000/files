@@ -38,36 +38,42 @@ public static class ScreenText
             return new ScreenRead(text, null);
         }
         System.Drawing.Rectangle area = CropAround(cursor);
+        string? note;
         try
         {
             // Capturing and encoding off the UI thread keeps the panel responsive.
-            var (words, scale) = await ReadWithFallbackAsync(reader, fallback, s => Task.Run(() => Grab(area, s)), CancellationToken.None);
+            var (words, scale, fellBack) = await ReadWithFallbackAsync(reader, fallback, s => Task.Run(() => Grab(area, s)), CancellationToken.None);
             // The word boxes are in the enlarged image.
             text = Nearest(words, new Point((cursor.X - area.X) * scale, (cursor.Y - area.Y) * scale));
+            note = fellBack ? FellBackNote : null;
         }
         catch (TextRecognitionUnavailableException error)
         {
             return new ScreenRead(null, error.Message);
         }
-        return text is null ? new ScreenRead(null, "No text under the mouse") : new ScreenRead(text, null);
+        return text is null ? new ScreenRead(null, note ?? "No text under the mouse") : new ScreenRead(text, note);
     }
+
+    /// <summary>Said when the engine chosen in Settings could not load, so the user knows why reading is weaker.</summary>
+    public const string FellBackNote = "PaddleOCR could not load, so Windows text recognition read this";
 
     /// <summary>
     /// Reads with <paramref name="reader"/>, grabbing the crop at its scale; if its models or runtime
-    /// cannot load, reads with <paramref name="fallback"/> instead. Returns the words and the scale they were read at.
+    /// cannot load, reads with <paramref name="fallback"/> instead. Returns the words, the scale they
+    /// were read at, and whether the fallback read them. Any other error is not hidden.
     /// </summary>
-    public static async Task<(IReadOnlyList<(string Text, Rect Box)> Words, int Scale)> ReadWithFallbackAsync(
+    public static async Task<(IReadOnlyList<(string Text, Rect Box)> Words, int Scale, bool FellBack)> ReadWithFallbackAsync(
         ITextReader reader, ITextReader fallback, Func<int, Task<byte[]>> grab, CancellationToken cancel)
     {
         try
         {
-            return (await reader.ReadWordsAsync(await grab(reader.Scale), cancel), reader.Scale);
+            return (await reader.ReadWordsAsync(await grab(reader.Scale), cancel), reader.Scale, false);
         }
-        catch (Exception error) when (!ReferenceEquals(reader, fallback) && PaddleTextReader.IsLoadFailure(error))
+        catch (TextReaderLoadException error) when (!ReferenceEquals(reader, fallback))
         {
             System.Diagnostics.Trace.WriteLine($"Reading with {reader.GetType().Name} failed, so Windows OCR reads instead: {error}");
         }
-        return (await fallback.ReadWordsAsync(await grab(fallback.Scale), cancel), fallback.Scale);
+        return (await fallback.ReadWordsAsync(await grab(fallback.Scale), cancel), fallback.Scale, true);
     }
 
     /// <summary>The whitespace-separated token of <paramref name="line"/> that holds <paramref name="word"/>, so AB-C-0704_Page1 stays whole.</summary>
