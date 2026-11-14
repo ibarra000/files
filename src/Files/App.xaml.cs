@@ -152,6 +152,8 @@ public partial class App : Application
         OcrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         Indexer.Start();
+        // Before the volume list is checked below, so an installer's volumes never open Settings at first start.
+        IReadOnlyList<string> bundleProblems = BundledVolumes.Add(BundledVolumes.DefaultPath, BundledVolumes.AddedPath, Indexer);
         // Combined PDFs were removed in 1.2; their cache is no longer needed.
         SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
         StartUpdateChecks();
@@ -169,6 +171,7 @@ public partial class App : Application
         {
             startProblems.Add($"Text-under-the-mouse shortcut: {OcrHotkeyProblem}");
         }
+        startProblems.AddRange(bundleProblems);
         if (startProblems.Count > 0)
         {
             _tray.Notify(string.Join("\n", startProblems));

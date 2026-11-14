@@ -17,6 +17,14 @@
     pwsh tools/make_msi.ps1
 
 .EXAMPLE
+    pwsh tools/make_msi.ps1 -Volumes volumes.json -Publish \\server\files-updates
+
+    Builds an installer with preset volumes and publishes it to a shared
+    update folder. volumes.json is a JSON array such as
+    [{ "name": "Drawings", "folder": "\\\\server\\drawings", "liveOnly": false }];
+    each volume is added once on every PC the installer runs on.
+
+.EXAMPLE
     pwsh tools/make_msi.ps1 -Release
 
     Builds the installer and latest.json into artifacts\dist and, if the
@@ -26,6 +34,9 @@
 param(
     # Skip `dotnet publish`, for when artifacts\publish is already current.
     [switch]$NoBuild,
+
+    # A volumes.json to build into the installer: volumes added once on each PC.
+    [string]$Volumes,
 
     # Copy the installer to this folder and write latest.json beside it.
     [string]$Publish,
@@ -52,6 +63,26 @@ function Write-Manifest([string]$Folder, [string]$Version, [string]$Msi) {
     $tmp = Join-Path $Folder 'latest.json.tmp'
     [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding $false))
     Move-Item -Path $tmp -Destination (Join-Path $Folder 'latest.json') -Force
+}
+
+# Checks a volumes.json and copies it beside files.exe, or removes a stale copy when there is none.
+function Stage-Volumes([string]$Source, [string]$Folder) {
+    $staged = Join-Path $Folder 'volumes.json'
+    if (-not $Source) {
+        Remove-Item -Path $staged -ErrorAction SilentlyContinue
+        return $false
+    }
+    if (-not (Test-Path $Source)) { throw "no such file: $Source" }
+    $entries = @(Get-Content $Source -Raw | ConvertFrom-Json)
+    if ($entries.Count -eq 0) { throw "$Source lists no volumes" }
+    foreach ($entry in $entries) {
+        if (-not ($entry.name -is [string] -and $entry.name.Trim()) -or -not ($entry.folder -is [string] -and $entry.folder.Trim())) {
+            throw "$Source has a volume without a name or folder: $($entry | ConvertTo-Json -Compress)"
+        }
+    }
+    Copy-Item -Path $Source -Destination $staged -Force
+    Write-Host "bundling $($entries.Count) volumes from $Source"
+    return $true
 }
 
 # Signs a file with the release certificate and checks the result.
@@ -100,10 +131,18 @@ try {
         }
     }
 
+    if ($Volumes -and $Release) {
+        # A public release is for everyone; preset volumes belong in an installer for one organisation.
+        throw '-Volumes cannot be used with -Release; use -Publish to a shared update folder instead'
+    }
+    $defines = @('-define', "Version=$version", '-define', "TargetDir=$publishDir")
+    if (Stage-Volumes -Source $Volumes -Folder $publishDir) {
+        $defines += @('-define', 'Volumes=1')
+    }
+
     $name = "files-$version-x64.msi"
     $out = Join-Path $artifacts $name
-    & $wix build -arch x64 -define "Version=$version" -define "TargetDir=$publishDir" `
-        -ext WixToolset.UI.wixext -out $out (Join-Path $root 'wix\files.wxs')
+    & $wix build -arch x64 @defines -ext WixToolset.UI.wixext -out $out (Join-Path $root 'wix\files.wxs')
     if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
     Sign-File $out
     Write-Host "wrote $out"

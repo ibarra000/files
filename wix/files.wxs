@@ -39,6 +39,13 @@
           <File Id="filesExe" Source="$(var.TargetDir)\files.exe" KeyPath="yes" />
         </Component>
 
+        <!-- Volumes built in with `make_msi.ps1 -Volumes` (Services/BundledVolumes.cs). -->
+        <?ifdef Volumes ?>
+        <Component Id="BundledVolumes" Bitness="always64">
+          <File Id="volumesJson" Source="$(var.TargetDir)\volumes.json" KeyPath="yes" />
+        </Component>
+        <?endif ?>
+
         <!-- PaddleOCR's models (Services/PaddleTextReader.cs), read beside files.exe;
              they are data, so they stay out of the single-file executable. -->
         <Directory Id="ModelsFolder" Name="models">
@@ -105,6 +112,9 @@
       <ComponentRef Id="PaddleRec" />
       <ComponentRef Id="PaddleKeys" />
       <ComponentRef Id="StartMenuShortcut" />
+      <?ifdef Volumes ?>
+      <ComponentRef Id="BundledVolumes" />
+      <?endif ?>
 
       <!-- Selected by default. The installer, the Settings window's General page
            and Task Manager's Startup tab all control the same `Run` value. -->

@@ -73,6 +73,16 @@ Maintainers only:
 
    `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag. The script signs `files.exe` and the MSI, and stops if either is not signed by the release certificate.
 
+### An installer with preset volumes
+
+For one organisation's PCs, `-Volumes` builds a list of volumes into the installer:
+
+```powershell
+pwsh tools/make_msi.ps1 -Volumes volumes.json -Publish \\server\share\files-updates
+```
+
+`volumes.json` is a JSON array, for example `[{ "name": "Drawings", "folder": "\\\\server\\drawings" }, { "name": "Archive", "folder": "\\\\server\\archive", "liveOnly": true }]`. It is installed beside `files.exe`, and at start-up each volume in it is added once on that PC (recorded in `%LOCALAPPDATA%\files\bundled.txt`). After that the volume belongs to the user: editing or removing it sticks, and a volume added to the list in a later installer is added on upgrade. A folder that is already a volume is left as it is. `-Volumes` cannot be combined with `-Release`, since a public release is for everyone. Publish it to the organisation's update folder instead, so updates keep the list.
+
 ## Getting help
 
 Open an issue with the steps to reproduce and what the Volumes page in Settings shows (remove server names if they are private).
