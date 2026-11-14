@@ -36,10 +36,27 @@ internal sealed class TempFolder : IDisposable
     private void Delete()
     {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
-        foreach (string file in Directory.EnumerateFiles(Path, "*", SearchOption.AllDirectories))
+        Delete(Path);
+    }
+
+    /// <summary>Deletes a folder without going through junctions, so a test's link never deletes what it points at.</summary>
+    private static void Delete(string folder)
+    {
+        foreach (string child in Directory.EnumerateDirectories(folder))
+        {
+            if (System.IO.File.GetAttributes(child).HasFlag(FileAttributes.ReparsePoint))
+            {
+                Directory.Delete(child);
+            }
+            else
+            {
+                Delete(child);
+            }
+        }
+        foreach (string file in Directory.EnumerateFiles(folder))
         {
             System.IO.File.SetAttributes(file, FileAttributes.Normal);
         }
-        Directory.Delete(Path, recursive: true);
+        Directory.Delete(folder, recursive: true);
     }
 }

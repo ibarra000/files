@@ -165,4 +165,18 @@ public sealed class LiveSearchTests
         Assert.Equal(2, walk.Folders);
         Assert.Equal(new[] { "keep.txt", @"b\keep-too.txt" }.Order(), seen.Order());
     }
+
+    [Fact]
+    public async Task What_the_walk_skipped_is_added_up_over_every_volume()
+    {
+        using var first = new TempFolder();
+        using var second = new TempFolder();
+        string deep = string.Join('\\', Enumerable.Repeat("d", Walker.MaxDepth + 1));
+        first.File(Path.Combine(deep, "plan.pdf"));
+        second.File(Path.Combine(deep, "plan.pdf"));
+
+        (LiveSearch live, _) = await Run("plan", null, ("one", first.Path), ("two", second.Path));
+
+        Assert.Equal(new WalkSkips(0, 0, 2), live.Skipped);
+    }
 }

@@ -34,6 +34,7 @@ public sealed class LiveSearch
     /// <summary>Folders whose own name matches, kept even when they hold no matching file (the walk only keeps those that do).</summary>
     private readonly List<string>[] _matchingFolders;
     private int _foldersRead;
+    private WalkSkips _skipped = WalkSkips.None;
     private int _kept;
     private int _notKept;
 
@@ -52,6 +53,18 @@ public sealed class LiveSearch
 
     /// <summary>More names matched than <see cref="MaxKept"/>; only the first ones found are ranked.</summary>
     public bool IsCapped => Volatile.Read(ref _notKept) > 0;
+
+    /// <summary>What the walks of the volumes read so far passed over, added up.</summary>
+    public WalkSkips Skipped
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _skipped;
+            }
+        }
+    }
 
     /// <summary>Volumes that could not be read, in words.</summary>
     public IReadOnlyList<string> Problems
@@ -110,13 +123,17 @@ public sealed class LiveSearch
         var (name, root) = _volumes[volume];
         try
         {
-            Walker.Walk(root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
+            WalkResult walk = Walker.Walk(root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
             {
                 lock (_gate)
                 {
                     _found[volume].Add((relative, files));
                 }
             });
+            lock (_gate)
+            {
+                _skipped = _skipped.Plus(walk.Skipped);
+            }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or ArgumentException or System.Security.SecurityException)
