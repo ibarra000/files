@@ -99,7 +99,9 @@ public partial class SettingsWindow : Window
         Settings saved = _app.Settings;
         bool hiddenChanged = !SplitList(HiddenBox.Text).SequenceEqual(saved.HiddenExtensions);
         bool folderChanged = UpdateFolderBox.Text.Trim() != saved.UpdateFolder;
-        bool removalsChanged = !RemovalLines().SequenceEqual(saved.ScreenTextRemovals);
+        // Patterns refused once are not tried again each time focus moves; changing them tries again.
+        List<string> removals = RemovalLines();
+        bool removalsChanged = !removals.SequenceEqual(saved.ScreenTextRemovals) && !removals.SequenceEqual(_refusedRemovals);
         if (hiddenChanged || folderChanged || removalsChanged)
         {
             Save();
@@ -270,6 +272,7 @@ public partial class SettingsWindow : Window
             UpdateFolder = UpdateFolderBox.Text.Trim(),
         };
         string? problem = _app.ApplySettings(settings);
+        _refusedRemovals = _app.Settings.ScreenTextRemovals.SequenceEqual(settings.ScreenTextRemovals) ? [] : settings.ScreenTextRemovals.ToList();
         if (problem is not null)
         {
             problems.Insert(0, problem);
@@ -282,6 +285,9 @@ public partial class SettingsWindow : Window
         ShowShortcuts();
         _loading = false;
     }
+
+    /// <summary>Patterns that did not compile when last saved, so leaving the box does not try them again.</summary>
+    private List<string> _refusedRemovals = [];
 
     /// <summary>The patterns typed, one per line, without blank lines.</summary>
     private List<string> RemovalLines() =>
@@ -297,15 +303,15 @@ public partial class SettingsWindow : Window
             // Still loading the window.
             return;
         }
-        if (RemovalsTry.Text.Trim().Length == 0)
-        {
-            RemovalsResult.Text = "Type a code to see what would be searched.";
-            return;
-        }
         (Core.TextCleanup? cleanup, IReadOnlyList<string> problems) = Core.TextCleanup.Compile(RemovalLines());
         if (cleanup is null)
         {
             RemovalsResult.Text = problems[0];
+            return;
+        }
+        if (RemovalsTry.Text.Trim().Length == 0)
+        {
+            RemovalsResult.Text = "Type a code to see what would be searched.";
             return;
         }
         ScreenRead read = ScreenText.WithRemovals(new ScreenRead(RemovalsTry.Text, null), cleanup);

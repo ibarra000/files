@@ -61,5 +61,7 @@ public sealed class TextCleanupTests
         Assert.Null(empty.Text);
         Assert.Equal(ScreenText.NothingLeftNote, empty.Problem);
         Assert.Equal(new ScreenRead(null, "No text"), ScreenText.WithRemovals(new ScreenRead(null, "No text"), cleanup));
+        // Why reading was weaker is still said when nothing is left.
+        Assert.Equal(new ScreenRead(null, $"fell back · {ScreenText.NothingLeftNote}"), ScreenText.WithRemovals(new ScreenRead("DRAFT", "fell back"), cleanup));
     }
 }

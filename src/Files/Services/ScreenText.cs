@@ -70,11 +70,7 @@ public static class ScreenText
         }
         Core.CleanedText cleaned = cleanup.Apply(read.Text);
         string? text = Clean(cleaned.Text);
-        if (text is null)
-        {
-            return new ScreenRead(null, NothingLeftNote);
-        }
-        string?[] notes = [read.Problem, cleaned.Note];
+        string?[] notes = [read.Problem, text is null ? NothingLeftNote : cleaned.Note];
         string note = string.Join(" · ", notes.OfType<string>());
         return new ScreenRead(text, note.Length > 0 ? note : null);
     }
