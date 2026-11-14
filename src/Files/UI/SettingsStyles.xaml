@@ -276,9 +276,9 @@
                         <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="10" Margin="0,0,11,0"
                                    HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"
                                    Foreground="{DynamicResource TextDim}" />
-                        <!-- The popup is moved up and left by its shadow's room (the Grid's margin), so the list sits 4 px under the field. -->
+                        <!-- The Grid's margin is the shadow's room. The Popup already puts it outside the field, so the offset is only the 4 px gap. -->
                         <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True"
-                               Focusable="False" PopupAnimation="Fade" HorizontalOffset="-24" VerticalOffset="-12">
+                               Focusable="False" PopupAnimation="Fade" VerticalOffset="4">
                             <Grid Margin="{StaticResource PopupShadowRoom}">
                                 <Border CornerRadius="8" Background="{DynamicResource ControlFill}">
                                     <Border.Effect>

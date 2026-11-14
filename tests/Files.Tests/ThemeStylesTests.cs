@@ -110,8 +110,9 @@ public sealed class ThemeStylesTests
 
             Assert.Equal((double)resources["ShadowOpacity"], shadow.Opacity);
             AssertRoomFor(shadow, room.Margin);
-            // Moved back by the room, so the list still opens under the field.
-            Assert.Equal(-room.Margin.Left, popup.HorizontalOffset);
+            // A Popup already places its child's margin outside the field, so moving it back by the room as well
+            // put the list over the field (seen on screen).
+            Assert.Equal(0, popup.HorizontalOffset);
         });
     }
 
