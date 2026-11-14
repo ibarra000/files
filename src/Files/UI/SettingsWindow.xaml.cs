@@ -66,16 +66,32 @@ public partial class SettingsWindow : Window
         }
         // Typing in a text field is saved even if the window is left or closed without moving focus.
         Deactivated += (_, _) => SaveTypedText();
-        Closing += (_, _) =>
+        // History may have changed in the panel while this window was behind it.
+        Activated += (_, _) => UpdateClearButtons();
+        Closing += (_, e) =>
         {
             ViewerGrid.CommitEdit(DataGridEditingUnit.Row, exitEditingMode: true);
+            // Now, not deferred as while the window is open: a program row that cannot be saved says so while it can be fixed.
+            Save();
+            if (_viewerProblem && !_closeWarned && !_app.IsQuitting)
+            {
+                // Once: a second close leaves the row out, as the message says.
+                e.Cancel = true;
+                _closeWarned = true;
+                return;
+            }
             SaveTypedText();
+            WarnOfRefusedPatterns();
         };
         Closed += (_, _) =>
         {
             app.Indexer.Changed -= onIndexerChanged;
             app.SettingsChanged -= onSettingsChanged;
-            app.ResumeHotkeys();
+            // A shortcut being recorded is taken now; a problem with it has no window left to be shown in.
+            if (app.ResumeHotkeys() is string problem)
+            {
+                app.Notify(problem);
+            }
         };
     }
 
@@ -247,6 +263,22 @@ public partial class SettingsWindow : Window
             .FirstOrDefault(item => (string)item.Tag == settings.EnterOpens) ?? EnterBox.Items[0];
     }
 
+    /// <summary>The last save left out a program row that is not valid (see ValidViewers).</summary>
+    private bool _viewerProblem;
+
+    /// <summary>Closing was stopped once to show a program row that is not valid.</summary>
+    private bool _closeWarned;
+
+    /// <summary>Patterns refused when last saved are not kept; closing with them still in the box says so once.</summary>
+    private void WarnOfRefusedPatterns()
+    {
+        if (_refusedRemovals.Count > 0)
+        {
+            _app.Notify("The removal patterns that are not valid were not saved; the ones before stay in use.");
+            _refusedRemovals = [];
+        }
+    }
+
     private void Save()
     {
         if (_loading)
@@ -274,6 +306,7 @@ public partial class SettingsWindow : Window
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
             UpdateFolder = UpdateFolderBox.Text.Trim(),
         };
+        _viewerProblem = problems.Count > 0;
         string? problem = _app.ApplySettings(settings);
         _refusedRemovals = _app.Settings.ScreenTextRemovals.SequenceEqual(settings.ScreenTextRemovals) ? [] : settings.ScreenTextRemovals.ToList();
         if (problem is not null)
@@ -374,6 +407,11 @@ public partial class SettingsWindow : Window
         {
             return;
         }
+        if (Hotkey.Refused(Keyboard.Modifiers, key) is string refused)
+        {
+            Message.Text = refused;
+            return;
+        }
         box.Text = Hotkey.Format(Keyboard.Modifiers, key);
         Save();
     }
@@ -388,6 +426,8 @@ public partial class SettingsWindow : Window
         catch (Exception error) when (error is UnauthorizedAccessException or System.Security.SecurityException or IOException)
         {
             Message.Text = $"Could not change Start with Windows: {error.Message}";
+            // The switch shows what Windows will do, not what was asked for.
+            StartWithWindowsBox.IsChecked = StartWithWindows.IsEnabled;
         }
     }
 
@@ -398,6 +438,9 @@ public partial class SettingsWindow : Window
     private void RefreshVolumes()
     {
         long? selected = (VolumeGrid.SelectedItem as VolumeRow)?.Id;
+        // A row replaced while the keyboard is in the grid takes the focus with it; it is given back below.
+        bool hadFocus = VolumeGrid.IsKeyboardFocusWithin;
+        DataGridColumn? column = VolumeGrid.CurrentCell.Column;
         List<VolumeRow> rows = _app.Indexer.Volumes.Select(VolumeRow.From).ToList();
         bool sameVolumes = rows.Select(row => row.Id).Order().SequenceEqual(_volumeRows.Select(row => row.Id).Order());
         if (!sameVolumes)
@@ -417,6 +460,38 @@ public partial class SettingsWindow : Window
             }
         }
         VolumeGrid.SelectedItem = _volumeRows.FirstOrDefault(row => row.Id == selected);
+        if (hadFocus && !VolumeGrid.IsKeyboardFocusWithin && VolumeGrid.SelectedItem is VolumeRow current)
+        {
+            VolumeGrid.CurrentCell = new DataGridCellInfo(current, column ?? VolumeGrid.Columns[0]);
+            VolumeGrid.UpdateLayout();
+            (VolumeGrid.ItemContainerGenerator.ContainerFromItem(current) as DataGridRow)?.Focus();
+        }
+        if (_editing is VolumeRow editing && !_saving && _volumeRows.All(row => row.Id != editing.Id))
+        {
+            // The volume being edited was removed: there is nothing left to save the form to.
+            ClearVolumeForm();
+            Message.Text = $"{editing.Name} was removed.";
+        }
+        UpdateVolumeButtons();
+    }
+
+    /// <summary>A live-only volume is never read in the background, so Read again has nothing to do for it.</summary>
+    private void UpdateVolumeButtons()
+    {
+        bool liveOnly = VolumeGrid.SelectedItem is VolumeRow { LiveOnly: true };
+        RescanButton.IsEnabled = !liveOnly;
+        RescanButton.ToolTip = liveOnly ? "A live-only volume is read only by a live search (Shift+Enter in the panel)" : null;
+    }
+
+    private void OnVolumeSelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateVolumeButtons();
+
+    /// <summary>A double-click on a row edits it; one on a header (to sort) or the empty space does not.</summary>
+    private void OnVolumeDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (ElementTree.AncestorOf<DataGridRow>(e.OriginalSource) is not null)
+        {
+            OnEditVolume(sender, e);
+        }
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
@@ -436,25 +511,48 @@ public partial class SettingsWindow : Window
     /// <summary>Adds the volume in the form, or saves the one being edited.</summary>
     private async void OnSaveVolume(object sender, RoutedEventArgs e)
     {
+        if (_saving)
+        {
+            return;
+        }
         string name = NewVolumeName.Text;
         string folder = NewVolumePath.Text;
         bool liveOnly = NewVolumeLiveOnly.IsChecked == true;
         VolumeRow? editing = _editing;
-        if (editing is not null && !await ConfirmEditAsync(editing, folder, liveOnly))
+        // One save at a time: a second click would add the folder twice, or edit a volume the first save replaced.
+        SetSaving(true);
+        try
         {
-            return;
+            if (editing is not null && !await ConfirmEditAsync(editing, folder, liveOnly))
+            {
+                return;
+            }
+            Message.Text = editing is null ? "Adding…" : "Saving…";
+            // Off the UI thread: asking a disconnected mapped drive what it is can take seconds,
+            // and an edit waits for a read that is writing the volume's file list to finish.
+            string? problem = await Task.Run(() => editing is null
+                ? _app.Indexer.Add(name, folder, liveOnly)
+                : _app.Indexer.Edit(editing.Id, name, folder, liveOnly));
+            Message.Text = problem ?? "";
+            // Only the form that was saved is cleared, not one started meanwhile.
+            if (problem is null && _editing == editing)
+            {
+                ClearVolumeForm();
+            }
         }
-        Message.Text = editing is null ? "Adding…" : "Saving…";
-        // Off the UI thread: asking a disconnected mapped drive what it is can take seconds,
-        // and an edit waits for a read that is writing the volume's file list to finish.
-        string? problem = await Task.Run(() => editing is null
-            ? _app.Indexer.Add(name, folder, liveOnly)
-            : _app.Indexer.Edit(editing.Id, name, folder, liveOnly));
-        Message.Text = problem ?? "";
-        if (problem is null)
+        finally
         {
-            ClearVolumeForm();
+            SetSaving(false);
         }
+    }
+
+    private bool _saving;
+
+    private void SetSaving(bool saving)
+    {
+        _saving = saving;
+        VolumeFormButton.IsEnabled = !saving;
+        CancelEditButton.IsEnabled = !saving;
     }
 
     /// <summary>A new folder, or making a volume live-only, drops what has been read; the user agrees first.</summary>
@@ -543,8 +641,16 @@ public partial class SettingsWindow : Window
 
     private async void OnCheckUpdate(object sender, RoutedEventArgs e)
     {
+        CheckButton.IsEnabled = false;
         Message.Text = "Checking…";
-        Message.Text = await _app.CheckForUpdateAsync();
+        try
+        {
+            Message.Text = await _app.CheckForUpdateAsync();
+        }
+        finally
+        {
+            CheckButton.IsEnabled = true;
+        }
         InstallButton.IsEnabled = _app.UpdateOffer is not null;
     }
 

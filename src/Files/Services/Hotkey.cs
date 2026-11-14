@@ -37,6 +37,23 @@ public sealed class Hotkey : IDisposable
     /// <summary>Takes <paramref name="wanted"/>, or the combination held before if it cannot. Returns the one kept.</summary>
     public (string Kept, string? Problem) Resume(string wanted) => _slot.Resume(wanted);
 
+    /// <summary>
+    /// Why a combination may not be a shortcut, or null: Windows uses these to close, switch and lock,
+    /// and taking one system-wide would stop it working in every program.
+    /// </summary>
+    public static string? Refused(ModifierKeys modifiers, Key key) => (modifiers, key) switch
+    {
+        (ModifierKeys.Alt, Key.F4) => "Alt+F4 closes windows, so it cannot be a shortcut",
+        (ModifierKeys.Alt or (ModifierKeys.Alt | ModifierKeys.Shift), Key.Tab) => "Alt+Tab switches windows, so it cannot be a shortcut",
+        (ModifierKeys.Alt or ModifierKeys.Control or (ModifierKeys.Control | ModifierKeys.Shift), Key.Escape) =>
+            $"{Format(modifiers, key)} belongs to Windows, so it cannot be a shortcut",
+        (ModifierKeys.Windows, Key.L) => "Win+L locks the PC, so it cannot be a shortcut",
+        _ => null,
+    };
+
+    /// <summary>Whether two shortcuts, however written, are the same keys. "Off" is never the same as anything.</summary>
+    public static bool SameKeys(string a, string b) => Parse(a) is { } first && Parse(b) is { } second && first == second;
+
     /// <summary>Parses text such as "Ctrl+Shift+Space". A shortcut needs at least one modifier.</summary>
     public static (ModifierKeys, Key)? Parse(string text)
     {

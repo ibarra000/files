@@ -151,8 +151,8 @@
                                     <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
                                                Text="One regular expression per line, ignoring case; whatever matches is taken out before searching. For example _Page\d+ or \s*Rev\s*[A-Z]$" />
                                 </StackPanel>
-                                <TextBox x:Name="RemovalsBox" Grid.Column="1" Width="300" MinHeight="64" AcceptsReturn="True" TextWrapping="NoWrap"
-                                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas"
+                                <TextBox x:Name="RemovalsBox" Grid.Column="1" Width="300" MinHeight="64" MaxHeight="160" AcceptsReturn="True" TextWrapping="NoWrap"
+                                         VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" FontFamily="Consolas"
                                          AutomationProperties.Name="Patterns removed from the text under the mouse"
                                          LostFocus="OnChanged" TextChanged="OnTryRemovals" />
                                 <StackPanel Grid.Row="1" Margin="0,10,16,0" VerticalAlignment="Center">
@@ -261,7 +261,8 @@
                         <TextBlock Text="VOLUMES" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
-                                <DataGrid x:Name="VolumeGrid" PreviewMouseWheel="OnGridWheel" MouseDoubleClick="OnEditVolume" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
+                                <DataGrid x:Name="VolumeGrid" PreviewMouseWheel="OnGridWheel" MouseDoubleClick="OnVolumeDoubleClick"
+                                          SelectionChanged="OnVolumeSelectionChanged" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="NAME" Binding="{Binding Name}" />
                                         <DataGridTextColumn Header="FOLDER" Binding="{Binding Root}" Width="*" />
@@ -271,7 +272,8 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <StackPanel Orientation="Horizontal" Margin="16,10,16,14">
-                                    <Button Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume" />
+                                    <Button x:Name="RescanButton" Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume"
+                                            ToolTipService.ShowOnDisabled="True" />
                                     <Button Content="Edit…" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnEditVolume" />
                                     <Button Content="Remove" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnRemoveVolume" />
                                     <TextBlock Text="With none selected, Read again reads them all." Margin="12,0,0,0" VerticalAlignment="Center"
@@ -444,7 +446,7 @@
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <StackPanel Orientation="Horizontal" Margin="16,12">
-                                    <Button Content="Check now" Style="{StaticResource SettingsButton}" Click="OnCheckUpdate" />
+                                    <Button x:Name="CheckButton" Content="Check now" Style="{StaticResource SettingsButton}" Click="OnCheckUpdate" />
                                     <Button x:Name="InstallButton" Content="Install and restart" Margin="8,0,0,0" Padding="14,0"
                                             Style="{StaticResource SettingsAccentButton}" Click="OnInstallUpdate" />
                                 </StackPanel>

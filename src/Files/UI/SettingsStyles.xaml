@@ -186,8 +186,10 @@
                 <ControlTemplate TargetType="TextBox">
                     <Border x:Name="Field" CornerRadius="6" BorderThickness="1" BorderBrush="{DynamicResource ControlStroke}"
                             Background="{DynamicResource PanelBackground}">
-                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"
-                                      Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" />
+                        <!-- A one-line field centres its text; a box of several lines (the removal patterns) sets Top and can scroll. -->
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                      Focusable="False" HorizontalScrollBarVisibility="Hidden"
+                                      VerticalScrollBarVisibility="{TemplateBinding ScrollViewer.VerticalScrollBarVisibility}" />
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
