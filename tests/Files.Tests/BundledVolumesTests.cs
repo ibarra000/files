@@ -48,6 +48,18 @@ public sealed class BundledVolumesTests
     }
 
     [Fact]
+    public void Comments_and_trailing_commas_are_allowed_as_the_installer_script_allows_them()
+    {
+        using var temp = new TempFolder();
+        string folder = temp.Path.Replace("\\", "\\\\");
+        string bundle = temp.File("volumes.json", "[\n  // the drawings share\n  { \"name\": \"Drawings\", \"folder\": \"" + folder + "\", },\n]");
+        using Indexer indexer = NewIndexer(temp);
+
+        Assert.Empty(BundledVolumes.Add(bundle, Path.Combine(temp.Path, "bundled.txt"), indexer));
+        Assert.Equal("Drawings", Assert.Single(indexer.Volumes).Volume.Name);
+    }
+
+    [Fact]
     public void No_file_adds_nothing_and_a_bad_file_or_entry_says_so()
     {
         using var temp = new TempFolder();

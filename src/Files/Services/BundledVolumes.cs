@@ -9,15 +9,21 @@ public sealed record BundledVolume(string? Name, string? Folder, bool LiveOnly);
 
 /// <summary>
 /// Volumes built into the installer (<c>tools/make_msi.ps1 -Volumes</c>). Each is added
-/// once on every PC; after that it belongs to the user, who may edit or remove it, and a
-/// removed one is not brought back. Which ones were added is kept beside the catalog
-/// (not in the roaming settings), because the volume list itself is per PC.
+/// once for each Windows user on each PC; after that it belongs to the user, who may edit
+/// or remove it, and a removed one is not brought back. Which ones were added is kept beside
+/// the catalog in the local profile (not in the roaming settings), as the volume list is.
 /// </summary>
 public static class BundledVolumes
 {
     public const string FileName = "volumes.json";
 
-    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+    // As forgiving as PowerShell's ConvertFrom-Json, which make_msi.ps1 checks the file with.
+    private static readonly JsonSerializerOptions Json = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+    };
 
     /// <summary>Where the installer puts the list: beside files.exe.</summary>
     public static string DefaultPath => Path.Combine(AppContext.BaseDirectory, FileName);
@@ -81,15 +87,18 @@ public static class BundledVolumes
         string root;
         try
         {
+            // Compared without asking the drive what it is (which a disconnected mapped drive can take seconds to answer),
+            // so start-up never waits on a volume added before. Normalized roots differ from this only in case.
+            string full = Path.GetFullPath(volume.Folder.Trim()).Replace('/', '\\');
+            if (added.Contains(full.Length > 3 ? full.TrimEnd('\\') : full, StringComparer.OrdinalIgnoreCase))
+            {
+                return null;
+            }
             root = VolumeRoot.Normalize(volume.Folder);
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
         {
             return $"{volume.Folder} is not a folder path: {error.Message}";
-        }
-        if (added.Contains(root, StringComparer.OrdinalIgnoreCase))
-        {
-            return null;
         }
         string? problem = indexer.Add(volume.Name, volume.Folder, volume.LiveOnly);
         if (problem is not null && problem != Indexer.AlreadyAVolume)

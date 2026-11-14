@@ -25,8 +25,8 @@ It is one WPF executable (`src/Files`, .NET 10, self-contained) with a test proj
 | Volume list | `%LOCALAPPDATA%\files\catalog.db` | SQLite, `Data/Sql/catalog-1.sql` |
 | File names | `%LOCALAPPDATA%\files\volumes\<uid>.db` | SQLite, one shard per volume, `Data/Sql/shard-1.sql` |
 | Staged updates | `%LOCALAPPDATA%\files\updates` | The MSI and the update helper |
-| Preset volumes | `volumes.json` beside `files.exe`, from the installer | JSON array of `{ name, folder, liveOnly }`, added once per PC by `Services/BundledVolumes.cs` at start-up |
-| Preset volumes added | `%LOCALAPPDATA%\files\bundled.txt` | Roots of the preset volumes already added on this PC, one per line, so a removed one is not added again. Local, like the catalog, because the volume list is per PC |
+| Preset volumes | `volumes.json` beside `files.exe`, from the installer | JSON array of `{ name, folder, liveOnly }`, added once per user on each PC by `Services/BundledVolumes.cs` at start-up |
+| Preset volumes added | `%LOCALAPPDATA%\files\bundled.txt` | Roots of the preset volumes already added, one per line, so a removed one is not added again. Local, like the catalog, because the volume list is per PC; checked by path alone, so start-up never waits on a mapped drive |
 
 **Migrations.** `Data/Migrations.cs` runs embedded scripts named `<kind>-<n>.sql` above the database's `PRAGMA user_version`, each in its own transaction. To change a schema, add the next numbered script; never edit one that has shipped.
 

@@ -21,7 +21,7 @@ Instant file-name search across folders and network shares on Windows.
 - **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> in an empty box brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again.
 - **History control.** So file names don't show up while your screen is shared, Settings → General → History can pause history (nothing new is recorded, nothing is deleted), hide Recently opened from the home list, and clear recent searches or recently opened files separately. Favorites are never cleared.
 - **Placing the panel.** Drag it anywhere by its edge padding (also out of maximized or snapped; double-click there maximizes or restores), resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
-- **Preset volumes.** An installer built with `make_msi.ps1 -Volumes` adds a list of volumes on each PC it is installed on, once; see [CONTRIBUTING.md](CONTRIBUTING.md#an-installer-with-preset-volumes).
+- **Preset volumes.** An installer built with `make_msi.ps1 -Volumes` adds a list of volumes once for each user on each PC it is installed on; see [CONTRIBUTING.md](CONTRIBUTING.md#an-installer-with-preset-volumes).
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
 
 ## Keys

@@ -81,7 +81,7 @@ For one organisation's PCs, `-Volumes` builds a list of volumes into the install
 pwsh tools/make_msi.ps1 -Volumes volumes.json -Publish \\server\share\files-updates
 ```
 
-`volumes.json` is a JSON array, for example `[{ "name": "Drawings", "folder": "\\\\server\\drawings" }, { "name": "Archive", "folder": "\\\\server\\archive", "liveOnly": true }]`. It is installed beside `files.exe`, and at start-up each volume in it is added once on that PC (recorded in `%LOCALAPPDATA%\files\bundled.txt`). After that the volume belongs to the user: editing or removing it sticks, and a volume added to the list in a later installer is added on upgrade. A folder that is already a volume is left as it is. `-Volumes` cannot be combined with `-Release`, since a public release is for everyone. Publish it to the organisation's update folder instead, so updates keep the list.
+`volumes.json` is a JSON array, for example `[{ "name": "Drawings", "folder": "\\\\server\\drawings" }, { "name": "Archive", "folder": "\\\\server\\archive", "liveOnly": true }]`. It is installed beside `files.exe`, and at start-up each volume in it is added once for each Windows user on that PC (recorded in `%LOCALAPPDATA%\files\bundled.txt`, beside the volume list). Comments and trailing commas are allowed. After that the volume belongs to the user: editing or removing it sticks, and a volume added to the list in a later installer is added on upgrade. A folder that is already a volume is left as it is. `-Volumes` cannot be combined with `-Release`, since a public release is for everyone. Publish it to the organisation's update folder instead, so updates keep the list.
 
 ## Getting help
 

@@ -35,7 +35,7 @@ param(
     # Skip `dotnet publish`, for when artifacts\publish is already current.
     [switch]$NoBuild,
 
-    # A volumes.json to build into the installer: volumes added once on each PC.
+    # A volumes.json to build into the installer: volumes added once for each user on each PC.
     [string]$Volumes,
 
     # Copy the installer to this folder and write latest.json beside it.
@@ -73,11 +73,17 @@ function Stage-Volumes([string]$Source, [string]$Folder) {
         return $false
     }
     if (-not (Test-Path $Source)) { throw "no such file: $Source" }
-    $entries = @(Get-Content $Source -Raw | ConvertFrom-Json)
+    $text = Get-Content $Source -Raw
+    # The app reads a list; a lone object would build but never load.
+    if (-not ($text.TrimStart() -match '^(//[^\n]*\n\s*)*\[')) { throw "$Source must be a JSON array: [ { ... }, ... ]" }
+    $entries = @($text | ConvertFrom-Json)
     if ($entries.Count -eq 0) { throw "$Source lists no volumes" }
     foreach ($entry in $entries) {
         if (-not ($entry.name -is [string] -and $entry.name.Trim()) -or -not ($entry.folder -is [string] -and $entry.folder.Trim())) {
             throw "$Source has a volume without a name or folder: $($entry | ConvertTo-Json -Compress)"
+        }
+        if ($null -ne $entry.liveOnly -and $entry.liveOnly -isnot [bool]) {
+            throw "$Source has a liveOnly that is not true or false: $($entry | ConvertTo-Json -Compress)"
         }
     }
     Copy-Item -Path $Source -Destination $staged -Force
@@ -105,6 +111,10 @@ try {
     if (-not $version) { throw "could not read <Version> from $project" }
     Write-Host "version $version"
 
+    if ($Volumes -and $Release) {
+        # A public release is for everyone; preset volumes belong in an installer for one organisation.
+        throw '-Volumes cannot be used with -Release; use -Publish to a shared update folder instead'
+    }
     if (-not (Test-Path "Cert:\CurrentUser\My\$Thumbprint")) {
         throw "the signing certificate $Thumbprint is not in Cert:\CurrentUser\My"
     }
@@ -131,10 +141,6 @@ try {
         }
     }
 
-    if ($Volumes -and $Release) {
-        # A public release is for everyone; preset volumes belong in an installer for one organisation.
-        throw '-Volumes cannot be used with -Release; use -Publish to a shared update folder instead'
-    }
     $defines = @('-define', "Version=$version", '-define', "TargetDir=$publishDir")
     if (Stage-Volumes -Source $Volumes -Folder $publishDir) {
         $defines += @('-define', 'Volumes=1')
