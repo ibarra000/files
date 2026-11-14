@@ -3,6 +3,7 @@ using Files.Core;
 namespace Files.Services;
 
 /// <summary>What the preview pane shows for one file or folder; <see cref="Note"/> says why something is missing.</summary>
+/// <param name="Thumbnail">A picture of the file (a PDF's first page, a drawing's saved preview) as PNG or BMP bytes.</param>
 public sealed record PreviewInfo(
     string Name,
     string Folder,
@@ -12,7 +13,8 @@ public sealed record PreviewInfo(
     IReadOnlyList<string>? Lines,
     IReadOnlyList<string>? Entries,
     bool IsImage,
-    string? Note);
+    string? Note,
+    byte[]? Thumbnail = null);
 
 /// <summary>
 /// Reads the details of the one selected file: its size, date, and first lines
@@ -25,6 +27,12 @@ public static class Preview
     public const int MaxLineLength = 200;
     public const int MaxEntries = 15;
     private const long MaxTextBytes = 1024 * 1024;
+
+    /// <summary>How wide a PDF page is rendered: twice the pane's picture, so it stays sharp on a high-DPI screen.</summary>
+    public const int ThumbnailWidth = 720;
+
+    /// <summary>Larger PDFs are not opened: Windows reads more of a big file to find its first page.</summary>
+    private const long MaxPdfBytes = 256L * 1024 * 1024;
     private const int SniffBytes = 4096;
     private const string TabAsSpaces = "    ";
 
@@ -34,7 +42,21 @@ public static class Preview
 
     private static readonly IReadOnlySet<string> ImageTypes = new HashSet<string>(["png", "jpg", "jpeg", "gif", "bmp"], StringComparer.OrdinalIgnoreCase);
 
-    public static Task<PreviewInfo> LoadAsync(string path, CancellationToken cancel) => Task.Run(() => Load(path, cancel), cancel);
+    /// <summary>Reads the details, and renders a PDF's first page, off the calling thread.</summary>
+    public static async Task<PreviewInfo> LoadAsync(string path, CancellationToken cancel)
+    {
+        PreviewInfo info = await Task.Run(() => Load(path, cancel), cancel);
+        bool isPdf = info.Note is null && info.Size is long size && size <= MaxPdfBytes
+            && Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+        if (!isPdf)
+        {
+            return info;
+        }
+        var page = await Task.Run(() => PdfThumbnail.RenderAsync(path, ThumbnailWidth, cancel), cancel);
+        return page is var (png, pages)
+            ? info with { Thumbnail = png, Note = $"Page 1 of {pages:N0}" }
+            : info with { Note = "Could not show this PDF" };
+    }
 
     public static PreviewInfo Load(string path, CancellationToken cancel)
     {
@@ -102,6 +124,16 @@ public static class Preview
         if (ImageTypes.Contains(extension))
         {
             return details with { IsImage = true };
+        }
+        if (extension.Equals("pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            // Rendered by LoadAsync, which Windows' PDF engine needs.
+            return details;
+        }
+        if (extension.Equals("dwg", StringComparison.OrdinalIgnoreCase))
+        {
+            byte[]? picture = DwgThumbnail.Read(file.FullName);
+            return picture is null ? details with { Note = "No preview saved in this drawing" } : details with { Thumbnail = picture };
         }
         if (!TextTypes.Contains(extension))
         {
