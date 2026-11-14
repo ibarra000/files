@@ -295,9 +295,9 @@ public sealed class Indexer : IDisposable
             {
                 problem = $"Stopped after {walk.Index.FileCount:N0} files because the names no longer fit in memory; add its subfolders as separate volumes";
             }
-            else if (walk.Unreadable > 0)
+            else
             {
-                problem = $"{walk.Unreadable:N0} folders could not be read";
+                problem = walk.Skipped.Describe();
             }
             SetStatus(volume.Id, VolumeStatus.Online, null, problem, scannedSoFar: null, walk.Index);
         }

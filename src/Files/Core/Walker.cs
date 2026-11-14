@@ -1,10 +1,42 @@
+using System.Collections.Concurrent;
 using System.IO.Enumeration;
 using System.Runtime.ExceptionServices;
+using System.Runtime.InteropServices;
 
 namespace Files.Core;
 
+/// <summary>What a walk passed over, so a search that ends early says why.</summary>
+/// <param name="Unreadable">Folders that could not be listed (no access, deleted meanwhile, name too long).</param>
+/// <param name="Links">Folder links (junctions, DFS links, mount points) that were not followed.</param>
+/// <param name="TooDeep">Folders below <see cref="Walker.MaxDepth"/>, which were not read.</param>
+public sealed record WalkSkips(int Unreadable, int Links, int TooDeep)
+{
+    public static WalkSkips None { get; } = new(0, 0, 0);
+
+    public WalkSkips Plus(WalkSkips other) => new(Unreadable + other.Unreadable, Links + other.Links, TooDeep + other.TooDeep);
+
+    /// <summary>The skips in words, or null when nothing was skipped.</summary>
+    public string? Describe()
+    {
+        var parts = new List<string>();
+        if (Unreadable > 0)
+        {
+            parts.Add(Unreadable == 1 ? "1 folder could not be read" : $"{Unreadable:N0} folders could not be read");
+        }
+        if (Links > 0)
+        {
+            parts.Add(Links == 1 ? "1 link not followed" : $"{Links:N0} links not followed");
+        }
+        if (TooDeep > 0)
+        {
+            parts.Add(TooDeep == 1 ? "1 folder too deep" : $"{TooDeep:N0} folders too deep");
+        }
+        return parts.Count == 0 ? null : string.Join(" · ", parts);
+    }
+}
+
 /// <param name="Truncated">The walk stopped because the names no longer fit in memory.</param>
-public sealed record WalkResult(VolumeIndex Index, int Folders, int Unreadable, bool Truncated);
+public sealed record WalkResult(VolumeIndex Index, int Folders, WalkSkips Skipped, bool Truncated);
 
 /// <summary>
 /// Reads every file name under a root with several folders listed at once.
@@ -17,9 +49,10 @@ public static class Walker
     public const int MaxDepth = 32;
 
     /// <summary>
-    /// After this many folders in a row fail with I/O errors, the share is
-    /// treated as gone. Folders the user may not read do not count, so a share
-    /// full of restricted folders is still read.
+    /// After this many folders in a row fail with network errors, the root is
+    /// listed again: if it still reads, the walk goes on (a broken corner of a
+    /// share), otherwise the share is treated as gone. Folders the user may not
+    /// read do not count, so a share full of restricted folders is still read.
     /// </summary>
     public const int MaxConsecutiveFailures = 32;
 
@@ -34,12 +67,15 @@ public static class Walker
 
     private sealed record Folder(string Relative, int Depth);
 
-    private sealed record Listing(List<string> Files, List<string> Folders);
+    /// <param name="Links">Folders that are links (reparse points): junctions, symbolic links, DFS links, mount points.</param>
+    private sealed record Listing(List<string> Files, List<string> Folders, List<string> Links);
 
     /// <summary>
     /// Walks <paramref name="root"/>. Throws when the root itself cannot be
     /// read; a subfolder that cannot be read is counted and skipped. Folder
-    /// junctions and other reparse points are never followed.
+    /// links are followed only on a network share (where DFS links and the
+    /// server's mount points hold whole subtrees), each target once; on a
+    /// local disk they are counted and skipped.
     /// There is no fixed file count: the walk stops only when the names would
     /// no longer fit in an arena or in memory (see <see cref="CharLimit"/>).
     /// </summary>
@@ -75,6 +111,7 @@ public static class Walker
         return Walk(root, skipHidden, cancel, progress: null, CharLimit(), keep, onFolder);
     }
 
+    /// <param name="followLinks">Whether to read folder links; by default, only on a network share.</param>
     internal static WalkResult Walk(
         string root,
         bool skipHidden,
@@ -82,18 +119,32 @@ public static class Walker
         Action<int>? progress,
         long maxChars,
         Func<string, List<string>, List<string>>? keep = null,
-        Action<string, IReadOnlyList<string>>? onFolder = null)
+        Action<string, IReadOnlyList<string>>? onFolder = null,
+        bool? followLinks = null)
     {
+        bool follow = followLinks ?? IsOnNetwork(root);
+        // Link targets already read, by volume serial and file id, so a loop or two links to one place are read once.
+        var linkTargets = new ConcurrentDictionary<(uint Volume, ulong File), byte>();
+        // The links of a listing that are read like folders; the others are skipped.
+        List<string> LinksToFollow(string relative, Listing listing) => follow
+            ? listing.Links.Where(link => FolderId(Path.Join(root, relative, link)) is { } id && linkTargets.TryAdd(id, 0)).ToList()
+            : [];
+
         Listing rootListing = Filter(List(root, skipHidden), "", keep);
         onFolder?.Invoke("", rootListing.Files);
         var found = new List<(string Relative, List<string> Files)> { ("", rootListing.Files) };
-        var pending = new Stack<Folder>(rootListing.Folders.Select(name => new Folder(name, 1)));
+        List<string> rootLinks = LinksToFollow("", rootListing);
+        var pending = new Stack<Folder>(rootListing.Folders.Concat(rootLinks).Select(name => new Folder(name, 1)));
         int busy = 0;
         int entries = rootListing.Files.Count;
         long fileChars = CharsOf(rootListing.Files);
         long folderChars = 1;
         int unreadable = 0;
+        int linksSkipped = rootListing.Links.Count - rootLinks.Count;
+        int tooDeep = 0;
         int failuresInARow = 0;
+        bool checkingShare = false;
+        bool shareLost = false;
         bool truncated = false;
         Exception? failure = null;
         var gate = new object();
@@ -109,7 +160,7 @@ public static class Walker
                     {
                         Monitor.Wait(gate);
                     }
-                    bool stop = cancel.IsCancellationRequested || failuresInARow >= MaxConsecutiveFailures || failure is not null;
+                    bool stop = cancel.IsCancellationRequested || shareLost || failure is not null;
                     if (pending.Count == 0 || stop)
                     {
                         Monitor.PulseAll(gate);
@@ -120,12 +171,14 @@ public static class Walker
                 }
 
                 Listing? listing = null;
+                List<string> links = [];
                 bool lostContact = false;
                 Exception? crash = null;
                 try
                 {
                     listing = TryList(Path.Join(root, folder.Relative), skipHidden, out lostContact);
                     listing = listing is null ? null : Filter(listing, folder.Relative, keep);
+                    links = listing is not null && folder.Depth < MaxDepth ? LinksToFollow(folder.Relative, listing) : [];
                 }
                 catch (Exception error)
                 {
@@ -135,6 +188,7 @@ public static class Walker
                 }
                 bool store = listing is not null && (keep is null || listing.Files.Count > 0);
                 int? report = null;
+                bool checkShare = false;
 
                 lock (gate)
                 {
@@ -147,6 +201,9 @@ public static class Walker
                     {
                         unreadable++;
                         failuresInARow = lostContact ? failuresInARow + 1 : failuresInARow;
+                        // One worker at a time checks whether the share is really gone; the others carry on meanwhile.
+                        checkShare = lostContact && failuresInARow >= MaxConsecutiveFailures && !checkingShare && !shareLost;
+                        checkingShare |= checkShare;
                     }
                     else if (fileChars + CharsOf(listing.Files) > maxChars || folderChars + folder.Relative.Length + 1 > maxChars)
                     {
@@ -165,14 +222,32 @@ public static class Walker
                         }
                         if (folder.Depth < MaxDepth)
                         {
-                            foreach (string child in listing.Folders)
+                            foreach (string child in listing.Folders.Concat(links))
                             {
                                 pending.Push(new Folder(Path.Join(folder.Relative, child), folder.Depth + 1));
                             }
+                            linksSkipped += listing.Links.Count - links.Count;
+                        }
+                        else
+                        {
+                            tooDeep += listing.Folders.Count + listing.Links.Count;
                         }
                         report = entries;
                     }
                     Monitor.PulseAll(gate);
+                }
+                if (checkShare)
+                {
+                    // A run of failures can be one broken corner of a share that is still there.
+                    bool reachable = TryList(root, skipHidden, out _) is not null;
+                    lock (gate)
+                    {
+                        checkingShare = false;
+                        // Lost only if nothing was read while the root was tried; once lost, it stays lost.
+                        shareLost |= !reachable && failuresInARow >= MaxConsecutiveFailures;
+                        failuresInARow = reachable ? 0 : failuresInARow;
+                        Monitor.PulseAll(gate);
+                    }
                 }
                 // Reported outside the lock, so a slow listener never holds up the other workers.
                 try
@@ -205,9 +280,9 @@ public static class Walker
         {
             ExceptionDispatchInfo.Throw(failure);
         }
-        if (failuresInARow >= MaxConsecutiveFailures)
+        if (shareLost)
         {
-            throw new IOException($"{MaxConsecutiveFailures} folders in a row could not be read");
+            throw new IOException($"{MaxConsecutiveFailures} folders in a row could not be read, and neither could the volume itself");
         }
 
         // Sorted so the same tree always gives the same index.
@@ -217,7 +292,39 @@ public static class Walker
         {
             builder.AddFolder(relative, files);
         }
-        return new WalkResult(builder.Build(), found.Count, unreadable, truncated);
+        return new WalkResult(builder.Build(), found.Count, new WalkSkips(unreadable, linksSkipped, tooDeep), truncated);
+    }
+
+    /// <summary>A UNC path, or a drive Windows reports as a network drive.</summary>
+    internal static bool IsOnNetwork(string root)
+    {
+        if (root.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+        try
+        {
+            return new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (Exception error) when (error is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether a failed listing looks like the share going away (the network or
+    /// the server) rather than one folder that cannot be read: a path too long,
+    /// a name the server refuses, a broken link.
+    /// </summary>
+    internal static bool LooksLikeLostContact(IOException error)
+    {
+        const int PathNotFound = unchecked((int)0x80070003);
+        const int InvalidName = unchecked((int)0x8007007B);
+        const int FilenameTooLong = unchecked((int)0x800700CE);
+        const int CantAccessFile = unchecked((int)0x80070780);
+        return error is not PathTooLongException
+            && error.HResult is not (PathNotFound or InvalidName or FilenameTooLong or CantAccessFile);
     }
 
     private static Listing Filter(Listing listing, string relative, Func<string, List<string>, List<string>>? keep)
@@ -253,9 +360,9 @@ public static class Walker
         {
             return null;
         }
-        catch (IOException)
+        catch (IOException error)
         {
-            lostContact = true;
+            lostContact = LooksLikeLostContact(error);
             return null;
         }
     }
@@ -274,16 +381,13 @@ public static class Walker
             (ref FileSystemEntry entry) => (entry.FileName.ToString(), entry.Attributes),
             options);
 
-        var listing = new Listing([], []);
+        var listing = new Listing([], [], []);
         foreach (var (name, attributes) in entries)
         {
             if (attributes.HasFlag(FileAttributes.Directory))
             {
-                // Hidden and system folders are still walked; junctions never are.
-                if (!attributes.HasFlag(FileAttributes.ReparsePoint))
-                {
-                    listing.Folders.Add(name);
-                }
+                // Hidden and system folders are still walked; links only when the walk follows them.
+                (attributes.HasFlag(FileAttributes.ReparsePoint) ? listing.Links : listing.Folders).Add(name);
             }
             else if (!skipHidden || (attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
             {
@@ -293,4 +397,61 @@ public static class Walker
         listing.Files.Sort(string.CompareOrdinal);
         return listing;
     }
+
+    /// <summary>
+    /// The volume serial and file id of the folder a link leads to, or null when it
+    /// cannot be opened or the server gives no file id (some report 0), so the link
+    /// is counted as not followed rather than risk reading one place twice.
+    /// .NET has no managed way to ask for a folder's file id.
+    /// </summary>
+    private static (uint Volume, ulong File)? FolderId(string path)
+    {
+        const uint BackupSemantics = 0x02000000;
+        const uint OpenExisting = 3;
+        const int MaxPath = 260;
+        // The Windows API needs the long-path prefix past MAX_PATH, which .NET's own calls add by themselves.
+        string full = path.Length < MaxPath ? path
+            : path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path[2..] : @"\\?\" + path;
+        IntPtr handle = CreateFileW(full, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle == new IntPtr(-1))
+        {
+            return null;
+        }
+        try
+        {
+            if (!GetFileInformationByHandle(handle, out FileInformation info))
+            {
+                return null;
+            }
+            ulong file = ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow;
+            return file == 0 ? null : (info.VolumeSerialNumber, file);
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
+
+    /// <summary>BY_HANDLE_FILE_INFORMATION; each FILETIME is two 32-bit halves.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileInformation
+    {
+        public uint Attributes;
+        public uint CreationLow, CreationHigh, AccessLow, AccessHigh, WriteLow, WriteHigh;
+        public uint VolumeSerialNumber;
+        public uint SizeHigh;
+        public uint SizeLow;
+        public uint Links;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(string name, uint access, FileShare share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(IntPtr handle, out FileInformation info);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
 }

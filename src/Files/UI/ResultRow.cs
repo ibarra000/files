@@ -176,7 +176,8 @@ public static class StatusText
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
     /// <param name="found">The same count the header shows, folders included.</param>
-    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, IReadOnlyList<string> problems)
+    /// <param name="skipped">What the walks passed over; said once the search has ended.</param>
+    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
     {
         string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
         if (capped)
@@ -197,6 +198,10 @@ public static class StatusText
             state = $"Live search · {progress}";
         }
         var parts = new List<string> { state };
+        if (!running && skipped.Describe() is string skips)
+        {
+            parts.Add(skips);
+        }
         parts.AddRange(problems);
         return string.Join(" · ", parts);
     }

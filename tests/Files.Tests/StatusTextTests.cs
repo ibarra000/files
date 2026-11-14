@@ -1,3 +1,4 @@
+using Files.Core;
 using Files.Data;
 using Files.Services;
 using Files.UI;
@@ -65,8 +66,18 @@ public sealed class StatusTextTests
     [Fact]
     public void Live_progress_counts_what_the_header_counts()
     {
-        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, running: true, stopped: false, capped: false, []));
-        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, running: false, stopped: false, capped: false, []));
+        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, running: true, stopped: false, capped: false, new WalkSkips(0, 0, 0), []));
+        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, running: false, stopped: false, capped: false, new WalkSkips(0, 0, 0), []));
+    }
+
+    [Fact]
+    public void A_finished_live_search_says_what_it_could_not_read()
+    {
+        string done = StatusText.ForLive(3, 30, running: false, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
+        Assert.EndsWith("· 12 folders could not be read · 1 link not followed", done);
+        // While it runs the line is about progress; skips are added up at the end.
+        string running = StatusText.ForLive(3, 30, running: true, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
+        Assert.DoesNotContain("could not be read", running);
     }
 
     [Fact]
