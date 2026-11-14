@@ -99,7 +99,8 @@ public partial class SettingsWindow : Window
         Settings saved = _app.Settings;
         bool hiddenChanged = !SplitList(HiddenBox.Text).SequenceEqual(saved.HiddenExtensions);
         bool folderChanged = UpdateFolderBox.Text.Trim() != saved.UpdateFolder;
-        if (hiddenChanged || folderChanged)
+        bool removalsChanged = !RemovalLines().SequenceEqual(saved.ScreenTextRemovals);
+        if (hiddenChanged || folderChanged || removalsChanged)
         {
             Save();
         }
@@ -187,6 +188,7 @@ public partial class SettingsWindow : Window
             .FirstOrDefault(item => (string)item.Tag == settings.RescanHours.ToString()) ?? RescanBox.Items[0];
         HideSystemBox.IsChecked = settings.HideSystemFiles;
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
+        RemovalsBox.Text = string.Join(Environment.NewLine, settings.ScreenTextRemovals);
         ShowFoldersBox.IsChecked = settings.ShowFolders;
         foreach (Viewer viewer in settings.Viewers)
         {
@@ -260,6 +262,7 @@ public partial class SettingsWindow : Window
             RescanHours = int.Parse((string)((ComboBoxItem)RescanBox.SelectedItem).Tag),
             HideSystemFiles = HideSystemBox.IsChecked == true,
             HiddenExtensions = SplitList(HiddenBox.Text),
+            ScreenTextRemovals = RemovalLines(),
             ShowFolders = ShowFoldersBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
@@ -278,6 +281,35 @@ public partial class SettingsWindow : Window
         FillEnterChoices(_app.Settings);
         ShowShortcuts();
         _loading = false;
+    }
+
+    /// <summary>The patterns typed, one per line, without blank lines.</summary>
+    private List<string> RemovalLines() =>
+        RemovalsBox.Text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.Trim().Length > 0)
+            .ToList();
+
+    /// <summary>Shows what the patterns typed so far would leave of the sample, before they are saved.</summary>
+    private void OnTryRemovals(object sender, TextChangedEventArgs e)
+    {
+        if (RemovalsTry is null || RemovalsResult is null)
+        {
+            // Still loading the window.
+            return;
+        }
+        if (RemovalsTry.Text.Trim().Length == 0)
+        {
+            RemovalsResult.Text = "Type a code to see what would be searched.";
+            return;
+        }
+        (Core.TextCleanup? cleanup, IReadOnlyList<string> problems) = Core.TextCleanup.Compile(RemovalLines());
+        if (cleanup is null)
+        {
+            RemovalsResult.Text = problems[0];
+            return;
+        }
+        ScreenRead read = ScreenText.WithRemovals(new ScreenRead(RemovalsTry.Text, null), cleanup);
+        RemovalsResult.Text = read.Text is null ? read.Problem : $"Searches for: {read.Text}{(read.Problem is null ? "" : $" ({read.Problem})")}";
     }
 
     private List<Viewer> ValidViewers(List<string> problems)

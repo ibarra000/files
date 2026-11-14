@@ -30,6 +30,9 @@ public partial class App : Application
     // The engines for the text under the mouse; PaddleOCR loads its models only when chosen.
     private readonly WindowsTextReader _windowsReader = new();
     private readonly PaddleTextReader _paddleReader = new(PaddleTextReader.DefaultModelFolder);
+
+    // The removal patterns, compiled once each time they change. Settings saves only patterns that compile.
+    private Core.TextCleanup _textCleanup = Core.TextCleanup.None;
     private DispatcherTimer? _updateTimer;
 
     // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
@@ -122,6 +125,9 @@ public partial class App : Application
         }
 
         (Settings, string? settingsProblem) = Settings.Load(AppPaths.Settings);
+        // A hand-edited file can hold a pattern that does not compile; then none apply, and the start-up note says why.
+        (Core.TextCleanup? cleanup, IReadOnlyList<string> patternProblems) = Core.TextCleanup.Compile(Settings.ScreenTextRemovals);
+        _textCleanup = cleanup ?? Core.TextCleanup.None;
         History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
         Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
@@ -169,6 +175,7 @@ public partial class App : Application
         {
             startProblems.Add($"Text-under-the-mouse shortcut: {OcrHotkeyProblem}");
         }
+        startProblems.AddRange(patternProblems);
         if (startProblems.Count > 0)
         {
             _tray.Notify(string.Join("\n", startProblems));
@@ -212,7 +219,7 @@ public partial class App : Application
                 await Task.Delay(PanelHideDelay);
             }
             ITextReader reader = Settings.OcrEngine == OcrChoice.Paddle ? _paddleReader : _windowsReader;
-            read = await ScreenText.UnderCursorAsync(reader, _windowsReader);
+            read = ScreenText.WithRemovals(await ScreenText.UnderCursorAsync(reader, _windowsReader), _textCleanup);
         }
         catch (Exception error)
         {
@@ -268,6 +275,20 @@ public partial class App : Application
                 settings = settings with { OcrHotkey = working };
             }
             problem ??= OcrHotkeyProblem;
+        }
+        if (!settings.ScreenTextRemovals.SequenceEqual(previous.ScreenTextRemovals))
+        {
+            (Core.TextCleanup? cleanup, IReadOnlyList<string> patternProblems) = Core.TextCleanup.Compile(settings.ScreenTextRemovals);
+            if (cleanup is null)
+            {
+                // Never saved: the patterns that work stay in use.
+                settings = settings with { ScreenTextRemovals = previous.ScreenTextRemovals };
+                problem ??= string.Join("\n", patternProblems);
+            }
+            else
+            {
+                _textCleanup = cleanup;
+            }
         }
         Settings = settings;
         try
