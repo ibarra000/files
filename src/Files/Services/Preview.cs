@@ -183,12 +183,18 @@ public static class Preview
         }
         try
         {
-            (LineWork? work, byte[]? fallback) = extension switch
+            if (extension is "step" or "stp")
             {
-                "dxf" => DxfPreview.Read(file.FullName, cancel) is DxfContent dxf ? (dxf.Work, dxf.Saved) : (null, null),
-                "step" or "stp" => (StepPreview.Read(file.FullName, cancel), null),
-                _ => (PltPreview.Read(file.FullName, cancel), null),
-            };
+                return StepPreview.Render(file.FullName, ThumbnailWidth, cancel) switch
+                {
+                    { TooLarge: true } => details with { Note = "Too large to preview" },
+                    { Png: byte[] model } => details with { Thumbnail = model },
+                    _ => details with { Note = NoDrawingPreview },
+                };
+            }
+            (LineWork? work, byte[]? fallback) = extension == "dxf"
+                ? DxfPreview.Read(file.FullName, cancel) is DxfContent dxf ? (dxf.Work, dxf.Saved) : (null, null)
+                : (PltPreview.Read(file.FullName, cancel), null);
             if (work is { TooLarge: true })
             {
                 return details with { Note = "Too large to preview" };
