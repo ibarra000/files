@@ -133,6 +133,20 @@ public sealed class IndexerTests
     }
 
     [Fact]
+    public void Editing_a_volume_removed_meanwhile_says_so()
+    {
+        using var temp = new TempFolder();
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        using var indexer = new Indexer(catalog, Path.Combine(temp.Path, "volumes"), () => new Settings { RescanHours = 0 });
+        Assert.Null(indexer.Add("v", temp.Path, liveOnly: true));
+        long id = Assert.Single(indexer.Volumes).Volume.Id;
+        Assert.Null(indexer.Remove(id));
+
+        Assert.Equal("That volume was removed meanwhile.", indexer.Edit(id, "v", temp.Path, liveOnly: false));
+        Assert.Empty(catalog.All());
+    }
+
+    [Fact]
     public async Task Moving_a_volume_reads_the_new_folder_and_deletes_the_old_list()
     {
         using var temp = new TempFolder();

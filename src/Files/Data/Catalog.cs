@@ -83,22 +83,25 @@ public sealed class Catalog(string path)
 
     public void Remove(long id) => Update("DELETE FROM volumes WHERE id = $id", id);
 
-    public void Rename(long id, string name) => Update("UPDATE volumes SET name = $name WHERE id = $id", id, ("$name", name.Trim()));
-
-    public void SetLiveOnly(long id, bool liveOnly) => Update("UPDATE volumes SET live_only = $live WHERE id = $id", id, ("$live", liveOnly ? 1 : 0));
+    /// <summary>Renames a volume and sets whether it is live-only, in one statement.</summary>
+    public void Change(long id, string name, bool liveOnly)
+    {
+        Update("UPDATE volumes SET name = $name, live_only = $live WHERE id = $id", id, ("$name", name.Trim()), ("$live", liveOnly ? 1 : 0));
+    }
 
     /// <summary>
-    /// Points a volume at another folder. A volume's root never changes (its saved list
-    /// describes that place), so this replaces it, in one transaction, with a new volume
-    /// of the same name and live-only choice, and returns it. Throws
-    /// <see cref="SqliteException"/> if the folder is already a volume; nothing changes then.
+    /// Points a volume at another folder, named <paramref name="name"/>. A volume's root never
+    /// changes (its saved list describes that place), so this replaces it, in one transaction,
+    /// with a new volume, and returns it. The new one is inserted before the old one is deleted,
+    /// so it never gets the old local id. Throws <see cref="SqliteException"/> if the folder is
+    /// already a volume; nothing changes then.
     /// </summary>
-    public Volume Move(long id, string folder)
+    public Volume Move(long id, string folder, string name, bool liveOnly)
     {
         string root = VolumeRoot.Normalize(folder);
-        Volume old = All().Single(volume => volume.Id == id);
         using SqliteConnection connection = Connect();
         using SqliteTransaction transaction = connection.BeginTransaction();
+        Insert(connection, transaction, name, root, liveOnly);
         using (SqliteCommand delete = connection.CreateCommand())
         {
             delete.Transaction = transaction;
@@ -106,7 +109,6 @@ public sealed class Catalog(string path)
             delete.Parameters.AddWithValue("$id", id);
             delete.ExecuteNonQuery();
         }
-        Insert(connection, transaction, old.Name, root, old.LiveOnly);
         transaction.Commit();
         return All().Single(volume => volume.Root == root);
     }

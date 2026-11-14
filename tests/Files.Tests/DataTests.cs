@@ -123,15 +123,14 @@ public sealed class DataTests
         Volume volume = catalog.Add("v", temp.Path, liveOnly: true);
         Assert.True(volume.LiveOnly);
 
-        catalog.Rename(volume.Id, " renamed ");
-        catalog.SetLiveOnly(volume.Id, false);
+        catalog.Change(volume.Id, " renamed ", liveOnly: false);
 
         Volume stored = Assert.Single(catalog.All());
         Assert.Equal(volume with { Name = "renamed", LiveOnly = false }, stored);
     }
 
     [Fact]
-    public void Moving_a_volume_makes_a_new_one_with_the_same_name_and_live_only()
+    public void Moving_a_volume_makes_a_new_one_with_a_new_uid_and_id()
     {
         using var temp = new TempFolder();
         Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
@@ -141,15 +140,17 @@ public sealed class DataTests
         Volume volume = catalog.Add("v", from, liveOnly: true);
         catalog.Add("other", taken);
 
-        Volume moved = catalog.Move(volume.Id, to + @"\");
+        Volume moved = catalog.Move(volume.Id, to + @"\", " w ", liveOnly: true);
 
         Assert.Equal(to, moved.Root);
-        Assert.Equal("v", moved.Name);
+        Assert.Equal("w", moved.Name);
         Assert.True(moved.LiveOnly);
         Assert.NotEqual(volume.Uid, moved.Uid);
+        // A running read of the old volume must never mistake the new one for it.
+        Assert.NotEqual(volume.Id, moved.Id);
         Assert.DoesNotContain(catalog.All(), stored => stored.Id == volume.Id);
         // A folder that is already a volume is refused, and the volume stays where it was.
-        Assert.Throws<SqliteException>(() => catalog.Move(moved.Id, taken));
+        Assert.Throws<SqliteException>(() => catalog.Move(moved.Id, taken, "w", liveOnly: true));
         Assert.Contains(catalog.All(), stored => stored.Id == moved.Id && stored.Root == to);
     }
 

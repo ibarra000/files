@@ -19,6 +19,11 @@ public sealed record VolumeState(Volume Volume, VolumeIndex? Index, int? Scanned
 public sealed class Indexer : IDisposable
 {
     public const int MaxConcurrentScans = 2;
+
+    /// <summary>What adding or moving to a folder that is already a volume says.</summary>
+    public const string AlreadyAVolume = "That folder is already a volume.";
+
+    private const string RemovedMeanwhile = "That volume was removed meanwhile.";
     private const int SqliteConstraint = 19;
     private static readonly TimeSpan Tick = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(5);
@@ -88,7 +93,7 @@ public sealed class Indexer : IDisposable
         }
         catch (Microsoft.Data.Sqlite.SqliteException error) when (error.SqliteErrorCode == SqliteConstraint)
         {
-            return "That folder is already a volume.";
+            return AlreadyAVolume;
         }
         catch (Microsoft.Data.Sqlite.SqliteException error)
         {
@@ -114,10 +119,6 @@ public sealed class Indexer : IDisposable
         {
             return "A volume needs a name and a folder.";
         }
-        if (!_states.TryGetValue(id, out VolumeState? state))
-        {
-            return "That volume was removed meanwhile.";
-        }
         string root;
         try
         {
@@ -127,31 +128,43 @@ public sealed class Indexer : IDisposable
         {
             return $"That is not a folder path: {error.Message}";
         }
-        bool moving = root != state.Volume.Root;
-        bool dropList = moving || liveOnly;
-        if (dropList && _running.TryGetValue(id, out CancellationTokenSource? scan))
-        {
-            scan.Cancel();
-        }
+        VolumeState state;
         Volume edited;
-        // Held while a scan checks for its volume and writes its file list, as Remove does.
+        bool moving;
+        // Held while a scan checks for its volume and writes its file list, and while Remove runs.
         lock (_shardGate)
         {
+            if (!_states.TryGetValue(id, out VolumeState? current))
+            {
+                return RemovedMeanwhile;
+            }
+            state = current;
+            moving = root != state.Volume.Root;
             try
             {
-                // Moved first: if the folder is taken, nothing has changed yet.
-                long editedId = moving ? _catalog.Move(id, root).Id : id;
-                _catalog.Rename(editedId, name);
-                _catalog.SetLiveOnly(editedId, liveOnly);
-                edited = _catalog.All().Single(volume => volume.Id == editedId);
+                if (moving)
+                {
+                    edited = _catalog.Move(id, root, name, liveOnly);
+                }
+                else
+                {
+                    _catalog.Change(id, name, liveOnly);
+                    edited = _catalog.All().Single(volume => volume.Id == id);
+                }
             }
             catch (Microsoft.Data.Sqlite.SqliteException error) when (error.SqliteErrorCode == SqliteConstraint)
             {
-                return "That folder is already a volume.";
+                return AlreadyAVolume;
             }
             catch (Microsoft.Data.Sqlite.SqliteException error)
             {
                 return $"The volume list could not be changed: {error.Message}";
+            }
+            bool dropList = moving || liveOnly;
+            // Stopped only once the change is made; a read that finishes meanwhile sees it and keeps nothing.
+            if (dropList && _running.TryGetValue(id, out CancellationTokenSource? scan))
+            {
+                scan.Cancel();
             }
             lock (_gate)
             {
@@ -160,8 +173,9 @@ public sealed class Indexer : IDisposable
                     _states = _states.Remove(id);
                     _removed.Add(id);
                 }
-                VolumeState current = _states.GetValueOrDefault(edited.Id, state);
-                _states = _states.SetItem(edited.Id, new VolumeState(edited, dropList ? null : current.Index, null, dropList ? null : current.Problem));
+                _states = _states.SetItem(edited.Id, dropList
+                    ? new VolumeState(edited, null, null, null)
+                    : state with { Volume = edited });
             }
             if (dropList)
             {
@@ -335,7 +349,7 @@ public sealed class Indexer : IDisposable
 
     private void RunScan(Volume volume, CancellationToken cancel)
     {
-        SetStatus(volume.Id, VolumeStatus.Scanning, null, problem: null, scannedSoFar: 0);
+        SetStatus(volume, VolumeStatus.Scanning, null, problem: null, scannedSoFar: 0);
         // Reported from several reading threads at once: one report at a time, and the count never goes back.
         var progressGate = new object();
         DateTime lastReport = DateTime.MinValue;
@@ -360,8 +374,8 @@ public sealed class Indexer : IDisposable
             // Checked and written under the lock Remove holds, so a volume removed meanwhile never gets its file list back.
             lock (_shardGate)
             {
-                // Removed, or made live-only, meanwhile.
-                if (!_states.TryGetValue(volume.Id, out VolumeState? now) || now.Volume.LiveOnly)
+                // Removed, moved (a new uid) or made live-only meanwhile.
+                if (!_states.TryGetValue(volume.Id, out VolumeState? now) || now.Volume.Uid != volume.Uid || now.Volume.LiveOnly)
                 {
                     return;
                 }
@@ -378,29 +392,33 @@ public sealed class Indexer : IDisposable
             {
                 problem = $"{walk.Unreadable:N0} folders could not be read";
             }
-            SetStatus(volume.Id, VolumeStatus.Online, null, problem, scannedSoFar: null, walk.Index);
+            SetStatus(volume, VolumeStatus.Online, null, problem, scannedSoFar: null, walk.Index);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
         {
             _retryAt[volume.Id] = DateTime.UtcNow + RetryAfterFailure;
-            SetStatus(volume.Id, VolumeStatus.Offline, Classify(volume.Root, error), error.Message, scannedSoFar: null);
+            SetStatus(volume, VolumeStatus.Offline, Classify(volume.Root, error), error.Message, scannedSoFar: null);
         }
     }
 
-    private void SetStatus(long id, VolumeStatus status, VolumeError? error, string? problem, int? scannedSoFar, VolumeIndex? index = null)
+    /// <summary>Records what a read of <paramref name="volume"/> found, unless that volume was removed or moved meanwhile.</summary>
+    private void SetStatus(Volume volume, VolumeStatus status, VolumeError? error, string? problem, int? scannedSoFar, VolumeIndex? index = null)
     {
-        if (!_states.ContainsKey(id))
+        // Compared by uid: a moved volume is a new one, and a local id can be reused.
+        if (!_states.TryGetValue(volume.Id, out VolumeState? now) || now.Volume.Uid != volume.Uid)
         {
             return;
         }
-        _catalog.SetStatus(id, status, error);
-        Volume? fresh = _catalog.All().FirstOrDefault(v => v.Id == id);
+        _catalog.SetStatus(volume.Id, status, error);
+        Volume? fresh = _catalog.All().FirstOrDefault(v => v.Id == volume.Id && v.Uid == volume.Uid);
         if (fresh is null)
         {
             return;
         }
         // A volume made live-only keeps no list, even one a scan that was being stopped just read.
-        Update(id, state => new VolumeState(fresh, fresh.LiveOnly ? null : index ?? state.Index, scannedSoFar, problem));
+        Update(volume.Id, state => state.Volume.Uid != volume.Uid
+            ? state
+            : new VolumeState(fresh, fresh.LiveOnly ? null : index ?? state.Index, scannedSoFar, problem));
     }
 
     private void Put(VolumeState state)

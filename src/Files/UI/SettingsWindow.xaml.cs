@@ -402,7 +402,7 @@ public partial class SettingsWindow : Window
         string folder = NewVolumePath.Text;
         bool liveOnly = NewVolumeLiveOnly.IsChecked == true;
         VolumeRow? editing = _editing;
-        if (editing is not null && !ConfirmEdit(editing, folder, liveOnly))
+        if (editing is not null && !await ConfirmEditAsync(editing, folder, liveOnly))
         {
             return;
         }
@@ -420,20 +420,25 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>A new folder, or making a volume live-only, drops what has been read; the user agrees first.</summary>
-    private bool ConfirmEdit(VolumeRow editing, string folder, bool liveOnly)
+    private async Task<bool> ConfirmEditAsync(VolumeRow editing, string folder, bool liveOnly)
     {
-        string? consequence;
+        bool moving;
         try
         {
-            consequence = Data.VolumeRoot.Normalize(folder) != editing.Root
-                ? $"{editing.Name} will be read again from scratch. Until that finishes, only a live search finds its files."
-                : liveOnly && !editing.LiveOnly ? $"The saved file list of {editing.Name} will be deleted, and only a live search will read it." : null;
+            // Off the UI thread: asking a disconnected mapped drive what it is can take seconds.
+            moving = await Task.Run(() => Data.VolumeRoot.Normalize(folder)) != editing.Root;
         }
         catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
         {
             // Not a path; saving says so.
             return true;
         }
+        string? consequence = (moving, liveOnly) switch
+        {
+            (true, false) => $"{editing.Name} will be read again from scratch. Until that finishes, only a live search finds its files.",
+            (_, true) when moving || !editing.LiveOnly => $"The saved file list of {editing.Name} will be deleted, and only a live search will read it.",
+            _ => null,
+        };
         return consequence is null
             || MessageBox.Show(this, consequence, "Change volume", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
     }
