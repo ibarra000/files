@@ -57,7 +57,16 @@ public partial class SearchWindow
 
     private void OnScopeClick(object sender, RoutedEventArgs e)
     {
-        var menu = new ContextMenu { PlacementTarget = ScopeButton, Placement = PlacementMode.Bottom };
+        // Up and left by the shadow room (see PanelMenu), so the card opens just under the button.
+        var room = (Thickness)FindResource("PopupShadowRoom");
+        var menu = new ContextMenu
+        {
+            PlacementTarget = ScopeButton,
+            Placement = PlacementMode.Bottom,
+            Style = (Style)FindResource("PanelMenu"),
+            HorizontalOffset = -room.Left,
+            VerticalOffset = 4 - room.Top,
+        };
         AddScopeItem(menu, "All volumes", null);
         foreach (VolumeState state in _app.Indexer.Volumes)
         {
@@ -70,7 +79,7 @@ public partial class SearchWindow
 
     private void AddScopeItem(ContextMenu menu, string header, string? scope)
     {
-        var item = new MenuItem { Header = header, IsCheckable = true, IsChecked = _scope == scope };
+        var item = new MenuItem { Header = header, IsCheckable = true, IsChecked = _scope == scope, Style = (Style)FindResource("PanelMenuItem") };
         item.Click += (_, _) =>
         {
             _scope = scope;

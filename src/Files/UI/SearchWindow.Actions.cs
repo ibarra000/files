@@ -35,10 +35,12 @@ public partial class SearchWindow
         _actionFilter = "";
         ShowActions();
         // Beside the row, at the right of the list, as on the design; the popup keeps itself on screen.
-        ActionMenu.HorizontalOffset = Math.Max(0, Results.ActualWidth - ActionMenuWidth);
-        ActionMenu.VerticalOffset = Results.ItemContainerGenerator.ContainerFromItem(row) is FrameworkElement item
+        // The popup is wider and taller than the card by the shadow's room, so it starts that much up and to the left.
+        var room = (Thickness)FindResource("PopupShadowRoom");
+        ActionMenu.HorizontalOffset = Math.Max(0, Results.ActualWidth - ActionMenuWidth) - room.Left;
+        ActionMenu.VerticalOffset = (Results.ItemContainerGenerator.ContainerFromItem(row) is FrameworkElement item
             ? item.TranslatePoint(new Point(0, item.ActualHeight), Results).Y
-            : 0;
+            : 0) - room.Top;
         ActionMenu.IsOpen = true;
         UpdateStatus();
     }

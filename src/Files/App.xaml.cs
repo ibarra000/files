@@ -417,8 +417,8 @@ public partial class App : Application
     private bool ClaimSingleInstance()
     {
         // The event exists before the mutex is claimed, so a second launch can always signal it.
-        _summon = new EventWaitHandle(false, EventResetMode.AutoReset, SummonName);
-        _singleInstance = new Mutex(initiallyOwned: true, SingleInstanceName, out bool first);
+        _summon = new EventWaitHandle(false, EventResetMode.AutoReset, SummonName + AppPaths.InstanceSuffix);
+        _singleInstance = new Mutex(initiallyOwned: true, SingleInstanceName + AppPaths.InstanceSuffix, out bool first);
         if (!first)
         {
             // Already running: ask that instance to show its panel.

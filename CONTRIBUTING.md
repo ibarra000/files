@@ -16,6 +16,8 @@ dotnet run --project src/Files     # starts the tray app; Settings opens if no v
 
 The app keeps its data in `%APPDATA%\files` and `%LOCALAPPDATA%\files` (see [ARCHITECTURE.md](docs/ARCHITECTURE.md#storage)). Delete those folders to start over.
 
+To run a build beside the installed app, give it a folder of its own: `$env:FILES_HOME = "$env:TEMP\files-dev"; dotnet run --project src/Files`. It keeps its settings and volumes there and runs as a separate instance; running it again with the same `FILES_HOME` shows its panel. Its shortcuts clash with the installed app's, so set others in its Settings.
+
 ## Tests
 
 ```powershell

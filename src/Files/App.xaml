@@ -9,9 +9,7 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="UI/PanelStyles.xaml" />
             </ResourceDictionary.MergedDictionaries>
-            <Style x:Key="Dim" TargetType="TextBlock">
-                <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
-            </Style>
+
         </ResourceDictionary>
     </Application.Resources>
 </Application>
