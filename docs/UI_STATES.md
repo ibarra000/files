@@ -18,7 +18,7 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 **Action menu** (`ActionMenu.IsOpen`, `_actionRow`, `_actionFilter`):
 - Opened by Tab or a right-click on a row. Typing filters it, ↑↓ move, Enter or a click runs an action.
-- The shortcuts it lists (Del, Ctrl+D, Ctrl+C, Ctrl+Shift+C, Ctrl+↵, Ctrl+O) run for its row and close it. Other chords do nothing while it is open.
+- The shortcuts it lists (Del, Ctrl+D, Ctrl+C, Ctrl+Shift+C, Ctrl+↵) run for its row and close it. Other chords do nothing while it is open.
 - It closes on Esc, on Tab, when the panel deactivates, moves or hides, or when its row (matched by path) leaves the list.
 
 **Volume menu** (`_scopeMenu`):
