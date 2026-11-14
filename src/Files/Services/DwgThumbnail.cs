@@ -91,7 +91,7 @@ public static class DwgThumbnail
         int colors = colorsUsed != 0 ? colorsUsed : bitCount <= 8 ? 1 << bitCount : 0;
         int masks = compression == BitFields && infoBytes == InfoHeaderBytes ? 12 : 0;
         long pixelsAt = BmpFileHeaderBytes + (long)infoBytes + masks + colors * 4L;
-        if (infoBytes < InfoHeaderBytes || pixelsAt > BmpFileHeaderBytes + dib.Length)
+        if (infoBytes < InfoHeaderBytes || colorsUsed < 0 || pixelsAt > BmpFileHeaderBytes + dib.Length)
         {
             return null;
         }

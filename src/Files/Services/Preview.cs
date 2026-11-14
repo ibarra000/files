@@ -46,11 +46,14 @@ public static class Preview
     public static async Task<PreviewInfo> LoadAsync(string path, CancellationToken cancel)
     {
         PreviewInfo info = await Task.Run(() => Load(path, cancel), cancel);
-        bool isPdf = info.Note is null && info.Size is long size && size <= MaxPdfBytes
-            && Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+        bool isPdf = info.Note is null && info.Size is not null && Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
         if (!isPdf)
         {
             return info;
+        }
+        if (info.Size > MaxPdfBytes)
+        {
+            return info with { Note = "Too large to preview" };
         }
         var page = await Task.Run(() => PdfThumbnail.RenderAsync(path, ThumbnailWidth, cancel), cancel);
         return page is var (png, pages)

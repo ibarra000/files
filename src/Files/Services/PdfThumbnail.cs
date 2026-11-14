@@ -16,7 +16,9 @@ public static class PdfThumbnail
         try
         {
             await using FileStream file = new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096, useAsync: true);
-            PdfDocument document = await PdfDocument.LoadFromStreamAsync(file.AsRandomAccessStream()).AsTask(cancel);
+            // Not cancelled midway: Windows would still be reading the file when it is closed. Checked between steps instead.
+            PdfDocument document = await PdfDocument.LoadFromStreamAsync(file.AsRandomAccessStream());
+            cancel.ThrowIfCancellationRequested();
             if (document.PageCount == 0)
             {
                 return null;
@@ -24,7 +26,8 @@ public static class PdfThumbnail
             using PdfPage page = document.GetPage(0);
             using var output = new InMemoryRandomAccessStream();
             var options = new PdfPageRenderOptions { DestinationWidth = width, BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId };
-            await page.RenderToStreamAsync(output, options).AsTask(cancel);
+            await page.RenderToStreamAsync(output, options);
+            cancel.ThrowIfCancellationRequested();
             using var png = new MemoryStream();
             await output.AsStreamForRead().CopyToAsync(png, cancel);
             return (png.ToArray(), document.PageCount);

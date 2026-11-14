@@ -129,6 +129,18 @@ public sealed class ThumbnailTests
     }
 
     [Fact]
+    public void A_bitmap_preview_with_a_negative_colour_count_gives_none()
+    {
+        byte[] dib = Picture(ImageFormat.Bmp)[14..];
+        BitConverter.TryWriteBytes(dib.AsSpan(32), -1000);
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "plan.dwg");
+        File.WriteAllBytes(path, Dwg(2, dib));
+
+        Assert.Null(DwgThumbnail.Read(path));
+    }
+
+    [Fact]
     public async Task A_drawing_preview_is_shown_through_the_preview_pane()
     {
         using var temp = new TempFolder();
