@@ -47,6 +47,9 @@ public sealed record Settings
 
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
+
+    /// <summary>Regular expressions removed from the text under the mouse before it is searched (Core/TextCleanup.cs).</summary>
+    public IReadOnlyList<string> ScreenTextRemovals { get; init; } = [];
     public Theme Theme { get; init; } = Theme.System;
     public bool HideOnBlur { get; init; } = true;
     public bool HideAfterOpening { get; init; } = true;
@@ -112,6 +115,7 @@ public sealed record Settings
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
             OcrHotkey = loaded.OcrHotkey ?? defaults.OcrHotkey,
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
+            ScreenTextRemovals = (loaded.ScreenTextRemovals ?? []).Where(pattern => pattern is not null).ToList(),
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,
             Viewers = (loaded.Viewers ?? [])
                 .Where(viewer => viewer?.Name is not null && viewer.Program is not null)

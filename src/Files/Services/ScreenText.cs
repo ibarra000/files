@@ -54,6 +54,27 @@ public static class ScreenText
         return text is null ? new ScreenRead(null, note ?? "No text under the mouse") : new ScreenRead(text, note);
     }
 
+    /// <summary>Said when the removal patterns took away everything that was read.</summary>
+    public const string NothingLeftNote = "Nothing was left after the removal patterns (Settings → General)";
+
+    /// <summary>
+    /// Applies the removal patterns to what was read, however it was read (from the app or by
+    /// text recognition), then trims surrounding punctuation again. Text the patterns leave empty
+    /// is not searched; the panel says why.
+    /// </summary>
+    public static ScreenRead WithRemovals(ScreenRead read, Core.TextCleanup cleanup)
+    {
+        if (read.Text is null)
+        {
+            return read;
+        }
+        Core.CleanedText cleaned = cleanup.Apply(read.Text);
+        string? text = Clean(cleaned.Text);
+        string?[] notes = [read.Problem, text is null ? NothingLeftNote : cleaned.Note];
+        string note = string.Join(" · ", notes.OfType<string>());
+        return new ScreenRead(text, note.Length > 0 ? note : null);
+    }
+
     /// <summary>Said when the engine chosen in Settings could not load, so the user knows why reading is weaker.</summary>
     public const string FellBackNote = "PaddleOCR could not load, so Windows text recognition read this";
 
