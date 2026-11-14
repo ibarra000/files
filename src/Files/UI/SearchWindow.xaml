@@ -45,7 +45,7 @@
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="Input" FontSize="18" Padding="34,6,10,6" BorderThickness="0" Background="Transparent"
                          Foreground="{DynamicResource Text}" CaretBrush="{DynamicResource Text}"
-                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
+                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" SelectionChanged="OnInputSelectionChanged" />
                 <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="16" Margin="10,0,0,0"
                            VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
                 <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"

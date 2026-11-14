@@ -27,7 +27,8 @@ public partial class SearchWindow
         bool liveRunning = _liveCancel is not null;
         ShowHints(ActionMenu.IsOpen
             ? StatusText.MenuHints
-            : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning));
+            : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning,
+                liveStopped: _liveStopped, volumeMenu: ScopeButton.Visibility == Visibility.Visible));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
         string attention = StatusText.For(volumes, _queryProblem, rescanRequested);

@@ -52,8 +52,9 @@ public sealed class StatusTextTests
     [Theory]
     [InlineData(false, false, "Open")]
     [InlineData(true, false, "Search live")]
-    [InlineData(true, true, "Open")]
-    public void The_hints_offer_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
+    [InlineData(true, true, "Stop")]
+    [InlineData(false, true, "Open")]
+    public void The_hints_offer_a_live_search_when_nothing_matched_and_never_open_with_nothing_to_open(bool noHits, bool liveRunning, string expected)
     {
         IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits, liveRunning);
         // The most useful key comes first, since a narrow panel shows only the first.
@@ -76,6 +77,29 @@ public sealed class StatusTextTests
         Assert.Equal(new KeyHint("Esc", "Clear"), Assert.Single(StatusText.Hints(noHits: true, liveRunning: false, invalid: true)));
         // Searching live again would read every volume again for the same answer.
         Assert.Equal(new KeyHint("Esc", "Clear"), Assert.Single(StatusText.Hints(noHits: true, liveRunning: false, liveFinished: true)));
+    }
+
+    [Fact]
+    public void A_stopped_live_search_that_found_nothing_offers_to_search_on()
+    {
+        IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits: true, liveRunning: false, liveFinished: true, liveStopped: true);
+
+        Assert.Equal([new KeyHint("Shift ↵", "Search live"), new KeyHint("Esc", "Clear")], hints);
+    }
+
+    [Fact]
+    public void The_volume_menu_key_is_offered_only_with_the_volume_menu()
+    {
+        Assert.Contains(new KeyHint("Alt ↓", "Volumes"), StatusText.Hints(noHits: false, liveRunning: false, volumeMenu: true));
+        Assert.DoesNotContain(new KeyHint("Alt ↓", "Volumes"), StatusText.Hints(noHits: false, liveRunning: false));
+    }
+
+    [Fact]
+    public void The_count_says_searching_until_a_running_live_search_finds_something()
+    {
+        Assert.Equal("Searching…", StatusText.Count(0, took: null, stillSearching: true));
+        Assert.Equal("No results", StatusText.Count(0, took: null));
+        Assert.Equal("2 results", StatusText.Count(2, took: null, stillSearching: true));
     }
 
     [Fact]

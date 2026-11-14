@@ -92,19 +92,30 @@ public partial class SearchWindow
         }
     }
 
-    private void OnResultSelectionChanged(object sender, SelectionChangedEventArgs e) => SchedulePreview();
+    /// <summary>The file the pane shows, so a list refreshed under it (a live search, a volume read again) does not read it again.</summary>
+    private string? _previewedPath;
+
+    private void OnResultSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SelectedRow?.Path is string path && path == _previewedPath)
+        {
+            return;
+        }
+        SchedulePreview();
+    }
 
     /// <summary>A hidden panel reads nothing: the pending read is dropped and one in progress is cancelled.</summary>
     private void StopPreview()
     {
         _previewTimer?.Stop();
         _previewCancel?.Cancel();
+        _previewedPath = null;
     }
 
     /// <summary>Reads the selection after a short pause, so moving quickly through results does not read each one.</summary>
     private void SchedulePreview()
     {
-        if (!PreviewShown)
+        if (!PreviewShown || !IsVisible)
         {
             return;
         }
@@ -114,7 +125,7 @@ public partial class SearchWindow
             _previewTimer.Tick += async (_, _) =>
             {
                 _previewTimer.Stop();
-                if (!PreviewShown)
+                if (!PreviewShown || !IsVisible)
                 {
                     return;
                 }
@@ -140,6 +151,7 @@ public partial class SearchWindow
     private async Task ShowPreviewAsync(ResultRow? row)
     {
         _previewCancel?.Cancel();
+        _previewedPath = null;
         if (row?.Path is not string path)
         {
             ShowPreviewHeader(row?.Icon ?? "", row?.Before ?? "", row?.Detail ?? "");
@@ -168,10 +180,11 @@ public partial class SearchWindow
         {
             return;
         }
-        if (cancel.IsCancellationRequested || SelectedRow != row)
+        if (cancel.IsCancellationRequested || SelectedRow?.Path != path)
         {
             return;
         }
+        _previewedPath = path;
         ShowPreviewInfo(info, image);
     }
 

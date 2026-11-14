@@ -94,12 +94,19 @@ public partial class SearchWindow
         }
     }
 
-    private void OnResultMouseDown(object sender, MouseButtonEventArgs e) => _dragStart = e.GetPosition(Results);
+    /// <summary>A drag starts only from a row: a press on the scrollbar or empty space scrolls, as anywhere else.</summary>
+    private void OnResultMouseDown(object sender, MouseButtonEventArgs e) =>
+        _dragStart = ElementTree.AncestorOf<System.Windows.Controls.ListBoxItem>(e.OriginalSource) is not null ? e.GetPosition(Results) : null;
 
     /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
     private void OnResultMouseMove(object sender, MouseEventArgs e)
     {
-        if (e.LeftButton != MouseButtonState.Pressed || _dragStart is not Point start || SelectedRow?.Path is not string path)
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            _dragStart = null;
+            return;
+        }
+        if (_dragStart is not Point start || SelectedRow?.Path is not string path)
         {
             return;
         }

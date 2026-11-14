@@ -54,7 +54,7 @@ public sealed class HistoryTests
     }
 
     [Fact]
-    public void Recall_steps_back_then_forward_and_clears_past_the_newest()
+    public void Recall_steps_back_to_the_oldest_and_starts_over_when_reset()
     {
         var recall = new Recall();
         recall.Reset(["newest", "older", "oldest"]);
@@ -64,9 +64,8 @@ public sealed class HistoryTests
         Assert.Equal("older", recall.Older());
         Assert.Equal("oldest", recall.Older());
         Assert.Null(recall.Older());
-        Assert.Equal("older", recall.Newer());
-        Assert.Equal("newest", recall.Newer());
-        Assert.Equal("", recall.Newer());
+        Assert.True(recall.IsActive);
+        recall.Reset(["newest"]);
         Assert.False(recall.IsActive);
     }
 

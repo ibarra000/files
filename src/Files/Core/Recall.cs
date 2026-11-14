@@ -1,9 +1,9 @@
 namespace Files.Core;
 
 /// <summary>
-/// Steps through past searches in the search box, as a terminal does with
-/// past commands: Up goes back, Down comes forward, and past the newest the
-/// box is empty again.
+/// Steps back through past searches in the search box, as a terminal does with
+/// past commands: Up on the top row goes back. Down moves into what a recalled
+/// search found, and Esc clears the box.
 /// </summary>
 public sealed class Recall
 {
@@ -27,18 +27,6 @@ public sealed class Recall
             return null;
         }
         _index++;
-        return _history[_index];
-    }
-
-    /// <summary>The next newer search, or "" after the newest, which also ends the recall.</summary>
-    public string Newer()
-    {
-        if (_index <= 0)
-        {
-            _index = -1;
-            return "";
-        }
-        _index--;
         return _history[_index];
     }
 }
