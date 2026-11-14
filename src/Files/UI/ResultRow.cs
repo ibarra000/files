@@ -167,11 +167,21 @@ public static class StatusText
     /// <summary>The key caps while the action menu is open.</summary>
     public static IReadOnlyList<KeyHint> MenuHints { get; } = [new KeyHint("↵", "Run"), new KeyHint("Esc", "Back")];
 
-    /// <summary>The footer when all is well: how much is searchable and how fresh it is.</summary>
-    public static string Indexed(long files, DateTime? newestScan)
+    /// <summary>The footer when all is well: how much is searchable, how fresh it is, and what only a live search reads.</summary>
+    /// <param name="liveOnly">Live-only volumes in the search, which only Shift+Enter reads.</param>
+    public static string Indexed(long files, DateTime? newestScan, int liveOnly = 0)
     {
-        string count = files == 1 ? "1 file indexed" : $"{files:N0} files indexed";
-        return newestScan is null ? count : $"{count} · updated {Age(newestScan)}";
+        var parts = new List<string>();
+        if (files > 0 || liveOnly == 0)
+        {
+            string count = files == 1 ? "1 file indexed" : $"{files:N0} files indexed";
+            parts.Add(newestScan is null ? count : $"{count} · updated {Age(newestScan)}");
+        }
+        if (liveOnly > 0)
+        {
+            parts.Add(liveOnly == 1 ? "1 live-only volume: Shift+Enter searches it" : $"{liveOnly:N0} live-only volumes: Shift+Enter searches them");
+        }
+        return string.Join(" · ", parts);
     }
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
@@ -205,6 +215,11 @@ public static class StatusText
     private static string? VolumeWords(VolumeState state)
     {
         string name = state.Volume.Name;
+        if (state.Volume.LiveOnly)
+        {
+            // Never read in the background, so there is nothing to report.
+            return null;
+        }
         if (state.ScannedSoFar is not null)
         {
             // Covered by the one "Scanning…" for all volumes.

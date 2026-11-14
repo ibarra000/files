@@ -17,6 +17,7 @@ public enum VolumeError
     PermissionDenied,
 }
 
+/// <param name="LiveOnly">Never read in the background and has no saved list; only a live search reads it.</param>
 public sealed record Volume(
     long Id,
     Guid Uid,
@@ -25,7 +26,8 @@ public sealed record Volume(
     string Name,
     VolumeStatus Status,
     VolumeError? LastError,
-    DateTime? LastScannedAt);
+    DateTime? LastScannedAt,
+    bool LiveOnly = false);
 
 /// <summary>The list of volumes, in <c>catalog.db</c>. Each volume's names live in its own shard.</summary>
 public sealed class Catalog(string path)
@@ -51,7 +53,7 @@ public sealed class Catalog(string path)
     {
         using SqliteConnection connection = Connect();
         using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = "SELECT id, uid, root, vtype, name, status, last_error, last_scanned_at FROM volumes ORDER BY name, id";
+        command.CommandText = "SELECT id, uid, root, vtype, name, status, last_error, last_scanned_at, live_only FROM volumes ORDER BY name, id";
         using SqliteDataReader reader = command.ExecuteReader();
         var volumes = new List<Volume>();
         while (reader.Read())
@@ -64,27 +66,63 @@ public sealed class Catalog(string path)
                 reader.GetString(4),
                 Enum.Parse<VolumeStatus>(reader.GetString(5), ignoreCase: true),
                 reader.IsDBNull(6) ? null : ErrorFromText(reader.GetString(6)),
-                reader.IsDBNull(7) ? null : DateTime.Parse(reader.GetString(7), null, System.Globalization.DateTimeStyles.AdjustToUniversal)));
+                reader.IsDBNull(7) ? null : DateTime.Parse(reader.GetString(7), null, System.Globalization.DateTimeStyles.AdjustToUniversal),
+                reader.GetInt64(8) != 0));
         }
         return volumes;
     }
 
     /// <summary>Adds a volume. Throws <see cref="SqliteException"/> if the root is already a volume.</summary>
-    public Volume Add(string name, string folder)
+    public Volume Add(string name, string folder, bool liveOnly = false)
     {
         string root = VolumeRoot.Normalize(folder);
         using SqliteConnection connection = Connect();
-        using SqliteCommand command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO volumes (uid, root, vtype, name) VALUES ($uid, $root, $vtype, $name)";
-        command.Parameters.AddWithValue("$uid", Guid.NewGuid().ToByteArray());
-        command.Parameters.AddWithValue("$root", root);
-        command.Parameters.AddWithValue("$vtype", VolumeRoot.TypeOf(root));
-        command.Parameters.AddWithValue("$name", name.Trim());
-        command.ExecuteNonQuery();
+        Insert(connection, null, name, root, liveOnly);
         return All().Single(volume => volume.Root == root);
     }
 
     public void Remove(long id) => Update("DELETE FROM volumes WHERE id = $id", id);
+
+    public void Rename(long id, string name) => Update("UPDATE volumes SET name = $name WHERE id = $id", id, ("$name", name.Trim()));
+
+    public void SetLiveOnly(long id, bool liveOnly) => Update("UPDATE volumes SET live_only = $live WHERE id = $id", id, ("$live", liveOnly ? 1 : 0));
+
+    /// <summary>
+    /// Points a volume at another folder. A volume's root never changes (its saved list
+    /// describes that place), so this replaces it, in one transaction, with a new volume
+    /// of the same name and live-only choice, and returns it. Throws
+    /// <see cref="SqliteException"/> if the folder is already a volume; nothing changes then.
+    /// </summary>
+    public Volume Move(long id, string folder)
+    {
+        string root = VolumeRoot.Normalize(folder);
+        Volume old = All().Single(volume => volume.Id == id);
+        using SqliteConnection connection = Connect();
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        using (SqliteCommand delete = connection.CreateCommand())
+        {
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM volumes WHERE id = $id";
+            delete.Parameters.AddWithValue("$id", id);
+            delete.ExecuteNonQuery();
+        }
+        Insert(connection, transaction, old.Name, root, old.LiveOnly);
+        transaction.Commit();
+        return All().Single(volume => volume.Root == root);
+    }
+
+    private static void Insert(SqliteConnection connection, SqliteTransaction? transaction, string name, string root, bool liveOnly)
+    {
+        using SqliteCommand command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "INSERT INTO volumes (uid, root, vtype, name, live_only) VALUES ($uid, $root, $vtype, $name, $live)";
+        command.Parameters.AddWithValue("$uid", Guid.NewGuid().ToByteArray());
+        command.Parameters.AddWithValue("$root", root);
+        command.Parameters.AddWithValue("$vtype", VolumeRoot.TypeOf(root));
+        command.Parameters.AddWithValue("$name", name.Trim());
+        command.Parameters.AddWithValue("$live", liveOnly ? 1 : 0);
+        command.ExecuteNonQuery();
+    }
 
     public void SetStatus(long id, VolumeStatus status, VolumeError? error)
     {

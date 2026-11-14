@@ -74,8 +74,8 @@ public sealed class Indexer : IDisposable
         }
     }
 
-    /// <summary>Adds a volume and starts reading it. Returns a problem in words, or null.</summary>
-    public string? Add(string name, string folder)
+    /// <summary>Adds a volume and, unless it is live-only, starts reading it. Returns a problem in words, or null.</summary>
+    public string? Add(string name, string folder, bool liveOnly = false)
     {
         if (name.Trim().Length == 0 || folder.Trim().Length == 0)
         {
@@ -84,7 +84,7 @@ public sealed class Indexer : IDisposable
         Volume volume;
         try
         {
-            volume = _catalog.Add(name, folder);
+            volume = _catalog.Add(name, folder, liveOnly);
         }
         catch (Microsoft.Data.Sqlite.SqliteException error) when (error.SqliteErrorCode == SqliteConstraint)
         {
@@ -100,6 +100,79 @@ public sealed class Indexer : IDisposable
         }
         Put(new VolumeState(volume, null, null, null));
         Scan(volume);
+        return null;
+    }
+
+    /// <summary>
+    /// Renames a volume, points it at another folder, or makes it live-only (or not).
+    /// A new folder, or turning live-only on, drops the saved list: the folder is read
+    /// again from scratch, unless the volume is live-only. Returns a problem in words, or null.
+    /// </summary>
+    public string? Edit(long id, string name, string folder, bool liveOnly)
+    {
+        if (name.Trim().Length == 0 || folder.Trim().Length == 0)
+        {
+            return "A volume needs a name and a folder.";
+        }
+        if (!_states.TryGetValue(id, out VolumeState? state))
+        {
+            return "That volume was removed meanwhile.";
+        }
+        string root;
+        try
+        {
+            root = VolumeRoot.Normalize(folder);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+        {
+            return $"That is not a folder path: {error.Message}";
+        }
+        bool moving = root != state.Volume.Root;
+        bool dropList = moving || liveOnly;
+        if (dropList && _running.TryGetValue(id, out CancellationTokenSource? scan))
+        {
+            scan.Cancel();
+        }
+        Volume edited;
+        // Held while a scan checks for its volume and writes its file list, as Remove does.
+        lock (_shardGate)
+        {
+            try
+            {
+                // Moved first: if the folder is taken, nothing has changed yet.
+                long editedId = moving ? _catalog.Move(id, root).Id : id;
+                _catalog.Rename(editedId, name);
+                _catalog.SetLiveOnly(editedId, liveOnly);
+                edited = _catalog.All().Single(volume => volume.Id == editedId);
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException error) when (error.SqliteErrorCode == SqliteConstraint)
+            {
+                return "That folder is already a volume.";
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException error)
+            {
+                return $"The volume list could not be changed: {error.Message}";
+            }
+            lock (_gate)
+            {
+                if (moving)
+                {
+                    _states = _states.Remove(id);
+                    _removed.Add(id);
+                }
+                VolumeState current = _states.GetValueOrDefault(edited.Id, state);
+                _states = _states.SetItem(edited.Id, new VolumeState(edited, dropList ? null : current.Index, null, dropList ? null : current.Problem));
+            }
+            if (dropList)
+            {
+                DeleteShard(state.Volume);
+            }
+        }
+        Changed?.Invoke();
+        if (!edited.LiveOnly && (moving || state.Volume.LiveOnly))
+        {
+            Scan(edited);
+        }
         return null;
     }
 
@@ -185,7 +258,8 @@ public sealed class Indexer : IDisposable
         string? problem = null;
         try
         {
-            index = Shard.Load(Shard.PathFor(_shardFolder, volume.Uid), volume.Uid, volume.Root);
+            // A live-only volume has no saved list.
+            index = volume.LiveOnly ? null : Shard.Load(Shard.PathFor(_shardFolder, volume.Uid), volume.Uid, volume.Root);
         }
         catch (Exception error) when (error is Microsoft.Data.Sqlite.SqliteException or IOException or InvalidCastException)
         {
@@ -216,6 +290,10 @@ public sealed class Indexer : IDisposable
 
     private void Scan(Volume volume)
     {
+        if (volume.LiveOnly)
+        {
+            return;
+        }
         var cancel = new CancellationTokenSource();
         if (!_running.TryAdd(volume.Id, cancel))
         {
@@ -282,7 +360,8 @@ public sealed class Indexer : IDisposable
             // Checked and written under the lock Remove holds, so a volume removed meanwhile never gets its file list back.
             lock (_shardGate)
             {
-                if (!_states.ContainsKey(volume.Id))
+                // Removed, or made live-only, meanwhile.
+                if (!_states.TryGetValue(volume.Id, out VolumeState? now) || now.Volume.LiveOnly)
                 {
                     return;
                 }
@@ -320,7 +399,8 @@ public sealed class Indexer : IDisposable
         {
             return;
         }
-        Update(id, state => new VolumeState(fresh, index ?? state.Index, scannedSoFar, problem));
+        // A volume made live-only keeps no list, even one a scan that was being stopped just read.
+        Update(id, state => new VolumeState(fresh, fresh.LiveOnly ? null : index ?? state.Index, scannedSoFar, problem));
     }
 
     private void Put(VolumeState state)

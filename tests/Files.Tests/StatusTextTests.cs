@@ -27,6 +27,21 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void A_live_only_volume_is_never_reported_as_not_read_yet()
+    {
+        VolumeState state = State("archive", null);
+        VolumeState liveOnly = state with { Volume = state.Volume with { LiveOnly = true } };
+        Assert.Equal("", StatusText.For([liveOnly], queryProblem: null));
+    }
+
+    [Fact]
+    public void The_footer_points_to_live_search_for_live_only_volumes()
+    {
+        Assert.Equal($"{10:N0} files indexed · 1 live-only volume: Shift+Enter searches it", StatusText.Indexed(10, null, liveOnly: 1));
+        Assert.Equal("2 live-only volumes: Shift+Enter searches them", StatusText.Indexed(0, null, liveOnly: 2));
+    }
+
+    [Fact]
     public void A_volume_that_needs_attention_is_still_named()
     {
         string text = StatusText.For([State("drawings", 120), State("reports", null)], queryProblem: null);
