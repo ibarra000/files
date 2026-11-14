@@ -143,6 +143,7 @@ public static class Walker
         int linksSkipped = rootListing.Links.Count - rootLinks.Count;
         int tooDeep = 0;
         int failuresInARow = 0;
+        bool checkingShare = false;
         bool shareLost = false;
         bool truncated = false;
         Exception? failure = null;
@@ -200,8 +201,9 @@ public static class Walker
                     {
                         unreadable++;
                         failuresInARow = lostContact ? failuresInARow + 1 : failuresInARow;
-                        // One worker checks whether the share is really gone; the others carry on meanwhile.
-                        checkShare = lostContact && failuresInARow == MaxConsecutiveFailures;
+                        // One worker at a time checks whether the share is really gone; the others carry on meanwhile.
+                        checkShare = lostContact && failuresInARow >= MaxConsecutiveFailures && !checkingShare && !shareLost;
+                        checkingShare |= checkShare;
                     }
                     else if (fileChars + CharsOf(listing.Files) > maxChars || folderChars + folder.Relative.Length + 1 > maxChars)
                     {
@@ -240,7 +242,9 @@ public static class Walker
                     bool reachable = TryList(root, skipHidden, out _) is not null;
                     lock (gate)
                     {
-                        shareLost = !reachable;
+                        checkingShare = false;
+                        // Lost only if nothing was read while the root was tried; once lost, it stays lost.
+                        shareLost |= !reachable && failuresInARow >= MaxConsecutiveFailures;
                         failuresInARow = reachable ? 0 : failuresInARow;
                         Monitor.PulseAll(gate);
                     }
@@ -395,23 +399,32 @@ public static class Walker
     }
 
     /// <summary>
-    /// The volume serial and file id of the folder a link leads to, or null when
-    /// it cannot be opened. .NET has no managed way to ask for a folder's file id.
+    /// The volume serial and file id of the folder a link leads to, or null when it
+    /// cannot be opened or the server gives no file id (some report 0), so the link
+    /// is counted as not followed rather than risk reading one place twice.
+    /// .NET has no managed way to ask for a folder's file id.
     /// </summary>
     private static (uint Volume, ulong File)? FolderId(string path)
     {
         const uint BackupSemantics = 0x02000000;
         const uint OpenExisting = 3;
-        IntPtr handle = CreateFileW(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        const int MaxPath = 260;
+        // The Windows API needs the long-path prefix past MAX_PATH, which .NET's own calls add by themselves.
+        string full = path.Length < MaxPath ? path
+            : path.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + path[2..] : @"\\?\" + path;
+        IntPtr handle = CreateFileW(full, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
         if (handle == new IntPtr(-1))
         {
             return null;
         }
         try
         {
-            return GetFileInformationByHandle(handle, out FileInformation info)
-                ? (info.VolumeSerialNumber, ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow)
-                : null;
+            if (!GetFileInformationByHandle(handle, out FileInformation info))
+            {
+                return null;
+            }
+            ulong file = ((ulong)info.FileIndexHigh << 32) | info.FileIndexLow;
+            return file == 0 ? null : (info.VolumeSerialNumber, file);
         }
         finally
         {
