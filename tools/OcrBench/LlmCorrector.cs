@@ -1,6 +1,7 @@
 using System.Text;
 using LLama;
 using LLama.Common;
+using LLama.Native;
 using LLama.Sampling;
 
 namespace OcrBench;
@@ -33,13 +34,17 @@ public sealed class LlmCorrector : ICorrector, IDisposable
     private readonly StatelessExecutor _executor;
     private readonly InferenceParams _inference;
 
-    public LlmCorrector(string modelPath)
+    /// <summary>Puts every layer on the GPU; the largest model tried is about 1 GB.</summary>
+    private const int AllLayers = 999;
+
+    /// <param name="gpu">Run on the GPU chosen with <see cref="Device"/>, else on the CPU.</param>
+    public LlmCorrector(string modelPath, bool gpu)
     {
         Name = Path.GetFileNameWithoutExtension(modelPath);
         var parameters = new ModelParams(modelPath)
         {
             ContextSize = 1024,
-            GpuLayerCount = 0,
+            GpuLayerCount = gpu ? AllLayers : 0,
         };
         _weights = LLamaWeights.LoadFromFile(parameters);
         _executor = new StatelessExecutor(_weights, parameters);
@@ -86,6 +91,21 @@ public sealed class LlmCorrector : ICorrector, IDisposable
     }
 
     public void Dispose() => _weights.Dispose();
+
+    /// <summary>
+    /// Chooses llama.cpp's backend before any model loads: "cpu", "cuda" or "vulkan". There is no
+    /// fallback, so a GPU that cannot be used fails the run instead of quietly measuring the CPU.
+    /// </summary>
+    public static void Device(string device)
+    {
+        NativeLibraryConfig.All
+            .WithCuda(device == "cuda")
+            .WithVulkan(device == "vulkan")
+            .WithAutoFallback(false);
+    }
+
+    /// <summary>Whether the loaded backend can run layers on a GPU.</summary>
+    public static bool GpuLoaded => LLama.Native.NativeApi.llama_supports_gpu_offload();
 
     private static string Prompt(string read)
     {

@@ -11,6 +11,7 @@ using OcrBench;
 
 int codes = 80;
 var models = new List<string>();
+string device = "cuda";
 string output = Path.Combine("artifacts", "ocrbench");
 for (int i = 0; i < args.Length; i++)
 {
@@ -19,10 +20,19 @@ for (int i = 0; i < args.Length; i++)
         case "--codes": codes = int.Parse(args[++i], CultureInfo.InvariantCulture); break;
         case "--llm": models.Add(args[++i]); break;
         case "--out": output = args[++i]; break;
+        case "--device": device = args[++i]; break;
         default: throw new ArgumentException($"unknown argument {args[i]}");
     }
 }
 Directory.CreateDirectory(output);
+if (device is not ("cpu" or "cuda" or "vulkan"))
+{
+    throw new ArgumentException($"--device must be cpu, cuda or vulkan, not {device}");
+}
+if (models.Count > 0)
+{
+    LlmCorrector.Device(device);
+}
 
 IReadOnlyList<Sample> samples = Dataset.Build(codes, variantsPerCode: 4);
 VolumeIndex index = Dataset.Index(samples, distractors: 200_000);
@@ -35,9 +45,17 @@ var loaded = new List<IDisposable>();
 foreach (string model in models)
 {
     var stopwatch = Stopwatch.StartNew();
-    var llm = new LlmCorrector(model);
+    var llm = new LlmCorrector(model, gpu: device != "cpu");
+    if (device != "cpu" && !LlmCorrector.GpuLoaded)
+    {
+        throw new InvalidOperationException($"the {device} backend loaded without GPU support");
+    }
     loaded.Add(llm);
     Console.WriteLine($"loaded {llm.Name} in {stopwatch.Elapsed.TotalSeconds:N1} s ({new FileInfo(model).Length / 1e6:N0} MB)");
+    // The first answer pays one-time costs (on a GPU, compiling its shaders); it is not counted.
+    stopwatch.Restart();
+    await llm.CorrectAsync("AB-C-O7O4-warm");
+    Console.WriteLine($"first answer from {llm.Name} took {stopwatch.Elapsed.TotalSeconds:N1} s (not counted)");
     correctors.Add(llm);
     correctors.Add(new Checked(llm, swap, index));
 }
@@ -72,7 +90,7 @@ foreach (var (engineName, reader) in engines)
 }
 loaded.ForEach(model => model.Dispose());
 
-Report.Write(output, rows, samples, index, models);
+Report.Write(output, rows, samples, index, models, models.Count == 0 ? "none" : device);
 Console.WriteLine($"wrote {Path.GetFullPath(Path.Combine(output, "report.md"))}");
 
 // Whether a search for what was read lists the code's file first (what Enter opens), or in the first five.
@@ -93,7 +111,7 @@ public sealed record Row(string Engine, string Corrector, Sample Sample, string 
 
 public static class Report
 {
-    public static void Write(string folder, IReadOnlyList<Row> rows, IReadOnlyList<Sample> samples, VolumeIndex index, IReadOnlyList<string> models)
+    public static void Write(string folder, IReadOnlyList<Row> rows, IReadOnlyList<Sample> samples, VolumeIndex index, IReadOnlyList<string> models, string device)
     {
         var csv = new StringBuilder("engine,corrector,id,code,font,size,dark,jpeg,read,searched,exact,top1,top5,ocr_ms,fix_ms\n");
         foreach (Row r in rows)
@@ -110,6 +128,8 @@ public static class Report
         md.AppendLine($"{samples.Count} crops of {samples.Select(s => s.Code).Distinct().Count()} codes, each drawn at screen size in a line of text " +
             "(Segoe UI, Consolas, Arial, Courier New or Tahoma at 11, 13 or 15 px; light or dark; a third saved as JPEG at quality 35), " +
             $"then enlarged as the app enlarges its screen capture. The index holds {index.FileCount:N0} names, including a look-alike twin for a fifth of the codes.");
+        md.AppendLine();
+        md.AppendLine($"Language models ran on: **{device}**{(device is "cuda" or "vulkan" ? " (GPU, every layer offloaded)" : "")}.");
         md.AppendLine();
         md.AppendLine("**Opens it** = a search for the result lists the code's file first, so Enter opens it. **Top 5** = the file is among the first five results.");
         md.AppendLine();
