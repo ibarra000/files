@@ -307,6 +307,11 @@ public partial class SettingsWindow : Window
             UpdateFolder = UpdateFolderBox.Text.Trim(),
         };
         _viewerProblem = problems.Count > 0;
+        if (!_viewerProblem)
+        {
+            // Fixed: a row that goes wrong later stops a close again.
+            _closeWarned = false;
+        }
         string? problem = _app.ApplySettings(settings);
         _refusedRemovals = _app.Settings.ScreenTextRemovals.SequenceEqual(settings.ScreenTextRemovals) ? [] : settings.ScreenTextRemovals.ToList();
         if (problem is not null)
@@ -488,7 +493,7 @@ public partial class SettingsWindow : Window
     /// <summary>A double-click on a row edits it; one on a header (to sort) or the empty space does not.</summary>
     private void OnVolumeDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ElementTree.AncestorOf<DataGridRow>(e.OriginalSource) is not null)
+        if (!_saving && ElementTree.AncestorOf<DataGridRow>(e.OriginalSource) is not null)
         {
             OnEditVolume(sender, e);
         }
@@ -582,6 +587,11 @@ public partial class SettingsWindow : Window
     /// <summary>Fills the form with the selected volume, so it can be changed and saved.</summary>
     private void OnEditVolume(object sender, RoutedEventArgs e)
     {
+        if (_saving)
+        {
+            // The volume may be replaced by the save still running.
+            return;
+        }
         if (VolumeGrid.SelectedItem is not VolumeRow row)
         {
             Message.Text = "Select a volume first";

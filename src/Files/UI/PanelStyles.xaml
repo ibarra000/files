@@ -150,7 +150,8 @@
 
     <!-- The volume menu: the same card as the action menu, its shadow given room the same way (PopupShadowRoom). -->
     <Style x:Key="PanelMenu" TargetType="ContextMenu">
-        <Setter Property="HasDropShadow" Value="False" />
+        <!-- True keeps its popup transparent, so the rounded card and the shadow room show the screen behind; the template draws its own shadow. -->
+        <Setter Property="HasDropShadow" Value="True" />
         <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
         <Setter Property="FontSize" Value="13" />
         <Setter Property="Foreground" Value="{DynamicResource Text}" />
@@ -205,7 +206,8 @@
 
     <!-- Tooltips in the panel colors, rather than the stock look, in both themes. -->
     <Style TargetType="ToolTip">
-        <Setter Property="HasDropShadow" Value="False" />
+        <!-- True keeps its popup transparent, so the rounded card and the shadow room show the screen behind; the template draws its own shadow. -->
+        <Setter Property="HasDropShadow" Value="True" />
         <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
         <Setter Property="FontSize" Value="12" />
         <Setter Property="Foreground" Value="{DynamicResource Text}" />

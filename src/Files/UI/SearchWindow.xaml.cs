@@ -175,6 +175,7 @@ public partial class SearchWindow : Window
         Activate();
         Input.Focus();
         Input.SelectAll();
+        // After SelectAll, whose selection change (raised at once) would otherwise clear it.
         _selectedOnShow = Input.Text.Length > 0;
         _recall.Reset(_app.History);
         if (IsHome)
@@ -349,10 +350,12 @@ public partial class SearchWindow : Window
     {
         // Keep the same file selected when the rows move.
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
-        // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled.
-        bool sameSearch = Input.Text == _shownFor;
+        // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled;
+        // another chip or volume is another list, which starts at the top.
+        string shownFor = $"{Input.Text}\n{_filter}\n{_scope}";
+        bool sameSearch = shownFor == _shownFor;
         double scrolled = sameSearch && ListScroller() is ScrollViewer before ? before.VerticalOffset : 0;
-        _shownFor = Input.Text;
+        _shownFor = shownFor;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
@@ -407,6 +410,8 @@ public partial class SearchWindow : Window
             UpdateStatus();
             if (IsVisible && indexesChanged && _live is null && !IsHome)
             {
+                // A volume read again may have changed the selected file: the preview reads it again.
+                _previewedPath = null;
                 _ = SearchAsync();
             }
         });
@@ -418,15 +423,17 @@ public partial class SearchWindow : Window
         bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
         if (ActionMenu.IsOpen)
         {
-            if (!RunsFromActionMenu(e.Key, ctrl, shift))
+            // A shortcut the menu lists beside one of its actions runs that action for the menu's row.
+            // Other shortcuts, such as Ctrl+V, would change the search under the open menu, so they do nothing here.
+            if (MenuGesture(e.Key, ctrl, shift) is string gesture && _actions.FirstOrDefault(action => action.Gesture == gesture) is RowAction listed)
             {
-                // Other shortcuts, such as Ctrl+V, would change the search under the open menu, so they do nothing here.
-                bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
-                e.Handled = chord || OnActionKey(e.Key);
+                RunAction(listed);
+                e.Handled = true;
                 return;
             }
-            // A shortcut the menu lists beside an action runs it for the menu's row, as it would with the menu closed.
-            ActionMenu.IsOpen = false;
+            bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            e.Handled = chord || e.Key == Key.Delete || OnActionKey(e.Key);
+            return;
         }
         e.Handled = true;
         switch (e.Key)
@@ -511,14 +518,15 @@ public partial class SearchWindow : Window
         }
     }
 
-    /// <summary>The shortcuts the action menu shows beside its actions (RowActions), which work while it is open.</summary>
-    private static bool RunsFromActionMenu(Key key, bool ctrl, bool shift) => key switch
+    /// <summary>A key as the action menu writes it beside an action (RowAction.Gesture), or null for any other.</summary>
+    private static string? MenuGesture(Key key, bool ctrl, bool shift) => (key, ctrl, shift) switch
     {
-        Key.Delete => !ctrl && !shift,
-        Key.D or Key.O => ctrl && !shift,
-        Key.Enter => ctrl && !shift,
-        Key.C => ctrl,
-        _ => false,
+        (Key.Delete, false, false) => "Del",
+        (Key.D, true, false) => "Ctrl D",
+        (Key.Enter, true, false) => "Ctrl ↵",
+        (Key.C, true, false) => "Ctrl C",
+        (Key.C, true, true) => "Ctrl Shift C",
+        _ => null,
     };
 
     private void Move(int by)
