@@ -18,7 +18,6 @@ public static class DwgThumbnail
     private const byte PngCode = 6;
     private const int MaxEntries = 8;
     private const int MaxImageBytes = 16 * 1024 * 1024;
-    private const int BmpFileHeaderBytes = 14;
 
     /// <summary>The drawing's preview as a PNG or BMP file's bytes, or null when it has none that can be shown.</summary>
     public static byte[]? Read(string path)
@@ -63,7 +62,7 @@ public static class DwgThumbnail
             }
             stream.Position = start;
             byte[] image = reader.ReadBytes(size);
-            return code == PngCode ? image : AsBmpFile(image);
+            return code == PngCode ? image : Dib.AsBmpFile(image);
         }
         return null;
     }
@@ -73,34 +72,5 @@ public static class DwgThumbnail
     {
         byte[] version = reader.ReadBytes(6);
         return version.Length == 6 && version[0] == 'A' && version[1] == 'C' && version.Skip(2).All(b => b is >= (byte)'0' and <= (byte)'9');
-    }
-
-    /// <summary>Puts the BMP file header in front of a DIB, so the image decoder can read it; null when the DIB is not whole.</summary>
-    private static byte[]? AsBmpFile(byte[] dib)
-    {
-        const int InfoHeaderBytes = 40;
-        const int BitFields = 3;
-        if (dib.Length < InfoHeaderBytes)
-        {
-            return null;
-        }
-        int infoBytes = BitConverter.ToInt32(dib, 0);
-        int bitCount = BitConverter.ToInt16(dib, 14);
-        int compression = BitConverter.ToInt32(dib, 16);
-        int colorsUsed = BitConverter.ToInt32(dib, 32);
-        int colors = colorsUsed != 0 ? colorsUsed : bitCount <= 8 ? 1 << bitCount : 0;
-        int masks = compression == BitFields && infoBytes == InfoHeaderBytes ? 12 : 0;
-        long pixelsAt = BmpFileHeaderBytes + (long)infoBytes + masks + colors * 4L;
-        if (infoBytes < InfoHeaderBytes || colorsUsed < 0 || pixelsAt > BmpFileHeaderBytes + dib.Length)
-        {
-            return null;
-        }
-        var file = new byte[BmpFileHeaderBytes + dib.Length];
-        file[0] = (byte)'B';
-        file[1] = (byte)'M';
-        BitConverter.TryWriteBytes(file.AsSpan(2), file.Length);
-        BitConverter.TryWriteBytes(file.AsSpan(10), (int)pixelsAt);
-        dib.CopyTo(file, BmpFileHeaderBytes);
-        return file;
     }
 }

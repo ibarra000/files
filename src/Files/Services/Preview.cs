@@ -33,6 +33,12 @@ public static class Preview
 
     /// <summary>Larger PDFs are not opened: Windows reads more of a big file to find its first page.</summary>
     private const long MaxPdfBytes = 256L * 1024 * 1024;
+
+    /// <summary>Larger DXF, plot and STEP files are not read: they are read whole to be drawn.</summary>
+    private const long MaxDrawnBytes = 64L * 1024 * 1024;
+
+    /// <summary>Shown when a drawing has no preview this app can draw; Windows' thumbnail is tried next.</summary>
+    public const string NoDrawingPreview = "No preview: open it in its CAD program to see it";
     private const int SniffBytes = 4096;
     private const string TabAsSpaces = "    ";
 
@@ -46,6 +52,14 @@ public static class Preview
     public static async Task<PreviewInfo> LoadAsync(string path, CancellationToken cancel)
     {
         PreviewInfo info = await Task.Run(() => Load(path, cancel), cancel);
+        if (info.Note == NoDrawingPreview)
+        {
+            // Drawn by the CAD program's own handler, when one is installed.
+            string name = Path.GetFileName(path);
+            string? typedAs = FileKinds.IsNumbered(name) ? FileKinds.ExtensionOf(name) : null;
+            byte[]? picture = await ShellThumbnail.ReadAsync(path, ThumbnailWidth, typedAs, cancel);
+            return picture is null ? info : info with { Thumbnail = picture, Note = null };
+        }
         bool isPdf = info.Note is null && info.Size is not null && Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
         if (!isPdf)
         {
@@ -123,7 +137,7 @@ public static class Preview
 
     private static PreviewInfo ForFile(PreviewInfo details, FileInfo file, CancellationToken cancel)
     {
-        string extension = file.Extension.TrimStart('.');
+        string extension = FileKinds.ExtensionOf(file.Name) ?? "";
         if (ImageTypes.Contains(extension))
         {
             return details with { IsImage = true };
@@ -133,10 +147,9 @@ public static class Preview
             // Rendered by LoadAsync, which Windows' PDF engine needs.
             return details;
         }
-        if (extension.Equals("dwg", StringComparison.OrdinalIgnoreCase))
+        if (FileKinds.Of(file.Name) == FileKind.Drawing)
         {
-            byte[]? picture = DwgThumbnail.Read(file.FullName);
-            return picture is null ? details with { Note = "No preview saved in this drawing" } : details with { Thumbnail = picture };
+            return ForDrawing(details, file, extension.ToLowerInvariant(), cancel);
         }
         if (!TextTypes.Contains(extension))
         {
@@ -148,6 +161,48 @@ public static class Preview
         }
         IReadOnlyList<string>? lines = ReadLines(file, cancel);
         return lines is null ? details with { Note = "Binary file: no text preview" } : details with { Lines = lines };
+    }
+
+    /// <summary>
+    /// A drawing's picture, where this app can make one: a DWG's saved preview, or the lines of a DXF,
+    /// a plot or a STEP model. Otherwise the note asks LoadAsync to try Windows' thumbnail.
+    /// </summary>
+    private static PreviewInfo ForDrawing(PreviewInfo details, FileInfo file, string extension, CancellationToken cancel)
+    {
+        if (extension == "dwg")
+        {
+            return DwgThumbnail.Read(file.FullName) is byte[] saved ? details with { Thumbnail = saved } : details with { Note = NoDrawingPreview };
+        }
+        if (extension is not ("dxf" or "plt" or "hpgl" or "step" or "stp"))
+        {
+            return details with { Note = NoDrawingPreview };
+        }
+        if (file.Length > MaxDrawnBytes)
+        {
+            return details with { Note = "Too large to preview" };
+        }
+        try
+        {
+            (LineWork? work, byte[]? fallback) = extension switch
+            {
+                "dxf" => DxfPreview.Read(file.FullName, cancel) is DxfContent dxf ? (dxf.Work, dxf.Saved) : (null, null),
+                "step" or "stp" => (StepPreview.Read(file.FullName, cancel), null),
+                _ => (PltPreview.Read(file.FullName, cancel), null),
+            };
+            if (work is { TooLarge: true })
+            {
+                return details with { Note = "Too large to preview" };
+            }
+            // Drawn lines are sharper than a saved preview, which is kept for a drawing of text or solids only.
+            byte[]? picture = (work is null ? null : LineDrawing.Render(work, ThumbnailWidth)) ?? fallback;
+            return picture is null ? details with { Note = NoDrawingPreview } : details with { Thumbnail = picture };
+        }
+        catch (Exception error) when (error is not (OperationCanceledException or IOException or UnauthorizedAccessException))
+        {
+            // The file is untrusted and these readers are this app's own: whatever a damaged or hostile file makes
+            // them throw (or GDI+ while drawing) leaves only this preview without a picture. Windows' thumbnail is tried next.
+            return details with { Note = NoDrawingPreview };
+        }
     }
 
     /// <summary>The first lines of a text file, or null when it holds a NUL byte (so it is not text).</summary>

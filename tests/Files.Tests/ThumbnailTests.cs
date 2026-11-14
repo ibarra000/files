@@ -149,7 +149,7 @@ public sealed class ThumbnailTests
         string bare = temp.File("bare.dwg", "AC1018" + new string('\0', 200));
 
         Assert.NotNull((await Preview.LoadAsync(path, CancellationToken.None)).Thumbnail);
-        Assert.Equal("No preview saved in this drawing", (await Preview.LoadAsync(bare, CancellationToken.None)).Note);
+        Assert.Equal(Preview.NoDrawingPreview, (await Preview.LoadAsync(bare, CancellationToken.None)).Note);
     }
 
     /// <summary>A valid PDF of blank US-letter pages, with a correct cross-reference table.</summary>

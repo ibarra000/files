@@ -46,10 +46,10 @@ public sealed class PreviewTests
     public void Other_types_have_no_text_preview_but_keep_their_details()
     {
         using var temp = new TempFolder();
-        string path = temp.File("site.skp", "x");
+        string path = temp.File("track.mp3", "x");
         PreviewInfo preview = Preview.Load(path, CancellationToken.None);
         Assert.Null(preview.Lines);
-        Assert.Equal("Drawing", preview.Kind);
+        Assert.Equal("Audio", preview.Kind);
         Assert.Equal(1, preview.Size);
         Assert.Equal("No preview for this type", preview.Note);
     }
