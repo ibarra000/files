@@ -104,4 +104,73 @@ public sealed class IndexerTests
         Assert.Equal(VolumeError.PathNotFound, state.Volume.LastError);
         Assert.Null(state.Index);
     }
+
+    [Fact]
+    public async Task A_live_only_volume_is_never_read_and_loses_its_saved_list()
+    {
+        using var temp = new TempFolder();
+        string share = Directory.CreateDirectory(Path.Combine(temp.Path, "share")).FullName;
+        File.WriteAllText(Path.Combine(share, "report.pdf"), "");
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        string shards = Path.Combine(temp.Path, "volumes");
+        using var indexer = new Indexer(catalog, shards, () => new Settings { RescanHours = 0 });
+        indexer.Start();
+        Assert.Null(indexer.Add("share", share));
+        VolumeState read = await WaitFor(indexer, s => s.Index is not null);
+
+        Assert.Null(indexer.Edit(read.Volume.Id, "share", share, liveOnly: true));
+        indexer.RescanAll();
+
+        VolumeState liveOnly = Assert.Single(indexer.Volumes);
+        Assert.True(liveOnly.Volume.LiveOnly);
+        Assert.Null(liveOnly.Index);
+        Assert.False(indexer.IsScanning);
+        Assert.False(File.Exists(Shard.PathFor(shards, read.Volume.Uid)));
+
+        Assert.Null(indexer.Edit(read.Volume.Id, "share", share, liveOnly: false));
+        VolumeState again = await WaitFor(indexer, s => s.Index is not null);
+        Assert.Equal(1, again.Index!.FileCount);
+    }
+
+    [Fact]
+    public void Editing_a_volume_removed_meanwhile_says_so()
+    {
+        using var temp = new TempFolder();
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        using var indexer = new Indexer(catalog, Path.Combine(temp.Path, "volumes"), () => new Settings { RescanHours = 0 });
+        Assert.Null(indexer.Add("v", temp.Path, liveOnly: true));
+        long id = Assert.Single(indexer.Volumes).Volume.Id;
+        Assert.Null(indexer.Remove(id));
+
+        Assert.Equal("That volume was removed meanwhile.", indexer.Edit(id, "v", temp.Path, liveOnly: false));
+        Assert.Empty(catalog.All());
+    }
+
+    [Fact]
+    public async Task Moving_a_volume_reads_the_new_folder_and_deletes_the_old_list()
+    {
+        using var temp = new TempFolder();
+        string from = Directory.CreateDirectory(Path.Combine(temp.Path, "from")).FullName;
+        string to = Directory.CreateDirectory(Path.Combine(temp.Path, "to")).FullName;
+        File.WriteAllText(Path.Combine(from, "old.pdf"), "");
+        File.WriteAllText(Path.Combine(to, "new.pdf"), "");
+        File.WriteAllText(Path.Combine(to, "new.txt"), "");
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        string shards = Path.Combine(temp.Path, "volumes");
+        using var indexer = new Indexer(catalog, shards, () => new Settings { RescanHours = 0 });
+        indexer.Start();
+        Assert.Null(indexer.Add("v", from));
+        VolumeState first = await WaitFor(indexer, s => s.Index is not null);
+
+        Assert.Null(indexer.Edit(first.Volume.Id, "renamed", to, liveOnly: false));
+
+        VolumeState moved = await WaitFor(indexer, s => s.Index is { FileCount: 2 });
+        Assert.Equal("renamed", moved.Volume.Name);
+        Assert.Equal(to, moved.Volume.Root);
+        Assert.Single(indexer.Volumes);
+        Assert.False(File.Exists(Shard.PathFor(shards, first.Volume.Uid)));
+        Assert.Null(indexer.Add("other", from));
+        Assert.Equal("That folder is already a volume.", indexer.Edit(moved.Volume.Id, "renamed", from, liveOnly: false));
+        Assert.Contains(indexer.Volumes, state => state.Volume.Id == moved.Volume.Id && state.Volume.Root == to);
+    }
 }

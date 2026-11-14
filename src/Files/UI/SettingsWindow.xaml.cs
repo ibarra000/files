@@ -26,6 +26,9 @@ public partial class SettingsWindow : Window
     private readonly App _app;
     private readonly ObservableCollection<ViewerRow> _viewers = [];
     private readonly ObservableCollection<VolumeRow> _volumeRows = [];
+
+    /// <summary>The volume the form is editing, or null while it adds one.</summary>
+    private VolumeRow? _editing;
     private bool _loading = true;
 
     public SettingsWindow(App app)
@@ -392,19 +395,83 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private async void OnAddVolume(object sender, RoutedEventArgs e)
+    /// <summary>Adds the volume in the form, or saves the one being edited.</summary>
+    private async void OnSaveVolume(object sender, RoutedEventArgs e)
     {
         string name = NewVolumeName.Text;
         string folder = NewVolumePath.Text;
-        Message.Text = "Adding…";
-        // Off the UI thread: asking a disconnected mapped drive what it is can take seconds.
-        string? problem = await Task.Run(() => _app.Indexer.Add(name, folder));
+        bool liveOnly = NewVolumeLiveOnly.IsChecked == true;
+        VolumeRow? editing = _editing;
+        if (editing is not null && !await ConfirmEditAsync(editing, folder, liveOnly))
+        {
+            return;
+        }
+        Message.Text = editing is null ? "Adding…" : "Saving…";
+        // Off the UI thread: asking a disconnected mapped drive what it is can take seconds,
+        // and an edit waits for a read that is writing the volume's file list to finish.
+        string? problem = await Task.Run(() => editing is null
+            ? _app.Indexer.Add(name, folder, liveOnly)
+            : _app.Indexer.Edit(editing.Id, name, folder, liveOnly));
         Message.Text = problem ?? "";
         if (problem is null)
         {
-            NewVolumeName.Clear();
-            NewVolumePath.Clear();
+            ClearVolumeForm();
         }
+    }
+
+    /// <summary>A new folder, or making a volume live-only, drops what has been read; the user agrees first.</summary>
+    private async Task<bool> ConfirmEditAsync(VolumeRow editing, string folder, bool liveOnly)
+    {
+        bool moving;
+        try
+        {
+            // Off the UI thread: asking a disconnected mapped drive what it is can take seconds.
+            moving = await Task.Run(() => Data.VolumeRoot.Normalize(folder)) != editing.Root;
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or IOException)
+        {
+            // Not a path; saving says so.
+            return true;
+        }
+        string? consequence = (moving, liveOnly) switch
+        {
+            (true, false) => $"{editing.Name} will be read again from scratch. Until that finishes, only a live search finds its files.",
+            (_, true) when moving || !editing.LiveOnly => $"The saved file list of {editing.Name} will be deleted, and only a live search will read it.",
+            _ => null,
+        };
+        return consequence is null
+            || MessageBox.Show(this, consequence, "Change volume", MessageBoxButton.OKCancel, MessageBoxImage.Question) == MessageBoxResult.OK;
+    }
+
+    /// <summary>Fills the form with the selected volume, so it can be changed and saved.</summary>
+    private void OnEditVolume(object sender, RoutedEventArgs e)
+    {
+        if (VolumeGrid.SelectedItem is not VolumeRow row)
+        {
+            Message.Text = "Select a volume first";
+            return;
+        }
+        _editing = row;
+        NewVolumeName.Text = row.Name;
+        NewVolumePath.Text = row.Root;
+        NewVolumeLiveOnly.IsChecked = row.LiveOnly;
+        VolumeFormLabel.Text = $"EDIT {row.Name.ToUpperInvariant()}";
+        VolumeFormButton.Content = "Save";
+        CancelEditButton.Visibility = Visibility.Visible;
+        NewVolumeName.Focus();
+    }
+
+    private void OnCancelEdit(object sender, RoutedEventArgs e) => ClearVolumeForm();
+
+    private void ClearVolumeForm()
+    {
+        _editing = null;
+        NewVolumeName.Clear();
+        NewVolumePath.Clear();
+        NewVolumeLiveOnly.IsChecked = false;
+        VolumeFormLabel.Text = "ADD A FOLDER";
+        VolumeFormButton.Content = "Add";
+        CancelEditButton.Visibility = Visibility.Collapsed;
     }
 
     private async void OnRemoveVolume(object sender, RoutedEventArgs e)
@@ -455,17 +522,21 @@ public partial class SettingsWindow : Window
         public string Program { get; set; } = "";
     }
 
-    public sealed record VolumeRow(long Id, string Name, string Root, string Files, string LastRead, string Status)
+    public sealed record VolumeRow(long Id, string Name, string Root, string Files, string LastRead, string Status, bool LiveOnly)
     {
         public static VolumeRow From(VolumeState state)
         {
             string files = state.Index?.FileCount.ToString("N0") ?? "–";
-            return new VolumeRow(state.Volume.Id, state.Volume.Name, state.Volume.Root, files,
-                StatusText.Age(state.Volume.LastScannedAt), Describe(state));
+            string read = state.Volume.LiveOnly ? "–" : StatusText.Age(state.Volume.LastScannedAt);
+            return new VolumeRow(state.Volume.Id, state.Volume.Name, state.Volume.Root, files, read, Describe(state), state.Volume.LiveOnly);
         }
 
         private static string Describe(VolumeState state)
         {
+            if (state.Volume.LiveOnly)
+            {
+                return "Live search only";
+            }
             if (state.ScannedSoFar is int read)
             {
                 return $"Reading… {read:N0} files";

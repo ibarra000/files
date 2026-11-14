@@ -50,7 +50,8 @@ public partial class SearchWindow
         else
         {
             DateTime? newest = volumes.Max(state => state.Volume.LastScannedAt);
-            Status.Text = attention.Length > 0 ? attention : StatusText.Indexed(files, newest);
+            int liveOnly = ScopedVolumes().Count(state => state.Volume.LiveOnly);
+            Status.Text = attention.Length > 0 ? attention : StatusText.Indexed(files, newest, liveOnly);
             scanning = rescanRequested || volumes.Any(state => state.ScannedSoFar is not null);
         }
         SetSpinning(IsVisible && scanning);
