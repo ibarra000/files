@@ -3,7 +3,7 @@ using Files.Core;
 namespace Files.Services;
 
 /// <summary>What the preview pane shows for one file or folder; <see cref="Note"/> says why something is missing.</summary>
-/// <param name="Thumbnail">A picture of the file (a PDF's first page, a drawing's saved preview) as PNG or BMP bytes.</param>
+/// <param name="Thumbnail">A picture of the file (a PDF's first page, a drawing's saved preview) as PNG, BMP or JPEG bytes.</param>
 public sealed record PreviewInfo(
     string Name,
     string Folder,
@@ -39,12 +39,21 @@ public static class Preview
 
     /// <summary>Shown when a drawing has no preview this app can draw; Windows' thumbnail is tried next.</summary>
     public const string NoDrawingPreview = "No preview: open it in its CAD program to see it";
+
+    /// <summary>
+    /// Shown for a Creo file saved without a preview (older versions saved none). Creo's own thumbnail
+    /// handler draws only that same picture, so Windows' thumbnail is not tried.
+    /// </summary>
+    public const string NoCreoPreview = "No preview saved in this file: open it in Creo to see it";
     private const int SniffBytes = 4096;
     private const string TabAsSpaces = "    ";
 
     private static readonly IReadOnlySet<string> TextTypes = FileKinds.ExtensionsOf(FileKind.Code)
         .Concat(["txt", "md", "csv", "log", "ini", "cfg", "yml", "yaml"])
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Creo's parts, assemblies, drawings and formats, which hold a saved preview.</summary>
+    private static readonly IReadOnlySet<string> CreoTypes = new HashSet<string>(["prt", "asm", "drw", "frm"], StringComparer.OrdinalIgnoreCase);
 
     private static readonly IReadOnlySet<string> ImageTypes = new HashSet<string>(["png", "jpg", "jpeg", "gif", "bmp"], StringComparer.OrdinalIgnoreCase);
 
@@ -55,9 +64,7 @@ public static class Preview
         if (info.Note == NoDrawingPreview)
         {
             // Drawn by the CAD program's own handler, when one is installed.
-            string name = Path.GetFileName(path);
-            string? typedAs = FileKinds.IsNumbered(name) ? FileKinds.ExtensionOf(name) : null;
-            byte[]? picture = await ShellThumbnail.ReadAsync(path, ThumbnailWidth, typedAs, cancel);
+            byte[]? picture = await ShellThumbnail.ReadAsync(path, ThumbnailWidth, cancel);
             return picture is null ? info : info with { Thumbnail = picture, Note = null };
         }
         bool isPdf = info.Note is null && info.Size is not null && Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
@@ -151,6 +158,11 @@ public static class Preview
         {
             return ForDrawing(details, file, extension.ToLowerInvariant(), cancel);
         }
+        if (IsCreoAssembly(file, extension))
+        {
+            // "asm" alone is assembly source; this one is Creo's.
+            return ForDrawing(details with { Kind = "Drawing" }, file, "asm", cancel);
+        }
         if (!TextTypes.Contains(extension))
         {
             return details with { Note = "No preview for this type" };
@@ -164,25 +176,36 @@ public static class Preview
     }
 
     /// <summary>
-    /// A drawing's picture, where this app can make one: a DWG's saved preview, or the lines of a DXF,
-    /// a plot or a STEP model. Otherwise the note asks LoadAsync to try Windows' thumbnail.
+    /// A drawing's picture, where this app can make one: the preview a DWG or Creo file saves, or the lines
+    /// of a DXF, a plot or a STEP model. Otherwise the note asks LoadAsync to try Windows' thumbnail.
     /// </summary>
     private static PreviewInfo ForDrawing(PreviewInfo details, FileInfo file, string extension, CancellationToken cancel)
     {
-        if (extension == "dwg")
-        {
-            return DwgThumbnail.Read(file.FullName) is byte[] saved ? details with { Thumbnail = saved } : details with { Note = NoDrawingPreview };
-        }
-        if (extension is not ("dxf" or "plt" or "hpgl" or "step" or "stp"))
-        {
-            return details with { Note = NoDrawingPreview };
-        }
-        if (file.Length > MaxDrawnBytes)
-        {
-            return details with { Note = "Too large to preview" };
-        }
         try
         {
+            byte[]? saved = extension switch
+            {
+                "dwg" => DwgThumbnail.Read(file.FullName),
+                _ when CreoTypes.Contains(extension) => CreoThumbnail.Read(file.FullName, cancel),
+                _ => null,
+            };
+            if (saved is not null)
+            {
+                return details with { Thumbnail = saved };
+            }
+            if (CreoTypes.Contains(extension))
+            {
+                // Another program's .prt or .drw (Siemens NX's, say) may still have a Windows thumbnail.
+                return details with { Note = CreoThumbnail.IsCreoFile(file.FullName) ? NoCreoPreview : NoDrawingPreview };
+            }
+            if (extension is not ("dxf" or "plt" or "hpgl" or "step" or "stp"))
+            {
+                return details with { Note = NoDrawingPreview };
+            }
+            if (file.Length > MaxDrawnBytes)
+            {
+                return details with { Note = "Too large to preview" };
+            }
             if (extension is "step" or "stp")
             {
                 return StepPreview.Render(file.FullName, ThumbnailWidth, cancel) switch
@@ -210,6 +233,10 @@ public static class Preview
             return details with { Note = NoDrawingPreview };
         }
     }
+
+    /// <summary>Whether a file named *.asm is a Creo assembly saved without a number, which starts with "#UGC:".</summary>
+    private static bool IsCreoAssembly(FileInfo file, string extension) =>
+        extension.Equals("asm", StringComparison.OrdinalIgnoreCase) && CreoThumbnail.IsCreoFile(file.FullName);
 
     /// <summary>The first lines of a text file, or null when it holds a NUL byte (so it is not text).</summary>
     private static IReadOnlyList<string>? ReadLines(FileInfo file, CancellationToken cancel)

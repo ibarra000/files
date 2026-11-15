@@ -171,7 +171,12 @@
                                            LineHeight="20" LineStackingStrategy="BlockLineHeight" TextWrapping="NoWrap" />
                             </Grid>
                         </ScrollViewer>
-                        <Image x:Name="PreviewImage" Margin="10" Stretch="Uniform" Visibility="Collapsed" />
+                        <!-- A picture, with its caption (a PDF's page count) under it. -->
+                        <DockPanel>
+                            <TextBlock x:Name="PreviewCaption" DockPanel.Dock="Bottom" Margin="10,0,10,10" HorizontalAlignment="Center"
+                                       FontSize="12" Foreground="{DynamicResource TextDim}" Visibility="Collapsed" />
+                            <Image x:Name="PreviewImage" Margin="10" Stretch="Uniform" Visibility="Collapsed" />
+                        </DockPanel>
                         <TextBlock x:Name="PreviewNote" Margin="16" HorizontalAlignment="Center" VerticalAlignment="Center"
                                    TextWrapping="Wrap" TextAlignment="Center" FontSize="13" Foreground="{DynamicResource TextDim}" />
                     </Grid>

@@ -220,7 +220,7 @@ public partial class SettingsWindow : Window
         UpdateFolderBox.Text = settings.UpdateFolder;
         VersionText.Text = $"files {Updater.Current.ToString(3)}";
         SidebarVersion.Text = $"Version {Updater.Current.ToString(3)}";
-        PathsText.Text = $"Settings: {AppPaths.Settings}\nVolumes and file lists: {AppPaths.Local}";
+        PathsText.Text = $"Settings: {AppPaths.Settings}\nVolumes and indexes: {AppPaths.Local}";
         InstallButton.IsEnabled = _app.UpdateOffer is not null;
         _loading = false;
     }
@@ -235,20 +235,20 @@ public partial class SettingsWindow : Window
     {
         _app.ClearSearches();
         UpdateClearButtons();
-        Message.Text = "Recent searches cleared.";
+        Message.Text = "Searches cleared.";
     }
 
     private void OnClearOpened(object sender, RoutedEventArgs e)
     {
         _app.ClearOpened();
         UpdateClearButtons();
-        Message.Text = "Recently opened files cleared.";
+        Message.Text = "Recent files cleared.";
     }
 
     private void FillEnterChoices(Settings settings)
     {
         EnterBox.Items.Clear();
-        EnterBox.Items.Add(new ComboBoxItem { Content = "The Windows default for the file type", Tag = Settings.DefaultOpen });
+        EnterBox.Items.Add(new ComboBoxItem { Content = "Windows default", Tag = Settings.DefaultOpen });
         foreach (Viewer viewer in settings.Viewers)
         {
             EnterBox.Items.Add(new ComboBoxItem { Content = viewer.Name, Tag = viewer.Name });
@@ -352,7 +352,7 @@ public partial class SettingsWindow : Window
         }
         if (RemovalsTry.Text.Trim().Length == 0)
         {
-            RemovalsResult.Text = "Type a code to see what would be searched.";
+            RemovalsResult.Text = "Enter sample text to preview the search.";
             return;
         }
         ScreenRead read = ScreenText.WithRemovals(new ScreenRead(RemovalsTry.Text, null), cleanup);
@@ -485,7 +485,7 @@ public partial class SettingsWindow : Window
     {
         bool liveOnly = VolumeGrid.SelectedItem is VolumeRow { LiveOnly: true };
         RescanButton.IsEnabled = !liveOnly;
-        RescanButton.ToolTip = liveOnly ? "A live-only volume is read only by a live search (Shift+Enter in the panel)" : null;
+        RescanButton.ToolTip = liveOnly ? "Live-search-only volumes are not scanned. Live search (Shift+Enter in the panel) finds their files." : null;
     }
 
     private void OnVolumeSelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateVolumeButtons();
@@ -576,8 +576,8 @@ public partial class SettingsWindow : Window
         }
         string? consequence = (moving, liveOnly) switch
         {
-            (true, false) => $"{editing.Name} will be read again from scratch. Until that finishes, only a live search finds its files.",
-            (_, true) when moving || !editing.LiveOnly => $"The saved file list of {editing.Name} will be deleted, and only a live search will read it.",
+            (true, false) => $"{editing.Name} will be rescanned. Until the scan finishes, only live search finds its files.",
+            (_, true) when moving || !editing.LiveOnly => $"The index of {editing.Name} will be deleted. It will be searched only with live search.",
             _ => null,
         };
         return consequence is null
@@ -594,7 +594,7 @@ public partial class SettingsWindow : Window
         }
         if (VolumeGrid.SelectedItem is not VolumeRow row)
         {
-            Message.Text = "Select a volume first";
+            Message.Text = "Select a volume first.";
             return;
         }
         _editing = row;
@@ -615,7 +615,7 @@ public partial class SettingsWindow : Window
         NewVolumeName.Clear();
         NewVolumePath.Clear();
         NewVolumeLiveOnly.IsChecked = false;
-        VolumeFormLabel.Text = "ADD A FOLDER";
+        VolumeFormLabel.Text = "ADD VOLUME";
         VolumeFormButton.Content = "Add";
         CancelEditButton.Visibility = Visibility.Collapsed;
     }
@@ -624,10 +624,10 @@ public partial class SettingsWindow : Window
     {
         if (VolumeGrid.SelectedItem is not VolumeRow row)
         {
-            Message.Text = "Select a volume first";
+            Message.Text = "Select a volume first.";
             return;
         }
-        MessageBoxResult answer = MessageBox.Show(this, $"Stop searching {row.Name}?\n\n{row.Root}", "Remove volume",
+        MessageBoxResult answer = MessageBox.Show(this, $"Remove {row.Name}? Its index is deleted; files on disk are not affected.\n\n{row.Root}", "Remove volume",
             MessageBoxButton.OKCancel, MessageBoxImage.Question);
         if (answer == MessageBoxResult.OK)
         {
@@ -693,13 +693,13 @@ public partial class SettingsWindow : Window
             }
             if (state.ScannedSoFar is int read)
             {
-                return $"Reading… {read:N0} files";
+                return $"Scanning… {read:N0} files";
             }
             string? error = state.Volume.LastError switch
             {
                 VolumeError.PathNotFound => "Folder not found",
                 VolumeError.DriveNotFound => "Drive or server not found",
-                VolumeError.PermissionDenied => "No permission to read it",
+                VolumeError.PermissionDenied => "Access denied",
                 _ => null,
             };
             if (error is not null)

@@ -210,7 +210,7 @@ public sealed class Indexer : IDisposable
             }
             catch (Microsoft.Data.Sqlite.SqliteException error)
             {
-                // The read was stopped above; it must not stay "Reading…" until the next one.
+                // The read was stopped above; it must not stay "Scanning…" until the next one.
                 Update(id, current => current with { ScannedSoFar = null });
                 return $"The volume list could not be changed: {error.Message}";
             }
@@ -329,7 +329,7 @@ public sealed class Indexer : IDisposable
             }
             catch (OperationCanceledException)
             {
-                // Removed or shutting down; a volume still listed must not stay "Reading…".
+                // Removed or shutting down; a volume still listed must not stay "Scanning…".
                 Update(volume.Id, state => state with { ScannedSoFar = null });
             }
             catch (Exception error)

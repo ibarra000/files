@@ -7,7 +7,7 @@ namespace Files.Services;
 
 /// <summary>
 /// The thumbnail Windows shows for a file in Explorer, drawn by whichever program installed a preview
-/// handler for its type: CAD programs (Creo, SOLIDWORKS, Inventor, MicroStation, Revit, SketchUp) do.
+/// handler for its type: CAD programs (SOLIDWORKS, Inventor, MicroStation, Revit, SketchUp) do.
 /// Handlers are other vendors' code and can be slow on a share, or hang, so each request runs on its
 /// own thread and is given up after <see cref="Limit"/>.
 /// </summary>
@@ -78,11 +78,7 @@ public static class ShellThumbnail
     /// The thumbnail as PNG bytes, about <paramref name="size"/> pixels on its longer side; null when no
     /// handler draws one, or it took longer than <see cref="Limit"/>.
     /// </summary>
-    /// <param name="typedAs">
-    /// The extension the file's handler is registered for, when its own differs: Creo numbers its saves
-    /// (part.prt.3), and Windows finds no handler for ".3". The file is then read from a copy.
-    /// </param>
-    public static async Task<byte[]?> ReadAsync(string path, int size, string? typedAs, CancellationToken cancel)
+    public static async Task<byte[]?> ReadAsync(string path, int size, CancellationToken cancel)
     {
         // A handler that hangs keeps its thread; past a few of those, no more are started.
         if (!Running.Wait(0, CancellationToken.None))
@@ -94,7 +90,7 @@ public static class ShellThumbnail
         {
             try
             {
-                done.TrySetResult(ReadOnThisThread(path, size, typedAs));
+                done.TrySetResult(ReadOnThisThread(path, size));
             }
             catch (Exception)
             {
@@ -128,69 +124,19 @@ public static class ShellThumbnail
     /// <summary>How many handlers may run at once, counting any that hang.</summary>
     private static readonly SemaphoreSlim Running = new(3);
 
-    /// <summary>The longest file copied to give a numbered Creo save its type.</summary>
-    private const long MaxCopyBytes = 64L * 1024 * 1024;
-
-    /// <summary>Copies older than this are left from a handler that hung or an app that closed; they are deleted.</summary>
-    private static readonly TimeSpan StaleCopy = TimeSpan.FromHours(1);
-
-    private static string CopyFolder => Path.Combine(Path.GetTempPath(), "files-preview");
-
     /// <summary>The largest thumbnail kept, in pixels; a handler may give any size.</summary>
     private const int MaxPixels = 4096 * 4096;
 
-    private static byte[]? ReadOnThisThread(string path, int size, string? typedAs)
+    private static byte[]? ReadOnThisThread(string path, int size)
     {
-        string? copy = null;
         try
         {
-            if (typedAs is not null)
-            {
-                if (new FileInfo(path).Length > MaxCopyBytes)
-                {
-                    return null;
-                }
-                Directory.CreateDirectory(CopyFolder);
-                DeleteStaleCopies();
-                copy = Path.Combine(CopyFolder, $"{Guid.NewGuid():N}.{typedAs}");
-                File.Copy(path, copy);
-            }
-            return Thumbnail(copy ?? path, size);
+            return Thumbnail(path, size);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or COMException
             or InvalidCastException or ArgumentException or NotSupportedException)
         {
             return null;
-        }
-        finally
-        {
-            if (copy is not null)
-            {
-                TryDelete(copy);
-            }
-        }
-    }
-
-    private static void DeleteStaleCopies()
-    {
-        foreach (FileInfo old in new DirectoryInfo(CopyFolder).EnumerateFiles())
-        {
-            if (DateTime.UtcNow - old.CreationTimeUtc > StaleCopy)
-            {
-                TryDelete(old.FullName);
-            }
-        }
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            // Still open in a handler; deleted as stale on a later copy.
         }
     }
 

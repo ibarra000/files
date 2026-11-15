@@ -76,9 +76,8 @@ public sealed class TextReaderTests
         var reader = new PaddleTextReader(ModelFolder);
         byte[] png = Render(reader.Scale, Color.Black, Color.White);
         Task<IReadOnlyList<(string Text, Rect Box)>> reading = reader.ReadWordsAsync(png, CancellationToken.None);
-        // The first read loads the models, which takes far longer than this. Long enough for a slow
-        // CI runner to have started the read, which a close before it starts would refuse.
-        await Task.Delay(500);
+        // Closed only once the read is loading the models: a close before the read starts rightly refuses it.
+        await reader.LoadStarted.WaitAsync(TimeSpan.FromSeconds(30));
 
         var clock = System.Diagnostics.Stopwatch.StartNew();
         reader.Dispose();

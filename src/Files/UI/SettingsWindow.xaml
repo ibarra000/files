@@ -98,8 +98,8 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center">
-                                        <TextBlock Text="Open files" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="Click the box, then press the keys. Delete turns it off." Style="{StaticResource RowDescription}" />
+                                        <TextBlock Text="Open search" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Click and press a key combination. Delete disables it." Style="{StaticResource RowDescription}" />
                                     </StackPanel>
                                     <TextBox x:Name="HotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
                                              PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Shortcut" />
@@ -110,9 +110,9 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Search the text under the mouse" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Search text under pointer" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
                                     <TextBox x:Name="OcrHotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
-                                             PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Text under the mouse shortcut" />
+                                             PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Search text under pointer" />
                                 </Grid>
                             </StackPanel>
                         </Border>
@@ -126,14 +126,14 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel VerticalAlignment="Center">
-                                    <TextBlock Text="Engine for the text under the mouse" Style="{StaticResource RowLabel}" />
-                                    <TextBlock Text="PaddleOCR reads letters more reliably. It runs on this PC; nothing leaves it."
+                                    <TextBlock Text="Recognition engine" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="PaddleOCR is more accurate. Both engines run locally."
                                                Style="{StaticResource RowDescription}" />
                                 </StackPanel>
-                                <ComboBox x:Name="OcrEngineBox" Grid.Column="1" Width="220" AutomationProperties.Name="Text recognition engine"
+                                <ComboBox x:Name="OcrEngineBox" Grid.Column="1" Width="220" AutomationProperties.Name="Recognition engine"
                                           SelectionChanged="OnChanged">
-                                    <ComboBoxItem Content="Windows (built in)" />
-                                    <ComboBoxItem Content="PaddleOCR (more accurate)" />
+                                    <ComboBoxItem Content="Windows (built-in)" />
+                                    <ComboBoxItem Content="PaddleOCR" />
                                 </ComboBox>
                             </Grid>
                             <Border Style="{StaticResource RowDivider}" />
@@ -147,21 +147,21 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <StackPanel Margin="0,0,16,0">
-                                    <TextBlock Text="Remove from the text under the mouse" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Removal patterns" Style="{StaticResource RowLabel}" />
                                     <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                               Text="One regular expression per line, ignoring case; whatever matches is taken out before searching. For example _Page\d+ or \s*Rev\s*[A-Z]$" />
+                                               Text="Regular expressions, one per line, case-insensitive. Matching text is removed before searching. Example: _Page\d+" />
                                 </StackPanel>
                                 <TextBox x:Name="RemovalsBox" Grid.Column="1" Width="300" MinHeight="64" MaxHeight="160" AcceptsReturn="True" TextWrapping="NoWrap"
                                          VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" FontFamily="Consolas"
-                                         AutomationProperties.Name="Patterns removed from the text under the mouse"
+                                         AutomationProperties.Name="Removal patterns"
                                          LostFocus="OnChanged" TextChanged="OnTryRemovals" />
                                 <StackPanel Grid.Row="1" Margin="0,10,16,0" VerticalAlignment="Center">
-                                    <TextBlock Text="Try them" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Test" Style="{StaticResource RowLabel}" />
                                     <TextBlock x:Name="RemovalsResult" TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                               Text="Type a code to see what would be searched." />
+                                               Text="Enter sample text to preview the search." />
                                 </StackPanel>
                                 <TextBox x:Name="RemovalsTry" Grid.Row="1" Grid.Column="1" Width="300" Margin="0,10,0,0"
-                                         AutomationProperties.Name="Try the removal patterns" TextChanged="OnTryRemovals" />
+                                         AutomationProperties.Name="Test removal patterns" TextChanged="OnTryRemovals" />
                             </Grid>
                             </StackPanel>
                         </Border>
@@ -183,8 +183,8 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Hide when another window is clicked" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                    <CheckBox x:Name="HideOnBlurBox" Grid.Column="1" AutomationProperties.Name="Hide when another window is clicked" Click="OnChanged" />
+                                    <TextBlock Text="Hide when focus is lost" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="HideOnBlurBox" Grid.Column="1" AutomationProperties.Name="Hide when focus is lost" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <Grid Style="{StaticResource SettingRow}">
@@ -207,10 +207,10 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center">
-                                        <TextBlock Text="Remember new searches and opened files" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="Off pauses history; nothing is deleted." Style="{StaticResource RowDescription}" />
+                                        <TextBlock Text="Record history" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="When off, nothing new is recorded. Existing history is kept." Style="{StaticResource RowDescription}" />
                                     </StackPanel>
-                                    <CheckBox x:Name="RememberBox" Grid.Column="1" AutomationProperties.Name="Remember new searches and opened files" Click="OnChanged" />
+                                    <CheckBox x:Name="RememberBox" Grid.Column="1" AutomationProperties.Name="Record history" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <Grid Style="{StaticResource SettingRow}">
@@ -218,8 +218,8 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Show recently opened files when the search box is empty" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                    <CheckBox x:Name="ShowOpenedBox" Grid.Column="1" AutomationProperties.Name="Show recently opened files" Click="OnChanged" />
+                                    <TextBlock Text="Show recent files on the home list" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="ShowOpenedBox" Grid.Column="1" AutomationProperties.Name="Show recent files on the home list" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <Grid Style="{StaticResource SettingRow}">
@@ -229,11 +229,11 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center">
                                         <TextBlock Text="Clear history" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="Favorites are kept." Style="{StaticResource RowDescription}" />
+                                        <TextBlock Text="Favorites are not affected." Style="{StaticResource RowDescription}" />
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                                        <Button x:Name="ClearSearchesButton" Content="Clear recent searches" Style="{StaticResource SettingsButton}" Click="OnClearSearches" />
-                                        <Button x:Name="ClearOpenedButton" Content="Clear recently opened" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnClearOpened" />
+                                        <Button x:Name="ClearSearchesButton" Content="Clear searches" Style="{StaticResource SettingsButton}" Click="OnClearSearches" />
+                                        <Button x:Name="ClearOpenedButton" Content="Clear recent files" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnClearOpened" />
                                     </StackPanel>
                                 </Grid>
                             </StackPanel>
@@ -246,9 +246,9 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="Colors" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                <ComboBox x:Name="ThemeBox" Grid.Column="1" Width="220" AutomationProperties.Name="Colors" SelectionChanged="OnChanged">
-                                    <ComboBoxItem Content="Follow Windows" />
+                                <TextBlock Text="Theme" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                <ComboBox x:Name="ThemeBox" Grid.Column="1" Width="220" AutomationProperties.Name="Theme" SelectionChanged="OnChanged">
+                                    <ComboBoxItem Content="System default" />
                                     <ComboBoxItem Content="Light" />
                                     <ComboBoxItem Content="Dark" />
                                 </ComboBox>
@@ -267,22 +267,22 @@
                                         <DataGridTextColumn Header="NAME" Binding="{Binding Name}" />
                                         <DataGridTextColumn Header="FOLDER" Binding="{Binding Root}" Width="*" />
                                         <DataGridTextColumn Header="FILES" Binding="{Binding Files}" />
-                                        <DataGridTextColumn Header="READ" Binding="{Binding LastRead}" />
+                                        <DataGridTextColumn Header="LAST SCAN" Binding="{Binding LastRead}" />
                                         <DataGridTextColumn Header="STATUS" Binding="{Binding Status}" Width="1.2*" />
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <StackPanel Orientation="Horizontal" Margin="16,10,16,14">
-                                    <Button x:Name="RescanButton" Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume"
+                                    <Button x:Name="RescanButton" Content="Rescan" Style="{StaticResource SettingsButton}" Click="OnRescanVolume"
                                             ToolTipService.ShowOnDisabled="True" />
                                     <Button Content="Edit…" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnEditVolume" />
                                     <Button Content="Remove" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnRemoveVolume" />
-                                    <TextBlock Text="With none selected, Read again reads them all." Margin="12,0,0,0" VerticalAlignment="Center"
+                                    <TextBlock Text="With no volume selected, all volumes are rescanned." Margin="12,0,0,0" VerticalAlignment="Center"
                                                Style="{StaticResource RowDescription}" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>
 
-                        <TextBlock x:Name="VolumeFormLabel" Text="ADD A FOLDER" Style="{StaticResource SectionLabel}" />
+                        <TextBlock x:Name="VolumeFormLabel" Text="ADD VOLUME" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
                             <Grid Style="{StaticResource SettingRow}">
@@ -298,9 +298,9 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <TextBlock Text="Name" Margin="2,0,0,6" Style="{StaticResource RowDescription}" />
-                                <TextBlock Grid.Column="1" Text="Folder, drive or \\server\share" Margin="10,0,0,6" Style="{StaticResource RowDescription}" />
+                                <TextBlock Grid.Column="1" Text="Path: folder, drive or \\server\share" Margin="10,0,0,6" Style="{StaticResource RowDescription}" />
                                 <TextBox x:Name="NewVolumeName" Grid.Row="1" AutomationProperties.Name="Name" />
-                                <TextBox x:Name="NewVolumePath" Grid.Row="1" Grid.Column="1" Margin="8,0" AutomationProperties.Name="Folder" />
+                                <TextBox x:Name="NewVolumePath" Grid.Row="1" Grid.Column="1" Margin="8,0" AutomationProperties.Name="Path" />
                                 <Button Grid.Row="1" Grid.Column="2" Content="Browse…" Style="{StaticResource SettingsButton}" Click="OnBrowse" />
                                 <Button x:Name="VolumeFormButton" Grid.Row="1" Grid.Column="3" Content="Add" Margin="8,0,0,0" Padding="18,0" MinWidth="64"
                                         Style="{StaticResource SettingsAccentButton}" Click="OnSaveVolume" />
@@ -315,7 +315,7 @@
                                 </Grid.ColumnDefinitions>
                                 <StackPanel VerticalAlignment="Center">
                                     <TextBlock Text="Live search only" Style="{StaticResource RowLabel}" />
-                                    <TextBlock Text="Never read in the background or saved; only Shift+Enter reads it. For very large volumes."
+                                    <TextBlock Text="Not indexed; found by live search (Shift+Enter). Recommended for very large volumes."
                                                TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
                                 </StackPanel>
                                 <CheckBox x:Name="NewVolumeLiveOnly" Grid.Column="1" AutomationProperties.Name="Live search only" />
@@ -323,7 +323,7 @@
                             </StackPanel>
                         </Border>
 
-                        <TextBlock Text="READING" Style="{StaticResource SectionLabel}" />
+                        <TextBlock Text="SCANNING" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
                                 <Grid Style="{StaticResource SettingRow}">
@@ -331,12 +331,12 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Read every volume again" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                    <ComboBox x:Name="RescanBox" Grid.Column="1" Width="180" AutomationProperties.Name="Read every volume again" SelectionChanged="OnChanged">
-                                        <ComboBoxItem Content="every hour" Tag="1" />
-                                        <ComboBoxItem Content="every 4 hours" Tag="4" />
-                                        <ComboBoxItem Content="every day" Tag="24" />
-                                        <ComboBoxItem Content="only on F5" Tag="0" />
+                                    <TextBlock Text="Rescan volumes" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <ComboBox x:Name="RescanBox" Grid.Column="1" Width="180" AutomationProperties.Name="Rescan volumes" SelectionChanged="OnChanged">
+                                        <ComboBoxItem Content="Every hour" Tag="1" />
+                                        <ComboBoxItem Content="Every 4 hours" Tag="4" />
+                                        <ComboBoxItem Content="Daily" Tag="24" />
+                                        <ComboBoxItem Content="Manually (F5)" Tag="0" />
                                     </ComboBox>
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
@@ -347,7 +347,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center">
                                         <TextBlock Text="Skip hidden and system files" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="Applies at the next read." Style="{StaticResource RowDescription}" />
+                                        <TextBlock Text="Takes effect at the next scan." Style="{StaticResource RowDescription}" />
                                     </StackPanel>
                                     <CheckBox x:Name="HideSystemBox" Grid.Column="1" AutomationProperties.Name="Skip hidden and system files" Click="OnChanged" />
                                 </Grid>
@@ -365,10 +365,10 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                    <TextBlock Text="File types never shown" Style="{StaticResource RowLabel}" />
-                                    <TextBlock Text="Extensions separated by commas." Style="{StaticResource RowDescription}" />
+                                    <TextBlock Text="Excluded file types" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Comma-separated extensions." Style="{StaticResource RowDescription}" />
                                 </StackPanel>
-                                <TextBox x:Name="HiddenBox" Grid.Column="1" Width="300" AutomationProperties.Name="File types never shown" LostFocus="OnChanged" />
+                                <TextBox x:Name="HiddenBox" Grid.Column="1" Width="300" AutomationProperties.Name="Excluded file types" LostFocus="OnChanged" />
                             </Grid>
                         </Border>
 
@@ -380,10 +380,10 @@
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel VerticalAlignment="Center">
-                                    <TextBlock Text="Show each result's folder on its own line" Style="{StaticResource RowLabel}" />
-                                    <TextBlock Text="Off puts the folder after the name, for one line per file." Style="{StaticResource RowDescription}" />
+                                    <TextBlock Text="Show folder on a second line" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="When off, the folder follows the file name." Style="{StaticResource RowDescription}" />
                                 </StackPanel>
-                                <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show each result's folder on its own line" Click="OnChanged" />
+                                <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show folder on a second line" Click="OnChanged" />
                             </Grid>
                         </Border>
                     </StackPanel>
@@ -397,8 +397,8 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Text="Enter opens with" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                <ComboBox x:Name="EnterBox" Grid.Column="1" Width="300" AutomationProperties.Name="Enter opens with" SelectionChanged="OnChanged" />
+                                <TextBlock Text="Default program (Enter)" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                <ComboBox x:Name="EnterBox" Grid.Column="1" Width="300" AutomationProperties.Name="Default program" SelectionChanged="OnChanged" />
                             </Grid>
                         </Border>
 
@@ -412,7 +412,7 @@
                                         <DataGridTextColumn Header="PROGRAM" Binding="{Binding Program}" Width="*" EditingElementStyle="{StaticResource GridField}" />
                                     </DataGrid.Columns>
                                 </DataGrid>
-                                <TextBlock Text="Type in the empty last row to add a program; select a row and press Delete to remove it."
+                                <TextBlock Text="Add a program in the last row. Select a row and press Delete to remove it."
                                            Margin="16,10,16,14" Style="{StaticResource RowDescription}" />
                             </StackPanel>
                         </Border>
@@ -429,8 +429,8 @@
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Check for updates every few hours" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                    <CheckBox x:Name="CheckUpdatesBox" Grid.Column="1" AutomationProperties.Name="Check for updates every few hours" Click="OnChanged" />
+                                    <TextBlock Text="Check for updates automatically" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
+                                    <CheckBox x:Name="CheckUpdatesBox" Grid.Column="1" AutomationProperties.Name="Check for updates automatically" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <Grid Style="{StaticResource SettingRow}">
@@ -440,7 +440,7 @@
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Text="Update folder" Style="{StaticResource RowLabel}" />
-                                        <TextBlock Text="Empty for GitHub releases." Style="{StaticResource RowDescription}" />
+                                        <TextBlock Text="Leave empty to use GitHub releases." Style="{StaticResource RowDescription}" />
                                     </StackPanel>
                                     <TextBox x:Name="UpdateFolderBox" Grid.Column="1" Width="300" AutomationProperties.Name="Update folder" LostFocus="OnChanged" />
                                 </Grid>

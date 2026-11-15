@@ -326,8 +326,8 @@ public sealed class DrawingPreviewTests
         File.WriteAllBytes(png, Picture(ImageFormat.Png));
         string unknown = temp.File("thing.nohandlerhere", "nothing to draw");
 
-        Assert.NotNull(await ShellThumbnail.ReadAsync(png, 64, null, CancellationToken.None));
-        Assert.Null(await ShellThumbnail.ReadAsync(unknown, 64, null, CancellationToken.None));
+        Assert.NotNull(await ShellThumbnail.ReadAsync(png, 64, CancellationToken.None));
+        Assert.Null(await ShellThumbnail.ReadAsync(unknown, 64, CancellationToken.None));
     }
 
     /// <summary>A number in HP-GL/2's 8-bit encoding: base 64, lowest digit first, the sign in the lowest bit.</summary>

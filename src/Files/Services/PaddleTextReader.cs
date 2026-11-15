@@ -103,8 +103,18 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
     private RapidOcr Engine()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _ocr ??= Load();
+        if (_ocr is null)
+        {
+            _loadStarted.TrySetResult();
+            _ocr = Load();
+        }
+        return _ocr;
     }
+
+    private readonly TaskCompletionSource _loadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Completes when the models start loading, with the lock held; for tests that close the reader mid-load.</summary>
+    internal Task LoadStarted => _loadStarted.Task;
 
     private IReadOnlyList<(string Text, Rect Box)> Read(byte[] png, CancellationToken cancel)
     {
