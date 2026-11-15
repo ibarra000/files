@@ -18,7 +18,7 @@ Instant file-name search across folders and network shares on Windows.
 - **Opening.** <kbd>Enter</kbd> opens with the Windows default or a program you add in Settings. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. <kbd>Tab</kbd> or right-click a result for every option. Drag a result into another app to hand it the file.
 - **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. The action menu (<kbd>Tab</kbd>) can also pin a result's folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
 - **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder, under Recent (<kbd>Del</kbd> takes one off).
-- **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> in an empty box brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again.
+- **Search history.** A search is remembered only when you open or show a result from it, so typos are not kept (the newest 50). <kbd>↑</kbd> on the top row brings back earlier searches one by one, like a terminal, and <kbd>↓</kbd> goes forward again; what you had typed is kept and comes back after the newest. Text you clear without opening anything is never remembered.
 - **History control.** So file names don't show up while your screen is shared, Settings → General → History can pause history (nothing new is recorded, nothing is deleted), hide Recently opened from the home list, and clear recent searches or recently opened files separately. Favorites are never cleared.
 - **Placing the panel.** Drag it anywhere by its edge padding (also out of maximized or snapped; double-click there maximizes or restores), resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
 - **Preset volumes.** An installer built with `make_msi.ps1 -Volumes` adds a list of volumes once for each user on each PC it is installed on; see [CONTRIBUTING.md](CONTRIBUTING.md#an-installer-with-preset-volumes).
@@ -37,7 +37,7 @@ Instant file-name search across folders and network shares on Windows.
 | <kbd>Ctrl</kbd>+<kbd>P</kbd> | Show or hide the preview pane |
 | <kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>Ctrl</kbd>+<kbd>5</kbd> | Filter: All, Files, Folders, Code, Documents |
 | <kbd>Del</kbd> | Remove the selected file from Recent (box empty) |
-| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results; <kbd>↑</kbd> at the top of an empty box recalls earlier searches |
+| <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move through results; <kbd>↑</kbd> <kbd>↓</kbd> on the top row step through earlier searches |
 | <kbd>Esc</kbd> | Stop a live search, leave "See all", clear the box, then hide |
 | <kbd>F5</kbd> | Read every volume again |
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings (or the gear at the bottom right) |

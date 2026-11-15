@@ -361,7 +361,8 @@ public partial class SearchWindow : Window
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
-        int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        // A recalled search starts at the top row, where Up and Down keep stepping through past searches.
+        int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         if (scrolled > 0)
@@ -448,11 +449,14 @@ public partial class SearchWindow : Window
                 // Alt+Down opens the volume menu, as it opens a dropdown.
                 OpenScopeMenu();
                 break;
+            case Key.Down when CanRecallNewer():
+                ShowRecalled(_recall.Newer());
+                break;
             case Key.Down:
                 Move(1);
                 break;
             case Key.Up when CanRecall():
-                ShowRecalled(_recall.Older());
+                ShowRecalled(_recall.Older(Input.Text));
                 break;
             case Key.Up:
                 Move(-1);
