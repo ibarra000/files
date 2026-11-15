@@ -1,20 +1,36 @@
 namespace Files.Core;
 
+/// <summary>A volume a live search reads, with its saved list when it has one (used to read likely folders first).</summary>
+public sealed record LiveVolume(string Name, string Root, VolumeIndex? Saved = null)
+{
+    public static implicit operator LiveVolume((string Name, string Root) volume) => new(volume.Name, volume.Root);
+}
+
 /// <summary>
 /// Searches volumes by reading them now instead of using their saved lists,
 /// so files added since the last scan are found. Only matching names are
 /// kept, so memory stays small however large the volumes are. Results can be
 /// taken with <see cref="Snapshot"/> at any time while the search runs.
 /// </summary>
+/// <remarks>
+/// Every volume is read at once. Folders where a match is likely are read
+/// first: the typed text as a path under the root, and the folders the saved
+/// list found matches in. Folder links are never followed, so a search stays
+/// inside the volume chosen.
+/// </remarks>
 public sealed class LiveSearch
 {
-    public const int MaxVolumesAtOnce = 2;
-
     /// <summary>
     /// The most names kept. A short term on a large share can match millions;
     /// past this the rest are only counted, so memory and each snapshot stay small.
     /// </summary>
     public const int MaxKept = 100_000;
+
+    /// <summary>The most folders listed at once on one share: a listing mostly waits for the server, so many run side by side.</summary>
+    public const int NetworkWorkers = 32;
+
+    /// <summary>The folders listed at once shared out over the shares of one search; each share still gets at least <see cref="Walker.Workers"/>.</summary>
+    public const int TotalNetworkWorkers = 64;
 
     /// <summary>The most files kept from a matching folder that do not match by name, as indexed search shows.</summary>
     private const int MaxInheritedPerFolder = 64;
@@ -22,7 +38,13 @@ public sealed class LiveSearch
     /// <summary>The most matching folders remembered per volume; the panel ranks and shows far fewer.</summary>
     private const int MaxMatchingFolders = 1000;
 
-    private readonly IReadOnlyList<(string Name, string Root)> _volumes;
+    /// <summary>The most folders read first per volume.</summary>
+    private const int MaxFirstFolders = 200;
+
+    /// <summary>The most folders found by their own name in the saved list that are read first.</summary>
+    private const int SavedFolderHits = 50;
+
+    private readonly IReadOnlyList<LiveVolume> _volumes;
     private readonly Query _query;
     private readonly IReadOnlySet<string> _hiddenExtensions;
     private readonly bool _skipHidden;
@@ -30,15 +52,19 @@ public sealed class LiveSearch
     private readonly object _gate = new();
     private readonly List<(string Relative, IReadOnlyList<string> Files)>[] _found;
     private readonly List<string> _problems = [];
+    private readonly WalkProgress[] _progress;
+    private readonly bool[] _finished;
 
     /// <summary>Folders whose own name matches, kept even when they hold no matching file (the walk only keeps those that do).</summary>
     private readonly List<string>[] _matchingFolders;
-    private int _foldersRead;
-    private WalkSkips _skipped = WalkSkips.None;
+
+    // Goes up with every folder kept, so a snapshot of nothing new is the one before. Guarded by _gate.
+    private int _version;
+    private (int Version, int NotKept, SearchResult Result)? _lastSnapshot;
     private int _kept;
     private int _notKept;
 
-    public LiveSearch(IReadOnlyList<(string Name, string Root)> volumes, Query query, IReadOnlySet<string> hiddenExtensions, bool skipHidden, int maxKept = MaxKept)
+    public LiveSearch(IReadOnlyList<LiveVolume> volumes, Query query, IReadOnlySet<string> hiddenExtensions, bool skipHidden, int maxKept = MaxKept)
     {
         _volumes = volumes;
         _query = query;
@@ -47,22 +73,32 @@ public sealed class LiveSearch
         _maxKept = maxKept;
         _found = volumes.Select(_ => new List<(string, IReadOnlyList<string>)>()).ToArray();
         _matchingFolders = volumes.Select(_ => new List<string>()).ToArray();
+        _progress = volumes.Select(_ => new WalkProgress()).ToArray();
+        _finished = new bool[volumes.Count];
     }
 
-    public int FoldersRead => Volatile.Read(ref _foldersRead);
+    /// <summary>Folders finished so far over every volume, whether they could be read or not.</summary>
+    public int FoldersRead => _progress.Sum(progress => progress.Folders);
 
     /// <summary>More names matched than <see cref="MaxKept"/>; only the first ones found are ranked.</summary>
     public bool IsCapped => Volatile.Read(ref _notKept) > 0;
 
-    /// <summary>What the walks of the volumes read so far passed over, added up.</summary>
-    public WalkSkips Skipped
+    /// <summary>What the walks have passed over so far, added up over every volume.</summary>
+    public WalkSkips Skipped => _progress.Aggregate(WalkSkips.None, (sum, progress) => sum.Plus(progress.Skipped));
+
+    /// <summary>A folder being read now, as the volume name and its path in the volume; null when none is.</summary>
+    public string? Reading
     {
         get
         {
-            lock (_gate)
+            for (int volume = 0; volume < _volumes.Count; volume++)
             {
-                return _skipped;
+                if (!Volatile.Read(ref _finished[volume]) && _progress[volume].Reading is string relative)
+                {
+                    return Path.Join(_volumes[volume].Name, relative);
+                }
             }
+            return null;
         }
     }
 
@@ -78,34 +114,53 @@ public sealed class LiveSearch
         }
     }
 
-    /// <summary>Reads every volume. A volume that cannot be read is noted in <see cref="Problems"/>.</summary>
+    /// <summary>Reads every volume at once. A volume that cannot be read is noted in <see cref="Problems"/>.</summary>
     public async Task RunAsync(CancellationToken cancel)
     {
         if (!_query.IsValid)
         {
             return;
         }
-        var options = new ParallelOptions { MaxDegreeOfParallelism = MaxVolumesAtOnce, CancellationToken = cancel };
-        await Parallel.ForEachAsync(Enumerable.Range(0, _volumes.Count), options, (volume, token) =>
-        {
-            Read(volume, token);
-            return ValueTask.CompletedTask;
-        });
+        cancel.ThrowIfCancellationRequested();
+        bool[] onNetwork = _volumes.Select(volume => Walker.IsOnNetwork(volume.Root)).ToArray();
+        int shares = Math.Max(1, onNetwork.Count(network => network));
+        int shareWorkers = Math.Clamp(TotalNetworkWorkers / shares, Walker.Workers, NetworkWorkers);
+        // Each walk waits on its own reading threads, so each gets a thread of its own rather than one from the pool.
+        IEnumerable<Task> reads = Enumerable.Range(0, _volumes.Count).Select(volume => Task.Factory.StartNew(
+            () => Read(volume, onNetwork[volume] ? shareWorkers : Walker.Workers, cancel),
+            cancel,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default));
+        // A cancel ends the search at once, even while a read waits on a server that does not answer
+        // (a root or a first folder being checked); that read stops by itself when the server replies.
+        await Task.WhenAll(reads).WaitAsync(cancel);
     }
 
-    /// <summary>The matches found so far, ranked as indexed search ranks them.</summary>
+    /// <summary>The matches found so far, ranked as indexed search ranks them; the same result while nothing new was found.</summary>
     public SearchResult Snapshot(CancellationToken cancel = default)
     {
+        int notKept = Volatile.Read(ref _notKept);
+        int version;
+        var copies = new List<List<(string Relative, IReadOnlyList<string> Files)>>();
+        lock (_gate)
+        {
+            if (_lastSnapshot is { } last && last.Version == _version && last.NotKept == notKept)
+            {
+                return last.Result;
+            }
+            version = _version;
+            for (int volume = 0; volume < _volumes.Count; volume++)
+            {
+                List<(string Relative, IReadOnlyList<string> Files)> folders = [.. _found[volume]];
+                var listed = folders.Select(folder => folder.Relative).ToHashSet(StringComparer.Ordinal);
+                folders.AddRange(_matchingFolders[volume].Where(listed.Add).Select(relative => (relative, (IReadOnlyList<string>)[])));
+                copies.Add(folders);
+            }
+        }
         var indexes = new List<(string Name, VolumeIndex Index)>();
         for (int volume = 0; volume < _volumes.Count; volume++)
         {
-            List<(string Relative, IReadOnlyList<string> Files)> folders;
-            lock (_gate)
-            {
-                folders = [.. _found[volume]];
-                var listed = folders.Select(folder => folder.Relative).ToHashSet(StringComparer.Ordinal);
-                folders.AddRange(_matchingFolders[volume].Where(listed.Add).Select(relative => (relative, (IReadOnlyList<string>)[])));
-            }
+            List<(string Relative, IReadOnlyList<string> Files)> folders = copies[volume];
             folders.Sort((a, b) => string.CompareOrdinal(a.Relative, b.Relative));
             var builder = new VolumeIndex.Builder(_volumes[volume].Root);
             foreach (var (relative, files) in folders)
@@ -114,35 +169,93 @@ public sealed class LiveSearch
             }
             indexes.Add((_volumes[volume].Name, builder.Build()));
         }
-        SearchResult result = Searcher.Search(indexes, _query, _hiddenExtensions, cancel);
-        return result with { Matched = result.Matched + Volatile.Read(ref _notKept) };
+        SearchResult searched = Searcher.Search(indexes, _query, _hiddenExtensions, cancel);
+        SearchResult result = searched with { Matched = searched.Matched + notKept };
+        lock (_gate)
+        {
+            _lastSnapshot = (version, notKept, result);
+        }
+        return result;
     }
 
-    private void Read(int volume, CancellationToken cancel)
+    private void Read(int volume, int workers, CancellationToken cancel)
     {
-        var (name, root) = _volumes[volume];
+        LiveVolume read = _volumes[volume];
         try
         {
-            WalkResult walk = Walker.Walk(root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
+            var options = new LiveWalkOptions(workers, FirstFolders(read, cancel), _progress[volume]);
+            Walker.Walk(read.Root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
             {
                 lock (_gate)
                 {
                     _found[volume].Add((relative, files));
+                    _version++;
                 }
-            });
-            lock (_gate)
-            {
-                _skipped = _skipped.Plus(walk.Skipped);
-            }
+            }, options);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or ArgumentException or System.Security.SecurityException)
         {
             lock (_gate)
             {
-                _problems.Add($"{name} could not be read · {error.Message}");
+                _problems.Add($"{read.Name} could not be read · {error.Message}");
             }
         }
+        finally
+        {
+            Volatile.Write(ref _finished[volume], true);
+        }
+    }
+
+    /// <summary>
+    /// Where a match is likely, read before the rest: the typed text as a path
+    /// under the root (one quick check), then the folders the saved list found
+    /// matches in, best first.
+    /// </summary>
+    internal List<string> FirstFolders(LiveVolume volume, CancellationToken cancel)
+    {
+        var first = new List<string>();
+        if (ExactFolder(volume.Root) is string exact)
+        {
+            first.Add(exact);
+        }
+        if (volume.Saved is VolumeIndex saved)
+        {
+            first.AddRange(SavedFolders(volume.Name, saved, cancel));
+        }
+        return first.Distinct(StringComparer.OrdinalIgnoreCase).Take(MaxFirstFolders).ToList();
+    }
+
+    /// <summary>
+    /// The folder the typed text names under <paramref name="root"/> (itself, or
+    /// the folder of the file it names), or null when it names nothing there.
+    /// </summary>
+    private string? ExactFolder(string root)
+    {
+        string term = _query.Term.Trim().Trim('\\', '/');
+        bool plain = _query.Mode == MatchMode.Contains && term.Length > 0 && term.IndexOfAny(Path.GetInvalidPathChars()) < 0
+            && !Path.IsPathRooted(term) && !term.Split('\\', '/').Contains("..");
+        if (!plain)
+        {
+            return null;
+        }
+        string path = Path.Join(root, term);
+        if (Directory.Exists(path))
+        {
+            return term;
+        }
+        return File.Exists(path) && Path.GetDirectoryName(term) is { Length: > 0 } parent ? parent : null;
+    }
+
+    /// <summary>The folders, relative to the root, of the best matches in the saved list, files first, then folders by their own name.</summary>
+    private IEnumerable<string> SavedFolders(string name, VolumeIndex saved, CancellationToken cancel)
+    {
+        var (hits, _) = saved.Search(name, _query, _hiddenExtensions, cancel);
+        IEnumerable<string> fileFolders = hits.Select(hit => hit.Folder);
+        IEnumerable<string> ownFolders = saved.SearchFolders(name, _query, SavedFolderHits, cancel).Select(hit => hit.Path);
+        return fileFolders.Concat(ownFolders)
+            .Select(full => Path.GetRelativePath(saved.Root, full))
+            .Where(relative => relative != ".");
     }
 
     /// <summary>Remembers a folder found by its own name, up to <see cref="MaxMatchingFolders"/> per volume.</summary>
@@ -153,6 +266,7 @@ public sealed class LiveSearch
             if (_matchingFolders[volume].Count < MaxMatchingFolders)
             {
                 _matchingFolders[volume].Add(relative);
+                _version++;
             }
         }
     }
@@ -164,7 +278,6 @@ public sealed class LiveSearch
     /// </summary>
     private List<string> Keep(int volume, string relative, List<string> files)
     {
-        Interlocked.Increment(ref _foldersRead);
         string lowerRelative = Names.Fold(relative);
         bool folderMatches = relative.Length > 0 && VolumeIndex.FolderMatch(_query, lowerRelative) >= 0;
         if (relative.Length > 0 && VolumeIndex.OwnNameMatch(_query, lowerRelative) >= 0)

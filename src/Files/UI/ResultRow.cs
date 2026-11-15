@@ -204,8 +204,9 @@ public static class StatusText
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
     /// <param name="found">The same count the header shows, folders included.</param>
-    /// <param name="skipped">What the walks passed over; said once the search has ended.</param>
-    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
+    /// <param name="reading">A folder being read now, so the line moves even while nothing matches; shown only while running.</param>
+    /// <param name="skipped">What the walks have passed over so far.</param>
+    public static string ForLive(int found, int foldersRead, string? reading, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
     {
         string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
         if (capped)
@@ -215,7 +216,8 @@ public static class StatusText
         string state;
         if (running)
         {
-            state = $"Searching live · {progress} · Esc to stop";
+            string at = reading is null ? "" : $" · reading {LastFolders(reading)}";
+            state = $"Searching live · {progress}{at} · Esc to stop";
         }
         else if (stopped)
         {
@@ -226,12 +228,20 @@ public static class StatusText
             state = $"Live search · {progress}";
         }
         var parts = new List<string> { state };
-        if (!running && skipped.Describe() is string skips)
+        if (skipped.Describe() is string skips)
         {
             parts.Add(skips);
         }
         parts.AddRange(problems);
         return string.Join(" · ", parts);
+    }
+
+    /// <summary>The last two parts of a folder path, after an ellipsis when there are more, so a deep path still fits the footer.</summary>
+    internal static string LastFolders(string path)
+    {
+        const int Shown = 2;
+        string[] parts = path.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length <= Shown ? string.Join('\\', parts) : "…\\" + string.Join('\\', parts[^Shown..]);
     }
 
     /// <summary>What the status line says about one volume, or null when all is well.</summary>

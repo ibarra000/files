@@ -37,6 +37,11 @@ public sealed class Indexer : IDisposable
     private readonly ConcurrentDictionary<long, DateTime> _retryAt = new();
     private readonly object _gate = new();
     private readonly object _shardGate = new();
+    private readonly object _holdGate = new();
+
+    // Live searches holding the background reads back, and what queued reads wait on. Guarded by _holdGate.
+    private int _holds;
+    private TaskCompletionSource _scansAllowed = Allowed();
 
     // Volumes removed since start, so loading at start-up cannot bring one back. Guarded by _gate.
     private readonly HashSet<long> _removed = [];
@@ -68,6 +73,64 @@ public sealed class Indexer : IDisposable
         foreach (VolumeState state in _states.Values)
         {
             Scan(state.Volume);
+        }
+    }
+
+    /// <summary>
+    /// Holds back background reads until the returned hold is disposed: reads already
+    /// running carry on, the others wait, so a live search has the servers to itself.
+    /// Holds add up; reads go on when the last one is released.
+    /// </summary>
+    public IDisposable HoldScans()
+    {
+        lock (_holdGate)
+        {
+            if (_holds++ == 0)
+            {
+                _scansAllowed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+        return new ScanHold(this);
+    }
+
+    private void ReleaseScans()
+    {
+        lock (_holdGate)
+        {
+            // Under the lock, so a hold taken meanwhile cannot be let through by this release.
+            if (--_holds == 0)
+            {
+                _scansAllowed.TrySetResult();
+            }
+        }
+    }
+
+    private Task ScansAllowed()
+    {
+        lock (_holdGate)
+        {
+            return _scansAllowed.Task;
+        }
+    }
+
+    private static TaskCompletionSource Allowed()
+    {
+        var allowed = new TaskCompletionSource();
+        allowed.SetResult();
+        return allowed;
+    }
+
+    /// <summary>Releases its hold once, however often it is disposed.</summary>
+    private sealed class ScanHold(Indexer indexer) : IDisposable
+    {
+        private int _released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                indexer.ReleaseScans();
+            }
         }
     }
 
@@ -317,6 +380,7 @@ public sealed class Indexer : IDisposable
         {
             try
             {
+                await ScansAllowed().WaitAsync(cancel.Token);
                 await _scanSlots.WaitAsync(cancel.Token);
                 try
                 {
