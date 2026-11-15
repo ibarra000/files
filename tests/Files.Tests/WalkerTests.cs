@@ -161,6 +161,153 @@ public sealed class WalkerTests
             new WalkSkips(3, 1, 2).Describe());
     }
 
+    [Fact]
+    public void A_live_walk_counts_links_and_never_reads_them()
+    {
+        using var temp = new TempFolder();
+        using var elsewhere = new TempFolder();
+        temp.File("own.txt");
+        File.WriteAllText(Path.Combine(elsewhere.Path, "linked.txt"), "");
+        Junction(Path.Combine(temp.Path, "link"), elsewhere.Path);
+        var progress = new WalkProgress();
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { },
+            new LiveWalkOptions(Walker.Workers, [], progress));
+
+        Assert.Equal(1, walk.Index.FileCount);
+        Assert.Equal(1, walk.Skipped.Links);
+        Assert.Equal(1, progress.Skipped.Links);
+    }
+
+    [Fact]
+    public void A_cancelled_walk_returns_without_waiting_for_a_folder_still_being_read()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"slow\x.txt");
+        using var cancel = new CancellationTokenSource();
+        using var reading = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        try
+        {
+            Task<WalkResult> walk = Task.Run(() => Walker.Walk(temp.Path, skipHidden: true, cancel.Token, (relative, files) =>
+            {
+                if (relative == "slow")
+                {
+                    // Stands in for a listing that waits on a server that does not answer.
+                    reading.Set();
+                    release.Wait();
+                }
+                return files;
+            }, (_, _) => { }));
+            Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+
+            var clock = Stopwatch.StartNew();
+            cancel.Cancel();
+
+            Assert.ThrowsAny<OperationCanceledException>(() => walk.GetAwaiter().GetResult());
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"took {clock.Elapsed}");
+        }
+        finally
+        {
+            release.Set();
+        }
+    }
+
+    [Fact]
+    public void Folders_to_read_first_are_read_before_the_rest_and_only_once()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\one.txt");
+        temp.File(@"b\two.txt");
+        temp.File(@"c\deep\three.txt");
+        var order = new List<string>();
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (relative, files) =>
+        {
+            lock (order)
+            {
+                order.Add(relative);
+            }
+            return files;
+        }, (_, _) => { }, new LiveWalkOptions(1, [@"c\deep", "gone", @"..\outside"], null));
+
+        Assert.Equal(["", @"c\deep"], order.Take(2));
+        Assert.Single(order, relative => relative == @"c\deep");
+        Assert.Equal(3, walk.Index.FileCount);
+        // A folder the saved list knew that is gone is passed over, not counted as unreadable.
+        Assert.Equal(WalkSkips.None, walk.Skipped);
+    }
+
+    [Fact]
+    public void Progress_counts_every_folder_and_names_the_one_being_read()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\b\x.txt");
+        temp.File(@"c\y.txt");
+        var progress = new WalkProgress();
+
+        Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { },
+            new LiveWalkOptions(Walker.Workers, [], progress));
+
+        Assert.Equal(4, progress.Folders);
+        Assert.NotNull(progress.Reading);
+    }
+
+    [Fact]
+    public void A_first_folder_behind_a_link_is_never_read()
+    {
+        using var temp = new TempFolder();
+        using var elsewhere = new TempFolder();
+        temp.File("own.txt");
+        File.WriteAllText(Path.Combine(elsewhere.Path, "linked.txt"), "");
+        Directory.CreateDirectory(Path.Combine(elsewhere.Path, "inside"));
+        File.WriteAllText(Path.Combine(elsewhere.Path, @"inside\deeper.txt"), "");
+        Junction(Path.Combine(temp.Path, "link"), elsewhere.Path);
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { },
+            new LiveWalkOptions(Walker.Workers, ["link", @"link\inside"], null));
+
+        Assert.Equal(1, walk.Index.FileCount);
+        Assert.Equal(1, walk.Skipped.Links);
+    }
+
+    [Fact]
+    public void A_folder_still_being_read_when_the_walk_is_cancelled_reports_nothing_after()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"slow\x.txt");
+        using var cancel = new CancellationTokenSource();
+        using var reading = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var progress = new WalkProgress();
+        int reported = 0;
+        Task<WalkResult> walk = Task.Run(() => Walker.Walk(temp.Path, skipHidden: true, cancel.Token, (relative, files) =>
+        {
+            if (relative == "slow")
+            {
+                reading.Set();
+                release.Wait();
+            }
+            return files;
+        }, (relative, _) =>
+        {
+            if (relative == "slow")
+            {
+                Interlocked.Increment(ref reported);
+            }
+        }, new LiveWalkOptions(Walker.Workers, [], progress)));
+        Assert.True(reading.Wait(TimeSpan.FromSeconds(10)));
+        cancel.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => walk.GetAwaiter().GetResult());
+        int foldersAtCancel = progress.Folders;
+
+        release.Set();
+        Thread.Sleep(200);
+
+        Assert.Equal(0, Volatile.Read(ref reported));
+        Assert.Equal(foldersAtCancel, progress.Folders);
+    }
+
     private static WalkResult Walk(string root, bool followLinks) =>
         Walker.Walk(root, skipHidden: true, CancellationToken.None, progress: null, Walker.CharLimit(), followLinks: followLinks);
 

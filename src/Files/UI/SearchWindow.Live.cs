@@ -30,7 +30,8 @@ public partial class SearchWindow
             return;
         }
 
-        var volumes = ScopedVolumes().Select(state => (state.Volume.Name, state.Volume.Root)).ToList();
+        // A volume's saved list, when it has one, points the walk at the folders where matches were last time.
+        var volumes = ScopedVolumes().Select(state => new LiveVolume(state.Volume.Name, state.Volume.Root, state.Index)).ToList();
         _searchTook = null;
         var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
         var cancel = new CancellationTokenSource();
@@ -41,6 +42,8 @@ public partial class SearchWindow
         Results.ItemsSource = null;
         UpdateStatus();
         _liveTimer.Start();
+        // Background reads of the volumes wait while this one runs, so they do not compete for the same servers.
+        IDisposable scansHeld = _app.Indexer.HoldScans();
         try
         {
             await Task.Run(() => live.RunAsync(cancel.Token));
@@ -55,6 +58,10 @@ public partial class SearchWindow
             {
                 ShowToast($"Live search stopped: {error.Message}");
             }
+        }
+        finally
+        {
+            scansHeld.Dispose();
         }
         bool stopped = cancel.IsCancellationRequested;
         cancel.Dispose();
@@ -109,7 +116,15 @@ public partial class SearchWindow
         }
         if (_live == live)
         {
-            ShowResults(result);
+            // Nothing new found: only the footer moves (folders read, the folder being read), and the rows stay as they are.
+            if (ReferenceEquals(result, _result))
+            {
+                UpdateStatus();
+            }
+            else
+            {
+                ShowResults(result);
+            }
         }
         if (_liveSnapshotAgain)
         {

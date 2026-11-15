@@ -56,6 +56,28 @@ public sealed class IndexerTests
     }
 
     [Fact]
+    public async Task A_held_indexer_reads_nothing_until_the_hold_is_released()
+    {
+        using var temp = new TempFolder();
+        string share = Directory.CreateDirectory(Path.Combine(temp.Path, "share")).FullName;
+        File.WriteAllText(Path.Combine(share, "report.pdf"), "");
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        using var indexer = new Indexer(catalog, Path.Combine(temp.Path, "volumes"), () => new Settings { RescanHours = 0 });
+        indexer.Start();
+        IDisposable hold = indexer.HoldScans();
+
+        Assert.Null(indexer.Add("share", share));
+        await Task.Delay(500);
+        Assert.Null(Assert.Single(indexer.Volumes).Index);
+
+        // Released once, however often it is disposed.
+        hold.Dispose();
+        hold.Dispose();
+        VolumeState read = await WaitFor(indexer, s => s.Index is not null);
+        Assert.Equal(1, read.Index!.FileCount);
+    }
+
+    [Fact]
     public async Task A_volume_removed_while_it_is_read_leaves_no_file_list_behind()
     {
         using var temp = new TempFolder();

@@ -6,7 +6,7 @@ public sealed class LiveSearchTests
 {
     private static readonly IReadOnlySet<string> NothingHidden = new HashSet<string>();
 
-    private static async Task<(LiveSearch Live, SearchResult Result)> Run(string line, IReadOnlySet<string>? hidden, params (string Name, string Root)[] volumes)
+    private static async Task<(LiveSearch Live, SearchResult Result)> Run(string line, IReadOnlySet<string>? hidden, params LiveVolume[] volumes)
     {
         var live = new LiveSearch(volumes, Query.Parse(line), hidden ?? NothingHidden, skipHidden: true);
         await live.RunAsync(CancellationToken.None);
@@ -178,5 +178,60 @@ public sealed class LiveSearchTests
         (LiveSearch live, _) = await Run("plan", null, ("one", first.Path), ("two", second.Path));
 
         Assert.Equal(new WalkSkips(0, 0, 2), live.Skipped);
+    }
+
+    [Fact]
+    public async Task A_snapshot_of_nothing_new_is_the_one_before()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\plan.pdf");
+
+        (LiveSearch live, SearchResult first) = await Run("plan", null, ("v", temp.Path));
+
+        Assert.Same(first, live.Snapshot());
+    }
+
+    [Fact]
+    public void The_typed_path_and_the_saved_matches_are_read_first()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"jobs\1234\sheet.dwg");
+        temp.File(@"old\plan-a.pdf");
+        temp.File(@"plans\notes.txt");
+        VolumeIndex saved = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None).Index;
+
+        List<string> byFolder = FirstFolders(@"jobs\1234", temp.Path, saved: null);
+        List<string> byFile = FirstFolders(@"jobs\1234\sheet.dwg", temp.Path, saved: null);
+        List<string> missing = FirstFolders(@"jobs\9999", temp.Path, saved: null);
+        List<string> fromSaved = FirstFolders("plan", temp.Path, saved);
+
+        Assert.Equal([@"jobs\1234"], byFolder);
+        Assert.Equal([@"jobs\1234"], byFile);
+        Assert.Empty(missing);
+        Assert.Equal(["old", "plans"], fromSaved);
+    }
+
+    [Fact]
+    public async Task A_folder_the_saved_list_knew_that_is_gone_does_not_count_as_unreadable()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"old\plan-a.pdf");
+        VolumeIndex saved = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None).Index;
+        Directory.Delete(Path.Combine(temp.Path, "old"), recursive: true);
+        temp.File(@"new\plan-b.pdf");
+        var live = new LiveSearch([new LiveVolume("v", temp.Path, saved)], Query.Parse("plan"), NothingHidden, skipHidden: true);
+
+        await live.RunAsync(CancellationToken.None);
+
+        Assert.Equal("plan-b.pdf", Assert.Single(live.Snapshot().Hits).Name);
+        Assert.Equal(WalkSkips.None, live.Skipped);
+        Assert.Null(live.Reading);
+    }
+
+    private static List<string> FirstFolders(string line, string root, VolumeIndex? saved)
+    {
+        var volume = new LiveVolume("v", root, saved);
+        var live = new LiveSearch([volume], Query.Parse(line), NothingHidden, skipHidden: true);
+        return live.FirstFolders(volume, CancellationToken.None);
     }
 }

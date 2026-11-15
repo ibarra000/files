@@ -46,7 +46,7 @@ public partial class SearchWindow
         else if (_live is LiveSearch live)
         {
             int found = _result is SearchResult shown ? Shown(shown) : 0;
-            Status.Text = StatusText.ForLive(found, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Skipped, live.Problems);
+            Status.Text = StatusText.ForLive(found, live.FoldersRead, live.Reading, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Skipped, live.Problems);
         }
         else
         {
