@@ -14,11 +14,18 @@
             <!-- The action menu (Tab or right-click on a result), opened beside the row (SearchWindow.Actions.cs). -->
             <Popup x:Name="ActionMenu" DockPanel.Dock="Top" PlacementTarget="{Binding ElementName=Results}" Placement="Relative"
                    StaysOpen="False" AllowsTransparency="True" Closed="OnActionMenuClosed">
-                <Border Width="300" Margin="0,0,16,16" Padding="6" CornerRadius="10" BorderThickness="1"
+                <!-- A popup is a window as big as its content, and cuts off whatever a shadow draws outside it: the
+                     margin leaves the blur room on every side (SearchWindow.Actions.cs offsets the popup by it). -->
+                <Grid Margin="{StaticResource PopupShadowRoom}">
+                    <!-- The shadow is cast by a shape of its own, so the menu's text is not blurred with it. -->
+                    <Border CornerRadius="10" Background="{DynamicResource ControlFill}">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="24" ShadowDepth="8" Direction="270"
+                                              Color="{DynamicResource ShadowColor}" Opacity="{DynamicResource ShadowOpacity}" />
+                        </Border.Effect>
+                    </Border>
+                <Border Width="300" Padding="6" CornerRadius="10" BorderThickness="1"
                         Background="{DynamicResource ControlFill}" BorderBrush="{DynamicResource ControlStroke}">
-                    <Border.Effect>
-                        <DropShadowEffect BlurRadius="24" ShadowDepth="8" Direction="270" Opacity="0.35" />
-                    </Border.Effect>
                     <DockPanel>
                         <TextBlock x:Name="ActionTitle" DockPanel.Dock="Top" FontSize="11" Margin="10,6,10,8"
                                    TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextDim}" />
@@ -28,6 +35,7 @@
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled" PreviewMouseLeftButtonUp="OnActionClicked" />
                     </DockPanel>
                 </Border>
+                </Grid>
             </Popup>
             <!-- The box is the panel's header: a search icon and no box chrome, then a divider. -->
             <Grid DockPanel.Dock="Top" Margin="12,10,16,10">
@@ -37,7 +45,7 @@
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="Input" FontSize="18" Padding="34,6,10,6" BorderThickness="0" Background="Transparent"
                          Foreground="{DynamicResource Text}" CaretBrush="{DynamicResource Text}"
-                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" />
+                         AutomationProperties.Name="Search" TextChanged="OnInputChanged" SelectionChanged="OnInputSelectionChanged" />
                 <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="16" Margin="10,0,0,0"
                            VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{DynamicResource TextFaint}" />
                 <TextBlock x:Name="Placeholder" Text="Type to search" FontSize="18" Margin="37,7,0,0"
@@ -49,7 +57,7 @@
                     <Button x:Name="ScopeButton" Margin="12,0,0,0" Style="{StaticResource ControlButton}" Visibility="Collapsed"
                             AutomationProperties.Name="Volumes to search" Click="OnScopeClick">
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock x:Name="ScopeLabel" Text="All volumes" />
+                            <TextBlock x:Name="ScopeLabel" Text="All volumes" MaxWidth="160" TextTrimming="CharacterEllipsis" />
                             <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="9" Margin="6,1,0,0"
                                        VerticalAlignment="Center" />
                         </StackPanel>

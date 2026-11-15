@@ -18,6 +18,7 @@ public partial class SearchWindow
         int epoch = ++_epoch;
         _result = null;
         _queryProblem = null;
+        _shownFor = null;
         if (_app.Favorites.Count == 0)
         {
             _showAllFavorites = false;

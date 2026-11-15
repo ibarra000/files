@@ -27,7 +27,8 @@ public partial class SearchWindow
         bool liveRunning = _liveCancel is not null;
         ShowHints(ActionMenu.IsOpen
             ? StatusText.MenuHints
-            : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning));
+            : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning,
+                liveStopped: _liveStopped, volumeMenu: ScopeButton.Visibility == Visibility.Visible));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
         string attention = StatusText.For(volumes, _queryProblem, rescanRequested);
@@ -45,12 +46,13 @@ public partial class SearchWindow
         else if (_live is LiveSearch live)
         {
             int found = _result is SearchResult shown ? Shown(shown) : 0;
-            Status.Text = StatusText.ForLive(found, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Problems);
+            Status.Text = StatusText.ForLive(found, live.FoldersRead, running: _liveCancel is not null, _liveStopped, live.IsCapped, live.Skipped, live.Problems);
         }
         else
         {
             DateTime? newest = volumes.Max(state => state.Volume.LastScannedAt);
-            Status.Text = attention.Length > 0 ? attention : StatusText.Indexed(files, newest);
+            int liveOnly = ScopedVolumes().Count(state => state.Volume.LiveOnly);
+            Status.Text = attention.Length > 0 ? attention : StatusText.Indexed(files, newest, liveOnly);
             scanning = rescanRequested || volumes.Any(state => state.ScannedSoFar is not null);
         }
         SetSpinning(IsVisible && scanning);

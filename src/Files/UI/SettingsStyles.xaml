@@ -9,7 +9,20 @@
     <!-- A page in the sidebar: rounded, with an accent pill when it is the page shown. -->
     <Style x:Key="NavItem" TargetType="ListBoxItem">
         <Setter Property="Foreground" Value="{DynamicResource Text}" />
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <!-- A ring for the keyboard, so a focused page never looks like the page shown. -->
+        <Setter Property="FocusVisualStyle">
+            <Setter.Value>
+                <Style>
+                    <Setter Property="Control.Template">
+                        <Setter.Value>
+                            <ControlTemplate>
+                                <Border Margin="0,1" CornerRadius="6" BorderThickness="2" BorderBrush="{DynamicResource Text}" />
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </Setter.Value>
+        </Setter>
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Template">
             <Setter.Value>
@@ -29,8 +42,8 @@
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectionFill}" />
                             <Setter TargetName="Pill" Property="Visibility" Value="Visible" />
                         </Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectionFill}" />
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.45" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -79,9 +92,21 @@
         <Setter Property="Foreground" Value="{DynamicResource TextDim}" />
     </Style>
 
+    <!-- The ring around a control reached with Tab (a click does not leave it behind), for the rounded buttons and pages. -->
+    <Style x:Key="ButtonFocus">
+        <Setter Property="Control.Template">
+            <Setter.Value>
+                <ControlTemplate>
+                    <Border Margin="-3" CornerRadius="9" BorderThickness="2" BorderBrush="{DynamicResource Text}" />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- The panel's buttons, but reachable with Tab: Settings is a form. -->
     <Style x:Key="SettingsButton" TargetType="Button" BasedOn="{StaticResource ControlButton}">
         <Setter Property="Focusable" Value="True" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ButtonFocus}" />
         <Setter Property="MinHeight" Value="32" />
         <Style.Triggers>
             <Trigger Property="IsEnabled" Value="False">
@@ -91,6 +116,7 @@
     </Style>
     <Style x:Key="SettingsAccentButton" TargetType="Button" BasedOn="{StaticResource AccentButton}">
         <Setter Property="Focusable" Value="True" />
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ButtonFocus}" />
         <Setter Property="MinHeight" Value="32" />
         <Style.Triggers>
             <Trigger Property="IsEnabled" Value="False">
@@ -160,8 +186,10 @@
                 <ControlTemplate TargetType="TextBox">
                     <Border x:Name="Field" CornerRadius="6" BorderThickness="1" BorderBrush="{DynamicResource ControlStroke}"
                             Background="{DynamicResource PanelBackground}">
-                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"
-                                      Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden" />
+                        <!-- A one-line field centres its text; a box of several lines (the removal patterns) sets Top and can scroll. -->
+                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                      Focusable="False" HorizontalScrollBarVisibility="Hidden"
+                                      VerticalScrollBarVisibility="{TemplateBinding ScrollViewer.VerticalScrollBarVisibility}" />
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -205,11 +233,12 @@
                         <ContentPresenter />
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectionFill}" />
-                        </Trigger>
+                        <!-- Highlight first, so the chosen item keeps its fill while the pointer or the keyboard is on it. -->
                         <Trigger Property="IsHighlighted" Value="True">
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource HoverFill}" />
+                        </Trigger>
+                        <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectionFill}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -241,23 +270,29 @@
                                 </ControlTemplate>
                             </ToggleButton.Template>
                         </ToggleButton>
-                        <Border x:Name="FocusRing" CornerRadius="6" BorderThickness="1" BorderBrush="Transparent" IsHitTestVisible="False" />
+                        <Border x:Name="FocusRing" CornerRadius="6" BorderThickness="2" BorderBrush="Transparent" IsHitTestVisible="False" />
                         <ContentPresenter Margin="10,6,30,6" VerticalAlignment="Center" IsHitTestVisible="False"
                                           Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
                         <TextBlock Text="&#xE70D;" FontFamily="{StaticResource IconFont}" FontSize="10" Margin="0,0,11,0"
                                    HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"
                                    Foreground="{DynamicResource TextDim}" />
+                        <!-- The Grid's margin is the shadow's room. The Popup already puts it outside the field, so the offset is only the 4 px gap. -->
                         <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True"
-                               Focusable="False" PopupAnimation="Fade">
-                            <Border Margin="0,4,10,10" Padding="4" MinWidth="{Binding ActualWidth, ElementName=Toggle}" CornerRadius="8"
-                                    BorderThickness="1" Background="{DynamicResource ControlFill}" BorderBrush="{DynamicResource ControlStroke}">
-                                <Border.Effect>
-                                    <DropShadowEffect BlurRadius="18" ShadowDepth="6" Direction="270" Opacity="0.3" />
-                                </Border.Effect>
-                                <ScrollViewer MaxHeight="{TemplateBinding MaxDropDownHeight}" VerticalScrollBarVisibility="Auto">
-                                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
-                                </ScrollViewer>
-                            </Border>
+                               Focusable="False" PopupAnimation="Fade" VerticalOffset="4">
+                            <Grid Margin="{StaticResource PopupShadowRoom}">
+                                <Border CornerRadius="8" Background="{DynamicResource ControlFill}">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="18" ShadowDepth="6" Direction="270"
+                                                          Color="{DynamicResource ShadowColor}" Opacity="{DynamicResource ShadowOpacity}" />
+                                    </Border.Effect>
+                                </Border>
+                                <Border Padding="4" MinWidth="{Binding ActualWidth, ElementName=Toggle}" CornerRadius="8"
+                                        BorderThickness="1" Background="{DynamicResource ControlFill}" BorderBrush="{DynamicResource ControlStroke}">
+                                    <ScrollViewer MaxHeight="{TemplateBinding MaxDropDownHeight}" VerticalScrollBarVisibility="Auto">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Grid>
                         </Popup>
                     </Grid>
                     <ControlTemplate.Triggers>
@@ -322,7 +357,20 @@
         </Setter>
     </Style>
     <Style TargetType="DataGridCell">
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <!-- The cell that F2 or typing edits, outlined when the keyboard is in the grid. -->
+        <Setter Property="FocusVisualStyle">
+            <Setter.Value>
+                <Style>
+                    <Setter Property="Control.Template">
+                        <Setter.Value>
+                            <ControlTemplate>
+                                <Border CornerRadius="4" BorderThickness="2" BorderBrush="{DynamicResource Accent}" />
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </Setter.Value>
+        </Setter>
         <!-- A style setter, so the theme's white selected-cell text never lands on the pale selection. -->
         <Setter Property="Foreground" Value="{DynamicResource Text}" />
         <Setter Property="Template">

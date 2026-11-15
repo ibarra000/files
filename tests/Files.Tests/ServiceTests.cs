@@ -174,6 +174,35 @@ public sealed class ServiceTests
         Assert.Null(Hotkey.Parse(text));
     }
 
+    [Theory]
+    [InlineData(ModifierKeys.Alt, Key.F4)]
+    [InlineData(ModifierKeys.Alt, Key.Tab)]
+    [InlineData(ModifierKeys.Alt | ModifierKeys.Shift, Key.Tab)]
+    [InlineData(ModifierKeys.Control, Key.Escape)]
+    [InlineData(ModifierKeys.Control | ModifierKeys.Shift, Key.Escape)]
+    [InlineData(ModifierKeys.Windows, Key.L)]
+    public void Combinations_windows_needs_are_refused_as_shortcuts(ModifierKeys modifiers, Key key)
+    {
+        Assert.NotNull(Hotkey.Refused(modifiers, key));
+    }
+
+    [Theory]
+    [InlineData(ModifierKeys.Control | ModifierKeys.Shift, Key.Space)]
+    [InlineData(ModifierKeys.Control | ModifierKeys.Alt, Key.F4)]
+    [InlineData(ModifierKeys.Windows | ModifierKeys.Shift, Key.F)]
+    public void Other_combinations_can_be_shortcuts(ModifierKeys modifiers, Key key)
+    {
+        Assert.Null(Hotkey.Refused(modifiers, key));
+    }
+
+    [Fact]
+    public void The_same_keys_written_another_way_are_the_same_shortcut()
+    {
+        Assert.True(Hotkey.SameKeys("Ctrl+Shift+Space", "shift+control+space"));
+        Assert.False(Hotkey.SameKeys("Ctrl+Shift+Space", "Ctrl+Alt+Space"));
+        Assert.False(Hotkey.SameKeys(Hotkey.Off, Hotkey.Off));
+    }
+
     [Fact]
     public void Scan_failures_map_to_the_catalog_errors()
     {

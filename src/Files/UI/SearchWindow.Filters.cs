@@ -55,9 +55,25 @@ public partial class SearchWindow
         }
     }
 
-    private void OnScopeClick(object sender, RoutedEventArgs e)
+    private void OnScopeClick(object sender, RoutedEventArgs e) => OpenScopeMenu();
+
+    /// <summary>The volume menu, from its button or Alt+Down; the keyboard moves in it, and the box has it back when it closes.</summary>
+    private void OpenScopeMenu()
     {
-        var menu = new ContextMenu { PlacementTarget = ScopeButton, Placement = PlacementMode.Bottom };
+        if (ScopeButton.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+        // Up and left by the shadow room (see PanelMenu), so the card opens just under the button.
+        var room = (Thickness)FindResource("PopupShadowRoom");
+        var menu = new ContextMenu
+        {
+            PlacementTarget = ScopeButton,
+            Placement = PlacementMode.Bottom,
+            Style = (Style)FindResource("PanelMenu"),
+            HorizontalOffset = -room.Left,
+            VerticalOffset = 4 - room.Top,
+        };
         AddScopeItem(menu, "All volumes", null);
         foreach (VolumeState state in _app.Indexer.Volumes)
         {
@@ -65,12 +81,20 @@ public partial class SearchWindow
         }
         // Kept here, not as the button's context menu, so a right-click can never reopen an old one.
         _scopeMenu = menu;
+        menu.Opened += (_, _) => (menu.Items.OfType<MenuItem>().FirstOrDefault(item => item.IsChecked) ?? menu.Items.OfType<MenuItem>().First()).Focus();
+        menu.Closed += (_, _) =>
+        {
+            if (IsVisible)
+            {
+                Input.Focus();
+            }
+        };
         menu.IsOpen = true;
     }
 
     private void AddScopeItem(ContextMenu menu, string header, string? scope)
     {
-        var item = new MenuItem { Header = header, IsCheckable = true, IsChecked = _scope == scope };
+        var item = new MenuItem { Header = header, IsCheckable = true, IsChecked = _scope == scope, Style = (Style)FindResource("PanelMenuItem") };
         item.Click += (_, _) =>
         {
             _scope = scope;
@@ -106,7 +130,7 @@ public partial class SearchWindow
         ScopeLabel.Text = _scope ?? "All volumes";
         if (searching && _result is SearchResult result)
         {
-            Count.Text = StatusText.Count(Shown(result), _live is null ? _searchTook : null);
+            Count.Text = StatusText.Count(Shown(result), _live is null ? _searchTook : null, stillSearching: _liveCancel is not null);
             Count.Visibility = Visibility.Visible;
         }
         else

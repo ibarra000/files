@@ -22,7 +22,7 @@ The checks that enforce these are the compiler (`TreatWarningsAsErrors`, nullabl
 
 ## P/Invoke
 
-Only where .NET has no managed API. Today that is `RegisterHotKey` (`Services/Hotkey.cs`) and the DWM attributes (`UI/Backdrop.cs`). Use `DllImport` with blittable signatures, keep each call in the class that needs it, and don't enable unsafe code.
+Only where .NET has no managed API. Today that is `RegisterHotKey` (`Services/Hotkey.cs`), the DWM attributes (`UI/Backdrop.cs`), a folder's file id (`CreateFileW` + `GetFileInformationByHandle` in `Core/Walker.cs`, so a followed link is read once), and Windows' file thumbnails, `SHCreateItemFromParsingName` with `GetObject`/`DeleteObject` for the bitmap it gives (`Services/ShellThumbnail.cs`). Use `DllImport` with blittable signatures, keep each call in the class that needs it, and don't enable unsafe code.
 
 ## Vocabulary
 

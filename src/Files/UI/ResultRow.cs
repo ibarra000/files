@@ -138,11 +138,12 @@ public static class StatusText
     public static string Placeholder(long files) => files == 0 ? "Type to search" : $"Search {files:N0} files";
 
     /// <summary>The header beside the box: how many results and, for a search of the saved lists, how long it took.</summary>
-    public static string Count(int results, TimeSpan? took)
+    /// <param name="stillSearching">A live search is still reading, so none found is not yet "No results".</param>
+    public static string Count(int results, TimeSpan? took, bool stillSearching = false)
     {
         if (results == 0)
         {
-            return "No results";
+            return stillSearching ? "Searching…" : "No results";
         }
         string count = results == 1 ? "1 result" : $"{results:N0} results";
         return took is TimeSpan time ? $"{count} · {Math.Round(time.TotalMilliseconds):N0} ms" : count;
@@ -153,30 +154,58 @@ public static class StatusText
     /// A search that found nothing offers to read the volumes directly.
     /// </summary>
     /// <param name="invalid">The search cannot run; only clearing it helps.</param>
-    /// <param name="liveFinished">A live search read everything; searching live again would find the same.</param>
-    public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning, bool invalid = false, bool liveFinished = false)
+    /// <param name="liveFinished">A live search ended: it read everything, or it was stopped (<paramref name="liveStopped"/>).</param>
+    /// <param name="liveStopped">Esc stopped it before it read everything, so searching live again can still find more.</param>
+    /// <param name="volumeMenu">The volume menu shows (more than one volume), so Alt+Down opens it.</param>
+    public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning, bool invalid = false, bool liveFinished = false,
+        bool liveStopped = false, bool volumeMenu = false)
     {
-        if (invalid || (noHits && liveFinished && !liveRunning))
+        if (invalid)
         {
             return [new KeyHint("Esc", "Clear")];
         }
-        KeyHint first = noHits && !liveRunning ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
-        return [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
+        if (noHits && liveRunning)
+        {
+            // Nothing to open yet.
+            return [new KeyHint("Esc", "Stop")];
+        }
+        if (noHits && liveFinished)
+        {
+            return liveStopped ? [new KeyHint("Shift ↵", "Search live"), new KeyHint("Esc", "Clear")] : [new KeyHint("Esc", "Clear")];
+        }
+        KeyHint first = noHits ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
+        List<KeyHint> hints = [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
+        if (volumeMenu)
+        {
+            hints.Add(new KeyHint("Alt ↓", "Volumes"));
+        }
+        return hints;
     }
 
     /// <summary>The key caps while the action menu is open.</summary>
     public static IReadOnlyList<KeyHint> MenuHints { get; } = [new KeyHint("↵", "Run"), new KeyHint("Esc", "Back")];
 
-    /// <summary>The footer when all is well: how much is searchable and how fresh it is.</summary>
-    public static string Indexed(long files, DateTime? newestScan)
+    /// <summary>The footer when all is well: how much is searchable, how fresh it is, and what only a live search reads.</summary>
+    /// <param name="liveOnly">Live-only volumes in the search, which only Shift+Enter reads.</param>
+    public static string Indexed(long files, DateTime? newestScan, int liveOnly = 0)
     {
-        string count = files == 1 ? "1 file indexed" : $"{files:N0} files indexed";
-        return newestScan is null ? count : $"{count} · updated {Age(newestScan)}";
+        var parts = new List<string>();
+        if (files > 0 || liveOnly == 0)
+        {
+            string count = files == 1 ? "1 file indexed" : $"{files:N0} files indexed";
+            parts.Add(newestScan is null ? count : $"{count} · updated {Age(newestScan)}");
+        }
+        if (liveOnly > 0)
+        {
+            parts.Add(liveOnly == 1 ? "1 live-only volume: Shift+Enter searches it" : $"{liveOnly:N0} live-only volumes: Shift+Enter searches them");
+        }
+        return string.Join(" · ", parts);
     }
 
     /// <summary>The status line while a live search runs, or after it ends.</summary>
     /// <param name="found">The same count the header shows, folders included.</param>
-    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, IReadOnlyList<string> problems)
+    /// <param name="skipped">What the walks passed over; said once the search has ended.</param>
+    public static string ForLive(int found, int foldersRead, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
     {
         string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
         if (capped)
@@ -197,6 +226,10 @@ public static class StatusText
             state = $"Live search · {progress}";
         }
         var parts = new List<string> { state };
+        if (!running && skipped.Describe() is string skips)
+        {
+            parts.Add(skips);
+        }
         parts.AddRange(problems);
         return string.Join(" · ", parts);
     }
@@ -205,6 +238,11 @@ public static class StatusText
     private static string? VolumeWords(VolumeState state)
     {
         string name = state.Volume.Name;
+        if (state.Volume.LiveOnly)
+        {
+            // Never read in the background, so there is nothing to report.
+            return null;
+        }
         if (state.ScannedSoFar is not null)
         {
             // Covered by the one "Scanning…" for all volumes.

@@ -1,3 +1,4 @@
+using Files.Core;
 using Files.Data;
 using Files.Services;
 using Files.UI;
@@ -27,6 +28,21 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void A_live_only_volume_is_never_reported_as_not_read_yet()
+    {
+        VolumeState state = State("archive", null);
+        VolumeState liveOnly = state with { Volume = state.Volume with { LiveOnly = true } };
+        Assert.Equal("", StatusText.For([liveOnly], queryProblem: null));
+    }
+
+    [Fact]
+    public void The_footer_points_to_live_search_for_live_only_volumes()
+    {
+        Assert.Equal($"{10:N0} files indexed · 1 live-only volume: Shift+Enter searches it", StatusText.Indexed(10, null, liveOnly: 1));
+        Assert.Equal("2 live-only volumes: Shift+Enter searches them", StatusText.Indexed(0, null, liveOnly: 2));
+    }
+
+    [Fact]
     public void A_volume_that_needs_attention_is_still_named()
     {
         string text = StatusText.For([State("drawings", 120), State("reports", null)], queryProblem: null);
@@ -36,8 +52,9 @@ public sealed class StatusTextTests
     [Theory]
     [InlineData(false, false, "Open")]
     [InlineData(true, false, "Search live")]
-    [InlineData(true, true, "Open")]
-    public void The_hints_offer_a_live_search_only_when_nothing_matched(bool noHits, bool liveRunning, string expected)
+    [InlineData(true, true, "Stop")]
+    [InlineData(false, true, "Open")]
+    public void The_hints_offer_a_live_search_when_nothing_matched_and_never_open_with_nothing_to_open(bool noHits, bool liveRunning, string expected)
     {
         IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits, liveRunning);
         // The most useful key comes first, since a narrow panel shows only the first.
@@ -63,10 +80,43 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void A_stopped_live_search_that_found_nothing_offers_to_search_on()
+    {
+        IReadOnlyList<KeyHint> hints = StatusText.Hints(noHits: true, liveRunning: false, liveFinished: true, liveStopped: true);
+
+        Assert.Equal([new KeyHint("Shift ↵", "Search live"), new KeyHint("Esc", "Clear")], hints);
+    }
+
+    [Fact]
+    public void The_volume_menu_key_is_offered_only_with_the_volume_menu()
+    {
+        Assert.Contains(new KeyHint("Alt ↓", "Volumes"), StatusText.Hints(noHits: false, liveRunning: false, volumeMenu: true));
+        Assert.DoesNotContain(new KeyHint("Alt ↓", "Volumes"), StatusText.Hints(noHits: false, liveRunning: false));
+    }
+
+    [Fact]
+    public void The_count_says_searching_until_a_running_live_search_finds_something()
+    {
+        Assert.Equal("Searching…", StatusText.Count(0, took: null, stillSearching: true));
+        Assert.Equal("No results", StatusText.Count(0, took: null));
+        Assert.Equal("2 results", StatusText.Count(2, took: null, stillSearching: true));
+    }
+
+    [Fact]
     public void Live_progress_counts_what_the_header_counts()
     {
-        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, running: true, stopped: false, capped: false, []));
-        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, running: false, stopped: false, capped: false, []));
+        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, running: true, stopped: false, capped: false, new WalkSkips(0, 0, 0), []));
+        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, running: false, stopped: false, capped: false, new WalkSkips(0, 0, 0), []));
+    }
+
+    [Fact]
+    public void A_finished_live_search_says_what_it_could_not_read()
+    {
+        string done = StatusText.ForLive(3, 30, running: false, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
+        Assert.EndsWith("· 12 folders could not be read · 1 link not followed", done);
+        // While it runs the line is about progress; skips are added up at the end.
+        string running = StatusText.ForLive(3, 30, running: true, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
+        Assert.DoesNotContain("could not be read", running);
     }
 
     [Fact]

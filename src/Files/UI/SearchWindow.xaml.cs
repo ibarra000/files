@@ -30,6 +30,9 @@ public partial class SearchWindow : Window
     private CancellationTokenSource? _searchCancel;
     private Task? _searching;
     private bool _accepting;
+
+    /// <summary>The box text is selected only because the panel was just shown, not by the user.</summary>
+    private bool _selectedOnShow;
     private bool _hiding;
     private int _epoch;
     private SearchResult? _result;
@@ -163,10 +166,17 @@ public partial class SearchWindow : Window
         {
             PlaceWindow();
         }
+        // Win+Down can minimize a panel that stays open; it has no taskbar button to restore it from.
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
         Show();
         Activate();
         Input.Focus();
         Input.SelectAll();
+        // After SelectAll, whose selection change (raised at once) would otherwise clear it.
+        _selectedOnShow = Input.Text.Length > 0;
         _recall.Reset(_app.History);
         if (IsHome)
         {
@@ -191,6 +201,10 @@ public partial class SearchWindow : Window
         StopLiveSearch();
         CloseMenus();
         StopPreview();
+        // A search typed just before hiding would otherwise finish, and fill the list and read a preview, while hidden.
+        // Showing the panel again searches for what is in the box.
+        _typing.Stop();
+        _searchCancel?.Cancel();
         // Saving the place raises a settings change while the panel is still visible; it must not rebuild the list,
         // restart a preview read or check favorites for a panel about to hide.
         _hiding = true;
@@ -236,6 +250,9 @@ public partial class SearchWindow : Window
         e.Cancel = true;
         HidePanel();
     }
+
+    /// <summary>The user chose or moved the selection in the box, so Ctrl+C copies what is selected there.</summary>
+    private void OnInputSelectionChanged(object sender, RoutedEventArgs e) => _selectedOnShow = false;
 
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
@@ -314,6 +331,12 @@ public partial class SearchWindow : Window
         {
             return;
         }
+        catch (Exception error) when (epoch == _epoch)
+        {
+            // This runs from timers and settings changes, where an exception would end the app: the footer says so instead.
+            ShowToast($"The search failed: {error.Message}");
+            return;
+        }
         if (epoch != _epoch)
         {
             return;
@@ -327,6 +350,12 @@ public partial class SearchWindow : Window
     {
         // Keep the same file selected when the rows move.
         string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
+        // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled;
+        // another chip or volume is another list, which starts at the top.
+        string shownFor = $"{Input.Text}\n{_filter}\n{_scope}";
+        bool sameSearch = shownFor == _shownFor;
+        double scrolled = sameSearch && ListScroller() is ScrollViewer before ? before.VerticalOffset : 0;
+        _shownFor = shownFor;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
@@ -335,7 +364,30 @@ public partial class SearchWindow : Window
         int keep = rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
+        if (scrolled > 0)
+        {
+            Results.UpdateLayout();
+            ListScroller()?.ScrollToVerticalOffset(scrolled);
+        }
         UpdateStatus();
+    }
+
+    /// <summary>The search whose results are on screen, so a refresh of them can keep the scroll; null on the home list.</summary>
+    private string? _shownFor;
+
+    private ScrollViewer? ListScroller() => FirstScroller(Results);
+
+    private static ScrollViewer? FirstScroller(DependencyObject parent)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+            if ((child as ScrollViewer ?? FirstScroller(child)) is ScrollViewer found)
+            {
+                return found;
+            }
+        }
+        return null;
     }
 
     private void OnIndexerChanged()
@@ -358,6 +410,8 @@ public partial class SearchWindow : Window
             UpdateStatus();
             if (IsVisible && indexesChanged && _live is null && !IsHome)
             {
+                // A volume read again may have changed the selected file: the preview reads it again.
+                _previewedPath = null;
                 _ = SearchAsync();
             }
         });
@@ -369,9 +423,16 @@ public partial class SearchWindow : Window
         bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
         if (ActionMenu.IsOpen)
         {
-            // Shortcuts such as Ctrl+V would change the search under the open menu, so they do nothing here.
+            // A shortcut the menu lists beside one of its actions runs that action for the menu's row.
+            // Other shortcuts, such as Ctrl+V, would change the search under the open menu, so they do nothing here.
+            if (MenuGesture(e.Key, ctrl, shift) is string gesture && _actions.FirstOrDefault(action => action.Gesture == gesture) is RowAction listed)
+            {
+                RunAction(listed);
+                e.Handled = true;
+                return;
+            }
             bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
-            e.Handled = chord || OnActionKey(e.Key);
+            e.Handled = chord || e.Key == Key.Delete || OnActionKey(e.Key);
             return;
         }
         e.Handled = true;
@@ -383,8 +444,9 @@ public partial class SearchWindow : Window
             case Key.Delete when IsHome && SelectedRow is { Kind: RowKind.Opened } recent:
                 RemoveRecent(recent);
                 break;
-            case Key.Down when _recall.IsActive:
-                ShowRecalled(_recall.Newer());
+            case Key.System when e.SystemKey == Key.Down && Keyboard.Modifiers == ModifierKeys.Alt:
+                // Alt+Down opens the volume menu, as it opens a dropdown.
+                OpenScopeMenu();
                 break;
             case Key.Down:
                 Move(1);
@@ -417,7 +479,8 @@ public partial class SearchWindow : Window
             case Key.C when ctrl && shift:
                 CopySelected(path: false);
                 break;
-            case Key.C when ctrl && Input.SelectionLength == 0:
+            case Key.C when ctrl && (Input.SelectionLength == 0 || _selectedOnShow):
+                // The box text is selected only because the panel was shown: Ctrl+C copies the path, as the footer says.
                 CopySelected(path: true);
                 break;
             case Key.Escape when _liveCancel is not null:
@@ -445,7 +508,8 @@ public partial class SearchWindow : Window
             case Key.P when ctrl:
                 TogglePreview();
                 break;
-            case >= Key.D1 and <= Key.D5 when ctrl:
+            case >= Key.D1 and <= Key.D5 when ctrl && !IsHome:
+                // Only while the chips show: on the home list a hidden chip would narrow the next search unseen.
                 SetFilter((SearchFilter)(e.Key - Key.D1));
                 break;
             default:
@@ -453,6 +517,17 @@ public partial class SearchWindow : Window
                 break;
         }
     }
+
+    /// <summary>A key as the action menu writes it beside an action (RowAction.Gesture), or null for any other.</summary>
+    private static string? MenuGesture(Key key, bool ctrl, bool shift) => (key, ctrl, shift) switch
+    {
+        (Key.Delete, false, false) => "Del",
+        (Key.D, true, false) => "Ctrl D",
+        (Key.Enter, true, false) => "Ctrl ↵",
+        (Key.C, true, false) => "Ctrl C",
+        (Key.C, true, true) => "Ctrl Shift C",
+        _ => null,
+    };
 
     private void Move(int by)
     {
@@ -491,6 +566,8 @@ public partial class SearchWindow : Window
 
     private async Task AcceptAsync()
     {
+        // What Enter was pressed for: if the box changes or the panel hides while the search finishes, nothing opens.
+        string pressedFor = Input.Text;
         if (_typing.IsEnabled)
         {
             // Enter before the typing pause ended: search now, then open the best match.
@@ -513,9 +590,9 @@ public partial class SearchWindow : Window
                 return;
             }
         }
-        if (_queryProblem is not null)
+        if (_queryProblem is not null || Input.Text != pressedFor || !IsVisible)
         {
-            // The footer already says what is wrong with the search.
+            // The footer already says what is wrong with the search; or Esc, typing or hiding has moved on from it.
             return;
         }
         switch (SelectedRow)

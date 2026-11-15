@@ -6,11 +6,23 @@ namespace Files.Services;
 /// </summary>
 public static class AppPaths
 {
-    public static string Roaming { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "files");
+    /// <summary>
+    /// For development: a folder that holds everything instead, so a build can run, with its own
+    /// settings and volumes, beside the installed app (see CONTRIBUTING). Null normally.
+    /// </summary>
+    public static string? Home { get; } = Environment.GetEnvironmentVariable("FILES_HOME") is { Length: > 0 } home ? Path.GetFullPath(home) : null;
 
-    public static string Local { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "files");
+    public static string Roaming { get; } = Home is not null
+        ? Path.Combine(Home, "roaming")
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "files");
+
+    public static string Local { get; } = Home is not null
+        ? Path.Combine(Home, "local")
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "files");
+
+    /// <summary>Names the app's single-instance objects; a <see cref="Home"/> of its own is another instance.</summary>
+    public static string InstanceSuffix { get; } = Home is null ? "" : "-" + Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Home.ToUpperInvariant())))[..12];
 
     public static string Settings => Path.Combine(Roaming, "settings.json");
     public static string History => Path.Combine(Roaming, "history.txt");

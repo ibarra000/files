@@ -23,7 +23,9 @@ public static class FileKinds
         (FileKind.Pdf, Set("pdf")),
         (FileKind.Document, Set("doc", "docx", "odt", "rtf", "txt", "md", "ppt", "pptx")),
         (FileKind.Image, Set("png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "webp", "heic", "svg")),
-        (FileKind.Drawing, Set("dwg", "dxf", "dgn", "rvt", "skp", "step", "stp", "iges", "igs")),
+        (FileKind.Drawing, Set("dwg", "dxf", "dgn", "rvt", "skp", "step", "stp", "iges", "igs", "plt", "hpgl",
+            "drw", "prt", "frm", "slddrw", "sldprt", "sldasm", "idw", "ipt", "iam", "ipn",
+            "catpart", "catproduct", "catdrawing", "x_t", "jt", "stl")),
         (FileKind.Sheet, Set("xls", "xlsx", "xlsm", "csv", "ods")),
         (FileKind.Archive, Set("zip", "7z", "rar", "tar", "gz")),
         (FileKind.Video, Set("mp4", "mov", "avi", "mkv", "wmv")),
@@ -31,15 +33,44 @@ public static class FileKinds
         (FileKind.Code, Set("cs", "js", "ts", "py", "json", "xml", "html", "css", "sql", "ps1", "c", "cpp", "h", "asm", "java", "go", "rs")),
     ];
 
-    public static FileKind Of(string name)
+    /// <summary>Creo's file types: Creo numbers each save (part.prt.3), so the type is the extension before the number.</summary>
+    private static readonly HashSet<string> NumberedTypes = Set("drw", "prt", "asm", "frm");
+
+    /// <summary>
+    /// A name's extension, without the dot, or null when it has none (".gitignore" has none: the dot
+    /// starts its name). A numbered Creo save gives its type: "prt" for part.prt.3.
+    /// </summary>
+    public static string? ExtensionOf(string name)
     {
-        // ".gitignore" has no extension: the dot starts its name.
         int dot = name.LastIndexOf('.');
         if (dot <= 0 || dot == name.Length - 1)
         {
-            return FileKind.Other;
+            return null;
         }
         string extension = name[(dot + 1)..];
+        if (extension.All(char.IsAsciiDigit) && name.LastIndexOf('.', dot - 1) is int before and > 0
+            && NumberedTypes.Contains(name[(before + 1)..dot]))
+        {
+            return name[(before + 1)..dot];
+        }
+        return extension;
+    }
+
+    /// <summary>Whether a name is a numbered Creo save, whose extension (a number) is not its type.</summary>
+    public static bool IsNumbered(string name) =>
+        ExtensionOf(name) is string type && !name.EndsWith("." + type, StringComparison.OrdinalIgnoreCase);
+
+    public static FileKind Of(string name)
+    {
+        if (ExtensionOf(name) is not string extension)
+        {
+            return FileKind.Other;
+        }
+        if (IsNumbered(name))
+        {
+            // A Creo assembly too, though "asm" alone is assembly source.
+            return FileKind.Drawing;
+        }
         foreach ((FileKind kind, HashSet<string> extensions) in Kinds)
         {
             if (extensions.Contains(extension))

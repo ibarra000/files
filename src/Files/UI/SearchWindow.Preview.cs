@@ -92,19 +92,30 @@ public partial class SearchWindow
         }
     }
 
-    private void OnResultSelectionChanged(object sender, SelectionChangedEventArgs e) => SchedulePreview();
+    /// <summary>The file the pane shows, so a list refreshed under it (a live search, a volume read again) does not read it again.</summary>
+    private string? _previewedPath;
+
+    private void OnResultSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SelectedRow?.Path is string path && path == _previewedPath)
+        {
+            return;
+        }
+        SchedulePreview();
+    }
 
     /// <summary>A hidden panel reads nothing: the pending read is dropped and one in progress is cancelled.</summary>
     private void StopPreview()
     {
         _previewTimer?.Stop();
         _previewCancel?.Cancel();
+        _previewedPath = null;
     }
 
     /// <summary>Reads the selection after a short pause, so moving quickly through results does not read each one.</summary>
     private void SchedulePreview()
     {
-        if (!PreviewShown)
+        if (!PreviewShown || !IsVisible)
         {
             return;
         }
@@ -114,7 +125,7 @@ public partial class SearchWindow
             _previewTimer.Tick += async (_, _) =>
             {
                 _previewTimer.Stop();
-                if (!PreviewShown)
+                if (!PreviewShown || !IsVisible)
                 {
                     return;
                 }
@@ -140,6 +151,7 @@ public partial class SearchWindow
     private async Task ShowPreviewAsync(ResultRow? row)
     {
         _previewCancel?.Cancel();
+        _previewedPath = null;
         if (row?.Path is not string path)
         {
             ShowPreviewHeader(row?.Icon ?? "", row?.Before ?? "", row?.Detail ?? "");
@@ -157,22 +169,28 @@ public partial class SearchWindow
             info = await Preview.LoadAsync(path, cancel.Token);
             if (info.IsImage)
             {
-                image = await Task.Run(() => LoadImage(path), cancel.Token);
+                image = await Task.Run(() => LoadImage(image => image.UriSource = new Uri(path)), cancel.Token);
+            }
+            else if (info.Thumbnail is byte[] picture)
+            {
+                image = await Task.Run(() => LoadImage(image => image.StreamSource = new MemoryStream(picture)), cancel.Token);
             }
         }
         catch (OperationCanceledException)
         {
             return;
         }
-        if (cancel.IsCancellationRequested || SelectedRow != row)
+        if (cancel.IsCancellationRequested || SelectedRow?.Path != path)
         {
             return;
         }
+        _previewedPath = path;
         ShowPreviewInfo(info, image);
     }
 
-    /// <summary>A small copy of the image, decoded off the UI thread; null when it cannot be read.</summary>
-    private static BitmapImage? LoadImage(string path)
+    /// <summary>A small copy of an image (a file, or a picture of one), decoded off the UI thread; null when it cannot be read.</summary>
+    /// <param name="source">Points the image at what to decode.</param>
+    private static BitmapImage? LoadImage(Action<BitmapImage> source)
     {
         try
         {
@@ -180,7 +198,7 @@ public partial class SearchWindow
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
             image.DecodePixelWidth = PreviewImageWidth;
-            image.UriSource = new Uri(path);
+            source(image);
             image.EndInit();
             image.Freeze();
             return image;
@@ -221,10 +239,11 @@ public partial class SearchWindow
         IReadOnlyList<string>? lines = info.Lines ?? info.Entries;
         if (image is not null)
         {
-            ShowPreviewNote("");
+            // A PDF's page count stays under its picture.
+            ShowPreviewNote(info.Thumbnail is null ? "" : info.Note ?? "");
             PreviewImage.Source = image;
             PreviewImage.Visibility = Visibility.Visible;
-            PreviewNote.Visibility = Visibility.Collapsed;
+            PreviewNote.Visibility = info.Thumbnail is not null && info.Note is not null ? Visibility.Visible : Visibility.Collapsed;
         }
         else if (lines is { Count: > 0 })
         {
@@ -237,7 +256,7 @@ public partial class SearchWindow
         }
         else
         {
-            string note = info.IsImage ? "Could not show this image" : info.Note ?? "";
+            string note = info.IsImage || info.Thumbnail is not null ? "Could not show this image" : info.Note ?? "";
             ShowPreviewNote(note.Length == 0 && info.Lines is { Count: 0 } ? "Empty file" : note);
         }
     }

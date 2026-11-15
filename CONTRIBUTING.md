@@ -16,6 +16,8 @@ dotnet run --project src/Files     # starts the tray app; Settings opens if no v
 
 The app keeps its data in `%APPDATA%\files` and `%LOCALAPPDATA%\files` (see [ARCHITECTURE.md](docs/ARCHITECTURE.md#storage)). Delete those folders to start over.
 
+To run a build beside the installed app, give it a folder of its own: `$env:FILES_HOME = "$env:TEMP\files-dev"; dotnet run --project src/Files`. It keeps its settings and volumes there and runs as a separate instance; running it again with the same `FILES_HOME` shows its panel. Its shortcuts clash with the installed app's, so set others in its Settings.
+
 ## Tests
 
 ```powershell
@@ -72,6 +74,16 @@ Maintainers only:
    ```
 
    `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag. The script signs `files.exe` and the MSI, and stops if either is not signed by the release certificate.
+
+### An installer with preset volumes
+
+For one organisation's PCs, `-Volumes` builds a list of volumes into the installer:
+
+```powershell
+pwsh tools/make_msi.ps1 -Volumes volumes.json -Publish \\server\share\files-updates
+```
+
+`volumes.json` is a JSON array, for example `[{ "name": "Drawings", "folder": "\\\\server\\drawings" }, { "name": "Archive", "folder": "\\\\server\\archive", "liveOnly": true }]`. It is installed beside `files.exe`, and at start-up each volume in it is added once for each Windows user on that PC (recorded in `%LOCALAPPDATA%\files\bundled.txt`, beside the volume list). Comments and trailing commas are allowed. After that the volume belongs to the user: editing or removing it sticks, and a volume added to the list in a later installer is added on upgrade. A folder that is already a volume is left as it is. `-Volumes` cannot be combined with `-Release`, since a public release is for everyone. Publish it to the organisation's update folder instead, so updates keep the list.
 
 ## Getting help
 

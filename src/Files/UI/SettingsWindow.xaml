@@ -119,6 +119,7 @@
 
                         <TextBlock Text="TEXT RECOGNITION" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
+                            <StackPanel>
                             <Grid Style="{StaticResource SettingRow}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
@@ -135,6 +136,34 @@
                                     <ComboBoxItem Content="PaddleOCR (more accurate)" />
                                 </ComboBox>
                             </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Margin="0,0,16,0">
+                                    <TextBlock Text="Remove from the text under the mouse" Style="{StaticResource RowLabel}" />
+                                    <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
+                                               Text="One regular expression per line, ignoring case; whatever matches is taken out before searching. For example _Page\d+ or \s*Rev\s*[A-Z]$" />
+                                </StackPanel>
+                                <TextBox x:Name="RemovalsBox" Grid.Column="1" Width="300" MinHeight="64" MaxHeight="160" AcceptsReturn="True" TextWrapping="NoWrap"
+                                         VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" FontFamily="Consolas"
+                                         AutomationProperties.Name="Patterns removed from the text under the mouse"
+                                         LostFocus="OnChanged" TextChanged="OnTryRemovals" />
+                                <StackPanel Grid.Row="1" Margin="0,10,16,0" VerticalAlignment="Center">
+                                    <TextBlock Text="Try them" Style="{StaticResource RowLabel}" />
+                                    <TextBlock x:Name="RemovalsResult" TextWrapping="Wrap" Style="{StaticResource RowDescription}"
+                                               Text="Type a code to see what would be searched." />
+                                </StackPanel>
+                                <TextBox x:Name="RemovalsTry" Grid.Row="1" Grid.Column="1" Width="300" Margin="0,10,0,0"
+                                         AutomationProperties.Name="Try the removal patterns" TextChanged="OnTryRemovals" />
+                            </Grid>
+                            </StackPanel>
                         </Border>
 
                         <TextBlock Text="BEHAVIOR" Style="{StaticResource SectionLabel}" />
@@ -232,7 +261,8 @@
                         <TextBlock Text="VOLUMES" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
-                                <DataGrid x:Name="VolumeGrid" PreviewMouseWheel="OnGridWheel" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
+                                <DataGrid x:Name="VolumeGrid" PreviewMouseWheel="OnGridWheel" MouseDoubleClick="OnVolumeDoubleClick"
+                                          SelectionChanged="OnVolumeSelectionChanged" Margin="8,4,8,0" MaxHeight="240" IsReadOnly="True" AutoGenerateColumns="False" SelectionMode="Single">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="NAME" Binding="{Binding Name}" />
                                         <DataGridTextColumn Header="FOLDER" Binding="{Binding Root}" Width="*" />
@@ -242,7 +272,9 @@
                                     </DataGrid.Columns>
                                 </DataGrid>
                                 <StackPanel Orientation="Horizontal" Margin="16,10,16,14">
-                                    <Button Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume" />
+                                    <Button x:Name="RescanButton" Content="Read again" Style="{StaticResource SettingsButton}" Click="OnRescanVolume"
+                                            ToolTipService.ShowOnDisabled="True" />
+                                    <Button Content="Edit…" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnEditVolume" />
                                     <Button Content="Remove" Margin="8,0,0,0" Style="{StaticResource SettingsButton}" Click="OnRemoveVolume" />
                                     <TextBlock Text="With none selected, Read again reads them all." Margin="12,0,0,0" VerticalAlignment="Center"
                                                Style="{StaticResource RowDescription}" />
@@ -250,12 +282,14 @@
                             </StackPanel>
                         </Border>
 
-                        <TextBlock Text="ADD A FOLDER" Style="{StaticResource SectionLabel}" />
+                        <TextBlock x:Name="VolumeFormLabel" Text="ADD A FOLDER" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
+                            <StackPanel>
                             <Grid Style="{StaticResource SettingRow}">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="160" />
                                     <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
@@ -268,9 +302,25 @@
                                 <TextBox x:Name="NewVolumeName" Grid.Row="1" AutomationProperties.Name="Name" />
                                 <TextBox x:Name="NewVolumePath" Grid.Row="1" Grid.Column="1" Margin="8,0" AutomationProperties.Name="Folder" />
                                 <Button Grid.Row="1" Grid.Column="2" Content="Browse…" Style="{StaticResource SettingsButton}" Click="OnBrowse" />
-                                <Button Grid.Row="1" Grid.Column="3" Content="Add" Margin="8,0,0,0" Padding="18,0" MinWidth="64"
-                                        Style="{StaticResource SettingsAccentButton}" Click="OnAddVolume" />
+                                <Button x:Name="VolumeFormButton" Grid.Row="1" Grid.Column="3" Content="Add" Margin="8,0,0,0" Padding="18,0" MinWidth="64"
+                                        Style="{StaticResource SettingsAccentButton}" Click="OnSaveVolume" />
+                                <Button x:Name="CancelEditButton" Grid.Row="1" Grid.Column="4" Content="Cancel" Margin="8,0,0,0" Visibility="Collapsed"
+                                        Style="{StaticResource SettingsButton}" Click="OnCancelEdit" />
                             </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Live search only" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Never read in the background or saved; only Shift+Enter reads it. For very large volumes."
+                                               TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <CheckBox x:Name="NewVolumeLiveOnly" Grid.Column="1" AutomationProperties.Name="Live search only" />
+                            </Grid>
+                            </StackPanel>
                         </Border>
 
                         <TextBlock Text="READING" Style="{StaticResource SectionLabel}" />
@@ -396,7 +446,7 @@
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <StackPanel Orientation="Horizontal" Margin="16,12">
-                                    <Button Content="Check now" Style="{StaticResource SettingsButton}" Click="OnCheckUpdate" />
+                                    <Button x:Name="CheckButton" Content="Check now" Style="{StaticResource SettingsButton}" Click="OnCheckUpdate" />
                                     <Button x:Name="InstallButton" Content="Install and restart" Margin="8,0,0,0" Padding="14,0"
                                             Style="{StaticResource SettingsAccentButton}" Click="OnInstallUpdate" />
                                 </StackPanel>

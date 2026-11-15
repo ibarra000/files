@@ -30,6 +30,9 @@ public partial class App : Application
     // The engines for the text under the mouse; PaddleOCR loads its models only when chosen.
     private readonly WindowsTextReader _windowsReader = new();
     private readonly PaddleTextReader _paddleReader = new(PaddleTextReader.DefaultModelFolder);
+
+    // The removal patterns, compiled once each time they change. Settings saves only patterns that compile.
+    private Core.TextCleanup _textCleanup = Core.TextCleanup.None;
     private DispatcherTimer? _updateTimer;
 
     // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
@@ -122,6 +125,9 @@ public partial class App : Application
         }
 
         (Settings, string? settingsProblem) = Settings.Load(AppPaths.Settings);
+        // A hand-edited file can hold a pattern that does not compile; then none apply, and the start-up note says why.
+        (Core.TextCleanup? cleanup, IReadOnlyList<string> patternProblems) = Core.TextCleanup.Compile(Settings.ScreenTextRemovals);
+        _textCleanup = cleanup ?? Core.TextCleanup.None;
         History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
         Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
@@ -152,6 +158,8 @@ public partial class App : Application
         OcrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         Indexer.Start();
+        // Before the volume list is checked below, so an installer's volumes never open Settings at first start.
+        IReadOnlyList<string> bundleProblems = BundledVolumes.Add(BundledVolumes.DefaultPath, BundledVolumes.AddedPath, Indexer);
         // Combined PDFs were removed in 1.2; their cache is no longer needed.
         SaveInBackground(() => DeleteFolder(Path.Combine(AppPaths.Local, "pdf")));
         StartUpdateChecks();
@@ -169,6 +177,8 @@ public partial class App : Application
         {
             startProblems.Add($"Text-under-the-mouse shortcut: {OcrHotkeyProblem}");
         }
+        startProblems.AddRange(bundleProblems);
+        startProblems.AddRange(patternProblems);
         if (startProblems.Count > 0)
         {
             _tray.Notify(string.Join("\n", startProblems));
@@ -212,7 +222,7 @@ public partial class App : Application
                 await Task.Delay(PanelHideDelay);
             }
             ITextReader reader = Settings.OcrEngine == OcrChoice.Paddle ? _paddleReader : _windowsReader;
-            read = await ScreenText.UnderCursorAsync(reader, _windowsReader);
+            read = ScreenText.WithRemovals(await ScreenText.UnderCursorAsync(reader, _windowsReader), _textCleanup);
         }
         catch (Exception error)
         {
@@ -249,9 +259,22 @@ public partial class App : Application
     {
         Settings previous = Settings;
         string? problem = null;
+        // The two shortcuts can never be the same keys: the second could not be registered, and would be blamed on another program.
+        if (Hotkey.SameKeys(settings.Hotkey, settings.OcrHotkey))
+        {
+            bool ocrChanged = !Hotkey.SameKeys(settings.OcrHotkey, previous.OcrHotkey);
+            settings = ocrChanged ? settings with { OcrHotkey = previous.OcrHotkey } : settings with { Hotkey = previous.Hotkey };
+            problem = $"{(ocrChanged ? settings.Hotkey : settings.OcrHotkey)} is already the other shortcut";
+        }
+        // A new update folder may offer something else: the offer from the old one is not installed from the new one.
+        if (settings.UpdateFolder != previous.UpdateFolder && UpdateOffer is not null)
+        {
+            UpdateOffer = null;
+        }
         // A shortcut is registered before it is saved: one another program holds is not kept, and the working one stays.
-        // One that failed before (at start, say) is tried again whenever settings are applied.
-        if (_hotkey is not null && !_hotkeysSuspended && (settings.Hotkey != previous.Hotkey || HotkeyProblem is not null))
+        // One that failed before (at start, say) is tried again whenever settings are applied. Quitting has let them go for good.
+        bool canRegister = !_hotkeysSuspended && !IsQuitting;
+        if (_hotkey is not null && canRegister && (settings.Hotkey != previous.Hotkey || HotkeyProblem is not null))
         {
             HotkeyProblem = _hotkey.Register(settings.Hotkey);
             if (HotkeyProblem is not null && _hotkey.Active is string working)
@@ -260,7 +283,7 @@ public partial class App : Application
             }
             problem ??= HotkeyProblem;
         }
-        if (_ocrHotkey is not null && !_hotkeysSuspended && (settings.OcrHotkey != previous.OcrHotkey || OcrHotkeyProblem is not null))
+        if (_ocrHotkey is not null && canRegister && (settings.OcrHotkey != previous.OcrHotkey || OcrHotkeyProblem is not null))
         {
             OcrHotkeyProblem = _ocrHotkey.Register(settings.OcrHotkey);
             if (OcrHotkeyProblem is not null && _ocrHotkey.Active is string working)
@@ -268,6 +291,21 @@ public partial class App : Application
                 settings = settings with { OcrHotkey = working };
             }
             problem ??= OcrHotkeyProblem;
+        }
+        if (!settings.ScreenTextRemovals.SequenceEqual(previous.ScreenTextRemovals))
+        {
+            (Core.TextCleanup? cleanup, IReadOnlyList<string> patternProblems) = Core.TextCleanup.Compile(settings.ScreenTextRemovals);
+            if (cleanup is null)
+            {
+                // Never saved: the patterns that work stay in use. Said even when a shortcut problem is said too.
+                settings = settings with { ScreenTextRemovals = previous.ScreenTextRemovals };
+                string patterns = string.Join("\n", patternProblems);
+                problem = problem is null ? patterns : $"{problem}\n{patterns}";
+            }
+            else
+            {
+                _textCleanup = cleanup;
+            }
         }
         Settings = settings;
         try
@@ -320,11 +358,34 @@ public partial class App : Application
         return Core.Favorites.Contains(favorites, favorite);
     }
 
-    public async Task<string?> CheckForUpdateAsync()
+    /// <summary>A notice from the tray icon, for what no window is open to say.</summary>
+    public void Notify(string message) => _tray?.Notify(message);
+
+    /// <summary>The check running now, shared by the timer and Check now, so only one runs at a time.</summary>
+    private Task<string>? _checking;
+
+    public Task<string> CheckForUpdateAsync()
     {
+        if (_checking is { IsCompleted: false } running)
+        {
+            return running;
+        }
+        _checking = CheckOnceAsync();
+        return _checking;
+    }
+
+    private async Task<string> CheckOnceAsync()
+    {
+        string folder = Settings.UpdateFolder;
         try
         {
-            UpdateOffer = await Updater.CheckAsync(CancellationToken.None);
+            Manifest? offer = await Updater.CheckAsync(CancellationToken.None);
+            if (Settings.UpdateFolder != folder)
+            {
+                // The folder changed while checking; what the old one offers is not this one's.
+                return "The update folder changed; check again";
+            }
+            UpdateOffer = offer;
             SettingsChanged?.Invoke();
             return UpdateOffer is null ? "files is up to date" : $"Version {UpdateOffer.Version} is available";
         }
@@ -393,8 +454,8 @@ public partial class App : Application
     private bool ClaimSingleInstance()
     {
         // The event exists before the mutex is claimed, so a second launch can always signal it.
-        _summon = new EventWaitHandle(false, EventResetMode.AutoReset, SummonName);
-        _singleInstance = new Mutex(initiallyOwned: true, SingleInstanceName, out bool first);
+        _summon = new EventWaitHandle(false, EventResetMode.AutoReset, SummonName + AppPaths.InstanceSuffix);
+        _singleInstance = new Mutex(initiallyOwned: true, SingleInstanceName + AppPaths.InstanceSuffix, out bool first);
         if (!first)
         {
             // Already running: ask that instance to show its panel.

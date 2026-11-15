@@ -35,6 +35,7 @@ public partial class SearchWindow
         _actionFilter = "";
         ShowActions();
         // Beside the row, at the right of the list, as on the design; the popup keeps itself on screen.
+        // The offsets place the card itself: the Popup already puts its child's margin (the shadow's room) outside them.
         ActionMenu.HorizontalOffset = Math.Max(0, Results.ActualWidth - ActionMenuWidth);
         ActionMenu.VerticalOffset = Results.ItemContainerGenerator.ContainerFromItem(row) is FrameworkElement item
             ? item.TranslatePoint(new Point(0, item.ActualHeight), Results).Y
@@ -46,11 +47,15 @@ public partial class SearchWindow
     /// <summary>The list changed under an open menu: it stays only while its row is still listed.</summary>
     private void KeepActionsFor(IReadOnlyList<ResultRow> rows)
     {
-        if (ActionMenu.IsOpen && (_actionRow is null || !rows.Contains(_actionRow)))
+        // The same file or folder, though its row was rebuilt (a favorite found missing, a live search moving on).
+        if (ActionMenu.IsOpen && (_actionRow is null || !rows.Any(row => SameItem(row, _actionRow))))
         {
             ActionMenu.IsOpen = false;
         }
     }
+
+    private static bool SameItem(ResultRow row, ResultRow other) =>
+        row.Path is string path ? row.Kind == other.Kind && path == other.Path : row.Equals(other);
 
     private void ShowActions()
     {
@@ -193,11 +198,18 @@ public partial class SearchWindow
         {
             return;
         }
+        int at = Results.SelectedIndex;
         _app.RemoveOpened(path);
         ShowToast($"Removed {row.Before} from recent");
         if (IsHome)
         {
             ShowHome();
+            // The next one down takes its place, so Delete can be pressed again.
+            int target = Math.Clamp(at, 0, Math.Max(0, Results.Items.Count - 1));
+            if ((NextSelectable(target, 1) ?? NextSelectable(target, -1)) is int next)
+            {
+                Results.SelectedIndex = next;
+            }
         }
     }
 }
