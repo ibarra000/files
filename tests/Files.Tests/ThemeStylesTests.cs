@@ -30,7 +30,8 @@ public sealed class ThemeStylesTests
             dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
             ready.Set();
             System.Windows.Threading.Dispatcher.Run();
-        }) { IsBackground = true };
+        })
+        { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         ready.Wait();
