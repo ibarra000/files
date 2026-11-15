@@ -107,13 +107,11 @@ public partial class SearchWindow
         }
     }
 
-    /// <summary>Up recalls past searches while the box is empty or showing one, and the top row is selected.</summary>
-    private bool CanRecall()
-    {
-        bool boxFree = IsHome || _recall.IsActive;
-        int top = NextSelectable(0, 1) ?? -1;
-        return boxFree && Results.SelectedIndex <= top;
-    }
+    /// <summary>Up recalls an older search from the top row; what was typed is held until Down brings it back.</summary>
+    private bool CanRecall() => Results.SelectedIndex <= (NextSelectable(0, 1) ?? -1);
+
+    /// <summary>Down recalls a newer search from the top row while a past one is shown.</summary>
+    private bool CanRecallNewer() => _recall.IsActive && CanRecall();
 
     private void ShowRecalled(string? search)
     {
