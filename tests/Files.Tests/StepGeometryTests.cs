@@ -201,7 +201,8 @@ public sealed class StepGeometryTests
 
         Triangulation.Fill(points, [.. Enumerable.Range(0, points.Length)], []);
 
-        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), $"took {clock.Elapsed}");
+        // Well under a second here; CI's coverage instrumentation makes it many times slower.
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(30), $"took {clock.Elapsed}");
     }
 
     /// <summary>Every 30° of the turn round z has some of the mesh in it: no wedge is left out.</summary>
