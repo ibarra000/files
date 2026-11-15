@@ -218,7 +218,7 @@ public static class ShellThumbnail
                 }
                 BitmapSource picture = WithAlpha(bitmap) ?? System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
                     bitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-                return Png(OnWhite(picture));
+                return Png(OnWhite(Cropped(picture)));
             }
             finally
             {
@@ -269,6 +269,20 @@ public static class ShellThumbnail
             }
         }
         return BitmapSource.Create(dib.Width, dib.Height, 96, 96, PixelFormats.Pbgra32, null, pixels, stride);
+    }
+
+    /// <summary>Only the part of the bitmap the handler drew on, so a picture drawn small in a corner fills the pane.</summary>
+    private static BitmapSource Cropped(BitmapSource picture)
+    {
+        BitmapSource bgra = picture.Format == PixelFormats.Pbgra32 || picture.Format == PixelFormats.Bgra32
+            ? picture
+            : new FormatConvertedBitmap(picture, PixelFormats.Bgra32, null, 0);
+        int stride = bgra.PixelWidth * 4;
+        var pixels = new byte[stride * bgra.PixelHeight];
+        bgra.CopyPixels(pixels, stride, 0);
+        return ThumbnailCrop.ContentBounds(pixels, bgra.PixelWidth, bgra.PixelHeight, stride) is Int32Rect drawn
+            ? new CroppedBitmap(picture, drawn)
+            : picture;
     }
 
     /// <summary>Thumbnails may be transparent around the part; on white they read as Explorer shows them.</summary>

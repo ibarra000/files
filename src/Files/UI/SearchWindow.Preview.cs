@@ -227,8 +227,15 @@ public partial class SearchWindow
         PreviewText.Visibility = Visibility.Collapsed;
         PreviewImage.Visibility = Visibility.Collapsed;
         PreviewImage.Source = null;
+        ShowPreviewCaption("");
         PreviewNote.Text = note;
         PreviewNote.Visibility = Visibility.Visible;
+    }
+
+    private void ShowPreviewCaption(string caption)
+    {
+        PreviewCaption.Text = caption;
+        PreviewCaption.Visibility = caption.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ShowPreviewInfo(PreviewInfo info, BitmapImage? image)
@@ -239,11 +246,12 @@ public partial class SearchWindow
         IReadOnlyList<string>? lines = info.Lines ?? info.Entries;
         if (image is not null)
         {
-            // A PDF's page count stays under its picture.
-            ShowPreviewNote(info.Thumbnail is null ? "" : info.Note ?? "");
+            PreviewText.Visibility = Visibility.Collapsed;
+            PreviewNote.Visibility = Visibility.Collapsed;
             PreviewImage.Source = image;
             PreviewImage.Visibility = Visibility.Visible;
-            PreviewNote.Visibility = info.Thumbnail is not null && info.Note is not null ? Visibility.Visible : Visibility.Collapsed;
+            // A PDF's page count, under its picture.
+            ShowPreviewCaption(info.Thumbnail is null ? "" : info.Note ?? "");
         }
         else if (lines is { Count: > 0 })
         {
@@ -253,6 +261,7 @@ public partial class SearchWindow
             PreviewText.Visibility = Visibility.Visible;
             PreviewImage.Visibility = Visibility.Collapsed;
             PreviewNote.Visibility = Visibility.Collapsed;
+            ShowPreviewCaption("");
         }
         else
         {
