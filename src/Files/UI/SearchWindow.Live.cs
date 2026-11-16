@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Files.Core;
 
 namespace Files.UI;
@@ -40,6 +41,7 @@ public partial class SearchWindow
         _liveStopped = false;
         _result = SearchResult.Empty;
         Results.ItemsSource = null;
+        _liveSnapshotDue = 0;
         UpdateStatus();
         _liveTimer.Start();
         // Background reads of the volumes wait while this one runs, so they do not compete for the same servers.
@@ -92,6 +94,21 @@ public partial class SearchWindow
         _live = null;
     }
 
+    /// <summary>
+    /// Each refresh moves the footer (folders read, the folder being read or waited on).
+    /// The results are taken again only once the last snapshot is done and as long again
+    /// has passed twice over: on a share where much matches a snapshot takes seconds,
+    /// and taking them back to back would hold up the footer and the reading.
+    /// </summary>
+    private async Task OnLiveTickAsync()
+    {
+        UpdateStatus();
+        if (!_liveSnapshotPending && Stopwatch.GetTimestamp() >= _liveSnapshotDue)
+        {
+            await ShowLiveAsync();
+        }
+    }
+
     private async Task ShowLiveAsync()
     {
         if (_live is not LiveSearch live)
@@ -106,6 +123,7 @@ public partial class SearchWindow
         }
         _liveSnapshotPending = true;
         SearchResult result;
+        long started = Stopwatch.GetTimestamp();
         try
         {
             result = await Task.Run(() => live.Snapshot());
@@ -113,6 +131,12 @@ public partial class SearchWindow
         finally
         {
             _liveSnapshotPending = false;
+            // A snapshot of a search replaced meanwhile leaves the new one's timing alone.
+            if (_live == live)
+            {
+                long took = Stopwatch.GetTimestamp() - started;
+                _liveSnapshotDue = Stopwatch.GetTimestamp() + 2 * took;
+            }
         }
         if (_live == live)
         {

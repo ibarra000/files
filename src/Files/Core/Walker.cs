@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Enumeration;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
@@ -36,7 +37,11 @@ public sealed record WalkSkips(int Unreadable, int Links, int TooDeep)
 }
 
 /// <param name="Truncated">The walk stopped because the names no longer fit in memory.</param>
-public sealed record WalkResult(VolumeIndex Index, int Folders, WalkSkips Skipped, bool Truncated);
+/// <param name="RootError">
+/// Why the root itself could not be listed, when a live walk still read folders below it
+/// (those it was asked to read first, or those the root handed out before it failed).
+/// </param>
+public sealed record WalkResult(VolumeIndex Index, int Folders, WalkSkips Skipped, bool Truncated, Exception? RootError = null);
 
 /// <summary>
 /// Reads every file name under a root with several folders listed at once.
@@ -58,6 +63,9 @@ public static class Walker
 
     private const int BufferBytes = 64 * 1024;
 
+    /// <summary>The longest a listing gathers names before handing them to the walk.</summary>
+    private static readonly TimeSpan BatchTime = TimeSpan.FromSeconds(1);
+
     /// <summary>
     /// Memory a walk needs per character of names, as a safe estimate: the
     /// listed string, both arenas, the copy made while an arena grows, and
@@ -69,11 +77,16 @@ public static class Walker
     private sealed record Folder(string Relative, int Depth, bool First = false);
 
     /// <param name="Links">Folders that are links (reparse points): junctions, symbolic links, DFS links, mount points.</param>
-    private sealed record Listing(List<string> Files, List<string> Folders, List<string> Links);
+    private sealed record Listing(List<string> Files, List<string> Folders, List<string> Links)
+    {
+        /// <summary>The names listed: files, folders and links.</summary>
+        public int Count => Files.Count + Folders.Count + Links.Count;
+    }
 
     /// <summary>
     /// Walks <paramref name="root"/>. Throws when the root itself cannot be
-    /// read; a subfolder that cannot be read is counted and skipped. Folder
+    /// read and nothing below it was; a subfolder that cannot be read is
+    /// counted and skipped. Folder
     /// links are followed only on a network share (where DFS links and the
     /// server's mount points hold whole subtrees), each target once; on a
     /// local disk they are counted and skipped.
@@ -137,15 +150,14 @@ public static class Walker
             ? listing.Links.Where(link => FolderId(Path.Join(root, relative, link)) is { } id && linkTargets.TryAdd(id, 0)).ToList()
             : [];
 
-        Listing rootListing = Filter(List(root, skipHidden), "", keep);
-        onFolder?.Invoke("", rootListing.Files);
-        var found = new List<(string Relative, List<string> Files)> { ("", rootListing.Files) };
-        List<string> rootLinks = LinksToFollow("", rootListing);
-        var pending = new Stack<Folder>(rootListing.Folders.Concat(rootLinks).Select(name => new Folder(name, 1)));
+        // The root is read by the workers like any folder, and taken first: a share whose root lists for minutes
+        // (a huge root, or a server checking each entry's permissions) does not hold up the folders read first,
+        // and what its listing has handed out so far is walked while the rest comes in.
+        var pending = new Stack<Folder>();
+        var firstPending = new Queue<Folder>(FirstFoldersOf(live.FirstFolders).Prepend(new Folder("", 0)));
         // Folders to read first are all taken before the rest; what they hold goes on the stack with everything else.
         // The folders read so far keep each to one reading.
-        var firstPending = new Queue<Folder>(FirstFoldersOf(live.FirstFolders));
-        HashSet<string>? read = firstPending.Count > 0 ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "" } : null;
+        HashSet<string>? read = firstPending.Count > 1 ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) : null;
         // Whether each folder on the way to a first folder is a plain folder, not a link, by its path relative to the root.
         var plainFolders = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
         bool PassesThroughLink(string relative)
@@ -161,13 +173,15 @@ public static class Walker
             }
             return false;
         }
-        int folders = 1;
+        var found = new List<(string Relative, List<string> Files)>();
+        int folders = 0;
+        int readBelowRoot = 0;
         int busy = 0;
-        int entries = rootListing.Files.Count;
-        long fileChars = CharsOf(rootListing.Files);
-        long folderChars = 1;
+        int entries = 0;
+        long fileChars = 0;
+        long folderChars = 0;
         int unreadable = 0;
-        int linksSkipped = rootListing.Links.Count - rootLinks.Count;
+        int linksSkipped = 0;
         int tooDeep = 0;
         int failuresInARow = 0;
         bool checkingShare = false;
@@ -176,6 +190,7 @@ public static class Walker
         // Set when Walk has returned: a worker still listing when it was cancelled then reports nothing more.
         bool stopped = false;
         Exception? failure = null;
+        Exception? rootFailure = null;
         var gate = new object();
 
         // Called under the gate, after each folder.
@@ -206,6 +221,72 @@ public static class Walker
             }
         }
 
+        // Hands one batch of a folder's names to the walk: its files are kept and its subfolders
+        // queued at once, while the folder's listing goes on. False ends that folder's listing:
+        // the names no longer fit, the walk is over, or a listener failed.
+        bool Hand(Folder folder, Listing batch, ref bool stored)
+        {
+            Listing kept = Filter(batch, folder.Relative, keep);
+            List<string> links = folder.Depth < MaxDepth ? LinksToFollow(folder.Relative, kept) : [];
+            // An index keeps every folder, even an empty one, once; a live search only folders with a match.
+            bool store = kept.Files.Count > 0 || (keep is null && !stored);
+            int report;
+            lock (gate)
+            {
+                if (stopped || failure is not null)
+                {
+                    return false;
+                }
+                if (fileChars + CharsOf(kept.Files) > maxChars || (!stored && folderChars + folder.Relative.Length + 1 > maxChars))
+                {
+                    truncated = true;
+                    return false;
+                }
+                if (store)
+                {
+                    entries += kept.Files.Count;
+                    fileChars += CharsOf(kept.Files);
+                    folderChars += stored ? 0 : folder.Relative.Length + 1;
+                    found.Add((folder.Relative, kept.Files));
+                }
+                if (folder.Depth < MaxDepth)
+                {
+                    foreach (string child in kept.Folders.Concat(links))
+                    {
+                        pending.Push(new Folder(Path.Join(folder.Relative, child), folder.Depth + 1));
+                    }
+                    linksSkipped += kept.Links.Count - links.Count;
+                }
+                else
+                {
+                    tooDeep += kept.Folders.Count + kept.Links.Count;
+                }
+                report = entries;
+                ReportProgress();
+                Monitor.PulseAll(gate);
+            }
+            stored |= store;
+            // Reported outside the lock, so a slow listener never holds up the other workers.
+            try
+            {
+                progress?.Invoke(report);
+                if (store)
+                {
+                    onFolder?.Invoke(folder.Relative, kept.Files);
+                }
+                return true;
+            }
+            catch (Exception error)
+            {
+                lock (gate)
+                {
+                    failure ??= error;
+                    Monitor.PulseAll(gate);
+                }
+                return false;
+            }
+        }
+
         void Work()
         {
             while (true)
@@ -220,19 +301,44 @@ public static class Walker
                     return;
                 }
 
-                Listing? listing = null;
-                List<string> links = [];
+                int names = 0;
+                bool stored = false;
                 bool lostContact = false;
                 bool missing = false;
+                Exception? problem = null;
                 Exception? crash = null;
                 try
                 {
                     live.Progress?.Started(folder.Relative);
                     // The saved list was read following links: a first folder may lie behind one, which a live walk never enters.
                     missing = folder.First && PassesThroughLink(folder.Relative);
-                    listing = missing ? null : TryList(Path.Join(root, folder.Relative), skipHidden, out lostContact, out missing);
-                    listing = listing is null ? null : Filter(listing, folder.Relative, keep);
-                    links = listing is not null && folder.Depth < MaxDepth ? LinksToFollow(folder.Relative, listing) : [];
+                    if (!missing)
+                    {
+                        live.BeforeList?.Invoke(folder.Relative);
+                        foreach (Listing batch in ListInBatches(Path.Join(root, folder.Relative), skipHidden, live.StreamEvery))
+                        {
+                            names += batch.Count;
+                            if (!Hand(folder, batch, ref stored))
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (DirectoryNotFoundException notFound)
+                {
+                    missing = true;
+                    problem = notFound;
+                }
+                catch (Exception refused) when (refused is UnauthorizedAccessException
+                    or System.Security.SecurityException or ArgumentException)
+                {
+                    problem = refused;
+                }
+                catch (IOException failed)
+                {
+                    lostContact = LooksLikeLostContact(failed);
+                    problem = failed;
                 }
                 catch (Exception error)
                 {
@@ -240,8 +346,7 @@ public static class Walker
                     // and is rethrown by Walk; letting it escape would end the process.
                     crash = error;
                 }
-                bool store = listing is not null && (keep is null || listing.Files.Count > 0);
-                int? report = null;
+                live.Progress?.Finished(folder.Relative, names, problem ?? crash);
                 bool checkShare = false;
 
                 lock (gate)
@@ -256,83 +361,41 @@ public static class Walker
                     {
                         failure ??= crash;
                     }
-                    else if (listing is null && folder.First && missing)
+                    else if (folder.First && missing && names == 0)
                     {
                         // A folder the saved list knew that is gone, or behind a link: passed over, not counted.
                     }
-                    else if (listing is null)
+                    else if (problem is not null)
                     {
+                        // What a listing handed out before it failed is kept; the folder still counts as not read.
                         folders++;
                         unreadable++;
+                        rootFailure = folder.Relative.Length == 0 ? problem : rootFailure;
                         failuresInARow = lostContact ? failuresInARow + 1 : failuresInARow;
                         // One worker at a time checks whether the share is really gone; the others carry on meanwhile.
                         checkShare = lostContact && failuresInARow >= MaxConsecutiveFailures && !checkingShare && !shareLost;
                         checkingShare |= checkShare;
                     }
-                    else if (fileChars + CharsOf(listing.Files) > maxChars || folderChars + folder.Relative.Length + 1 > maxChars)
-                    {
-                        folders++;
-                        truncated = true;
-                        store = false;
-                    }
                     else
                     {
                         folders++;
+                        readBelowRoot += folder.Relative.Length > 0 ? 1 : 0;
                         failuresInARow = 0;
-                        if (store)
-                        {
-                            entries += listing.Files.Count;
-                            fileChars += CharsOf(listing.Files);
-                            folderChars += folder.Relative.Length + 1;
-                            found.Add((folder.Relative, listing.Files));
-                        }
-                        if (folder.Depth < MaxDepth)
-                        {
-                            foreach (string child in listing.Folders.Concat(links))
-                            {
-                                pending.Push(new Folder(Path.Join(folder.Relative, child), folder.Depth + 1));
-                            }
-                            linksSkipped += listing.Links.Count - links.Count;
-                        }
-                        else
-                        {
-                            tooDeep += listing.Folders.Count + listing.Links.Count;
-                        }
-                        report = entries;
                     }
                     ReportProgress();
                     Monitor.PulseAll(gate);
                 }
                 if (checkShare)
                 {
-                    // A run of failures can be one broken corner of a share that is still there.
-                    bool reachable = TryList(root, skipHidden, out _, out _) is not null;
+                    // A run of failures can be one broken corner of a share that is still there. Asking for the
+                    // root itself answers that; listing it again could take minutes on a share with a huge root.
+                    bool reachable = Directory.Exists(root);
                     lock (gate)
                     {
                         checkingShare = false;
                         // Lost only if nothing was read while the root was tried; once lost, it stays lost.
                         shareLost |= !reachable && failuresInARow >= MaxConsecutiveFailures;
                         failuresInARow = reachable ? 0 : failuresInARow;
-                        Monitor.PulseAll(gate);
-                    }
-                }
-                // Reported outside the lock, so a slow listener never holds up the other workers.
-                try
-                {
-                    if (report is int count)
-                    {
-                        progress?.Invoke(count);
-                    }
-                    if (store)
-                    {
-                        onFolder?.Invoke(folder.Relative, listing!.Files);
-                    }
-                }
-                catch (Exception error)
-                {
-                    lock (gate)
-                    {
-                        failure ??= error;
                         Monitor.PulseAll(gate);
                     }
                 }
@@ -389,15 +452,49 @@ public static class Walker
         {
             throw new IOException($"{MaxConsecutiveFailures} folders in a row could not be read, and neither could the volume itself");
         }
+        // A root that could not be read, with nothing read below it either: the volume could not be read.
+        // An index is never saved from part of a root; a live search keeps what it found and says the root failed.
+        if (rootFailure is not null && (keep is null || readBelowRoot == 0))
+        {
+            ExceptionDispatchInfo.Throw(rootFailure);
+        }
 
-        // Sorted so the same tree always gives the same index.
-        found.Sort((a, b) => string.CompareOrdinal(a.Relative, b.Relative));
+        // Each folder once, its batches together, sorted so the same tree always gives the same index.
+        List<(string Relative, List<string> Files)> merged = Merge(found.Select(folder => (folder.Relative, (IReadOnlyList<string>)folder.Files)));
         var builder = new VolumeIndex.Builder(root);
-        foreach (var (relative, files) in found)
+        foreach (var (relative, files) in merged)
         {
             builder.AddFolder(relative, files);
         }
-        return new WalkResult(builder.Build(), found.Count, new WalkSkips(unreadable, linksSkipped, tooDeep), truncated);
+        return new WalkResult(builder.Build(), merged.Count, new WalkSkips(unreadable, linksSkipped, tooDeep), truncated, rootFailure);
+    }
+
+    /// <summary>
+    /// A folder's batches put together, each folder once with its files sorted, the folders in
+    /// path order. The lists handed in are left as they are: a caller may still hold them.
+    /// </summary>
+    internal static List<(string Relative, List<string> Files)> Merge(IEnumerable<(string Relative, IReadOnlyList<string> Files)> batches)
+    {
+        var byFolder = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var order = new List<string>();
+        foreach (var (relative, files) in batches)
+        {
+            if (!byFolder.TryGetValue(relative, out List<string>? all))
+            {
+                byFolder[relative] = all = [];
+                order.Add(relative);
+            }
+            all.AddRange(files);
+        }
+        order.Sort(string.CompareOrdinal);
+        var merged = new List<(string Relative, List<string> Files)>(order.Count);
+        foreach (string relative in order)
+        {
+            List<string> files = byFolder[relative];
+            files.Sort(string.CompareOrdinal);
+            merged.Add((relative, files));
+        }
+        return merged;
     }
 
     /// <summary>A UNC path, or a drive Windows reports as a network drive.</summary>
@@ -467,37 +564,12 @@ public static class Walker
     }
 
     /// <summary>
-    /// Lists one folder, or returns null when it cannot be read.
-    /// <paramref name="lostContact"/> says whether that looks like the share
-    /// going away, rather than a folder that is restricted or was just deleted.
+    /// Lists one folder in batches of about <paramref name="batchSize"/> names, or what
+    /// came in over <see cref="BatchTime"/>, so the folders of a huge listing are walked
+    /// while the rest is still coming. The last batch is always returned, empty or not.
+    /// Throws, between batches, when the folder cannot be read.
     /// </summary>
-    /// <param name="missing">The folder is not there (deleted, or its parent is).</param>
-    private static Listing? TryList(string path, bool skipHidden, out bool lostContact, out bool missing)
-    {
-        lostContact = false;
-        missing = false;
-        try
-        {
-            return List(path, skipHidden);
-        }
-        catch (DirectoryNotFoundException)
-        {
-            missing = true;
-            return null;
-        }
-        catch (Exception error) when (error is UnauthorizedAccessException
-            or System.Security.SecurityException or ArgumentException)
-        {
-            return null;
-        }
-        catch (IOException error)
-        {
-            lostContact = LooksLikeLostContact(error);
-            return null;
-        }
-    }
-
-    private static Listing List(string path, bool skipHidden)
+    private static IEnumerable<Listing> ListInBatches(string path, bool skipHidden, int batchSize)
     {
         var options = new EnumerationOptions
         {
@@ -511,21 +583,32 @@ public static class Walker
             (ref FileSystemEntry entry) => (entry.FileName.ToString(), entry.Attributes),
             options);
 
-        var listing = new Listing([], [], []);
+        var batch = new Listing([], [], []);
+        int listed = 0;
+        long started = Stopwatch.GetTimestamp();
         foreach (var (name, attributes) in entries)
         {
+            listed++;
             if (attributes.HasFlag(FileAttributes.Directory))
             {
                 // Hidden and system folders are still walked; links only when the walk follows them.
-                (attributes.HasFlag(FileAttributes.ReparsePoint) ? listing.Links : listing.Folders).Add(name);
+                (attributes.HasFlag(FileAttributes.ReparsePoint) ? batch.Links : batch.Folders).Add(name);
             }
             else if (!skipHidden || (attributes & (FileAttributes.Hidden | FileAttributes.System)) == 0)
             {
-                listing.Files.Add(name);
+                batch.Files.Add(name);
+            }
+            if (listed >= batchSize || Stopwatch.GetElapsedTime(started) >= BatchTime)
+            {
+                batch.Files.Sort(string.CompareOrdinal);
+                yield return batch;
+                batch = new Listing([], [], []);
+                listed = 0;
+                started = Stopwatch.GetTimestamp();
             }
         }
-        listing.Files.Sort(string.CompareOrdinal);
-        return listing;
+        batch.Files.Sort(string.CompareOrdinal);
+        yield return batch;
     }
 
     /// <summary>
