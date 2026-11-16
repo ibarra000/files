@@ -49,6 +49,8 @@ public partial class SearchWindow : Window
     private bool _liveStopped;
     private bool _liveSnapshotPending;
     private bool _liveSnapshotAgain;
+    // When the next snapshot of a running live search may be taken: spaced by how long the last one took.
+    private long _liveSnapshotDue;
     private HwndSourceHook? _snapHook;
 
     public SearchWindow(App app)
@@ -70,7 +72,7 @@ public partial class SearchWindow : Window
         {
             try
             {
-                await ShowLiveAsync();
+                await OnLiveTickAsync();
             }
             catch (Exception error) when (error is InvalidOperationException or ArgumentException or IOException)
             {

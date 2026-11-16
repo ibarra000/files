@@ -254,6 +254,150 @@ public sealed class WalkerTests
     }
 
     [Fact]
+    public void Each_folder_listed_is_traced_with_its_names_and_none_stay_in_flight()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\b\x.txt");
+        temp.File(@"a\y.txt");
+        var listed = new System.Collections.Concurrent.ConcurrentBag<FolderListed>();
+        var progress = new WalkProgress { Listed = listed.Add };
+
+        Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { },
+            new LiveWalkOptions(Walker.Workers, ["gone"], progress));
+
+        Dictionary<string, int> entries = listed.ToDictionary(folder => folder.Relative, folder => folder.Entries);
+        Assert.Equal(new Dictionary<string, int> { [""] = 1, ["a"] = 2, [@"a\b"] = 1, ["gone"] = 0 }, entries);
+        Assert.Empty(progress.InFlight);
+    }
+
+    [Fact]
+    public void A_root_slow_to_list_does_not_hold_up_the_folders_read_first()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"jobs\1234\plan.pdf");
+        temp.File("other.txt");
+        using var firstRead = new ManualResetEventSlim();
+        var options = new LiveWalkOptions(Walker.Workers, [@"jobs\1234"], null)
+        {
+            // The root lists only once the folder read first has been handed over, as a share with a huge root would.
+            BeforeList = relative =>
+            {
+                if (relative.Length == 0)
+                {
+                    Assert.True(firstRead.Wait(TimeSpan.FromSeconds(10)), "the folder read first waited on the root");
+                }
+            },
+        };
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (relative, _) =>
+        {
+            if (relative == @"jobs\1234")
+            {
+                firstRead.Set();
+            }
+        }, options);
+
+        Assert.Equal(2, walk.Index.FileCount);
+    }
+
+    [Fact]
+    public void A_root_that_cannot_be_listed_still_gives_what_the_folders_read_first_hold()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"jobs\1234\plan.pdf");
+        temp.File("other.txt");
+        var options = new LiveWalkOptions(Walker.Workers, [@"jobs\1234"], null)
+        {
+            BeforeList = relative =>
+            {
+                if (relative.Length == 0)
+                {
+                    throw new IOException("The network path was not found.", unchecked((int)0x80070035));
+                }
+            },
+        };
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { }, options);
+
+        Assert.Equal(1, walk.Index.FileCount);
+        Assert.Equal(1, walk.Skipped.Unreadable);
+        Assert.IsType<IOException>(walk.RootError);
+    }
+
+    [Fact]
+    public void A_root_that_cannot_be_listed_with_nothing_read_below_it_fails_the_walk()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"jobs\plan.pdf");
+        var options = new LiveWalkOptions(Walker.Workers, [], null)
+        {
+            BeforeList = relative =>
+            {
+                if (relative.Length == 0)
+                {
+                    throw new IOException("The network path was not found.", unchecked((int)0x80070035));
+                }
+            },
+        };
+
+        Assert.Throws<IOException>(() => Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (_, _) => { }, options));
+    }
+
+    [Fact]
+    public void A_large_folder_is_walked_while_it_lists_and_indexed_once_with_all_its_names()
+    {
+        using var temp = new TempFolder();
+        foreach (string name in new[] { "a.txt", "b.txt", "c.txt", "d.txt", "e.txt" })
+        {
+            temp.File(name);
+        }
+        temp.File(@"sub1\x.txt");
+        temp.File(@"sub2\y.txt");
+        int rootBatches = 0;
+        var options = new LiveWalkOptions(Walker.Workers, [], null) { StreamEvery = 2 };
+
+        WalkResult walk = Walker.Walk(temp.Path, skipHidden: true, CancellationToken.None, (_, files) => files, (relative, _) =>
+        {
+            if (relative.Length == 0)
+            {
+                Interlocked.Increment(ref rootBatches);
+            }
+        }, options);
+
+        Assert.True(rootBatches > 1, $"the root came in {rootBatches} batch(es)");
+        Assert.Equal(7, walk.Index.FileCount);
+        Assert.Equal(3, walk.Folders);
+    }
+
+    [Fact]
+    public void Batches_of_one_folder_are_merged_sorted_and_left_as_they_were()
+    {
+        IReadOnlyList<string> second = ["b", "a"];
+
+        List<(string Relative, List<string> Files)> merged = Walker.Merge([("x", ["c"]), ("", ["z"]), ("x", second)]);
+
+        Assert.Equal(["", "x"], merged.Select(folder => folder.Relative));
+        Assert.Equal(["a", "b", "c"], merged[1].Files);
+        Assert.Equal(["b", "a"], second);
+    }
+
+    [Fact]
+    public void A_folder_being_listed_is_in_flight_with_how_long_it_has_waited_longest_first()
+    {
+        var progress = new WalkProgress();
+        progress.Started("old");
+        Thread.Sleep(30);
+        progress.Started("new");
+        progress.Started("old");
+
+        Assert.Equal(["old", "new"], progress.InFlight.Select(folder => folder.Relative));
+        Assert.True(progress.InFlight[0].Waited >= TimeSpan.FromMilliseconds(25));
+
+        progress.Finished("old", 3, null);
+        Assert.Equal("new", Assert.Single(progress.InFlight).Relative);
+    }
+
+    [Fact]
     public void A_first_folder_behind_a_link_is_never_read()
     {
         using var temp = new TempFolder();

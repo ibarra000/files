@@ -72,6 +72,23 @@ public sealed class LiveSearchTests
     }
 
     [Fact]
+    public async Task A_matching_folder_read_in_batches_is_found_once_and_keeps_64_others_in_all()
+    {
+        using var temp = new TempFolder();
+        for (int i = 0; i < 100; i++)
+        {
+            temp.File($@"budget 2024\notes{i:D3}.txt");
+        }
+        var live = new LiveSearch([("v", temp.Path)], Query.Parse("budget"), NothingHidden, skipHidden: true) { StreamEvery = 10 };
+
+        await live.RunAsync(CancellationToken.None);
+        SearchResult result = live.Snapshot();
+
+        Assert.Equal(64, result.Hits.Count(hit => hit.Inherited));
+        Assert.Single(result.Folders);
+    }
+
+    [Fact]
     public async Task A_volume_that_cannot_be_read_is_reported_and_the_others_still_answer()
     {
         using var temp = new TempFolder();
@@ -226,6 +243,7 @@ public sealed class LiveSearchTests
         Assert.Equal("plan-b.pdf", Assert.Single(live.Snapshot().Hits).Name);
         Assert.Equal(WalkSkips.None, live.Skipped);
         Assert.Null(live.Reading);
+        Assert.Null(live.Waiting);
     }
 
     private static List<string> FirstFolders(string line, string root, VolumeIndex? saved)

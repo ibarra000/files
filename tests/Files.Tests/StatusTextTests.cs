@@ -105,27 +105,36 @@ public sealed class StatusTextTests
     [Fact]
     public void Live_progress_counts_what_the_header_counts()
     {
-        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, null, running: true, stopped: false, capped: false, WalkSkips.None, []));
-        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, null, running: false, stopped: false, capped: false, WalkSkips.None, []));
+        Assert.StartsWith($"Searching live · {1_204:N0} matches in", StatusText.ForLive(1_204, 30, null, null, running: true, stopped: false, capped: false, WalkSkips.None, []));
+        Assert.StartsWith("Live search · 1 match in", StatusText.ForLive(1, 30, null, null, running: false, stopped: false, capped: false, WalkSkips.None, []));
     }
 
     [Fact]
     public void A_running_live_search_says_which_folder_it_is_reading()
     {
-        string running = StatusText.ForLive(0, 3_410, @"Share\Projects\2024\Line 3", running: true, stopped: false, capped: false, WalkSkips.None, []);
+        string running = StatusText.ForLive(0, 3_410, @"Share\Projects\2024\Line 3", null, running: true, stopped: false, capped: false, WalkSkips.None, []);
         Assert.Equal($@"Searching live · 0 matches in {3_410:N0} folders · reading …\2024\Line 3 · Esc to stop", running);
 
-        string done = StatusText.ForLive(0, 3_410, @"Share\Projects", running: false, stopped: false, capped: false, WalkSkips.None, []);
+        string done = StatusText.ForLive(0, 3_410, @"Share\Projects", null, running: false, stopped: false, capped: false, WalkSkips.None, []);
         Assert.DoesNotContain("reading", done);
     }
 
     [Fact]
     public void A_live_search_says_what_it_could_not_read_while_it_runs_and_after()
     {
-        string done = StatusText.ForLive(3, 30, null, running: false, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
+        string done = StatusText.ForLive(3, 30, null, null, running: false, stopped: false, capped: false, new WalkSkips(12, 1, 0), []);
         Assert.EndsWith("· 12 folders could not be read · 1 link not followed", done);
-        string running = StatusText.ForLive(3, 30, "Share", running: true, stopped: false, capped: false, new WalkSkips(12, 0, 0), []);
+        string running = StatusText.ForLive(3, 30, "Share", null, running: true, stopped: false, capped: false, new WalkSkips(12, 0, 0), []);
         Assert.EndsWith("· Esc to stop · 12 folders could not be read", running);
+    }
+
+    [Fact]
+    public void A_live_search_names_the_folder_a_slow_server_has_kept_it_waiting_on()
+    {
+        string running = StatusText.ForLive(0, 5, @"Share\x", (@"Share\Projects\2024\Line 3", TimeSpan.FromSeconds(12.4)),
+            running: true, stopped: false, capped: false, WalkSkips.None, []);
+
+        Assert.Equal(@"Searching live · 0 matches in 5 folders · waiting on …\2024\Line 3 (12s) · Esc to stop", running);
     }
 
     [Fact]

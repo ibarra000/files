@@ -206,7 +206,7 @@ public static class StatusText
     /// <param name="found">The same count the header shows, folders included.</param>
     /// <param name="reading">A folder being read now, so the line moves even while nothing matches; shown only while running.</param>
     /// <param name="skipped">What the walks have passed over so far.</param>
-    public static string ForLive(int found, int foldersRead, string? reading, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
+    public static string ForLive(int found, int foldersRead, string? reading, (string Path, TimeSpan Waited)? waiting, bool running, bool stopped, bool capped, WalkSkips skipped, IReadOnlyList<string> problems)
     {
         string progress = $"{(found == 1 ? "1 match" : $"{found:N0} matches")} in {foldersRead:N0} folders";
         if (capped)
@@ -216,7 +216,8 @@ public static class StatusText
         string state;
         if (running)
         {
-            string at = reading is null ? "" : $" · reading {LastFolders(reading)}";
+            string at = waiting is var (path, waited) ? $" · waiting on {LastFolders(path)} ({waited.TotalSeconds:F0}s)"
+                : reading is null ? "" : $" · reading {LastFolders(reading)}";
             state = $"Searching live · {progress}{at} · Esc to stop";
         }
         else if (stopped)

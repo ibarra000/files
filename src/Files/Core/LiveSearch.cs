@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+
 namespace Files.Core;
 
 /// <summary>A volume a live search reads, with its saved list when it has one (used to read likely folders first).</summary>
@@ -38,6 +40,9 @@ public sealed class LiveSearch
     /// <summary>The most matching folders remembered per volume; the panel ranks and shows far fewer.</summary>
     private const int MaxMatchingFolders = 1000;
 
+    /// <summary>How long a folder is listed before the footer names it as the one waited on.</summary>
+    public static readonly TimeSpan SlowFolder = TimeSpan.FromSeconds(5);
+
     /// <summary>The most folders read first per volume.</summary>
     private const int MaxFirstFolders = 200;
 
@@ -58,6 +63,12 @@ public sealed class LiveSearch
     /// <summary>Folders whose own name matches, kept even when they hold no matching file (the walk only keeps those that do).</summary>
     private readonly List<string>[] _matchingFolders;
 
+    /// <summary>
+    /// Per volume, the folders whose path matches, with the files kept from each so far that do not
+    /// match by name: a huge folder is kept batch by batch, and its limit is for the whole folder.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, int>[] _inheritedSoFar;
+
     // Goes up with every folder kept, so a snapshot of nothing new is the one before. Guarded by _gate.
     private int _version;
     private (int Version, int NotKept, SearchResult Result)? _lastSnapshot;
@@ -73,9 +84,13 @@ public sealed class LiveSearch
         _maxKept = maxKept;
         _found = volumes.Select(_ => new List<(string, IReadOnlyList<string>)>()).ToArray();
         _matchingFolders = volumes.Select(_ => new List<string>()).ToArray();
+        _inheritedSoFar = volumes.Select(_ => new ConcurrentDictionary<string, int>(StringComparer.Ordinal)).ToArray();
         _progress = volumes.Select(_ => new WalkProgress()).ToArray();
         _finished = new bool[volumes.Count];
     }
+
+    /// <summary>For tests: names listed before a folder's listing hands them on (see <see cref="LiveWalkOptions.StreamEvery"/>).</summary>
+    internal int StreamEvery { get; init; } = LiveWalkOptions.DefaultStreamEvery;
 
     /// <summary>Folders finished so far over every volume, whether they could be read or not.</summary>
     public int FoldersRead => _progress.Sum(progress => progress.Folders);
@@ -99,6 +114,30 @@ public sealed class LiveSearch
                 }
             }
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The folder listed longest, as the volume name and its path in the volume, once it has
+    /// waited <see cref="SlowFolder"/> or more: a server slow to answer; null when none has.
+    /// </summary>
+    public (string Path, TimeSpan Waited)? Waiting
+    {
+        get
+        {
+            (string Path, TimeSpan Waited)? longest = null;
+            for (int volume = 0; volume < _volumes.Count; volume++)
+            {
+                if (Volatile.Read(ref _finished[volume]) || _progress[volume].InFlight is not [var (relative, waited), ..])
+                {
+                    continue;
+                }
+                if (waited >= SlowFolder && (longest is null || waited > longest.Value.Waited))
+                {
+                    longest = (Path.Join(_volumes[volume].Name, relative), waited);
+                }
+            }
+            return longest;
         }
     }
 
@@ -151,17 +190,17 @@ public sealed class LiveSearch
             version = _version;
             for (int volume = 0; volume < _volumes.Count; volume++)
             {
+                // A folder whose own name matches but that holds no match is listed with no files.
                 List<(string Relative, IReadOnlyList<string> Files)> folders = [.. _found[volume]];
-                var listed = folders.Select(folder => folder.Relative).ToHashSet(StringComparer.Ordinal);
-                folders.AddRange(_matchingFolders[volume].Where(listed.Add).Select(relative => (relative, (IReadOnlyList<string>)[])));
+                folders.AddRange(_matchingFolders[volume].Select(relative => (relative, (IReadOnlyList<string>)[])));
                 copies.Add(folders);
             }
         }
         var indexes = new List<(string Name, VolumeIndex Index)>();
         for (int volume = 0; volume < _volumes.Count; volume++)
         {
-            List<(string Relative, IReadOnlyList<string> Files)> folders = copies[volume];
-            folders.Sort((a, b) => string.CompareOrdinal(a.Relative, b.Relative));
+            // A huge folder comes in several batches: each folder once, its batches together.
+            List<(string Relative, List<string> Files)> folders = Walker.Merge(copies[volume]);
             var builder = new VolumeIndex.Builder(_volumes[volume].Root);
             foreach (var (relative, files) in folders)
             {
@@ -181,10 +220,12 @@ public sealed class LiveSearch
     private void Read(int volume, int workers, CancellationToken cancel)
     {
         LiveVolume read = _volumes[volume];
+        // The root is in flight from the start: the checks below and its listing can each wait on the server.
+        _progress[volume].Started("");
         try
         {
-            var options = new LiveWalkOptions(workers, FirstFolders(read, cancel), _progress[volume]);
-            Walker.Walk(read.Root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
+            var options = new LiveWalkOptions(workers, FirstFolders(read, cancel), _progress[volume]) { StreamEvery = StreamEvery };
+            WalkResult walk = Walker.Walk(read.Root, _skipHidden, cancel, (relative, files) => Keep(volume, relative, files), (relative, files) =>
             {
                 lock (_gate)
                 {
@@ -192,6 +233,13 @@ public sealed class LiveSearch
                     _version++;
                 }
             }, options);
+            if (walk.RootError is Exception rootError)
+            {
+                lock (_gate)
+                {
+                    _problems.Add($"{read.Name}'s top folder could not be listed, so only part of it was searched · {rootError.Message}");
+                }
+            }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException
             or ArgumentException or System.Security.SecurityException)
@@ -203,6 +251,8 @@ public sealed class LiveSearch
         }
         finally
         {
+            // The root stays in flight if the walk ended before it was listed (a cancel, a failed check).
+            _progress[volume].Finished("", 0, null);
             Volatile.Write(ref _finished[volume], true);
         }
     }
@@ -263,7 +313,8 @@ public sealed class LiveSearch
     {
         lock (_gate)
         {
-            if (_matchingFolders[volume].Count < MaxMatchingFolders)
+            // A huge folder is kept batch by batch: it is remembered once.
+            if (_matchingFolders[volume].Count < MaxMatchingFolders && !_matchingFolders[volume].Contains(relative))
             {
                 _matchingFolders[volume].Add(relative);
                 _version++;
@@ -285,7 +336,8 @@ public sealed class LiveSearch
             NoteMatchingFolder(volume, relative);
         }
         var kept = new List<string>();
-        int inherited = 0;
+        // The batches of one folder are kept one after another by one reader, so this count is not raced.
+        int inherited = folderMatches ? _inheritedSoFar[volume].GetValueOrDefault(relative) : 0;
         foreach (string file in files)
         {
             string lower = Names.Fold(file);
@@ -294,6 +346,10 @@ public sealed class LiveSearch
             {
                 kept.Add(file);
             }
+        }
+        if (folderMatches)
+        {
+            _inheritedSoFar[volume][relative] = inherited;
         }
         // Reserve room for this folder's names; whatever does not fit is only counted.
         int room = _maxKept - Interlocked.Add(ref _kept, kept.Count) + kept.Count;
