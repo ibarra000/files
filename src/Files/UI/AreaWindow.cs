@@ -51,26 +51,40 @@ public sealed class AreaWindow : Window
         SourceInitialized += (_, _) => CoverScreens();
         // Moved onto a screen of another scale, Windows resizes the layer by that scale; it is put back over every screen.
         DpiChanged += (_, _) => Dispatcher.BeginInvoke(CoverScreens);
+        // A screen plugged in, removed or rescaled while picking changes the area to cover.
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         Loaded += (_, _) => PlaceHint();
         MouseLeftButtonDown += (_, _) => Start();
         MouseMove += (_, _) => Track();
         MouseLeftButtonUp += (_, _) => Finish();
         MouseRightButtonDown += (_, _) => CloseOnce();
+        // Another window taking the mouse mid-drag (a UAC prompt, Alt+Tab) would leave a box no button-up ends; the drag starts over.
+        LostMouseCapture += (_, _) => ForgetDrag();
         Closed += (_, _) =>
         {
+            // SystemEvents holds its handlers for the life of the app, so a closed layer must leave it.
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            // Closed by quitting too, not only by CloseOnce; a screen change queued before then has nothing to cover.
+            _closing = true;
             _escape.Stop();
             _picked.TrySetResult(null);
         };
     }
 
-    /// <summary>Shows the layer and returns the area dragged, in physical screen pixels, or null when cancelled or too small.</summary>
-    public static Task<System.Drawing.Rectangle?> PickAsync()
+    /// <summary>Shows the layer. <see cref="Picked"/> gives the area dragged.</summary>
+    public static AreaWindow Open()
     {
         var window = new AreaWindow();
         window.Show();
         window._escape.Start();
-        return window._picked.Task;
+        return window;
     }
+
+    /// <summary>The area dragged, in physical screen pixels, or null when cancelled or too small.</summary>
+    public Task<System.Drawing.Rectangle?> Picked => _picked.Task;
+
+    /// <summary>Closes the layer with nothing picked.</summary>
+    public void Cancel() => CloseOnce();
 
     private void Start()
     {
@@ -104,6 +118,26 @@ public sealed class AreaWindow : Window
         ReleaseMouseCapture();
         _picked.TrySetResult(ScreenText.Area(from, ScreenText.CursorPosition(), System.Windows.Forms.SystemInformation.VirtualScreen));
         CloseOnce();
+    }
+
+    private void ForgetDrag()
+    {
+        _from = null;
+        _box.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        // Raised on a system thread.
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_closing)
+            {
+                return;
+            }
+            CoverScreens();
+            PlaceHint();
+        });
     }
 
     /// <summary>Esc, a right-click and the end of a drag can come together; the layer closes once.</summary>

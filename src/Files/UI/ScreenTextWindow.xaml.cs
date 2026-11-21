@@ -16,7 +16,13 @@ public partial class ScreenTextWindow : Window
         InitializeComponent();
         Show(_app.ScreenTexts);
         _app.ScreenTextsChanged += OnHistoryChanged;
-        Closed += (_, _) => _app.ScreenTextsChanged -= OnHistoryChanged;
+        // Pausing or resuming history in Settings changes the note.
+        _app.SettingsChanged += OnHistoryChanged;
+        Closed += (_, _) =>
+        {
+            _app.ScreenTextsChanged -= OnHistoryChanged;
+            _app.SettingsChanged -= OnHistoryChanged;
+        };
     }
 
     /// <summary>One read as the list shows it.</summary>

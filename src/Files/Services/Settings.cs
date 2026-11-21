@@ -145,5 +145,41 @@ public sealed record Settings
         };
     }
 
+    /// <summary>
+    /// No two shortcuts can be the same keys: the second could not be registered, and would be blamed
+    /// on another program. Of two that clash, the one just changed gives way, and only that one.
+    /// </summary>
+    public (Settings Kept, string? Problem) WithShortcutsApart(Settings previous)
+    {
+        Settings kept = this;
+        string? problem = null;
+        if (Services.Hotkey.SameKeys(kept.Hotkey, kept.OcrHotkey))
+        {
+            bool ocrChanged = !Services.Hotkey.SameKeys(kept.OcrHotkey, previous.OcrHotkey);
+            problem = $"{kept.OcrHotkey} is already the other shortcut";
+            kept = ocrChanged ? kept with { OcrHotkey = previous.OcrHotkey } : kept with { Hotkey = previous.Hotkey };
+        }
+        bool clashesWithHotkey = Services.Hotkey.SameKeys(kept.AreaHotkey, kept.Hotkey);
+        bool clashesWithOcr = Services.Hotkey.SameKeys(kept.AreaHotkey, kept.OcrHotkey);
+        if (!clashesWithHotkey && !clashesWithOcr)
+        {
+            return (kept, problem);
+        }
+        problem ??= $"{kept.AreaHotkey} is already another shortcut";
+        if (!Services.Hotkey.SameKeys(kept.AreaHotkey, previous.AreaHotkey))
+        {
+            return (kept with { AreaHotkey = previous.AreaHotkey }, problem);
+        }
+        if (clashesWithHotkey)
+        {
+            kept = kept with { Hotkey = previous.Hotkey };
+        }
+        if (clashesWithOcr)
+        {
+            kept = kept with { OcrHotkey = previous.OcrHotkey };
+        }
+        return (kept, problem);
+    }
+
     public void Save(string path) => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(this, Json));
 }

@@ -218,6 +218,44 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Only_the_shortcut_that_clashes_with_the_area_shortcut_is_put_back()
+    {
+        var previous = new Settings { Hotkey = "Ctrl+Shift+Space", OcrHotkey = "Ctrl+Alt+Space", AreaHotkey = "Ctrl+Alt+Shift+Space" };
+        Settings changed = previous with { Hotkey = "ctrl+alt+shift+space", OcrHotkey = "Ctrl+Alt+O" };
+
+        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
+
+        Assert.Equal(previous.Hotkey, kept.Hotkey);
+        Assert.Equal("Ctrl+Alt+O", kept.OcrHotkey);
+        Assert.Equal(previous.AreaHotkey, kept.AreaHotkey);
+        Assert.NotNull(problem);
+    }
+
+    [Fact]
+    public void An_area_shortcut_changed_to_another_shortcut_gives_way()
+    {
+        var previous = new Settings { Hotkey = "Ctrl+Shift+Space", OcrHotkey = "Ctrl+Alt+Space", AreaHotkey = "Ctrl+Alt+Shift+Space" };
+        Settings changed = previous with { AreaHotkey = "Ctrl+Alt+Space" };
+
+        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
+
+        Assert.Equal(previous, kept);
+        Assert.NotNull(problem);
+    }
+
+    [Fact]
+    public void Shortcuts_that_differ_are_kept_as_they_are()
+    {
+        var previous = new Settings();
+        Settings changed = previous with { AreaHotkey = "Ctrl+Alt+A" };
+
+        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
+
+        Assert.Equal(changed, kept);
+        Assert.Null(problem);
+    }
+
+    [Fact]
     public void Scan_failures_map_to_the_catalog_errors()
     {
         Assert.Equal(VolumeError.PermissionDenied, Indexer.Classify(@"C:\x", new UnauthorizedAccessException()));
