@@ -307,6 +307,7 @@ public partial class SearchWindow : Window
         Query query = SearchFilters.Narrow(Query.Parse(line), _filter);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
+        StopContentSearch();
         _queryProblem = query.Problem;
         if (!query.IsValid)
         {
@@ -346,12 +347,14 @@ public partial class SearchWindow : Window
         _searchedIndexes = volumes.Select(v => v.Index).ToHashSet();
         _searchTook = clock.Elapsed;
         ShowResults(result);
+        // The names are on screen first; what kensaku finds inside files follows when it answers.
+        _ = SearchContentsAsync(line, epoch);
     }
 
     private void ShowResults(SearchResult result)
     {
         // Keep the same file selected when the rows move.
-        string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
+        string? selectedPath = (Results.SelectedItem as ResultRow)?.Path;
         // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled;
         // another chip or volume is another list, which starts at the top.
         string shownFor = $"{Input.Text}\n{_filter}\n{_scope}";
@@ -360,11 +363,11 @@ public partial class SearchWindow : Window
         _shownFor = shownFor;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter, _live is null ? ContentsShown : null);
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
         // A recalled search starts at the top row, where Up and Down keep stepping through past searches.
-        int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Path is not null && row.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         if (scrolled > 0)

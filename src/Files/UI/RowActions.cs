@@ -16,6 +16,8 @@ public enum ActionKind
     SaveSearch,
     RemoveRecent,
     RunSearch,
+    OpenInKensaku,
+    FindInKensaku,
 }
 
 /// <summary>One line of the action menu (Tab or right-click): what it says, its shortcut, and what it does.</summary>
@@ -48,6 +50,14 @@ public static class RowActions
         actions.Add(new RowAction("Copy path", "Ctrl C", ActionKind.CopyPath));
         actions.Add(new RowAction("Copy name", "Ctrl Shift C", ActionKind.CopyName));
         AddFavorites(actions, row, favorites, search);
+        if (settings.ContentSearch && search.Trim().Length > 0)
+        {
+            actions.Add(new RowAction("Open in kensaku", "", ActionKind.OpenInKensaku, SeparatorBefore: true));
+            if (row.Hit is not null)
+            {
+                actions.Add(new RowAction("Find this name in kensaku", "", ActionKind.FindInKensaku));
+            }
+        }
         if (row.Kind == RowKind.Opened)
         {
             actions.Add(new RowAction("Remove from recent", "Del", ActionKind.RemoveRecent, SeparatorBefore: true, Danger: true));

@@ -188,6 +188,12 @@ public partial class SearchWindow
             case ActionKind.RunSearch when row.Item is Favorite saved:
                 RunSearch(saved.Target);
                 break;
+            case ActionKind.OpenInKensaku:
+                OpenInKensaku(Input.Text.Trim());
+                break;
+            case ActionKind.FindInKensaku when row.Hit is Hit hit:
+                OpenInKensaku(hit.Name);
+                break;
         }
     }
 
