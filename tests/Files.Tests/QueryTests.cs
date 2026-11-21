@@ -5,6 +5,7 @@ namespace Files.Tests;
 public sealed class QueryTests
 {
     private static readonly HashSet<string> Documents = ["pdf", "docx"];
+    private static readonly HashSet<string> NothingHidden = [];
 
     [Fact]
     public void Narrowing_a_search_without_types_keeps_only_those_types()
@@ -73,18 +74,31 @@ public sealed class QueryTests
     }
 
     [Theory]
-    [InlineData("plan ext:p<f")]
-    [InlineData("plan path:")]
-    [InlineData("plan !")]
     [InlineData("plan ext:")]
-    public void An_operator_that_is_not_one_is_searched_as_written(string line)
+    [InlineData("plan ext:p<f")]
+    [InlineData("plan ext:!")]
+    [InlineData("plan ext:pdf;toolongtype")]
+    public void A_malformed_ext_is_a_problem(string line)
     {
         Query query = Query.Parse(line);
-        Assert.Null(query.Problem);
+        Assert.Equal("ext: needs a type, like ext:pdf", query.Problem);
         Assert.Empty(query.Extensions);
-        Assert.Empty(query.Excluded);
-        Assert.Empty(query.PathTerms);
-        Assert.Equal(line, query.Term);
+    }
+
+    [Theory]
+    [InlineData("plan path:")]
+    [InlineData("plan path:\\/")]
+    public void An_empty_path_is_a_problem(string line)
+    {
+        Assert.Equal("path: needs a folder name, like path:2026", Query.Parse(line).Problem);
+    }
+
+    [Theory]
+    [InlineData("plan !")]
+    [InlineData("!")]
+    public void A_lone_bang_is_a_problem(string line)
+    {
+        Assert.Equal("! needs a word after it, like !draft", Query.Parse(line).Problem);
     }
 
     [Fact]
@@ -94,6 +108,23 @@ public sealed class QueryTests
         Assert.True(query.IsValid);
         Assert.Equal("!readme", query.Term);
         Assert.Empty(query.Excluded);
+    }
+
+    [Fact]
+    public void An_exclamation_mark_beside_an_operator_still_excludes()
+    {
+        Query query = Query.Parse("ext:pdf !draft");
+        Assert.Empty(query.Alternatives);
+        Assert.Equal(["draft"], query.Excluded);
+        Assert.Equal("nothing to search for", query.Problem);
+    }
+
+    [Fact]
+    public void Two_exclusions_alone_have_nothing_to_search_for()
+    {
+        Query query = Query.Parse("!a !b");
+        Assert.Equal(["a", "b"], query.Excluded);
+        Assert.Equal("nothing to search for", query.Problem);
     }
 
     [Theory]
@@ -131,8 +162,8 @@ public sealed class QueryTests
         Assert.Equal(["invoice", "quote"], query.Alternatives.Select(alternative => alternative.Term));
         Assert.Equal(["draft"], query.Excluded);
         Assert.True(query.Match("2026 quote.pdf") >= 0);
-        Assert.True(query.AdmitsName("2026 quote.pdf"));
-        Assert.False(query.AdmitsName("quote draft.pdf"));
+        Assert.True(new NameFilter(query, NothingHidden).Admits("2026 quote.pdf"));
+        Assert.False(new NameFilter(query, NothingHidden).Admits("quote draft.pdf"));
     }
 
     [Fact]
@@ -141,7 +172,7 @@ public sealed class QueryTests
         Query query = Query.Parse("setup ext:pdf;XLSX ext:!exe");
         Assert.Equal(new HashSet<string> { "pdf", "xlsx" }, query.Extensions);
         Assert.Equal(new HashSet<string> { "exe" }, query.ExcludedExtensions);
-        Assert.False(query.AdmitsName("setup.exe"));
+        Assert.False(new NameFilter(query, NothingHidden).Admits("setup.exe"));
     }
 
     [Fact]

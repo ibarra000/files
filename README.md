@@ -38,7 +38,7 @@ Instant file-name search across folders and network shares on Windows.
 | `plan*` / `*0704` | names starting with "plan" / ending with "0704" before the extension |
 | `AB-?-07*.pdf` | a wildcard pattern the whole name fits: `?` is one character, `*` any run |
 
-Operators combine: `inv|quote !draft ext:pdf path:2026`. They apply to the whole line, so write them apart from the `|` words: `inv|quote !draft`, not `inv|!draft`. `!readme` on its own searches for a name starting with "!". Something that looks like an operator but is not a valid one (`ext:` with nothing after it, a lone `!`) is searched as written, so a search never fails on a typo. Live search (<kbd>Shift</kbd>+<kbd>Enter</kbd>) understands the same syntax.
+Operators combine: `inv|quote !draft ext:pdf path:2026`. They apply to the whole line, so write them apart from the `|` words: `inv|quote !draft`, not `inv|!draft`. `!readme` on its own searches for a name starting with "!"; next to anything else, `!` leaves names out. An operator that is not a valid one (`ext:` with nothing after it, an empty `path:`, a lone `!`) is shown as an invalid search, and the footer says what it needs. Live search (<kbd>Shift</kbd>+<kbd>Enter</kbd>) understands the same syntax.
 
 ## Keys
 

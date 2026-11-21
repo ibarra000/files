@@ -137,15 +137,7 @@ public sealed class VolumeIndex
     internal bool AdmitsFolder(Query query, ReadOnlySpan<char> lowerRelative)
     {
         ReadOnlySpan<char> own = lowerRelative[(lowerRelative.LastIndexOf('\\') + 1)..];
-        for (int i = 0; i < query.Excluded.Count; i++)
-        {
-            string word = query.Excluded[i];
-            if (own.Contains(word, StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-        return AdmitsPath(query, lowerRelative);
+        return !query.HoldsExcludedWord(own) && AdmitsPath(query, lowerRelative);
     }
 
     /// <summary>Every <c>path:</c> term is in the folder's path below the root, or in the root itself.</summary>
@@ -331,17 +323,14 @@ public sealed class VolumeIndex
     /// <summary>Whether a matching file may be listed: hidden types, then the query's types, excluded words and <c>path:</c> terms.</summary>
     private sealed class Filter(VolumeIndex index, Query query, IReadOnlySet<string> hidden)
     {
+        private readonly NameFilter _names = new(query, hidden);
+
         // Admits runs once per matching name, up to millions of times: what does not apply is skipped.
-        private readonly bool _byName = query.Extensions.Count + query.ExcludedExtensions.Count + query.Excluded.Count > 0;
         private readonly bool _byPath = query.PathTerms.Count > 0;
 
-        public bool Admits(int file, ReadOnlySpan<char> lowerName)
-        {
-            string ext = Query.ExtensionOf(lowerName);
-            return !hidden.Contains(ext)
-                && (!_byName || query.AdmitsName(lowerName, ext))
-                && (!_byPath || index.AdmitsPath(query, index.Folders.LowerSpan(index.FolderOf(file))));
-        }
+        public bool Admits(int file, ReadOnlySpan<char> lowerName) =>
+            _names.Admits(lowerName)
+            && (!_byPath || index.AdmitsPath(query, index.Folders.LowerSpan(index.FolderOf(file))));
     }
 
     /// <summary>Builds an index one folder at a time. The root folder must come first.</summary>

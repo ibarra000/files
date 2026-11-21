@@ -52,6 +52,7 @@ public sealed class LiveSearch
     private readonly IReadOnlyList<LiveVolume> _volumes;
     private readonly Query _query;
     private readonly IReadOnlySet<string> _hiddenExtensions;
+    private readonly NameFilter _names;
     private readonly bool _skipHidden;
     private readonly int _maxKept;
     private readonly object _gate = new();
@@ -80,6 +81,7 @@ public sealed class LiveSearch
         _volumes = volumes;
         _query = query;
         _hiddenExtensions = hiddenExtensions;
+        _names = new NameFilter(query, hiddenExtensions);
         _skipHidden = skipHidden;
         _maxKept = maxKept;
         _found = volumes.Select(_ => new List<(string, IReadOnlyList<string>)>()).ToArray();
@@ -348,8 +350,8 @@ public sealed class LiveSearch
         foreach (string file in files)
         {
             string lower = Names.Fold(file);
-            bool admitted = _query.AdmitsName(lower);
-            if (admitted && (_query.Match(lower) >= 0 || (folderMatches && inherited++ < MaxInheritedPerFolder)))
+            // Hidden types are dropped here too, so they neither use up the room nor add to the count.
+            if (_names.Admits(lower) && (_query.Match(lower) >= 0 || (folderMatches && inherited++ < MaxInheritedPerFolder)))
             {
                 kept.Add(file);
             }

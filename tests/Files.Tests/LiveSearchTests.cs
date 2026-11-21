@@ -160,6 +160,24 @@ public sealed class LiveSearchTests
     }
 
     [Fact]
+    public async Task Hidden_types_do_not_use_up_the_room_for_results()
+    {
+        using var temp = new TempFolder();
+        for (int i = 0; i < 30; i++)
+        {
+            temp.File(i < 10 ? $"plan{i}.pdf" : $"plan{i}.tmp");
+        }
+        var live = new LiveSearch([("v", temp.Path)], Query.Parse("plan"), new HashSet<string> { "tmp" }, skipHidden: true, maxKept: 10);
+
+        await live.RunAsync(CancellationToken.None);
+        SearchResult result = live.Snapshot();
+
+        Assert.False(live.IsCapped);
+        Assert.Equal(10, result.Hits.Count);
+        Assert.Equal(10, result.Matched);
+    }
+
+    [Fact]
     public void A_failing_filter_ends_the_walk_with_its_error_instead_of_the_process()
     {
         using var temp = new TempFolder();

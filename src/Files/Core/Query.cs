@@ -92,12 +92,13 @@ public sealed record Alternative(string Term, MatchMode Mode, string? RawPattern
 /// <c>ext:!exe</c> choose types, <c>path:x</c> keeps files whose folder holds x, a star at either
 /// end means starts or ends with, and <c>*</c> or <c>?</c> inside a word make a wildcard pattern.
 /// Quotes keep spaces and make operators plain text. Windows forbids <c>* ? | : "</c> in names,
-/// so the syntax never clashes with a real name. Parsing never throws: an operator that is not a
-/// valid one is searched as written, and problems are reported in <see cref="Problem"/>.
+/// so the syntax never clashes with a real name. Parsing never throws: a malformed operator, and
+/// anything else that cannot be searched, is reported in <see cref="Problem"/>.
 /// </summary>
 public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet<string> Extensions, string? Problem)
 {
     private const int MaxExtensionLength = 8;
+    private const string ExtProblem = "ext: needs a type, like ext:pdf";
     private static readonly char[] BadExtensionChars = ['"', '*', '?', '<', '>', '|', ':', '\\', '/', '.', '!'];
 
     // Quoted * ? | stand in as characters no name has, so they stay plain text through parsing.
@@ -132,31 +133,26 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
 
     public static Query Parse(string line)
     {
-        Query query = Parse(line, excludeWithBang: true);
-        // "!readme" alone is a name that starts with "!", not a search that leaves out everything.
-        return query.Alternatives.Count == 0 && query.Excluded.Count > 0 ? Parse(line, excludeWithBang: false) : query;
-    }
-
-    private static Query Parse(string line, bool excludeWithBang)
-    {
         var words = new List<string>();
         var extensions = new HashSet<string>(StringComparer.Ordinal);
         var excludedExtensions = new HashSet<string>(StringComparer.Ordinal);
         var excluded = new List<string>();
         var pathTerms = new List<string>();
+        string? problem = null;
 
-        foreach ((string text, bool quoted) in Tokens(line))
+        List<(string Text, bool Quoted)> tokens = Tokens(line).Where(token => token.Text.Length > 0).ToList();
+        // "!readme" alone is a name that starts with "!", not a search that leaves out everything.
+        bool bangIsText = tokens.Count == 1 && tokens[0].Text.Length > 1 && tokens[0].Text[0] == '!';
+        foreach ((string text, bool quoted) in tokens)
         {
-            if (text.Length == 0)
-            {
-                continue;
-            }
-            bool isOperator = !quoted && (excludeWithBang || text[0] != '!')
-                && Operator(text, extensions, excludedExtensions, excluded, pathTerms);
+            string? malformed = null;
+            bool isOperator = !quoted && !bangIsText
+                && Operator(text, extensions, excludedExtensions, excluded, pathTerms, out malformed);
             if (!isOperator)
             {
                 words.Add(text);
             }
+            problem ??= malformed;
         }
 
         var alternatives = string.Join(' ', words).Split('|')
@@ -165,12 +161,11 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
             .Select(ParseAlternative)
             .OfType<Alternative>()
             .ToList();
-        string? problem = null;
         if (line.Contains('\0'))
         {
             problem = "contains a character that cannot be searched";
         }
-        else if (alternatives.Count == 0)
+        else if (problem is null && alternatives.Count == 0)
         {
             problem = "nothing to search for";
         }
@@ -182,9 +177,13 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
         };
     }
 
-    /// <summary>Takes an <c>ext:</c>, <c>path:</c> or <c>!</c> token, or returns false to search it as written.</summary>
-    private static bool Operator(string text, HashSet<string> extensions, HashSet<string> excludedExtensions, List<string> excluded, List<string> pathTerms)
+    /// <summary>
+    /// Takes an <c>ext:</c>, <c>path:</c> or <c>!</c> token, or returns false when it is a word.
+    /// A malformed one is taken too, with what is wrong in <paramref name="problem"/>.
+    /// </summary>
+    private static bool Operator(string text, HashSet<string> extensions, HashSet<string> excludedExtensions, List<string> excluded, List<string> pathTerms, out string? problem)
     {
+        problem = null;
         if (text.StartsWith("ext:", StringComparison.OrdinalIgnoreCase))
         {
             var include = new List<string>();
@@ -195,13 +194,15 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
                 string ext = piece.TrimStart('!').TrimStart('.');
                 if (!IsValidExtension(ext))
                 {
-                    return false;
+                    problem = ExtProblem;
+                    return true;
                 }
                 (not ? exclude : include).Add(ext.ToLowerInvariant());
             }
             if (include.Count + exclude.Count == 0)
             {
-                return false;
+                problem = ExtProblem;
+                return true;
             }
             extensions.UnionWith(include);
             excludedExtensions.UnionWith(exclude);
@@ -212,13 +213,19 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
             string path = Names.Fold(Restore(text[5..])).Replace('/', '\\').Trim('\\');
             if (path.Length == 0)
             {
-                return false;
+                problem = "path: needs a folder name, like path:2026";
+                return true;
             }
             pathTerms.Add(path);
             return true;
         }
-        if (text.Length > 1 && text[0] == '!')
+        if (text[0] == '!')
         {
+            if (text.Length == 1)
+            {
+                problem = "! needs a word after it, like !draft";
+                return true;
+            }
             excluded.Add(Names.Fold(Restore(text[1..])));
             return true;
         }
@@ -307,25 +314,18 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
 
     public int Match(ReadOnlySpan<char> lowerName) => Match(lowerName, out _);
 
-    /// <summary>Whether a matching name may be listed: its type is allowed and it holds none of the excluded words.</summary>
-    public bool AdmitsName(ReadOnlySpan<char> lowerName) => AdmitsName(lowerName, ExtensionOf(lowerName));
-
-    /// <summary>The same, given the name's lowercased extension (<see cref="ExtensionOf"/>).</summary>
-    public bool AdmitsName(ReadOnlySpan<char> lowerName, string ext)
+    /// <summary>Whether a lowercased name holds any of the excluded words (<c>!term</c>).</summary>
+    public bool HoldsExcludedWord(ReadOnlySpan<char> lowerName)
     {
-        if (ExcludedExtensions.Contains(ext) || (Extensions.Count > 0 && !Extensions.Contains(ext)))
-        {
-            return false;
-        }
         for (int i = 0; i < Excluded.Count; i++)
         {
             string word = Excluded[i];
             if (lowerName.Contains(word, StringComparison.Ordinal))
             {
-                return false;
+                return true;
             }
         }
-        return true;
+        return false;
     }
 
     /// <summary>Whether a lowercased folder path holds every <c>path:</c> term.</summary>
@@ -361,11 +361,4 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
         ext.Length is > 0 and <= MaxExtensionLength
         && ext.All(char.IsAscii)
         && ext.IndexOfAny(BadExtensionChars) < 0;
-
-    /// <summary>The lowercased last extension of a name, or "" when it has none.</summary>
-    public static string ExtensionOf(ReadOnlySpan<char> lowerName)
-    {
-        int dot = lowerName.LastIndexOf('.');
-        return dot < 0 ? "" : lowerName[(dot + 1)..].ToString();
-    }
 }
