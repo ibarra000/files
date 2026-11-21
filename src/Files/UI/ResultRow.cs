@@ -107,11 +107,12 @@ public sealed record KeyHint(string Keys, string Label);
 public static class StatusText
 {
     /// <param name="rescanRequested">F5 was just pressed: say "Scanning…" even before a volume reports, so a fast read still shows.</param>
-    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem, bool rescanRequested = false)
+    /// <param name="settingsKeys">The keys that open Settings, as a sentence writes them.</param>
+    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem, bool rescanRequested = false, string settingsKeys = "Ctrl+,")
     {
         if (volumes.Count == 0)
         {
-            return "No volumes yet · press Ctrl+, to add a folder";
+            return $"No volumes yet · press {settingsKeys} to add a folder";
         }
         var parts = new List<string>();
         if (queryProblem is not null)
@@ -157,9 +158,12 @@ public static class StatusText
     /// <param name="liveFinished">A live search ended: it read everything, or it was stopped (<paramref name="liveStopped"/>).</param>
     /// <param name="liveStopped">Esc stopped it before it read everything, so searching live again can still find more.</param>
     /// <param name="volumeMenu">The volume menu shows (more than one volume), so Alt+Down opens it.</param>
+    /// <param name="keys">The panel's shortcuts, as Settings has them; the defaults if null.</param>
     public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning, bool invalid = false, bool liveFinished = false,
-        bool liveStopped = false, bool volumeMenu = false)
+        bool liveStopped = false, bool volumeMenu = false, PanelKeys? keys = null)
     {
+        keys ??= PanelKeys.Defaults;
+        var searchLive = new KeyHint(keys.Label(PanelCommand.LiveSearch), "Search live");
         if (invalid)
         {
             return [new KeyHint("Esc", "Clear")];
@@ -171,10 +175,17 @@ public static class StatusText
         }
         if (noHits && liveFinished)
         {
-            return liveStopped ? [new KeyHint("Shift ↵", "Search live"), new KeyHint("Esc", "Clear")] : [new KeyHint("Esc", "Clear")];
+            return liveStopped ? [searchLive, new KeyHint("Esc", "Clear")] : [new KeyHint("Esc", "Clear")];
         }
-        KeyHint first = noHits ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
-        List<KeyHint> hints = [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
+        KeyHint first = noHits ? searchLive : new KeyHint("↵", "Open");
+        List<KeyHint> hints =
+        [
+            first,
+            new KeyHint("↑↓", "Move"),
+            new KeyHint(keys.Label(PanelCommand.Reveal), "Folder"),
+            new KeyHint(keys.Label(PanelCommand.CopyPath), "Copy path"),
+            new KeyHint(keys.Label(PanelCommand.Preview), "Preview"),
+        ];
         if (volumeMenu)
         {
             hints.Add(new KeyHint("Alt ↓", "Volumes"));
