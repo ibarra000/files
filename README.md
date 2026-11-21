@@ -45,6 +45,15 @@ Instant file-name search across folders and network shares on Windows.
 
 ## Install
 
+Once the packages are published (see [#84](https://github.com/ibarra000/files/issues/84)):
+
+```powershell
+winget install ibarra000.files
+choco install files-search
+```
+
+Or by hand:
+
 1. Download `files-<version>-x64.msi` from the [releases](https://github.com/ibarra000/files/releases) and run it. It installs per machine and asks for elevation. "Start with Windows" is on by default.
 2. Start **files** from the Start menu. The first time, Settings opens on **Volumes**: add the folders you want to search.
 3. Press the hotkey and search.
