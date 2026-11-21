@@ -239,6 +239,47 @@
         <Setter Property="TextTrimming" Value="CharacterEllipsis" />
     </Style>
 
+    <!-- A scroll area with its bar in a column of its own, a little apart from the content. The Fluent
+         theme's own ScrollViewer lays the bar over the content, over the rows' right edge (#77). The bars
+         keep the theme's look. -->
+    <Style x:Key="BesideScroller" TargetType="ScrollViewer">
+        <!-- Filled, so the wheel also scrolls over the gap and under the bar. -->
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollViewer">
+                    <Grid Background="{TemplateBinding Background}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Margin="{TemplateBinding Padding}"
+                                                CanContentScroll="{TemplateBinding CanContentScroll}" />
+                        <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Margin="4,0,0,0" Cursor="Arrow"
+                                   Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}"
+                                   Value="{Binding VerticalOffset, Mode=OneWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                   Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}" />
+                        <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Row="1" Orientation="Horizontal" Margin="0,4,0,0" Cursor="Arrow"
+                                   Maximum="{TemplateBinding ScrollableWidth}" ViewportSize="{TemplateBinding ViewportWidth}"
+                                   Value="{Binding HorizontalOffset, Mode=OneWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                   Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}" />
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- The panel's lists (results, action menu): their scroll bar beside the rows, not over them. -->
+    <Style x:Key="PanelList" TargetType="ListBox">
+        <Style.Resources>
+            <Style TargetType="ScrollViewer" BasedOn="{StaticResource BesideScroller}" />
+        </Style.Resources>
+    </Style>
+
     <!-- A line of the action menu (board 3): a separator above when it starts a group, the shortcut on the right. -->
     <Style x:Key="ActionItem" TargetType="ListBoxItem">
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
