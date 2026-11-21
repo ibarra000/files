@@ -121,6 +121,20 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void The_screen_text_settings_survive_a_save_and_nulls_get_their_defaults()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        new Settings { AreaHotkey = "Ctrl+Alt+A", OcrLanguage = "de-DE", AfterReading = ScreenTextAction.Copy }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+        Assert.Equal(("Ctrl+Alt+A", "de-DE", ScreenTextAction.Copy), (loaded.AreaHotkey, loaded.OcrLanguage, loaded.AfterReading));
+
+        string nulls = temp.File("nulls.json", """{ "AreaHotkey": null, "OcrLanguage": null }""");
+        (Settings defaults, _) = Settings.Load(nulls);
+        Assert.Equal((new Settings().AreaHotkey, ""), (defaults.AreaHotkey, defaults.OcrLanguage));
+    }
+
+    [Fact]
     public void Hidden_extensions_are_normalized()
     {
         var settings = new Settings { HiddenExtensions = [".TMP", " bak ", ""] };

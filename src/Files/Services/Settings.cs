@@ -21,6 +21,16 @@ public enum OcrChoice
     Paddle,
 }
 
+/// <summary>What happens to text read from the screen.</summary>
+public enum ScreenTextAction
+{
+    /// <summary>The panel searches for it.</summary>
+    Search,
+
+    /// <summary>It goes on the clipboard, and nothing is searched.</summary>
+    Copy,
+}
+
 /// <summary>A program to open files with.</summary>
 public sealed record Viewer(string Name, string Program);
 
@@ -44,6 +54,15 @@ public sealed record Settings
 
     /// <summary>Searches for the word or code under the mouse.</summary>
     public string OcrHotkey { get; init; } = "Ctrl+Alt+Space";
+
+    /// <summary>Lets the user drag out an area of the screen and searches the text in it.</summary>
+    public string AreaHotkey { get; init; } = "Ctrl+Alt+Shift+Space";
+
+    /// <summary>The language Windows text recognition reads (a tag such as "en-US"), or empty for the user's languages.</summary>
+    public string OcrLanguage { get; init; } = "";
+
+    /// <summary>Whether text read from the screen is searched for or only copied.</summary>
+    public ScreenTextAction AfterReading { get; init; } = ScreenTextAction.Search;
 
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
@@ -114,6 +133,8 @@ public sealed record Settings
         {
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
             OcrHotkey = loaded.OcrHotkey ?? defaults.OcrHotkey,
+            AreaHotkey = loaded.AreaHotkey ?? defaults.AreaHotkey,
+            OcrLanguage = loaded.OcrLanguage ?? "",
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
             ScreenTextRemovals = (loaded.ScreenTextRemovals ?? []).Where(pattern => pattern is not null).ToList(),
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,

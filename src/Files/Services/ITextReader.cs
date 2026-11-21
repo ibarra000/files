@@ -2,6 +2,12 @@ using System.Windows;
 
 namespace Files.Services;
 
+/// <summary>A word read from the screen, its box in the read image's pixels, and how sure the engine is (0 to 1) when it says.</summary>
+public sealed record ReadWord(string Text, Rect Box, float? Confidence = null)
+{
+    public static implicit operator ReadWord((string Text, Rect Box) word) => new(word.Text, word.Box);
+}
+
 /// <summary>A text-recognition engine that reads the words in the crop around the mouse.</summary>
 public interface ITextReader
 {
@@ -9,7 +15,7 @@ public interface ITextReader
     int Scale { get; }
 
     /// <summary>The words in <paramref name="png"/> with their boxes, in the enlarged image's pixels.</summary>
-    Task<IReadOnlyList<(string Text, Rect Box)>> ReadWordsAsync(byte[] png, CancellationToken cancel);
+    Task<IReadOnlyList<ReadWord>> ReadWordsAsync(byte[] png, CancellationToken cancel);
 }
 
 /// <summary>An engine that cannot read at all on this PC, with what the user can do about it.</summary>

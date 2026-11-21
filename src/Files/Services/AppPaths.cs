@@ -26,6 +26,9 @@ public static class AppPaths
 
     public static string Settings => Path.Combine(Roaming, "settings.json");
     public static string History => Path.Combine(Roaming, "history.txt");
+
+    /// <summary>The last reads of the screen (Core/ScreenTextHistory.cs).</summary>
+    public static string ScreenTexts => Path.Combine(Roaming, "screen-text.json");
     public static string Opened => Path.Combine(Roaming, "opened.txt");
     public static string Favorites => Path.Combine(Roaming, "favorites.json");
     public static string Catalog => Path.Combine(Local, "catalog.db");

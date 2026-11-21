@@ -58,7 +58,7 @@ public partial class SettingsWindow : Window
                 Dispatcher.BeginInvoke(DispatcherPriority.Background, Save);
             }
         };
-        foreach (TextBox box in new[] { HotkeyBox, OcrHotkeyBox })
+        foreach (TextBox box in new[] { HotkeyBox, OcrHotkeyBox, AreaHotkeyBox })
         {
             // While a shortcut is being recorded, the current ones are let go so pressing them reaches the box.
             box.GotKeyboardFocus += (_, _) => app.SuspendHotkeys();
@@ -105,11 +105,43 @@ public partial class SettingsWindow : Window
         }
     }
 
+    /// <summary>The languages Windows can read here, the user's own first; one chosen before and since removed stays listed so it is not lost silently.</summary>
+    private void FillLanguages(string chosen)
+    {
+        OcrLanguageBox.Items.Clear();
+        OcrLanguageBox.Items.Add(new ComboBoxItem { Content = "My Windows languages", Tag = "" });
+        IReadOnlyList<(string Tag, string Name)> languages;
+        try
+        {
+            languages = WindowsTextReader.Languages();
+        }
+        catch (System.Runtime.InteropServices.COMException)
+        {
+            languages = [];
+        }
+        foreach ((string tag, string name) in languages)
+        {
+            OcrLanguageBox.Items.Add(new ComboBoxItem { Content = name, Tag = tag });
+        }
+        if (chosen.Length > 0 && !languages.Any(language => language.Tag == chosen))
+        {
+            OcrLanguageBox.Items.Add(new ComboBoxItem { Content = $"{chosen} (not installed)", Tag = chosen });
+        }
+        OcrLanguageBox.SelectedItem = OcrLanguageBox.Items.OfType<ComboBoxItem>().First(item => (string)item.Tag == chosen);
+        ShowLanguageRow();
+    }
+
+    /// <summary>The language list is for Windows text recognition; PaddleOCR reads with its one model.</summary>
+    private void ShowLanguageRow() => OcrLanguageRow.IsEnabled = OcrEngineBox.SelectedIndex != (int)OcrChoice.Paddle;
+
+    private void OnShowScreenTexts(object sender, RoutedEventArgs e) => _app.ShowScreenTexts();
+
     /// <summary>The shortcut boxes show the combinations that are kept, which may be the old ones after a problem.</summary>
     private void ShowShortcuts()
     {
         HotkeyBox.Text = _app.Settings.Hotkey;
         OcrHotkeyBox.Text = _app.Settings.OcrHotkey;
+        AreaHotkeyBox.Text = _app.Settings.AreaHotkey;
     }
 
     /// <summary>Saves the two typed fields when they differ from what is saved; they otherwise save only when focus leaves them.</summary>
@@ -197,7 +229,10 @@ public partial class SettingsWindow : Window
         _loading = true;
         HotkeyBox.Text = settings.Hotkey;
         OcrHotkeyBox.Text = settings.OcrHotkey;
+        AreaHotkeyBox.Text = settings.AreaHotkey;
         OcrEngineBox.SelectedIndex = (int)settings.OcrEngine;
+        FillLanguages(settings.OcrLanguage);
+        AfterReadingBox.SelectedIndex = (int)settings.AfterReading;
         StartWithWindowsBox.IsChecked = StartWithWindows.IsEnabled;
         HideOnBlurBox.IsChecked = settings.HideOnBlur;
         HideAfterOpeningBox.IsChecked = settings.HideAfterOpening;
@@ -290,7 +325,10 @@ public partial class SettingsWindow : Window
         {
             Hotkey = HotkeyBox.Text,
             OcrHotkey = OcrHotkeyBox.Text,
+            AreaHotkey = AreaHotkeyBox.Text,
             OcrEngine = (OcrChoice)Math.Max(0, OcrEngineBox.SelectedIndex),
+            OcrLanguage = (OcrLanguageBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "",
+            AfterReading = (ScreenTextAction)Math.Max(0, AfterReadingBox.SelectedIndex),
             HideOnBlur = HideOnBlurBox.IsChecked == true,
             HideAfterOpening = HideAfterOpeningBox.IsChecked == true,
             RememberSearches = RememberBox.IsChecked == true,
@@ -382,7 +420,14 @@ public partial class SettingsWindow : Window
             .Distinct()
             .ToList();
 
-    private void OnChanged(object sender, RoutedEventArgs e) => Save();
+    private void OnChanged(object sender, RoutedEventArgs e)
+    {
+        if (sender == OcrEngineBox)
+        {
+            ShowLanguageRow();
+        }
+        Save();
+    }
 
     private void OnGridEdited(object? sender, EventArgs e)
     {

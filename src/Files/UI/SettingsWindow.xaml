@@ -114,6 +114,19 @@
                                     <TextBox x:Name="OcrHotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
                                              PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Search text under pointer" />
                                 </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Search text in an area" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Drag over the text to read, on any screen. Esc cancels." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <TextBox x:Name="AreaHotkeyBox" Grid.Column="1" Width="220" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                                             PreviewKeyDown="OnHotkeyKey" AutomationProperties.Name="Search text in an area" />
+                                </Grid>
                             </StackPanel>
                         </Border>
 
@@ -135,6 +148,50 @@
                                     <ComboBoxItem Content="Windows (built-in)" />
                                     <ComboBoxItem Content="PaddleOCR" />
                                 </ComboBox>
+                            </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid x:Name="OcrLanguageRow" Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Language" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="What Windows text recognition reads. Add languages in Windows Settings → Time &amp; language. PaddleOCR reads Latin text."
+                                               TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <ComboBox x:Name="OcrLanguageBox" Grid.Column="1" Width="220" AutomationProperties.Name="Text recognition language"
+                                          SelectionChanged="OnChanged" />
+                            </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="After reading" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Text of several lines is always copied; its first line is searched."
+                                               TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <ComboBox x:Name="AfterReadingBox" Grid.Column="1" Width="220" AutomationProperties.Name="After reading"
+                                          SelectionChanged="OnChanged">
+                                    <ComboBoxItem Content="Search for it" />
+                                    <ComboBoxItem Content="Copy it" />
+                                </ComboBox>
+                            </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Screen text history" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="The last 50 reads, to search or copy again. Pausing history stops recording them."
+                                               TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Content="Open…" Style="{StaticResource SettingsButton}" Click="OnShowScreenTexts" />
                             </Grid>
                             <Border Style="{StaticResource RowDivider}" />
                             <Grid Style="{StaticResource SettingRow}">

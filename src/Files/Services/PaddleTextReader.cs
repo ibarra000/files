@@ -38,7 +38,7 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
     /// <summary>Twice the screen's size is enough for its text detector, and faster than more.</summary>
     public int Scale => 2;
 
-    public Task<IReadOnlyList<(string Text, Rect Box)>> ReadWordsAsync(byte[] png, CancellationToken cancel) =>
+    public Task<IReadOnlyList<ReadWord>> ReadWordsAsync(byte[] png, CancellationToken cancel) =>
         Task.Run(() => Read(png, cancel), cancel);
 
     /// <summary>Loads the models in the background, so the first read is not slowed by it. Failures wait for that read.</summary>
@@ -116,7 +116,7 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
     /// <summary>Completes when the models start loading, with the lock held; for tests that close the reader mid-load.</summary>
     internal Task LoadStarted => _loadStarted.Task;
 
-    private IReadOnlyList<(string Text, Rect Box)> Read(byte[] png, CancellationToken cancel)
+    private IReadOnlyList<ReadWord> Read(byte[] png, CancellationToken cancel)
     {
         using SKBitmap image = SKBitmap.Decode(png) ?? throw new InvalidDataException("The screen capture could not be decoded");
         RapidOcrNet.OcrResult result;
@@ -125,12 +125,14 @@ public sealed class PaddleTextReader : ITextReader, IDisposable
             result = Engine().Detect(image, Options, cancel);
             FreeIfClosed();
         }
-        var words = new List<(string Text, Rect Box)>();
+        var words = new List<ReadWord>();
         foreach (TextBlock block in result.TextBlocks)
         {
+            // Words share their line's score: the engine scores lines, not words.
+            float? confidence = block.CharScores is { Length: > 0 } scores ? scores.Average() : null;
             foreach (WordBox word in block.WordResults ?? [])
             {
-                words.Add((word.Text, Bounds(word.BoxPoints)));
+                words.Add(new ReadWord(word.Text, Bounds(word.BoxPoints), confidence));
             }
         }
         return words;
