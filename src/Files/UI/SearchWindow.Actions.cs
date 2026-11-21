@@ -143,7 +143,7 @@ public partial class SearchWindow
             return;
         }
         Results.SelectedItem = row;
-        _inResults = true;
+        GoToResults();
         OpenActions();
         e.Handled = true;
     }

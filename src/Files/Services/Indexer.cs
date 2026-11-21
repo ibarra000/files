@@ -274,8 +274,10 @@ public sealed class Indexer : IDisposable
             {
                 if (moving)
                 {
+                    // The note is about paths under the old place.
                     _states = _states.Remove(id);
                     _removed.Add(id);
+                    _notes = _notes.Remove(id);
                 }
                 _states = _states.SetItem(edited.Id, dropList
                     ? new VolumeState(edited, null, null, null)
@@ -322,6 +324,7 @@ public sealed class Indexer : IDisposable
             {
                 _states = _states.Remove(id);
                 _removed.Add(id);
+                _notes = _notes.Remove(id);
             }
             DeleteShard(state.Volume);
         }

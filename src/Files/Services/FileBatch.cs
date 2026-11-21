@@ -105,6 +105,16 @@ public sealed record FileBatch(FileOpKind Kind, IReadOnlyList<FileResult> Result
 
     public bool CanUndo => !Permanent && Undoes is null && Undoable.Any();
 
+    /// <summary>Where a rename or move put its file, for the next results to select; null if nothing went anywhere.</summary>
+    /// <remarks>A move whose results are all <see cref="FileOutcome.CopiedOnly"/> has none done.</remarks>
+    public string? MovedTo => Kind is FileOpKind.Rename or FileOpKind.Move ? Done.FirstOrDefault()?.Target : null;
+
+    /// <summary>The sources still where they were: a cut paste leaves these on the clipboard. A copy left behind is not among them.</summary>
+    public IReadOnlyList<string> LeftBehind => Results
+        .Where(result => result.Outcome is not (FileOutcome.Done or FileOutcome.CopiedOnly))
+        .Select(result => result.Source)
+        .ToList();
+
     /// <summary>The paths that are no longer where the saved lists have them, and the paths those lists do not have yet.</summary>
     public (IReadOnlyList<string> Removed, IReadOnlyList<NotedPath> Added) Changes()
     {

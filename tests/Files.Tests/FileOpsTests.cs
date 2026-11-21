@@ -424,6 +424,39 @@ public sealed class FileOpsTests
     }
 
     [Fact]
+    public void A_move_that_only_copied_has_nothing_to_select()
+    {
+        var batch = new FileBatch(FileOpKind.Move, [new FileResult(@"C:\a\2024", @"C:\b\2024", FileOutcome.CopiedOnly)]);
+
+        Assert.Null(batch.MovedTo);
+        Assert.Single(batch.Changes().Added);
+    }
+
+    [Fact]
+    public void A_rename_or_move_selects_where_the_file_went()
+    {
+        var rename = new FileBatch(FileOpKind.Rename, [new FileResult(@"C:\a\report.pdf", @"C:\a\plan.pdf", FileOutcome.Done)]);
+        var copy = new FileBatch(FileOpKind.Copy, [new FileResult(@"C:\a\report.pdf", @"C:\b\report.pdf", FileOutcome.Done)]);
+
+        Assert.Equal(@"C:\a\plan.pdf", rename.MovedTo);
+        Assert.Null(copy.MovedTo);
+    }
+
+    [Fact]
+    public void A_cut_paste_leaves_behind_what_is_still_where_it_was()
+    {
+        var batch = new FileBatch(FileOpKind.Move,
+        [
+            new FileResult(@"C:\a\moved.pdf", @"C:\b\moved.pdf", FileOutcome.Done),
+            new FileResult(@"C:\a\open.pdf", null, FileOutcome.Locked),
+            new FileResult(@"C:\a\edited.pdf", null, FileOutcome.Changed),
+            new FileResult(@"C:\a\2024", @"C:\b\2024", FileOutcome.CopiedOnly),
+        ]);
+
+        Assert.Equal([@"C:\a\open.pdf", @"C:\a\edited.pdf"], batch.LeftBehind);
+    }
+
+    [Fact]
     public void Undoing_a_rename_gives_the_old_name_back()
     {
         using var temp = new TempFolder();

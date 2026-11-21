@@ -21,13 +21,7 @@ The panel and Settings have no explicit state machine: their state is a handful 
 - The shortcuts it lists (Del, Ctrl+D, Ctrl+C, Ctrl+X, Ctrl+V, F2, Ctrl+Z, Ctrl+Shift+C, Ctrl+↵) run for its row and close it. Other chords do nothing while it is open.
 - It closes on Esc, on Tab, when the panel deactivates, moves or hides, or when its row (matched by path) leaves the list.
 
-**File operations** (`_inResults`, `_fileOpRunning`, `_lastBatch`, `_lastBatchAt`, `_undoFilesFirst`, `_copied`, `_deleteAsked`, `_renaming`):
-- On search results only; the home list keeps Del for Recent and Ctrl+C for the path. One operation runs at a time; another is refused with a message.
-- Del, Shift+Del, Ctrl+X, Ctrl+V (with files on the clipboard) and F2 act on a file only after the user went to the results since last typing: ↑ ↓ PgUp PgDn, or a click on a row (`_inResults`). Any change to the box, and hiding, give them back to the box. Ctrl+C copies the file whenever no text is selected in the box. The action menu's items always act on their row.
-- A delete for good (Shift+Del, or Del where there is no Recycle Bin) is asked about in the footer. Only the same key on the same file, pressed again between 300 ms and 4 s later, confirms it; a held key (auto-repeat) does nothing.
-- Ctrl+Z and the menu's "Undo …" take back the last batch for 2 minutes, until the panel hides. Ctrl+Z does so when nothing was typed since it, or when the box has nothing to undo; otherwise the box undoes its typing.
-- Renaming (F2): a box over the row's name has the keyboard. Enter applies, Esc or a click elsewhere cancels, a name already taken keeps the box open. A rebuilt list or hiding cancels it.
-- After an operation the results are searched again with the indexer's note, and a file renamed or moved stays selected.
+**File operations**: see the next section.
 
 **Volume menu** (`_scopeMenu`):
 - Shown only with more than one volume. Opened by its button or Alt+↓.
@@ -40,6 +34,47 @@ The panel and Settings have no explicit state machine: their state is a handful 
 - A read cut short by a newer selection says nothing.
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
+
+## File operations (`UI/SearchWindow.FileOps.cs`)
+
+On search results only; the home list keeps Del for Recent and Ctrl+C for the path. Ctrl+C copies the file whenever no text is selected in the box. The action menu's items always act on their row.
+
+**Key owner** (`_keyOwner`, a `KeyOwner`): who has Del, Shift+Del, F2, Ctrl+X and Ctrl+V (with files on the clipboard).
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Box** | Typing, any caret or selection change in the box, the list falling back to its first row because the selected file is gone, hiding | Going to the results | The keys edit the search. They never touch a file. |
+| **Results** | ↑ ↓ PgUp PgDn, a click or right-click on a row, a rename closing that began here | Any of the ways into Box, or F2 into Renaming | The keys act on the selected result. After a delete that worked the row beside it is selected, so the keys stay here. |
+| **Renaming** | F2 or the menu's Rename opening the rename box | The box closing | The rename box has every key. On closing, the keys go back to whoever had them before (`RenameSession.ReturnTo`). |
+
+**Delete ask** (`_deleteAsked`, `_deleteCount`): a delete for good (Shift+Del, or Del where there is no Recycle Bin) is asked about in the footer.
+- Each press is numbered and timed when pressed, before waiting to learn whether the drive has a Recycle Bin. A press whose drive answers after a newer press, after the keys went back to the box, or after hiding, is dropped.
+- The question is armed only once its toast shows. Any other toast drops it (`ShowToast`), and so does hiding.
+- Only the same key on the same file, pressed between 300 ms and 4 s after the question showed, confirms it. A press made before it showed, or a held key (auto-repeat), does nothing.
+
+**Undo slot** (`_lastBatch`, `_lastBatchAt`, `_undoFilesFirst`):
+- Filled by an operation that did something and can be taken back, while the panel is visible. Emptied by hiding, and after 2 minutes.
+- Ctrl+Z and the menu's "Undo …" take it back. Ctrl+Z does so when nothing was typed since the operation, or when the box has nothing to undo; otherwise the box undoes its typing. Hiding clears `_undoFilesFirst`.
+
+**Rename session** (`_rename`, a `RenameSession(Row, ReturnTo, Applying)`):
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Open** | F2 or the menu's Rename | Enter with a new name that works, Esc, a click elsewhere, hiding, or results that no longer list its row | The box lies over its row's name. A refresh that still lists the row keeps it, and the box moves onto that row. A scroll or resize moves it too; scrolled out of sight it waits above the list with what was typed. |
+| **Applying** | Enter with a changed name | The rename ending | Lost focus does not end it, and a second Enter does nothing. "Still working", a failure or a name taken goes back to Open, with the typed name kept. |
+
+**Clipboard mark** (`_clipboardMark`): the files Ctrl+C or Ctrl+X put on the clipboard, as they were then, and the clipboard's sequence number just after (`FileClipboard.Version`).
+- A paste checks the files against the mark only while the sequence number is unchanged; files from elsewhere are taken as they are. `Clipboard.IsCurrent` cannot tell, because the panel's copy is flushed so it outlives the app.
+- After a cut is pasted, and only if the clipboard is still the mark's: the files that moved leave it, and the ones that did not (locked, changed, in the way) stay on it, cut, for another try. A folder copied but not all deleted (`CopiedOnly`) leaves it too, since pasting it again would copy it twice. When all moved, the clipboard is cleared. A cut from another program is left as it is.
+
+**Batch progress** (`_runningBatch`, `_batchCount`): one operation runs at a time, and another is refused with a message. Each batch has a number, and only the running batch's progress reports reach the footer, so a late report never covers what happened or the next batch.
+
+**After an operation** (`_selectNext`): the results are searched again, or a live search's list is shown again. A renamed or moved file stays selected; after a delete that worked, the row beside it, and after one that failed, the same file. Nothing is chosen while the panel is hidden, and hiding or typing clears `_selectNext`.
+
+**Index note** (`Core/IndexNote.cs`, `Indexer._notes`): what the panel copied, moved, renamed or deleted in each volume since its last read.
+- Added by every operation that changed something (`Indexer.Note`). A read of the volume drops what was noted before that read began. Removing the volume, or moving it to another folder, drops its note.
+- The search adds what the note put in a volume. `ShowResults` leaves out what it removed, once, for indexed and live results alike.
+- The note knows the renamed or moved path, not what is inside it: the contents of a renamed or moved folder disappear from search until the next scan.
 
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 

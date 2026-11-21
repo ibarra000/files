@@ -114,8 +114,8 @@ public sealed class IndexNote
     }
 
     /// <summary>
-    /// Searches the volumes' saved lists together with what the notes say was put in them, then leaves
-    /// out what is gone.
+    /// Searches the volumes' saved lists together with what the notes say was put in them. What is gone
+    /// is still in the result: <see cref="Apply"/> leaves it out once, where the results are shown.
     /// </summary>
     public static SearchResult Search(IReadOnlyList<(string Name, string Root, VolumeIndex Index, IndexNote Note)> volumes,
         Query query, IReadOnlySet<string> hiddenExtensions, CancellationToken cancel)
@@ -129,8 +129,7 @@ public sealed class IndexNote
                 indexes.Add((name, added));
             }
         }
-        SearchResult found = Searcher.Search(indexes, query, hiddenExtensions, cancel);
-        return Apply(found, volumes.Select(volume => volume.Note).ToList());
+        return Searcher.Search(indexes, query, hiddenExtensions, cancel);
     }
 
     /// <summary>Whether <paramref name="path"/> is <paramref name="folder"/> or inside it, ignoring case.</summary>

@@ -1,5 +1,18 @@
 namespace Files.UI;
 
+/// <summary>What has Del, F2, Ctrl+X and Ctrl+V in the panel (docs/UI_STATES.md).</summary>
+public enum KeyOwner
+{
+    /// <summary>The search box: the keys edit the search, and never touch a file.</summary>
+    Box,
+
+    /// <summary>The selected result: the user went to it with the arrows, Page Up or Down, or the mouse.</summary>
+    Results,
+
+    /// <summary>The rename box over a row's name.</summary>
+    Renaming,
+}
+
 /// <summary>What a press of Del or Shift+Del does when the footer may have asked about deleting for good.</summary>
 public enum DeleteAnswer
 {

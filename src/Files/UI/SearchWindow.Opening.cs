@@ -102,7 +102,7 @@ public partial class SearchWindow
         if (onRow)
         {
             // Choosing a row with the mouse gives the file keys to it, as the arrow keys do.
-            _inResults = true;
+            GoToResults();
         }
     }
 

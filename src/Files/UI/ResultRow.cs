@@ -183,7 +183,7 @@ public static class StatusText
             first,
             new KeyHint("↑↓", "Move"),
             new KeyHint(keys.Label(PanelCommand.Reveal), "Folder"),
-            new KeyHint(keys.Label(PanelCommand.CopyPath), "Copy path"),
+            new KeyHint(keys.Label(PanelCommand.CopyPath), "Copy"),
             new KeyHint(keys.Label(PanelCommand.Preview), "Preview"),
         ];
         if (volumeMenu)

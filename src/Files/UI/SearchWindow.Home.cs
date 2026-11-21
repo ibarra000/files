@@ -36,6 +36,7 @@ public partial class SearchWindow
         List<ResultRow> rows = HomeRows.Build(_app.Favorites, opened, _missing, _showAllFavorites);
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
+        KeepRenameFor(rows);
         int found = -1;
         if (select is not null)
         {

@@ -113,6 +113,8 @@ public partial class SearchWindow
 
     private void ShowToast(string? message)
     {
+        // A question about deleting for good stands only while the footer shows it; DeleteSelected arms it after this.
+        _deleteAsked = null;
         _toastTimer.Stop();
         _toast = message;
         if (message is not null)

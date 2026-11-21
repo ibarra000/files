@@ -21,6 +21,20 @@ public sealed class FileKeysTests
     }
 
     [Fact]
+    public void A_press_made_before_the_question_showed_never_confirms_it()
+    {
+        // Two quick presses on a slow share: the second was pressed before the first one's question appeared.
+        Assert.Equal(DeleteAnswer.Ignore, FileKeys.Answer(ShiftDelete, @"C:\v\report.pdf", permanently: true, Asked.AddSeconds(-1)));
+    }
+
+    [Fact]
+    public void The_window_counts_from_the_press_not_from_when_the_drive_answered()
+    {
+        // Pressed inside the window; the drive took longer to say whether it has a Recycle Bin.
+        Assert.Equal(DeleteAnswer.Confirm, FileKeys.Answer(ShiftDelete, @"C:\v\report.pdf", permanently: true, Asked.AddSeconds(3.9)));
+    }
+
+    [Fact]
     public void Another_key_another_file_or_a_late_press_asks_again()
     {
         DateTime soon = Asked.AddSeconds(1);

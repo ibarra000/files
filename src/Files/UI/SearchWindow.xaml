@@ -149,7 +149,7 @@
                         </Grid.ColumnDefinitions>
                         <Button Content="Open" Style="{StaticResource AccentButton}" Click="OnPreviewOpen" />
                         <Button Grid.Column="2" Content="Show in folder" Style="{StaticResource ControlButton}" Click="OnPreviewReveal" />
-                        <Button x:Name="PreviewCopyButton" Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
+                        <Button x:Name="PreviewCopyButton" Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path"
                                 AutomationProperties.Name="Copy path" Click="OnPreviewCopy">
                             <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13" />
                         </Button>
@@ -190,7 +190,8 @@
                          VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                          MouseDoubleClick="OnResultDoubleClick" PreviewMouseRightButtonUp="OnResultRightClick"
-                         PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
+                         PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove"
+                         ScrollViewer.ScrollChanged="OnResultsLayoutChanged" SizeChanged="OnResultsLayoutChanged">
                 </ListBox>
                 <!-- F2 renames in place: the box lies over the selected row's name (SearchWindow.FileOps.cs). It is in the
                      window rather than a popup, so it types like the search box and never takes activation from the panel.

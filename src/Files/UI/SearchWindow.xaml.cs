@@ -122,7 +122,6 @@ public partial class SearchWindow : Window
     {
         PanelKeys keys = _app.Settings.Shortcuts;
         SettingsButton.ToolTip = $"Settings ({keys.Label(PanelCommand.Settings, "+")})";
-        PreviewCopyButton.ToolTip = $"Copy path ({keys.Label(PanelCommand.CopyPath, "+")})";
     }
 
     /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
@@ -214,9 +213,13 @@ public partial class SearchWindow : Window
         CloseMenus();
         EndRename();
         _deleteAsked = null;
-        // The chance to undo, and having gone to the results, end with what was on screen.
+        // A delete still waiting on its drive no longer counts.
+        _deleteCount++;
+        // The chance to undo, having gone to the results, and what the next results select end with what was on screen.
         _lastBatch = null;
-        _inResults = false;
+        _undoFilesFirst = false;
+        _selectNext = null;
+        _keyOwner = KeyOwner.Box;
         StopPreview();
         // A search typed just before hiding would otherwise finish, and fill the list and read a preview, while hidden.
         // Showing the panel again searches for what is in the box.
@@ -268,8 +271,15 @@ public partial class SearchWindow : Window
         HidePanel();
     }
 
-    /// <summary>The user chose or moved the selection in the box, so Ctrl+C copies what is selected there.</summary>
-    private void OnInputSelectionChanged(object sender, RoutedEventArgs e) => _selectedOnShow = false;
+    /// <summary>
+    /// The user chose or moved the selection in the box, so Ctrl+C copies what is selected there, and Del
+    /// and the other file keys edit the box again.
+    /// </summary>
+    private void OnInputSelectionChanged(object sender, RoutedEventArgs e)
+    {
+        _selectedOnShow = false;
+        BackToBox();
+    }
 
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
@@ -277,7 +287,9 @@ public partial class SearchWindow : Window
         // Typing since a file operation: Ctrl+Z undoes the typing first, as in any text box.
         _undoFilesFirst = false;
         // Typing puts the keyboard back in the box: Del, F2 and the rest edit the search until the results are chosen again.
-        _inResults = false;
+        BackToBox();
+        // An operation's target belongs to the search it ran on, not to the one being typed.
+        _selectNext = null;
         _typing.Stop();
         StopLiveSearch();
         // A paste, a recalled search or a saved one is complete already, so it searches at once.
@@ -370,9 +382,7 @@ public partial class SearchWindow : Window
 
     private void ShowResults(SearchResult result)
     {
-        // The rows are rebuilt under the rename box, which would then float over another one.
-        EndRename();
-        // A live search's results leave out what the panel moved or deleted too.
+        // The one place the note's removals apply, to indexed and live results alike.
         result = IndexNote.Apply(result, _app.Indexer.Volumes.Select(state => _app.Indexer.NoteFor(state.Volume.Id)).ToList());
         // Keep the same file selected when the rows move, or select the one just renamed or moved.
         string? selectedPath = _selectNext ?? (Results.SelectedItem as ResultRow)?.Hit?.Path;
@@ -388,14 +398,26 @@ public partial class SearchWindow : Window
         List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
+        KeepRenameFor(rows);
         // A recalled search starts at the top row, where Up and Down keep stepping through past searches.
         int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        if (keep < 0)
+        {
+            // The first row is not one the user chose: Del and the other file keys go back to the box.
+            BackToBox();
+        }
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         if (scrolled > 0)
         {
             Results.UpdateLayout();
             ListScroller()?.ScrollToVerticalOffset(scrolled);
+        }
+        if (_rename is not null)
+        {
+            // The kept rename's row may sit elsewhere in the new list; a scroll still to come moves the box again.
+            Results.UpdateLayout();
+            FollowRenameRow();
         }
         UpdateStatus();
     }
@@ -451,7 +473,7 @@ public partial class SearchWindow : Window
         // Alt chords arrive as Key.System.
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         PanelKeys keys = _app.Settings.Shortcuts;
-        if (_renaming is not null)
+        if (_keyOwner == KeyOwner.Renaming)
         {
             e.Handled = OnRenameKey(key);
             return;
@@ -563,7 +585,7 @@ public partial class SearchWindow : Window
                 // The box text is selected only because the panel was shown: the keys copy the path, as the footer says.
                 CopySelected(path: true);
                 return true;
-            case PanelCommand.Rename when SelectedHit is not null && _inResults:
+            case PanelCommand.Rename when SelectedHit is not null && _keyOwner == KeyOwner.Results:
                 StartRename();
                 return true;
             case PanelCommand.CopyName:
@@ -616,7 +638,7 @@ public partial class SearchWindow : Window
             return;
         }
         // Moving through the results gives the file keys (Del, F2, Ctrl+X, Ctrl+V) to the selected result.
-        _inResults = true;
+        GoToResults();
         int step = by > 0 ? 1 : -1;
         int target = Math.Clamp(Results.SelectedIndex + by, 0, Results.Items.Count - 1);
         // Section headers cannot be selected: keep going past them, or turn back at the end of the list.

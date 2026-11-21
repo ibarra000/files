@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.Runtime.InteropServices;
 using System.Windows;
 
 namespace Files.UI;
@@ -42,4 +43,14 @@ public static class FileClipboard
         int effect = BitConverter.ToInt32(bytes, 0);
         return (effect & MoveEffect) != 0 && (effect & CopyBit) == 0;
     }
+
+    /// <summary>
+    /// A number Windows changes whenever anything is put on the clipboard, so the panel can tell that what
+    /// it put there is still there. Clipboard.IsCurrent cannot: the panel's copy is flushed so it outlives
+    /// the app, and after that the clipboard no longer holds the panel's own object.
+    /// </summary>
+    public static uint Version => GetClipboardSequenceNumber();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetClipboardSequenceNumber();
 }
