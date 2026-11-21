@@ -25,7 +25,7 @@ dotnet test Files.slnx
 dotnet test Files.slnx --collect:"XPlat Code Coverage"
 ```
 
-Tests cover `Core`, `Data` and `Services` against temporary folders and databases. `SearchTests.A_million_names_search_in_milliseconds` prints the search time; run it in Release (`-c Release`) for a meaningful number. UI changes are checked by running the app: take a look in light and dark, and with a volume that is unreachable.
+Tests cover `Core`, `Data` and `Services` against temporary folders and databases. `SearchTests.A_million_names_search_in_milliseconds` prints the search time; run it in Release (`-c Release`) for a meaningful number. `tools/IndexBench` times the fixed query set in [docs/BENCHMARK.md](docs/BENCHMARK.md) at 1M and 5M names; run it again and replace the table there when a release changes the index, the query parser or the ranking. UI changes are checked by running the app: take a look in light and dark, and with a volume that is unreachable.
 
 ## Workflow
 
