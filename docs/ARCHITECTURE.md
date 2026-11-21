@@ -91,6 +91,12 @@ The panel's and Settings' states, what moves between them and the rules they kee
 - **A program**: started with the path quoted (file names cannot contain `"`).
 - **Show in folder**: `explorer.exe /select,"path"`.
 
+## Changing files
+
+Search results can be copied, cut, pasted, renamed and deleted (`UI/SearchWindow.FileOps.cs`), one batch at a time, off the UI thread, with progress in the footer. `Services/FileOps.cs` does the work and is tested against temporary folders: nothing is ever overwritten (a taken name gets " (1)", " (2)", …, using `File.Copy`/`File.Move` with `overwrite: false`), a source whose size or date changed since it was copied is skipped, and each file's outcome (done, changed, already there, in use, not allowed, not found, failed) is reported while the rest go on. A move within one drive or share is a rename; to another it is a copy, then a delete once the copy is complete. Linked folders inside a copied folder are not followed. The clipboard holds what Explorer's Copy holds (`UI/FileClipboard.cs`): the files, the path as text, and `Preferred DropEffect` (copy or move). Delete sends local files to the Recycle Bin (`Services/RecycleBin.cs`); a network path has none, so the panel asks in the footer before deleting it for good, as it does for Shift+Del. The last batch can be undone: copies go to the Recycle Bin (unless they changed since), moved and renamed files go back (unless something took their place), and recycled files are restored through the shell's Recycle Bin folder, matched by their original folder and name, newest first.
+
+The saved lists only change with a read, so `Services/Indexer.cs` keeps a note per volume (`Core/IndexNote.cs`) of what the panel removed and added, until that volume's next completed read that began after the change. Searches leave out removed paths (and what was inside a removed folder) and search a small index of the added ones beside the saved list. A folder moved or renamed shows under its new name, but its files only after the next read.
+
 ## Updates
 
 1. One minute after start, then every 4 hours, `Services/Updater.cs` reads `latest.json` (`version`, `msi`, `sha256`, `notes`) from the update folder, or from the latest GitHub release.

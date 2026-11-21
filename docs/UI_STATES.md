@@ -18,7 +18,15 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 **Action menu** (`ActionMenu.IsOpen`, `_actionRow`, `_actionFilter`):
 - Opened by Tab or a right-click on a row. Typing filters it, ↑↓ move, Enter or a click runs an action.
-- The shortcuts it lists (Del, Ctrl+D, Ctrl+C, Ctrl+Shift+C, Ctrl+↵) run for its row and close it. Other chords do nothing while it is open.
+- The shortcuts it lists (Del, Ctrl+D, Ctrl+C, Ctrl+X, Ctrl+V, F2, Ctrl+Z, Ctrl+Shift+C, Ctrl+↵) run for its row and close it. Other chords do nothing while it is open.
+
+**File operations** (`_fileOpRunning`, `_lastBatch`, `_undoFilesFirst`, `_copied`, `_deleteAsked`, `_renaming`):
+- On search results only; the home list keeps Del for Recent and Ctrl+C for the path. One operation runs at a time; another is refused with a message.
+- Ctrl+C and Ctrl+X act on the file unless the user selected text in the box. Ctrl+V pastes files only when the clipboard has files and a result is selected; otherwise the box pastes. Del and Shift+Del act on the file only when the box's caret is at its end, where they would change nothing.
+- A delete for good (Shift+Del, or Del on a network path) is asked about in the footer; the same key on the same file within 4 s confirms it.
+- Ctrl+Z undoes the last batch when nothing was typed since it, or when the box has nothing to undo; otherwise the box undoes its typing.
+- Renaming (F2): a box over the row's name has the keyboard. Enter applies, Esc or a click elsewhere cancels, a name already taken keeps the box open. A rebuilt list or hiding cancels it.
+- After an operation the results are searched again with the indexer's note, and a file renamed or moved stays selected.
 - It closes on Esc, on Tab, when the panel deactivates, moves or hides, or when its row (matched by path) leaves the list.
 
 **Volume menu** (`_scopeMenu`):

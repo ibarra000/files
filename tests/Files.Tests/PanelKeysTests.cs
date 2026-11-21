@@ -43,6 +43,16 @@ public sealed class PanelKeysTests
     }
 
     [Fact]
+    public void Rename_is_on_F2_and_can_move_but_the_file_keys_that_edit_text_cannot_be_taken()
+    {
+        Assert.Equal(PanelCommand.Rename, PanelKeys.Defaults.Find(ModifierKeys.None, Key.F2));
+        Assert.Equal(PanelCommand.Rename, Keys(("Rename", "Ctrl+R")).Find(ModifierKeys.Control, Key.R));
+        Assert.Contains("needed", Refused("Rename", "Ctrl+X"));
+        Assert.Contains("needed", Refused("Rename", "Ctrl+Z"));
+        Assert.Contains("needed", Refused("Rename", "Shift+Delete"));
+    }
+
+    [Fact]
     public void Labels_are_written_as_the_menu_and_footer_write_them()
     {
         PanelKeys keys = PanelKeys.Defaults;

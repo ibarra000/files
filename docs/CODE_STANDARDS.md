@@ -24,6 +24,8 @@ The checks that enforce these are the compiler (`TreatWarningsAsErrors`, nullabl
 
 Only where .NET has no managed API. Today that is `RegisterHotKey` (`Services/Hotkey.cs`), the DWM attributes (`UI/Backdrop.cs`), a folder's file id (`CreateFileW` + `GetFileInformationByHandle` in `Core/Walker.cs`, so a followed link is read once), and Windows' file thumbnails, `SHCreateItemFromParsingName` with `GetObject`/`DeleteObject` for the bitmap it gives (`Services/ShellThumbnail.cs`). Use `DllImport` with blittable signatures, keep each call in the class that needs it, and don't enable unsafe code.
 
+COM follows the same rule. The one use is restoring from the Recycle Bin (`Services/RecycleBin.cs`): `Shell.Application`, created with `Type.GetTypeFromProgID` and called late-bound through `InvokeMember` on an STA thread of its own, with no interop assembly and no `dynamic`. Its failures (`COMException`, `TargetInvocationException`, …) become a message, never a crash. Sending to the Recycle Bin uses `Microsoft.VisualBasic.FileIO.FileSystem`, which is part of .NET's Windows Desktop runtime, so no package is needed.
+
 ## Vocabulary
 
 `files` is a general-purpose tool, so names, messages, test data and docs use general words:

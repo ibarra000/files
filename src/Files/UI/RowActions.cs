@@ -16,6 +16,12 @@ public enum ActionKind
     SaveSearch,
     RemoveRecent,
     RunSearch,
+    Copy,
+    Cut,
+    Paste,
+    Rename,
+    Delete,
+    Undo,
 }
 
 /// <summary>One line of the action menu (Tab or right-click): what it says, its shortcut, and what it does.</summary>
@@ -24,7 +30,16 @@ public sealed record RowAction(string Label, string Gesture, ActionKind Kind, bo
 /// <summary>The actions a row offers, and the menu's filter as the user types.</summary>
 public static class RowActions
 {
-    public static IReadOnlyList<RowAction> For(ResultRow row, Settings settings, IReadOnlyList<Favorite> favorites, string search)
+    // The file keys Settings cannot change (they edit the search too), as the menu writes them.
+    public const string CutKeys = "Ctrl X";
+    public const string PasteKeys = "Ctrl V";
+    public const string UndoKeys = "Ctrl Z";
+    public const string DeleteKeys = "Del";
+
+    /// <param name="canPaste">Files are on the clipboard, so a result can take them.</param>
+    /// <param name="undo">The label for taking back the last file operation, or null if there is none.</param>
+    public static IReadOnlyList<RowAction> For(ResultRow row, Settings settings, IReadOnlyList<Favorite> favorites, string search,
+        bool canPaste = false, string? undo = null)
     {
         var actions = new List<RowAction>();
         PanelKeys keys = settings.Shortcuts;
@@ -46,14 +61,40 @@ public static class RowActions
             actions.AddRange(settings.Viewers.Select(viewer => new RowAction($"Open with {viewer.Name}", "", ActionKind.OpenWith, Viewer: viewer)));
         }
         actions.Add(new RowAction("Show in folder", keys.Label(PanelCommand.Reveal), ActionKind.Reveal, SeparatorBefore: true));
-        actions.Add(new RowAction("Copy path", keys.Label(PanelCommand.CopyPath), ActionKind.CopyPath));
+        // Files are copied, moved, renamed and deleted from search results only; the home list keeps Ctrl+C for the path.
+        bool isResult = row.Hit is not null;
+        if (isResult)
+        {
+            AddClipboard(actions, keys, canPaste);
+        }
+        actions.Add(new RowAction("Copy path", isResult ? "" : keys.Label(PanelCommand.CopyPath), ActionKind.CopyPath));
         actions.Add(new RowAction("Copy name", keys.Label(PanelCommand.CopyName), ActionKind.CopyName));
         AddFavorites(actions, row, favorites, search, keys);
+        if (isResult)
+        {
+            actions.Add(new RowAction("Rename…", keys.Label(PanelCommand.Rename), ActionKind.Rename, SeparatorBefore: true));
+            actions.Add(new RowAction("Delete", DeleteKeys, ActionKind.Delete, Danger: true));
+            if (undo is not null)
+            {
+                actions.Add(new RowAction(undo, UndoKeys, ActionKind.Undo, SeparatorBefore: true));
+            }
+        }
         if (row.Kind == RowKind.Opened)
         {
-            actions.Add(new RowAction("Remove from recent", "Del", ActionKind.RemoveRecent, SeparatorBefore: true, Danger: true));
+            actions.Add(new RowAction("Remove from recent", DeleteKeys, ActionKind.RemoveRecent, SeparatorBefore: true, Danger: true));
         }
         return actions;
+    }
+
+    /// <summary>Copy and Cut put the file itself on the clipboard, with its path for a text box; Paste here takes files from it.</summary>
+    private static void AddClipboard(List<RowAction> actions, PanelKeys keys, bool canPaste)
+    {
+        actions.Add(new RowAction("Copy", keys.Label(PanelCommand.CopyPath), ActionKind.Copy));
+        actions.Add(new RowAction("Cut", CutKeys, ActionKind.Cut));
+        if (canPaste)
+        {
+            actions.Add(new RowAction("Paste here", PasteKeys, ActionKind.Paste));
+        }
     }
 
     /// <summary>What Ctrl+D pins or unpins for a row: the file or folder of a result, or the favorite or recent item itself.</summary>

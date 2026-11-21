@@ -183,14 +183,25 @@
                 </DockPanel>
             </Border>
 
-            <ListBox x:Name="Results" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
-                     SelectionChanged="OnResultSelectionChanged"
-                     ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
-                     VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
-                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                     MouseDoubleClick="OnResultDoubleClick" PreviewMouseRightButtonUp="OnResultRightClick"
-                     PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
-            </ListBox>
+            <Grid>
+                <ListBox x:Name="Results" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
+                         SelectionChanged="OnResultSelectionChanged"
+                         ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
+                         VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                         MouseDoubleClick="OnResultDoubleClick" PreviewMouseRightButtonUp="OnResultRightClick"
+                         PreviewMouseLeftButtonDown="OnResultMouseDown" PreviewMouseMove="OnResultMouseMove">
+                </ListBox>
+                <!-- F2 renames in place: the box lies over the selected row's name (SearchWindow.FileOps.cs). It is in the
+                     window rather than a popup, so it types like the search box and never takes activation from the panel.
+                     The canvas has no background, so clicks go through it to the list. -->
+                <Canvas x:Name="RenameLayer" ClipToBounds="True">
+                    <TextBox x:Name="RenameBox" Visibility="Collapsed" FontSize="14" Padding="4,2" BorderThickness="1"
+                             Background="{DynamicResource ControlFill}" Foreground="{DynamicResource Text}"
+                             BorderBrush="{DynamicResource Accent}" CaretBrush="{DynamicResource Text}"
+                             AutomationProperties.Name="New name" LostKeyboardFocus="OnRenameLostFocus" />
+                </Canvas>
+            </Grid>
         </DockPanel>
     </Border>
 </Window>

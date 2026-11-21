@@ -14,6 +14,7 @@ public enum PanelCommand
     // Shown as "Copy": Ctrl+C copies the file itself once file operations land.
     CopyPath,
     CopyName,
+    Rename,
     Preview,
     Rescan,
     Settings,
@@ -56,6 +57,7 @@ public sealed class PanelKeys
         [PanelCommand.Favorite] = "Ctrl+D",
         [PanelCommand.CopyPath] = "Ctrl+C",
         [PanelCommand.CopyName] = "Ctrl+Shift+C",
+        [PanelCommand.Rename] = "F2",
         [PanelCommand.Preview] = "Ctrl+P",
         [PanelCommand.Rescan] = "F5",
         [PanelCommand.Settings] = "Ctrl+OemComma",
@@ -107,6 +109,7 @@ public sealed class PanelKeys
         PanelCommand.Favorite => "Pin to favorites",
         PanelCommand.CopyPath => "Copy",
         PanelCommand.CopyName => "Copy name",
+        PanelCommand.Rename => "Rename",
         PanelCommand.Preview => "Preview",
         PanelCommand.Rescan => "Rescan volumes",
         PanelCommand.Settings => "Settings",

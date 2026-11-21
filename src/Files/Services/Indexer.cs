@@ -46,6 +46,9 @@ public sealed class Indexer : IDisposable
     // Volumes removed since start, so loading at start-up cannot bring one back. Guarded by _gate.
     private readonly HashSet<long> _removed = [];
     private ImmutableDictionary<long, VolumeState> _states = ImmutableDictionary<long, VolumeState>.Empty;
+
+    // What the panel changed in each volume since its last read began. Swapped whole under _gate.
+    private ImmutableDictionary<long, IndexNote> _notes = ImmutableDictionary<long, IndexNote>.Empty;
     private Timer? _timer;
 
     public Indexer(Catalog catalog, string shardFolder, Func<Settings> settings)
@@ -62,6 +65,44 @@ public sealed class Indexer : IDisposable
         _states.Values.OrderBy(s => s.Volume.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
 
     public bool IsScanning => !_running.IsEmpty;
+
+    /// <summary>What the panel changed in a volume since it was last read; empty if nothing.</summary>
+    public IndexNote NoteFor(long id) => _notes.GetValueOrDefault(id, IndexNote.Empty);
+
+    /// <summary>
+    /// Notes files the panel removed from or put in the volumes, so searches show them that way until each
+    /// volume is read again. A path in no volume is ignored.
+    /// </summary>
+    public void Note(IReadOnlyList<string> removed, IReadOnlyList<NotedPath> added)
+    {
+        DateTime now = DateTime.UtcNow;
+        lock (_gate)
+        {
+            foreach (VolumeState state in _states.Values)
+            {
+                string root = state.Volume.Root;
+                List<string> gone = removed.Where(path => IndexNote.IsUnder(root, path)).ToList();
+                List<NotedPath> put = added.Where(path => IndexNote.IsUnder(root, path.Path)).ToList();
+                if (gone.Count > 0 || put.Count > 0)
+                {
+                    _notes = _notes.SetItem(state.Volume.Id, NoteFor(state.Volume.Id).With(gone, put, now));
+                }
+            }
+        }
+    }
+
+    /// <summary>A read that began at <paramref name="started"/> has the changes made before then.</summary>
+    private void PruneNote(long id, DateTime started)
+    {
+        lock (_gate)
+        {
+            if (_notes.TryGetValue(id, out IndexNote? note))
+            {
+                IndexNote kept = note.Since(started);
+                _notes = kept.IsEmpty ? _notes.Remove(id) : _notes.SetItem(id, kept);
+            }
+        }
+    }
 
     public void Start()
     {
@@ -413,6 +454,7 @@ public sealed class Indexer : IDisposable
 
     private void RunScan(Volume volume, CancellationToken cancel)
     {
+        DateTime started = DateTime.UtcNow;
         SetStatus(volume, VolumeStatus.Scanning, null, problem: null, scannedSoFar: 0);
         // Reported from several reading threads at once: one report at a time, and the count never goes back.
         var progressGate = new object();
@@ -457,6 +499,8 @@ public sealed class Indexer : IDisposable
                 problem = walk.Skipped.Describe();
             }
             SetStatus(volume, VolumeStatus.Online, null, problem, scannedSoFar: null, walk.Index);
+            // After the new list is in place, so nothing the panel changed shows its old state meanwhile.
+            PruneNote(volume.Id, started);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or Microsoft.Data.Sqlite.SqliteException)
         {

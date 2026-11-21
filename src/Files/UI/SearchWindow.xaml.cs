@@ -212,6 +212,8 @@ public partial class SearchWindow : Window
         }
         StopLiveSearch();
         CloseMenus();
+        EndRename();
+        _deleteAsked = null;
         StopPreview();
         // A search typed just before hiding would otherwise finish, and fill the list and read a preview, while hidden.
         // Showing the panel again searches for what is in the box.
@@ -269,6 +271,8 @@ public partial class SearchWindow : Window
     private void OnInputChanged(object sender, TextChangedEventArgs e)
     {
         Placeholder.Visibility = Input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // Typing since a file operation: Ctrl+Z undoes the typing first, as in any text box.
+        _undoFilesFirst = false;
         _typing.Stop();
         StopLiveSearch();
         // A paste, a recalled search or a saved one is complete already, so it searches at once.
@@ -328,16 +332,17 @@ public partial class SearchWindow : Window
 
         var cancel = new CancellationTokenSource();
         _searchCancel = cancel;
+        // With what the panel copied, moved, renamed or deleted since each volume was read (Indexer.Note).
         var volumes = ScopedVolumes()
             .Where(state => state.Index is not null)
-            .Select(state => (state.Volume.Name, Index: state.Index!))
+            .Select(state => (state.Volume.Name, state.Volume.Root, Index: state.Index!, Note: _app.Indexer.NoteFor(state.Volume.Id)))
             .ToList();
         IReadOnlySet<string> hidden = _app.Settings.HiddenExtensionSet;
         SearchResult result;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token), cancel.Token);
+            result = await Task.Run(() => IndexNote.Search(volumes, query, hidden, cancel.Token), cancel.Token);
         }
         catch (OperationCanceledException)
         {
@@ -360,8 +365,13 @@ public partial class SearchWindow : Window
 
     private void ShowResults(SearchResult result)
     {
-        // Keep the same file selected when the rows move.
-        string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
+        // The rows are rebuilt under the rename box, which would then float over another one.
+        EndRename();
+        // A live search's results leave out what the panel moved or deleted too.
+        result = IndexNote.Apply(result, _app.Indexer.Volumes.Select(state => _app.Indexer.NoteFor(state.Volume.Id)).ToList());
+        // Keep the same file selected when the rows move, or select the one just renamed or moved.
+        string? selectedPath = _selectNext ?? (Results.SelectedItem as ResultRow)?.Hit?.Path;
+        _selectNext = null;
         // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled;
         // another chip or volume is another list, which starts at the top.
         string shownFor = $"{Input.Text}\n{_filter}\n{_scope}";
@@ -436,6 +446,11 @@ public partial class SearchWindow : Window
         // Alt chords arrive as Key.System.
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;
         PanelKeys keys = _app.Settings.Shortcuts;
+        if (_renaming is not null)
+        {
+            e.Handled = OnRenameKey(key);
+            return;
+        }
         if (ActionMenu.IsOpen)
         {
             // A shortcut the menu lists beside one of its actions runs that action for the menu's row.
@@ -461,6 +476,10 @@ public partial class SearchWindow : Window
         {
             // Alt chords other than Alt+Down are left to Windows and the menu bar keys.
             return false;
+        }
+        if (OnFileKey(modifiers, key))
+        {
+            return true;
         }
         switch (key)
         {
@@ -531,9 +550,16 @@ public partial class SearchWindow : Window
             case PanelCommand.Favorite:
                 ToggleFavorite(FavoriteFor(SelectedRow));
                 return true;
-            case PanelCommand.CopyPath when Input.SelectionLength == 0 || _selectedOnShow:
+            case PanelCommand.CopyPath when !BoxHasSelection && SelectedHit is not null:
+                // A result goes on the clipboard as the file itself, with its path for pasting as text.
+                PutOnClipboard(cut: false);
+                return true;
+            case PanelCommand.CopyPath when !BoxHasSelection:
                 // The box text is selected only because the panel was shown: the keys copy the path, as the footer says.
                 CopySelected(path: true);
+                return true;
+            case PanelCommand.Rename when SelectedHit is not null:
+                StartRename();
                 return true;
             case PanelCommand.CopyName:
                 CopySelected(path: false);
@@ -563,9 +589,17 @@ public partial class SearchWindow : Window
     /// <summary>A key as the action menu writes it beside an action (RowAction.Gesture), or null for any other.</summary>
     private static string? MenuGesture(PanelKeys keys, ModifierKeys modifiers, Key key)
     {
-        if (key == Key.Delete && modifiers == ModifierKeys.None)
+        string? fixedKeys = (modifiers, key) switch
         {
-            return "Del";
+            (ModifierKeys.None, Key.Delete) => RowActions.DeleteKeys,
+            (ModifierKeys.Control, Key.X) => RowActions.CutKeys,
+            (ModifierKeys.Control, Key.V) => RowActions.PasteKeys,
+            (ModifierKeys.Control, Key.Z) => RowActions.UndoKeys,
+            _ => null,
+        };
+        if (fixedKeys is not null)
+        {
+            return fixedKeys;
         }
         return keys.Find(modifiers, key) is PanelCommand command ? keys.Label(command) : null;
     }

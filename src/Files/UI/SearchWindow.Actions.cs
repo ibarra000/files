@@ -25,7 +25,8 @@ public partial class SearchWindow
         {
             return;
         }
-        IReadOnlyList<RowAction> actions = RowActions.For(row, _app.Settings, _app.Favorites, Input.Text);
+        string? undo = _lastBatch is { CanUndo: true } batch ? FileOpText.UndoLabel(batch) : null;
+        IReadOnlyList<RowAction> actions = RowActions.For(row, _app.Settings, _app.Favorites, Input.Text, ClipboardHasFiles(), undo);
         if (actions.Count == 0)
         {
             return;
@@ -187,6 +188,34 @@ public partial class SearchWindow
                 break;
             case ActionKind.RunSearch when row.Item is Favorite saved:
                 RunSearch(saved.Target);
+                break;
+            default:
+                RunFileAction(action.Kind, row);
+                break;
+        }
+    }
+
+    private void RunFileAction(ActionKind kind, ResultRow row)
+    {
+        switch (kind)
+        {
+            case ActionKind.Copy:
+                PutOnClipboard(cut: false, row);
+                break;
+            case ActionKind.Cut:
+                PutOnClipboard(cut: true, row);
+                break;
+            case ActionKind.Paste:
+                Paste(row);
+                break;
+            case ActionKind.Rename:
+                StartRename(row);
+                break;
+            case ActionKind.Delete:
+                DeleteSelected(permanently: false, row);
+                break;
+            case ActionKind.Undo:
+                UndoLast();
                 break;
         }
     }

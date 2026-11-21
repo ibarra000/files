@@ -56,6 +56,28 @@ public sealed class IndexerTests
     }
 
     [Fact]
+    public async Task What_the_panel_changed_shows_until_the_volume_is_read_again()
+    {
+        using var temp = new TempFolder();
+        string share = Directory.CreateDirectory(Path.Combine(temp.Path, "share")).FullName;
+        string report = Path.Combine(share, "report.pdf");
+        File.WriteAllText(report, "");
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        using var indexer = new Indexer(catalog, Path.Combine(temp.Path, "volumes"), () => new Settings { RescanHours = 0 });
+        indexer.Start();
+        Assert.Null(indexer.Add("share", share));
+        VolumeState read = await WaitFor(indexer, s => s.Index is not null);
+
+        indexer.Note(removed: [report, Path.Combine(temp.Path, "elsewhere.pdf")], added: []);
+        Assert.True(indexer.NoteFor(read.Volume.Id).Hides(report));
+
+        File.Delete(report);
+        indexer.Rescan(read.Volume.Id);
+        await WaitFor(indexer, s => s.Index is { FileCount: 0 });
+        Assert.True(indexer.NoteFor(read.Volume.Id).IsEmpty);
+    }
+
+    [Fact]
     public async Task A_held_indexer_reads_nothing_until_the_hold_is_released()
     {
         using var temp = new TempFolder();
