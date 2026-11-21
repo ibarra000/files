@@ -10,7 +10,8 @@ public sealed record CleanedText(string Text, string? Note);
 /// searched. A line is a regular expression whose matches are taken out, such as
 /// <c>_Page\d+</c> or a drawing stamp. A line <c>pattern => replacement</c> puts the
 /// replacement in their place instead, such as <c>(?&lt;=\d)O(?=\d) => 0</c> for a zero
-/// read as the letter O; <c>$1</c> and the like name the pattern's groups. Each match is
+/// read as the letter O; <c>$1</c> and <c>${name}</c> name the pattern's groups, and any other
+/// <c>$</c> is kept as written. Each match is
 /// limited in time, so a pattern that backtracks badly can never hang the panel.
 /// </summary>
 public sealed class TextCleanup
@@ -24,6 +25,9 @@ public sealed class TextCleanup
     // The first " =>" followed by a space or the end of the line parts a pattern from its replacement,
     // so a pattern can still hold "=>" written without spaces.
     private static readonly Regex Arrow = new(@"^(?<pattern>.*?) =>(?: (?<replacement>.*))?$", RegexOptions.CultureInvariant | RegexOptions.Singleline);
+
+    // A "$" that names no group, which .NET would otherwise read as $$, $&, $_ and the like.
+    private static readonly Regex LoneDollar = new(@"\$(?![\d{])", RegexOptions.CultureInvariant);
 
     private readonly IReadOnlyList<Correction> _corrections;
 
@@ -52,7 +56,8 @@ public sealed class TextCleanup
             }
             Match arrow = Arrow.Match(line);
             string pattern = arrow.Success ? arrow.Groups["pattern"].Value : line;
-            string replacement = arrow.Success ? arrow.Groups["replacement"].Value : "";
+            // "$$" in a .NET replacement writes one "$".
+            string replacement = arrow.Success ? LoneDollar.Replace(arrow.Groups["replacement"].Value, "$$$$") : "";
             try
             {
                 compiled.Add(new Correction(new Regex(pattern, RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, MatchTimeout), replacement));

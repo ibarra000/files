@@ -62,6 +62,13 @@ public sealed class TextCleanupTests
     public void A_replacement_can_use_the_groups_it_matched()
     {
         Assert.Equal("AB-1234", Compile(@"([A-Z]{2})\s*(\d+) => $1-$2").Apply("AB 1234").Text);
+        Assert.Equal("AB-1234", Compile(@"(?<code>[A-Z]{2})\s*(\d+) => ${code}-$1").Apply("AB 1234").Text);
+    }
+
+    [Fact]
+    public void A_dollar_that_names_no_group_is_kept_as_written()
+    {
+        Assert.Equal("100 $ $$ $& $_", Compile("USD => $ $$ $& $_").Apply("100 USD").Text);
     }
 
     [Fact]
