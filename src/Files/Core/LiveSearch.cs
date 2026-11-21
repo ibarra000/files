@@ -283,7 +283,7 @@ public sealed class LiveSearch
     private string? ExactFolder(string root)
     {
         string term = _query.Term.Trim().Trim('\\', '/');
-        bool plain = _query.Mode == MatchMode.Contains && term.Length > 0 && term.IndexOfAny(Path.GetInvalidPathChars()) < 0
+        bool plain = _query.IsPlain && term.Length > 0 && term.IndexOfAny(Path.GetInvalidPathChars()) < 0
             && !Path.IsPathRooted(term) && !term.Split('\\', '/').Contains("..");
         if (!plain)
         {
@@ -335,14 +335,21 @@ public sealed class LiveSearch
         {
             NoteMatchingFolder(volume, relative);
         }
+        // Files outside every path: term are dropped from the results; keeping them would use up the room.
+        bool inPath = _query.PathTerms.Count == 0 || _query.AdmitsPath(lowerRelative)
+            || _query.AdmitsPath(Names.Fold(Path.Join(_volumes[volume].Root, relative)));
+        if (!inPath)
+        {
+            return [];
+        }
         var kept = new List<string>();
         // The batches of one folder are kept one after another by one reader, so this count is not raced.
         int inherited = folderMatches ? _inheritedSoFar[volume].GetValueOrDefault(relative) : 0;
         foreach (string file in files)
         {
             string lower = Names.Fold(file);
-            bool matches = _query.MatchAt(lower, lower.IndexOf(_query.Needle, StringComparison.Ordinal)) >= 0;
-            if (matches || (folderMatches && inherited++ < MaxInheritedPerFolder))
+            bool admitted = _query.AdmitsName(lower);
+            if (admitted && (_query.Match(lower) >= 0 || (folderMatches && inherited++ < MaxInheritedPerFolder)))
             {
                 kept.Add(file);
             }

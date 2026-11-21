@@ -57,6 +57,33 @@ public sealed class LiveSearchTests
     }
 
     [Fact]
+    public async Task A_live_search_understands_the_same_operators()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"2026\plan.pdf");
+        temp.File(@"2026\plan draft.pdf");
+        temp.File(@"2025\quote.xlsx");
+
+        (_, SearchResult result) = await Run("plan|quote !draft", null, ("v", temp.Path));
+
+        Assert.Equal(["plan.pdf", "quote.xlsx"], result.Hits.Select(hit => hit.Name).Order());
+    }
+
+    [Fact]
+    public async Task A_live_search_keeps_only_files_under_the_path_asked_for()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"2026\plan.pdf");
+        temp.File(@"2025\plan.pdf");
+
+        (_, SearchResult result) = await Run("plan path:2026", null, ("v", temp.Path));
+
+        Hit hit = Assert.Single(result.Hits);
+        Assert.Contains("2026", hit.Folder);
+        Assert.Equal(1, result.Matched);
+    }
+
+    [Fact]
     public async Task Files_in_a_matching_folder_come_after_direct_matches()
     {
         using var temp = new TempFolder();
