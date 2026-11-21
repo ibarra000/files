@@ -12,7 +12,7 @@ public sealed record OpenCount(int Count, DateTime LastUtc);
 /// </summary>
 public static class OpenCounts
 {
-    /// <summary>The most files counted; the ones opened longest ago fall off first.</summary>
+    /// <summary>The most files counted; the ones ranked lowest (fewest opens, then longest ago) fall off first.</summary>
     public const int MaxEntries = 500;
 
     public static IReadOnlyDictionary<string, OpenCount> Empty { get; } = new Dictionary<string, OpenCount>(StringComparer.OrdinalIgnoreCase);
@@ -38,7 +38,7 @@ public static class OpenCounts
         return updated;
     }
 
-    public static IReadOnlyDictionary<string, OpenCount> Load(string file)
+    public static IReadOnlyDictionary<string, OpenCount> Load(string file, DateTime nowUtc)
     {
         var counts = new Dictionary<string, OpenCount>(StringComparer.OrdinalIgnoreCase);
         if (!File.Exists(file))
@@ -56,7 +56,11 @@ public static class OpenCounts
                 && parts[2].Trim().Length is > 0 and <= History.MaxEntryLength
                 && parts[2].IndexOfAny(Path.GetInvalidPathChars()) < 0)
             {
-                counts[parts[2].Trim()] = new OpenCount(count, new DateTime(ticks, DateTimeKind.Utc));
+                // A clock set back since would keep a future time on top for good.
+                var read = new OpenCount(count, new DateTime(Math.Min(ticks, nowUtc.Ticks), DateTimeKind.Utc));
+                string path = parts[2].Trim();
+                // Lines that differ only in case are one file, as Record counts it.
+                counts[path] = counts.TryGetValue(path, out OpenCount? seen) ? Add(seen, read) : read;
             }
         }
         return Trim(counts);
@@ -70,6 +74,17 @@ public static class OpenCounts
         AtomicFile.WriteAllText(file, string.Join(Environment.NewLine, lines));
     }
 
+    /// <summary>The order opened files rank in, best first: more opens, then opened more recently.</summary>
+    public static int Compare(OpenCount a, OpenCount b)
+    {
+        int byCount = b.Count.CompareTo(a.Count);
+        return byCount != 0 ? byCount : b.LastUtc.CompareTo(a.LastUtc);
+    }
+
+    private static OpenCount Add(OpenCount a, OpenCount b) =>
+        new((int)Math.Min((long)a.Count + b.Count, int.MaxValue), a.LastUtc > b.LastUtc ? a.LastUtc : b.LastUtc);
+
+    /// <summary>Keeps the <see cref="MaxEntries"/> files that rank highest, so what is dropped is what ranks lowest.</summary>
     private static Dictionary<string, OpenCount> Trim(Dictionary<string, OpenCount> counts)
     {
         if (counts.Count <= MaxEntries)
@@ -77,7 +92,7 @@ public static class OpenCounts
             return counts;
         }
         return counts
-            .OrderByDescending(entry => entry.Value.LastUtc)
+            .Order(Comparer<KeyValuePair<string, OpenCount>>.Create((a, b) => Compare(a.Value, b.Value)))
             .Take(MaxEntries)
             .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
     }

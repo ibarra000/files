@@ -133,7 +133,7 @@ public partial class App : Application
         _textCleanup = cleanup ?? Core.TextCleanup.None;
         History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
         Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
-        OpenCounts = LoadOr(() => Core.OpenCounts.Load(AppPaths.OpenCounts), Core.OpenCounts.Empty);
+        OpenCounts = LoadOr(() => Core.OpenCounts.Load(AppPaths.OpenCounts, DateTime.UtcNow), Core.OpenCounts.Empty);
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
         Catalog catalog;
         try

@@ -255,6 +255,10 @@ public sealed class VolumeIndex
     // The hot loop, kept free of allocations: most searches are one phrase.
     private int SweepChunk(Alternative alternative, Filter filter, TopK top, int lo, int hi)
     {
+        if (alternative.Needle.Length == 1)
+        {
+            return SweepChunkOneLetter(alternative, filter, top, lo, hi);
+        }
         ReadOnlySpan<char> arena = Files.Lower;
         int end = Files.Offsets[hi];
         int position = Files.Offsets[lo];
@@ -267,17 +271,46 @@ public sealed class VolumeIndex
                 break;
             }
             int file = Files.EntryAt(position + found);
-            ReadOnlySpan<char> name = Files.LowerSpan(file);
-            int at = alternative.MatchAt(name, Files.OrigSpan(file), position + found - Files.Offsets[file], out MatchClass kind);
-            if (at >= 0 && filter.Admits(file, name))
+            if (Rank(alternative, filter, top, file, position + found - Files.Offsets[file]))
             {
                 matched++;
-                top.Add(RankKey.Make(false, kind, at, name.Length, file));
             }
             // Each name gives at most its leftmost hit.
             position = Files.Offsets[file + 1];
         }
         return matched;
+    }
+
+    /// <summary>
+    /// One letter is in nearly every name, so the names are walked in order: that skips the
+    /// search for which name each hit falls in.
+    /// </summary>
+    private int SweepChunkOneLetter(Alternative alternative, Filter filter, TopK top, int lo, int hi)
+    {
+        char letter = alternative.Needle[0];
+        int matched = 0;
+        for (int file = lo; file < hi; file++)
+        {
+            int firstHit = Files.LowerSpan(file).IndexOf(letter);
+            if (firstHit >= 0 && Rank(alternative, filter, top, file, firstHit))
+            {
+                matched++;
+            }
+        }
+        return matched;
+    }
+
+    /// <summary>Ranks a file whose name holds the needle at <paramref name="firstHit"/>; false when it does not match or is filtered out.</summary>
+    private bool Rank(Alternative alternative, Filter filter, TopK top, int file, int firstHit)
+    {
+        ReadOnlySpan<char> name = Files.LowerSpan(file);
+        int at = alternative.MatchAt(name, Files.OrigSpan(file), firstHit, out MatchClass kind);
+        if (at < 0 || !filter.Admits(file, name))
+        {
+            return false;
+        }
+        top.Add(RankKey.Make(false, kind, at, name.Length, file));
+        return true;
     }
 
     /// <summary>A search with several alternatives: each name is ranked once, by the alternative that matches earliest.</summary>
@@ -350,7 +383,7 @@ public sealed class VolumeIndex
                 matched++;
                 if (added++ < MaxFilesPerFolder)
                 {
-                    top.Add(RankKey.Make(true, at, name.Length, file));
+                    top.Add(RankKey.Make(true, MatchClass.Anywhere, at, name.Length, file));
                 }
             }
         }

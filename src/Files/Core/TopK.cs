@@ -18,9 +18,6 @@ public static class RankKey
     private const uint MaxPosition = 0x1FFF;
     private const uint MaxLength = 0xFFFF;
 
-    public static ulong Make(bool inherited, int position, int length, int file) =>
-        Make(inherited, MatchClass.Whole, position, length, file);
-
     public static ulong Make(bool inherited, MatchClass kind, int position, int length, int file)
     {
         ulong key = (ulong)kind << ClassShift

@@ -112,7 +112,6 @@ public static class Searcher
         {
             return a is null == b is null ? 0 : a is null ? 1 : -1;
         }
-        int byCount = b.Count.CompareTo(a.Count);
-        return byCount != 0 ? byCount : b.LastUtc.CompareTo(a.LastUtc);
+        return OpenCounts.Compare(a, b);
     }
 }

@@ -21,7 +21,7 @@ public enum MatchMode
 /// <summary>How well a name matches, best first; results are ranked by it before anything else.</summary>
 public enum MatchClass
 {
-    /// <summary>The phrase is the whole name, or all of it before the extension.</summary>
+    /// <summary>The phrase is the whole name, or all of it before the extension (or extensions, as in <c>.tar.gz</c>).</summary>
     Whole,
 
     /// <summary>The name starts with the phrase.</summary>
@@ -80,8 +80,8 @@ public sealed record Alternative(string Term, MatchMode Mode, string? RawPattern
         }
         if (at == 0)
         {
-            int dot = lowerName.LastIndexOf('.');
-            bool whole = lowerName.Length == Needle.Length || dot == Needle.Length;
+            // Everything after the first dot counts as the extension, so "invoice.tar.gz" is all "invoice".
+            bool whole = lowerName.Length == Needle.Length || lowerName[Needle.Length] == '.';
             kind = whole ? MatchClass.Whole : MatchClass.Start;
             return 0;
         }
