@@ -18,6 +18,22 @@ public enum MatchMode
     Pattern,
 }
 
+/// <summary>How well a name matches, best first; results are ranked by it before anything else.</summary>
+public enum MatchClass
+{
+    /// <summary>The phrase is the whole name, or all of it before the extension.</summary>
+    Whole,
+
+    /// <summary>The name starts with the phrase.</summary>
+    Start,
+
+    /// <summary>The phrase starts a word inside the name ("2026 invoice", "MyInvoice", "2026inv").</summary>
+    WordStart,
+
+    /// <summary>Anywhere else, or a wildcard pattern.</summary>
+    Anywhere,
+}
+
 /// <summary>One of the phrases a search finds, the parts of the line between <c>|</c>.</summary>
 /// <param name="RawPattern">A pattern as parsed, where quoted <c>* ?</c> are still characters no name has, so they never act as wildcards.</param>
 public sealed record Alternative(string Term, MatchMode Mode, string? RawPattern = null)
@@ -47,6 +63,54 @@ public sealed record Alternative(string Term, MatchMode Mode, string? RawPattern
             default:
                 return firstHit;
         }
+    }
+
+    /// <summary>
+    /// The same, also saying how good the match is (<see cref="MatchClass"/>). A match in the middle of
+    /// a word moves to a later one at a word start when the name has one. <paramref name="name"/> is the
+    /// name as spelled, for the capital that starts a word in <c>MyInvoice</c>.
+    /// </summary>
+    public int MatchAt(ReadOnlySpan<char> lowerName, ReadOnlySpan<char> name, int firstHit, out MatchClass kind)
+    {
+        int at = MatchAt(lowerName, firstHit);
+        kind = MatchClass.Anywhere;
+        if (at < 0 || Mode == MatchMode.Pattern)
+        {
+            return at;
+        }
+        if (at == 0)
+        {
+            int dot = lowerName.LastIndexOf('.');
+            bool whole = lowerName.Length == Needle.Length || dot == Needle.Length;
+            kind = whole ? MatchClass.Whole : MatchClass.Start;
+            return 0;
+        }
+        // One letter matches nearly every name, often several times: telling word starts apart is not worth the time.
+        for (int hit = at; hit >= 0 && Needle.Length > 1;)
+        {
+            if (StartsWord(lowerName, name, hit))
+            {
+                kind = MatchClass.WordStart;
+                return hit;
+            }
+            if (Mode != MatchMode.Contains)
+            {
+                break;
+            }
+            int next = lowerName[(hit + 1)..].IndexOf(Needle, StringComparison.Ordinal);
+            hit = next < 0 ? -1 : hit + 1 + next;
+        }
+        return at;
+    }
+
+    /// <summary>A word starts after a character that is not a letter or digit, where letters and digits meet, and at a capital after a small letter.</summary>
+    private static bool StartsWord(ReadOnlySpan<char> lowerName, ReadOnlySpan<char> name, int at)
+    {
+        char before = lowerName[at - 1];
+        char first = lowerName[at];
+        return !char.IsLetterOrDigit(before)
+            || char.IsDigit(before) != char.IsDigit(first)
+            || (char.IsLower(name[at - 1]) && char.IsUpper(name[at]));
     }
 
     private static string LongestLiteral(string pattern) =>
@@ -293,6 +357,28 @@ public sealed record Query(IReadOnlyList<Alternative> Alternatives, IReadOnlySet
             text = text.Replace(QuotedOperators[i], Operators[i]);
         }
         return text;
+    }
+
+    /// <summary>
+    /// Where the best alternative matches, ranked by <see cref="MatchClass"/> and then by how early, or -1.
+    /// <paramref name="name"/> is the name as spelled; <paramref name="length"/> is how much to highlight.
+    /// </summary>
+    public int Rank(ReadOnlySpan<char> lowerName, ReadOnlySpan<char> name, out int length, out MatchClass kind)
+    {
+        int best = -1;
+        length = 0;
+        kind = MatchClass.Anywhere;
+        foreach (Alternative alternative in _alternatives)
+        {
+            int at = alternative.MatchAt(lowerName, name, lowerName.IndexOf(alternative.Needle, StringComparison.Ordinal), out MatchClass how);
+            if (at >= 0 && (best < 0 || how < kind || (how == kind && at < best)))
+            {
+                best = at;
+                kind = how;
+                length = alternative.Needle.Length;
+            }
+        }
+        return best;
     }
 
     /// <summary>Where the best alternative matches <paramref name="lowerName"/> (the leftmost), or -1; <paramref name="length"/> is how much to highlight.</summary>

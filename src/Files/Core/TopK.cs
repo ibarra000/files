@@ -4,7 +4,8 @@ namespace Files.Core;
 /// Ranking keys, packed into one ulong where lower is better:
 /// <code>
 /// bit  63      0 = the name matched, 1 = its folder did
-/// bits 62..48  match position within the name   (earlier wins)
+/// bits 62..61  how well it matched (MatchClass)  (whole name, start, word start, anywhere)
+/// bits 60..48  match position within the name   (earlier wins)
 /// bits 47..32  name length                      (shorter wins)
 /// bits 31..0   file ordinal                     (keeps keys unique)
 /// </code>
@@ -13,16 +14,24 @@ namespace Files.Core;
 public static class RankKey
 {
     private const ulong InheritedBit = 1UL << 63;
-    private const uint MaxPosition = 0x7FFF;
+    private const int ClassShift = 61;
+    private const uint MaxPosition = 0x1FFF;
     private const uint MaxLength = 0xFFFF;
 
-    public static ulong Make(bool inherited, int position, int length, int file)
+    public static ulong Make(bool inherited, int position, int length, int file) =>
+        Make(inherited, MatchClass.Whole, position, length, file);
+
+    public static ulong Make(bool inherited, MatchClass kind, int position, int length, int file)
     {
-        ulong key = (ulong)Math.Min((uint)position, MaxPosition) << 48
+        ulong key = (ulong)kind << ClassShift
+            | (ulong)Math.Min((uint)position, MaxPosition) << 48
             | (ulong)Math.Min((uint)length, MaxLength) << 32
             | (uint)file;
         return inherited ? key | InheritedBit : key;
     }
+
+    /// <summary>Whether the name matched and how well: the part of the key ranked before anything else.</summary>
+    public static int Tier(ulong key) => (int)(key >> ClassShift);
 
     public static bool IsInherited(ulong key) => (key & InheritedBit) != 0;
 

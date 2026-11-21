@@ -374,17 +374,31 @@
 
                         <TextBlock Text="RESULTS" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
-                            <Grid Style="{StaticResource SettingRow}">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <StackPanel VerticalAlignment="Center">
-                                    <TextBlock Text="Show folder on a second line" Style="{StaticResource RowLabel}" />
-                                    <TextBlock Text="When off, the folder follows the file name." Style="{StaticResource RowDescription}" />
-                                </StackPanel>
-                                <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show folder on a second line" Click="OnChanged" />
-                            </Grid>
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Show folder on a second line" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="When off, the folder follows the file name." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show folder on a second line" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Rank files I open higher" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Files opened from the panel come first among results that match as well. Clearing Recently opened forgets them." Style="{StaticResource RowDescription}" />
+                                    </StackPanel>
+                                    <CheckBox x:Name="RankOpenedBox" Grid.Column="1" AutomationProperties.Name="Rank files I open higher" Click="OnChanged" />
+                                </Grid>
+                            </StackPanel>
                         </Border>
                     </StackPanel>
 

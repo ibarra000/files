@@ -323,11 +323,12 @@ public partial class SearchWindow : Window
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
         IReadOnlySet<string> hidden = _app.Settings.HiddenExtensionSet;
+        IReadOnlyDictionary<string, OpenCount>? opened = _app.Settings.RankOpenedHigher ? _app.OpenCounts : null;
         SearchResult result;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token), cancel.Token);
+            result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token, opened), cancel.Token);
         }
         catch (OperationCanceledException)
         {

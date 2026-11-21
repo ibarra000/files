@@ -62,6 +62,9 @@ public sealed record Settings
     /// <summary>Shows each result's folder on a second line; off keeps one line per result, the folder on hover.</summary>
     public bool ShowFolders { get; init; } = true;
 
+    /// <summary>Files opened from the panel rank first among results that match as well (Core/OpenCounts.cs); off also stops counting.</summary>
+    public bool RankOpenedHigher { get; init; } = true;
+
     /// <summary>The preview pane beside the results (Ctrl+P); the window is that much wider while it shows.</summary>
     public bool ShowPreview { get; init; }
 

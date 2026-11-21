@@ -48,6 +48,9 @@ public partial class App : Application
     /// <summary>Files opened or shown in their folder, newest first.</summary>
     public IReadOnlyList<string> Opened { get; private set; } = [];
 
+    /// <summary>How often and when each file was opened from the panel, which ranks it higher.</summary>
+    public IReadOnlyDictionary<string, Core.OpenCount> OpenCounts { get; private set; } = Core.OpenCounts.Empty;
+
     public IReadOnlyList<Favorite> Favorites { get; private set; } = [];
 
     /// <summary>The newer release found by the last check, if any.</summary>
@@ -130,6 +133,7 @@ public partial class App : Application
         _textCleanup = cleanup ?? Core.TextCleanup.None;
         History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
         Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
+        OpenCounts = LoadOr(() => Core.OpenCounts.Load(AppPaths.OpenCounts), Core.OpenCounts.Empty);
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
         Catalog catalog;
         try
@@ -347,6 +351,11 @@ public partial class App : Application
             Opened = opened;
             SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
         }
+        if (Settings.RankOpenedHigher)
+        {
+            OpenCounts = Core.OpenCounts.Record(OpenCounts, path, DateTime.UtcNow);
+            SaveInBackground(() => Core.OpenCounts.Save(AppPaths.OpenCounts, OpenCounts));
+        }
     }
 
     /// <summary>Adds the favorite, or removes it if it is one already. Returns whether it is a favorite now.</summary>
@@ -550,6 +559,12 @@ public partial class App : Application
             Opened = opened;
             SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
         }
+        IReadOnlyDictionary<string, Core.OpenCount> counts = Core.OpenCounts.Remove(OpenCounts, path);
+        if (!ReferenceEquals(counts, OpenCounts))
+        {
+            OpenCounts = counts;
+            SaveInBackground(() => Core.OpenCounts.Save(AppPaths.OpenCounts, OpenCounts));
+        }
     }
 
     /// <summary>Forgets the recently opened files. Favorites are kept.</summary>
@@ -557,6 +572,8 @@ public partial class App : Application
     {
         Opened = [];
         SaveInBackground(() => Core.History.Save(AppPaths.Opened, Opened));
+        OpenCounts = Core.OpenCounts.Empty;
+        SaveInBackground(() => Core.OpenCounts.Save(AppPaths.OpenCounts, OpenCounts));
     }
 
     private static void DeleteFolder(string path)
@@ -567,7 +584,10 @@ public partial class App : Application
         }
     }
 
-    private static IReadOnlyList<T> LoadOrEmpty<T>(Func<IReadOnlyList<T>> load)
+    private static IReadOnlyList<T> LoadOrEmpty<T>(Func<IReadOnlyList<T>> load) => LoadOr(load, []);
+
+    /// <summary>What <paramref name="load"/> reads, or <paramref name="fallback"/> when the file cannot be read.</summary>
+    private static T LoadOr<T>(Func<T> load, T fallback)
     {
         try
         {
@@ -576,7 +596,7 @@ public partial class App : Application
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             System.Diagnostics.Trace.WriteLine($"not loaded: {error.Message}");
-            return [];
+            return fallback;
         }
     }
 
