@@ -117,6 +117,23 @@
                             </StackPanel>
                         </Border>
 
+                        <TextBlock Text="PANEL SHORTCUTS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Click a box and press keys. Backspace restores one; arrows, Enter, Esc, Tab and text editing keep their keys."
+                                               TextWrapping="Wrap" Margin="0,0,16,0" VerticalAlignment="Center" Style="{StaticResource RowDescription}" />
+                                    <Button Grid.Column="1" Content="Restore defaults" Style="{StaticResource ControlButton}" Click="OnRestorePanelKeys" />
+                                </Grid>
+                                <!-- One row per command (Services/PanelKeys.cs), added in SettingsWindow.FillPanelKeys. -->
+                                <StackPanel x:Name="PanelKeysList" />
+                            </StackPanel>
+                        </Border>
+
                         <TextBlock Text="TEXT RECOGNITION" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>

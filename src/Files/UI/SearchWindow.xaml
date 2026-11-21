@@ -149,7 +149,7 @@
                         </Grid.ColumnDefinitions>
                         <Button Content="Open" Style="{StaticResource AccentButton}" Click="OnPreviewOpen" />
                         <Button Grid.Column="2" Content="Show in folder" Style="{StaticResource ControlButton}" Click="OnPreviewReveal" />
-                        <Button Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
+                        <Button x:Name="PreviewCopyButton" Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
                                 AutomationProperties.Name="Copy path" Click="OnPreviewCopy">
                             <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13" />
                         </Button>
