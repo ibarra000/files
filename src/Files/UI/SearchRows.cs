@@ -12,9 +12,9 @@ public static class SearchRows
     public const int FoldersShown = 5;
 
     /// <param name="filter">Files leaves folders out; Folders lists every folder found and no files.</param>
-    /// <param name="stale">By volume name, the mark for results from a volume that cannot be reached (<see cref="StatusText.Stale"/>).</param>
+    /// <param name="stale">The mark for a result whose volume cannot be reached (<see cref="StatusText.Stale"/>), or null.</param>
     public static List<ResultRow> Build(SearchResult result, bool showVolume, SearchFilter filter = SearchFilter.All,
-        IReadOnlyDictionary<string, string>? stale = null)
+        Func<Hit, string?>? stale = null)
     {
         var rows = new List<ResultRow>();
         IReadOnlyList<Hit> allFiles = filter == SearchFilter.Folders ? [] : result.Hits;
@@ -35,11 +35,11 @@ public static class SearchRows
         return rows;
     }
 
-    private static ResultRow Row(Hit hit, bool showVolume, IReadOnlyDictionary<string, string>? stale) =>
-        ResultRow.ForHit(hit, showVolume, stale?.GetValueOrDefault(hit.Volume));
+    private static ResultRow Row(Hit hit, bool showVolume, Func<Hit, string?>? stale) =>
+        ResultRow.ForHit(hit, showVolume, stale?.Invoke(hit));
 
     private static void AddGroup(List<ResultRow> rows, string title, IEnumerable<Hit> hits, bool showVolume,
-        IReadOnlyDictionary<string, string>? stale)
+        Func<Hit, string?>? stale)
     {
         List<ResultRow> group = hits.Select(hit => Row(hit, showVolume, stale)).ToList();
         if (group.Count == 0)

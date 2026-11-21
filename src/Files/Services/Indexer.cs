@@ -10,7 +10,23 @@ namespace Files.Services;
 /// <param name="Index">The last good index, kept while a rescan runs or fails.</param>
 /// <param name="ScannedSoFar">Files read by the scan in progress, if any.</param>
 /// <param name="Problem">Why the last scan failed, in words, or null.</param>
-public sealed record VolumeState(Volume Volume, VolumeIndex? Index, int? ScannedSoFar, string? Problem);
+/// <param name="Queued">A read is asked for and waits for a free slot or a live search to end.</param>
+/// <remarks>While it is read, <see cref="Volume.Status"/> keeps what the last read found; only the catalog says Scanning.</remarks>
+public sealed record VolumeState(Volume Volume, VolumeIndex? Index, int? ScannedSoFar, string? Problem, bool Queued = false);
+
+/// <summary>Where a volume is in its reads, from <see cref="Indexer.PhaseOf"/>.</summary>
+public enum VolumePhase
+{
+    LiveOnly,
+    NeverRead,
+    Queued,
+    Reading,
+    Online,
+    Offline,
+
+    /// <summary>The app closed during a read, so its last result is unknown.</summary>
+    Interrupted,
+}
 
 /// <summary>
 /// Keeps every volume's index in memory: loads the shards at start-up, then
@@ -236,9 +252,12 @@ public sealed class Indexer : IDisposable
                     _states = _states.Remove(id);
                     _removed.Add(id);
                 }
+                // Renamed only: applied to the state now, not the one read above, so a read meanwhile
+                // keeps its result; the status stays, since the catalog says Scanning during a read.
+                VolumeState now = _states.GetValueOrDefault(id, state);
                 _states = _states.SetItem(edited.Id, dropList
                     ? new VolumeState(edited, null, null, null)
-                    : state with { Volume = edited });
+                    : now with { Volume = now.Volume with { Name = edited.Name, LiveOnly = edited.LiveOnly } });
             }
             if (dropList)
             {
@@ -324,13 +343,8 @@ public sealed class Indexer : IDisposable
             // Added while start-up was loading, and already being read.
             return;
         }
+        // Still Scanning when the app closed during a read: Interrupted, and read again at once.
         Volume volume = stored;
-        if (volume.Status == VolumeStatus.Scanning)
-        {
-            // Left over from a run that ended mid-scan.
-            _catalog.SetStatus(volume.Id, VolumeStatus.Offline, volume.LastError);
-            volume = volume with { Status = VolumeStatus.Offline };
-        }
         VolumeIndex? index = null;
         string? problem = null;
         try
@@ -362,30 +376,54 @@ public sealed class Indexer : IDisposable
     public DateTime? NextScanFor(VolumeState state) =>
         NextScan(state, _settings().RescanHours, _retryAt.TryGetValue(state.Volume.Id, out DateTime retry) ? retry : null);
 
-    /// <summary>
-    /// The schedule <see cref="ScanDue"/> follows: a volume with no list is due at once, else
-    /// <paramref name="rescanHours"/> after its last read (never when 0); a failed read waits for its retry.
-    /// </summary>
-    public static DateTime? NextScan(VolumeState state, int rescanHours, DateTime? retryAt)
+    public static VolumePhase PhaseOf(VolumeState state)
     {
         if (state.Volume.LiveOnly)
         {
-            return null;
+            return VolumePhase.LiveOnly;
         }
-        DateTime? due;
+        if (state.ScannedSoFar is not null)
+        {
+            return VolumePhase.Reading;
+        }
+        if (state.Queued)
+        {
+            return VolumePhase.Queued;
+        }
         if (state.Index is null)
         {
-            due = DateTime.MinValue;
+            return VolumePhase.NeverRead;
         }
-        else if (rescanHours <= 0)
+        return state.Volume.Status switch
         {
-            due = null;
-        }
-        else
+            VolumeStatus.Online => VolumePhase.Online,
+            VolumeStatus.Offline => VolumePhase.Offline,
+            _ => VolumePhase.Interrupted,
+        };
+    }
+
+    /// <summary>
+    /// The schedule <see cref="ScanDue"/> follows: an online volume is read <paramref name="rescanHours"/>
+    /// after its last read (never when 0); any other is due at once. A failed read waits for its retry.
+    /// </summary>
+    public static DateTime? NextScan(VolumeState state, int rescanHours, DateTime? retryAt)
+    {
+        VolumePhase phase = PhaseOf(state);
+        if (phase == VolumePhase.LiveOnly)
         {
-            due = state.Volume.LastScannedAt is DateTime last ? last.AddHours(rescanHours) : DateTime.MinValue;
+            return null;
         }
-        return due is DateTime when && retryAt is DateTime retry && retry > when ? retry : due;
+        if (phase == VolumePhase.Online && rescanHours <= 0)
+        {
+            // Only F5 reads it, unless its last read stopped and waits for a retry.
+            return retryAt;
+        }
+        DateTime due = DateTime.MinValue;
+        if (phase == VolumePhase.Online && state.Volume.LastScannedAt is DateTime last)
+        {
+            due = last.AddHours(rescanHours);
+        }
+        return retryAt is DateTime retry && retry > due ? retry : due;
     }
 
     private void Scan(Volume volume)
@@ -399,6 +437,7 @@ public sealed class Indexer : IDisposable
         {
             return;
         }
+        Update(volume.Id, state => state with { Queued = true });
         Task.Run(async () =>
         {
             try
@@ -417,13 +456,13 @@ public sealed class Indexer : IDisposable
             catch (OperationCanceledException)
             {
                 // Removed or shutting down; a volume still listed must not stay "Scanning…".
-                Update(volume.Id, state => state with { ScannedSoFar = null });
+                Update(volume.Id, state => state with { ScannedSoFar = null, Queued = false });
             }
             catch (Exception error)
             {
                 // Nothing awaits this task, so whatever went wrong is shown on the volume instead.
                 _retryAt[volume.Id] = DateTime.UtcNow + RetryAfterFailure;
-                Update(volume.Id, state => state with { ScannedSoFar = null, Problem = $"Reading stopped: {error.Message}" });
+                Update(volume.Id, state => state with { ScannedSoFar = null, Queued = false, Problem = $"Reading stopped: {error.Message}" });
             }
             finally
             {
@@ -436,7 +475,7 @@ public sealed class Indexer : IDisposable
 
     private void RunScan(Volume volume, CancellationToken cancel)
     {
-        SetStatus(volume, VolumeStatus.Scanning, null, problem: null, scannedSoFar: 0);
+        StartReading(volume);
         // Reported from several reading threads at once: one report at a time, and the count never goes back.
         var progressGate = new object();
         DateTime lastReport = DateTime.MinValue;
@@ -486,6 +525,22 @@ public sealed class Indexer : IDisposable
             _retryAt[volume.Id] = DateTime.UtcNow + RetryAfterFailure;
             SetStatus(volume, VolumeStatus.Offline, Classify(volume.Root, error), error.Message, scannedSoFar: null);
         }
+    }
+
+    /// <summary>
+    /// Only the catalog says Scanning, so a read the app closed during is seen at the next start.
+    /// In memory the volume keeps its last status, so an offline one stays marked while it is tried again.
+    /// </summary>
+    private void StartReading(Volume volume)
+    {
+        if (!_states.TryGetValue(volume.Id, out VolumeState? now) || now.Volume.Uid != volume.Uid)
+        {
+            return;
+        }
+        _catalog.SetStatus(volume.Id, VolumeStatus.Scanning, null);
+        Update(volume.Id, state => state.Volume.Uid != volume.Uid
+            ? state
+            : state with { ScannedSoFar = 0, Problem = null, Queued = false });
     }
 
     /// <summary>Records what a read of <paramref name="volume"/> found, unless that volume was removed or moved meanwhile.</summary>

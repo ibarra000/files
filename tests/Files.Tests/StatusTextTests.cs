@@ -179,11 +179,31 @@ public sealed class StatusTextTests
     }
 
     [Fact]
-    public void Results_from_an_unreachable_volume_say_how_old_their_list_is()
+    public void Results_from_an_unreachable_volume_say_when_their_list_was_read()
     {
-        VolumeState offline = Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone", DateTime.UtcNow.AddHours(-3).AddMinutes(-5));
-        Assert.Equal("offline · list from 3 h ago", StatusText.Stale(offline));
+        var listed = new DateTime(2026, 11, 21, 9, 0, 0, DateTimeKind.Utc);
+        VolumeState offline = Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone", listed);
+        Assert.Equal($"offline · list from {listed.ToLocalTime():d MMM HH:mm}", StatusText.Stale(offline));
         Assert.Null(StatusText.Stale(Read(VolumeStatus.Online)));
+    }
+
+    [Fact]
+    public void An_unreachable_volume_keeps_its_mark_while_it_is_tried_again()
+    {
+        VolumeState offline = Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone", DateTime.UtcNow.AddHours(-3));
+        string? mark = StatusText.Stale(offline);
+        Assert.NotNull(mark);
+        Assert.Equal(mark, StatusText.Stale(offline with { Queued = true }));
+        Assert.Equal(mark, StatusText.Stale(offline with { ScannedSoFar = 40 }));
+    }
+
+    [Fact]
+    public void A_read_cut_off_when_the_app_closed_is_not_marked_offline()
+    {
+        VolumeState interrupted = Read(VolumeStatus.Scanning);
+        Assert.Null(StatusText.Stale(interrupted));
+        Assert.Equal("Interrupted", StatusText.Describe(interrupted));
+        Assert.Equal("Waiting to be read", StatusText.Describe(interrupted with { Queued = true }));
     }
 
     [Fact]

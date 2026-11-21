@@ -274,13 +274,16 @@ public static class StatusText
     /// <summary>A volume's state in a few words, the same in the panel's volume menu and on the Volumes page in Settings.</summary>
     public static string Describe(VolumeState state)
     {
-        if (state.Volume.LiveOnly)
+        switch (Indexer.PhaseOf(state))
         {
-            return "Live search only";
-        }
-        if (state.ScannedSoFar is int read)
-        {
-            return $"Scanning… {read:N0} files";
+            case VolumePhase.LiveOnly:
+                return "Live search only";
+            case VolumePhase.Queued:
+                return "Waiting to be read";
+            case VolumePhase.Reading:
+                return $"Scanning… {state.ScannedSoFar:N0} files";
+            case VolumePhase.Interrupted:
+                return "Interrupted";
         }
         string? error = state.Volume.LastError switch
         {
@@ -304,11 +307,20 @@ public static class StatusText
         return state.Index is null ? "Never read" : "Online";
     }
 
-    /// <summary>The mark on results whose volume cannot be reached, so the list they come from may be out of date; null otherwise.</summary>
+    /// <summary>
+    /// The mark on results whose volume cannot be reached, so the list they come from may be out of date; null otherwise.
+    /// It stays while the volume is tried again, and names a date, so it does not change until a read succeeds.
+    /// </summary>
     public static string? Stale(VolumeState state)
     {
-        bool fromSavedList = state.Index is not null && !state.Volume.LiveOnly && state.ScannedSoFar is null;
-        return fromSavedList && state.Volume.Status == VolumeStatus.Offline ? $"offline · list from {Age(state.Volume.LastScannedAt)}" : null;
+        bool offline = state.Index is not null && state.Volume.Status == VolumeStatus.Offline;
+        bool fromSavedList = Indexer.PhaseOf(state) is VolumePhase.Offline or VolumePhase.Queued or VolumePhase.Reading;
+        if (!offline || !fromSavedList)
+        {
+            return null;
+        }
+        string listed = state.Volume.LastScannedAt is DateTime when ? $"{when.ToLocalTime():d MMM HH:mm}" : "never";
+        return $"offline · list from {listed}";
     }
 
     /// <summary>A volume's state, when it was read and when it is read next: its second line in the volume menu.</summary>
@@ -316,7 +328,7 @@ public static class StatusText
     public static string MenuLine(VolumeState state, DateTime? next)
     {
         string described = Describe(state);
-        if (state.Volume.LiveOnly || state.ScannedSoFar is not null)
+        if (Indexer.PhaseOf(state) is VolumePhase.LiveOnly or VolumePhase.Queued or VolumePhase.Reading)
         {
             return described;
         }

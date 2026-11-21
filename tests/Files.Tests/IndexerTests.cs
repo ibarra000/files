@@ -196,9 +196,65 @@ public sealed class IndexerTests
         Assert.Contains(indexer.Volumes, state => state.Volume.Id == moved.Volume.Id && state.Volume.Root == to);
     }
 
-    private static VolumeState Scheduled(DateTime? lastRead, bool read = true, bool liveOnly = false) =>
-        new(new Volume(1, Guid.NewGuid(), @"C:\v", "folder", "v", VolumeStatus.Online, null, lastRead, liveOnly),
+    [Fact]
+    public async Task A_read_cut_off_when_the_app_closed_is_read_again_at_the_next_start()
+    {
+        using var temp = new TempFolder();
+        string share = Directory.CreateDirectory(Path.Combine(temp.Path, "share")).FullName;
+        File.WriteAllText(Path.Combine(share, "report.pdf"), "");
+        Catalog catalog = Catalog.Open(Path.Combine(temp.Path, "catalog.db"));
+        string shards = Path.Combine(temp.Path, "volumes");
+        using (var indexer = new Indexer(catalog, shards, () => new Settings { RescanHours = 0 }))
+        {
+            indexer.Start();
+            Assert.Null(indexer.Add("share", share));
+            await WaitFor(indexer, s => s.Index is not null);
+        }
+        // The app closed while reading the share again.
+        File.WriteAllText(Path.Combine(share, "AB-C-0704.pdf"), "");
+        catalog.SetStatus(Assert.Single(catalog.All()).Id, VolumeStatus.Scanning, null);
+
+        using var restarted = new Indexer(catalog, shards, () => new Settings { RescanHours = 0 });
+        restarted.Start();
+        VolumeState read = await WaitFor(restarted, s => s.Index?.FileCount == 2);
+        Assert.Equal(VolumeStatus.Online, read.Volume.Status);
+    }
+
+    private static VolumeState Scheduled(DateTime? lastRead, bool read = true, bool liveOnly = false, VolumeStatus status = VolumeStatus.Online) =>
+        new(new Volume(1, Guid.NewGuid(), @"C:\v", "folder", "v", status, null, lastRead, liveOnly),
             read ? SearchTests.Index(@"C:\v") : null, null, null);
+
+    [Fact]
+    public void Each_volume_state_is_one_phase()
+    {
+        VolumeState online = Scheduled(DateTime.UtcNow);
+        Assert.Equal(VolumePhase.Online, Indexer.PhaseOf(online));
+        Assert.Equal(VolumePhase.Offline, Indexer.PhaseOf(Scheduled(DateTime.UtcNow, status: VolumeStatus.Offline)));
+        Assert.Equal(VolumePhase.Interrupted, Indexer.PhaseOf(Scheduled(DateTime.UtcNow, status: VolumeStatus.Scanning)));
+        Assert.Equal(VolumePhase.NeverRead, Indexer.PhaseOf(Scheduled(null, read: false)));
+        Assert.Equal(VolumePhase.Queued, Indexer.PhaseOf(online with { Queued = true }));
+        Assert.Equal(VolumePhase.Reading, Indexer.PhaseOf(online with { ScannedSoFar = 0 }));
+        Assert.Equal(VolumePhase.LiveOnly, Indexer.PhaseOf(Scheduled(null, read: false, liveOnly: true)));
+    }
+
+    [Fact]
+    public void A_read_cut_off_when_the_app_closed_is_due_now_even_when_only_F5_reads()
+    {
+        VolumeState interrupted = Scheduled(DateTime.UtcNow, status: VolumeStatus.Scanning);
+        Assert.Equal(DateTime.MinValue, Indexer.NextScan(interrupted, rescanHours: 0, retryAt: null));
+    }
+
+    [Fact]
+    public void An_offline_volume_is_retried_even_when_only_F5_reads()
+    {
+        VolumeState offline = Scheduled(DateTime.UtcNow.AddHours(-3), status: VolumeStatus.Offline);
+        DateTime retry = DateTime.UtcNow.AddMinutes(5);
+        Assert.Equal(retry, Indexer.NextScan(offline, rescanHours: 0, retryAt: retry));
+        // Offline when the app last closed: tried again at once.
+        Assert.Equal(DateTime.MinValue, Indexer.NextScan(offline, rescanHours: 0, retryAt: null));
+        // An online volume whose read stopped is tried again too.
+        Assert.Equal(retry, Indexer.NextScan(Scheduled(DateTime.UtcNow), rescanHours: 0, retryAt: retry));
+    }
 
     [Fact]
     public void The_next_read_comes_the_set_hours_after_the_last()

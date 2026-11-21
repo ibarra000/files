@@ -348,31 +348,38 @@ public partial class SearchWindow : Window
         ShowResults(result);
     }
 
-    /// <summary>The marks on the rows on screen, so a volume going offline or coming back redraws them.</summary>
-    private Dictionary<string, string>? _shownStale;
+    /// <summary>By volume id, the marks on the rows on screen, so a volume going offline or coming back redraws them.</summary>
+    private Dictionary<long, string>? _shownStale;
 
     private bool StaleMarksChanged(IReadOnlyList<VolumeState> volumes)
     {
-        Dictionary<string, string>? now = StaleMarks(volumes);
+        Dictionary<long, string>? now = StaleMarks(volumes);
         return now?.Count != _shownStale?.Count || (now is not null && now.Any(mark => _shownStale!.GetValueOrDefault(mark.Key) != mark.Value));
     }
 
-    /// <summary>The mark for results from each volume that cannot be reached; none after a live search, which read them just now.</summary>
-    private Dictionary<string, string>? StaleMarks(IReadOnlyList<VolumeState> volumes)
+    /// <summary>By volume id, the mark for results from each volume that cannot be reached; none after a live search, which read them just now.</summary>
+    private Dictionary<long, string>? StaleMarks(IReadOnlyList<VolumeState> volumes)
     {
         if (_live is not null)
         {
             return null;
         }
-        var marks = new Dictionary<string, string>();
+        var marks = new Dictionary<long, string>();
         foreach (VolumeState state in volumes)
         {
             if (StatusText.Stale(state) is string mark)
             {
-                marks.TryAdd(state.Volume.Name, mark);
+                marks.Add(state.Volume.Id, mark);
             }
         }
         return marks;
+    }
+
+    /// <summary>The mark for a result, found by the list it came from, since two volumes may share a name.</summary>
+    private static string? StaleMark(Hit hit, IReadOnlyList<VolumeState> volumes, Dictionary<long, string>? marks)
+    {
+        VolumeState? from = volumes.FirstOrDefault(state => ReferenceEquals(state.Index, hit.Index));
+        return from is null ? null : marks?.GetValueOrDefault(from.Volume.Id);
     }
 
     private void ShowResults(SearchResult result)
@@ -388,8 +395,9 @@ public partial class SearchWindow : Window
         _result = result;
         IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
         bool showVolume = volumes.Count > 1;
-        _shownStale = StaleMarks(volumes);
-        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter, _shownStale);
+        Dictionary<long, string>? marks = StaleMarks(volumes);
+        _shownStale = marks;
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter, hit => StaleMark(hit, volumes, marks));
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
         // A recalled search starts at the top row, where Up and Down keep stepping through past searches.

@@ -25,8 +25,8 @@ public sealed class ResultRowTests
     public void A_result_from_an_unreachable_volume_is_marked_stale()
     {
         Hit hit = HitIn(@"\\server\share\2024", "AB-C-0704.pdf");
-        Assert.Equal("offline · list from 3 h ago", ResultRow.ForHit(hit, showVolume: false, "offline · list from 3 h ago").Badge);
-        Assert.Equal("drawings · offline · list from 3 h ago", ResultRow.ForHit(hit, showVolume: true, "offline · list from 3 h ago").Badge);
+        Assert.Equal("offline · list from 21 Nov 09:00", ResultRow.ForHit(hit, showVolume: false, "offline · list from 21 Nov 09:00").Badge);
+        Assert.Equal("drawings · offline · list from 21 Nov 09:00", ResultRow.ForHit(hit, showVolume: true, "offline · list from 21 Nov 09:00").Badge);
     }
 
     [Fact]
