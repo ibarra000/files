@@ -243,6 +243,8 @@
          theme's own ScrollViewer lays the bar over the content, over the rows' right edge (#77). The bars
          keep the theme's look. -->
     <Style x:Key="BesideScroller" TargetType="ScrollViewer">
+        <!-- Filled, so the wheel also scrolls over the gap and under the bar. -->
+        <Setter Property="Background" Value="Transparent" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="ScrollViewer">

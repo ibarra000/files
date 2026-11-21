@@ -128,6 +128,7 @@ public sealed class ThemeStylesTests
         InTheme(theme, _ =>
         {
             // The Fluent theme (App.ThemeMode) lays a ScrollViewer's bar over its content, over the rows' right edge (#77).
+            ThemeMode before = Application.Current.ThemeMode;
             Application.Current.ThemeMode = theme == "Dark" ? ThemeMode.Dark : ThemeMode.Light;
             try
             {
@@ -151,7 +152,7 @@ public sealed class ThemeStylesTests
             }
             finally
             {
-                Application.Current.ThemeMode = ThemeMode.None;
+                Application.Current.ThemeMode = before;
             }
         });
     }
