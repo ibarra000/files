@@ -48,7 +48,10 @@ public sealed record Settings
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
 
-    /// <summary>Regular expressions removed from the text under the mouse before it is searched (Core/TextCleanup.cs).</summary>
+    /// <summary>
+    /// The text corrections (Core/TextCleanup.cs), applied to the text under the mouse before it is searched:
+    /// a regular expression whose matches are removed, or "pattern => replacement". The name is older than replacements.
+    /// </summary>
     public IReadOnlyList<string> ScreenTextRemovals { get; init; } = [];
     public Theme Theme { get; init; } = Theme.System;
     public bool HideOnBlur { get; init; } = true;
