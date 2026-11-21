@@ -274,7 +274,7 @@ public partial class SettingsWindow : Window
     {
         if (_refusedRemovals.Count > 0)
         {
-            _app.Notify("The removal patterns that are not valid were not saved; the ones before stay in use.");
+            _app.Notify("The text corrections that are not valid were not saved; the ones before stay in use.");
             _refusedRemovals = [];
         }
     }

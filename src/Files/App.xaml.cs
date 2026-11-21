@@ -31,7 +31,7 @@ public partial class App : Application
     private readonly WindowsTextReader _windowsReader = new();
     private readonly PaddleTextReader _paddleReader = new(PaddleTextReader.DefaultModelFolder);
 
-    // The removal patterns, compiled once each time they change. Settings saves only patterns that compile.
+    // The text corrections, compiled once each time they change. Settings saves only patterns that compile.
     private Core.TextCleanup _textCleanup = Core.TextCleanup.None;
     private DispatcherTimer? _updateTimer;
 
