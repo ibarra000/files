@@ -348,21 +348,44 @@ public sealed class Indexer : IDisposable
 
     private void ScanDue()
     {
-        int hours = _settings().RescanHours;
         DateTime now = DateTime.UtcNow;
         foreach (VolumeState state in _states.Values)
         {
-            if (_retryAt.TryGetValue(state.Volume.Id, out DateTime retry) && retry > now)
-            {
-                continue;
-            }
-            bool neverRead = state.Index is null;
-            bool due = hours > 0 && (state.Volume.LastScannedAt is not DateTime last || now - last >= TimeSpan.FromHours(hours));
-            if (neverRead || due)
+            if (NextScanFor(state) is DateTime next && next <= now)
             {
                 Scan(state.Volume);
             }
         }
+    }
+
+    /// <summary>When the schedule reads this volume next (UTC), <see cref="DateTime.MinValue"/> if it is due now, or null if only F5 reads it.</summary>
+    public DateTime? NextScanFor(VolumeState state) =>
+        NextScan(state, _settings().RescanHours, _retryAt.TryGetValue(state.Volume.Id, out DateTime retry) ? retry : null);
+
+    /// <summary>
+    /// The schedule <see cref="ScanDue"/> follows: a volume with no list is due at once, else
+    /// <paramref name="rescanHours"/> after its last read (never when 0); a failed read waits for its retry.
+    /// </summary>
+    public static DateTime? NextScan(VolumeState state, int rescanHours, DateTime? retryAt)
+    {
+        if (state.Volume.LiveOnly)
+        {
+            return null;
+        }
+        DateTime? due;
+        if (state.Index is null)
+        {
+            due = DateTime.MinValue;
+        }
+        else if (rescanHours <= 0)
+        {
+            due = null;
+        }
+        else
+        {
+            due = state.Volume.LastScannedAt is DateTime last ? last.AddHours(rescanHours) : DateTime.MinValue;
+        }
+        return due is DateTime when && retryAt is DateTime retry && retry > when ? retry : due;
     }
 
     private void Scan(Volume volume)

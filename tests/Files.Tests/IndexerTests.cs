@@ -195,4 +195,33 @@ public sealed class IndexerTests
         Assert.Equal("That folder is already a volume.", indexer.Edit(moved.Volume.Id, "renamed", from, liveOnly: false));
         Assert.Contains(indexer.Volumes, state => state.Volume.Id == moved.Volume.Id && state.Volume.Root == to);
     }
+
+    private static VolumeState Scheduled(DateTime? lastRead, bool read = true, bool liveOnly = false) =>
+        new(new Volume(1, Guid.NewGuid(), @"C:\v", "folder", "v", VolumeStatus.Online, null, lastRead, liveOnly),
+            read ? SearchTests.Index(@"C:\v") : null, null, null);
+
+    [Fact]
+    public void The_next_read_comes_the_set_hours_after_the_last()
+    {
+        var last = new DateTime(2026, 11, 21, 9, 0, 0, DateTimeKind.Utc);
+        Assert.Equal(last.AddHours(2), Indexer.NextScan(Scheduled(last), rescanHours: 2, retryAt: null));
+        Assert.Equal(DateTime.MinValue, Indexer.NextScan(Scheduled(null), rescanHours: 2, retryAt: null));
+    }
+
+    [Fact]
+    public void A_volume_never_read_is_due_now_even_when_only_F5_reads()
+    {
+        Assert.Equal(DateTime.MinValue, Indexer.NextScan(Scheduled(null, read: false), rescanHours: 0, retryAt: null));
+        Assert.Null(Indexer.NextScan(Scheduled(DateTime.UtcNow), rescanHours: 0, retryAt: null));
+    }
+
+    [Fact]
+    public void A_failed_read_waits_for_its_retry_and_a_live_only_volume_is_never_read()
+    {
+        var last = new DateTime(2026, 11, 21, 9, 0, 0, DateTimeKind.Utc);
+        DateTime retry = last.AddHours(5);
+        Assert.Equal(retry, Indexer.NextScan(Scheduled(last), rescanHours: 1, retryAt: retry));
+        Assert.Equal(last.AddHours(1), Indexer.NextScan(Scheduled(last), rescanHours: 1, retryAt: last));
+        Assert.Null(Indexer.NextScan(Scheduled(null, read: false, liveOnly: true), rescanHours: 1, retryAt: null));
+    }
 }

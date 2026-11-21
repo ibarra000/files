@@ -51,9 +51,10 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     }
 
     /// <param name="showVolume">Name the volume, which only tells results apart when there are several.</param>
-    public static ResultRow ForHit(Hit hit, bool showVolume)
+    /// <param name="stale">From <see cref="StatusText.Stale"/>: the volume cannot be reached, and how old its list is.</param>
+    public static ResultRow ForHit(Hit hit, bool showVolume, string? stale = null)
     {
-        string badge = showVolume ? hit.Volume : "";
+        string badge = string.Join(" · ", new[] { showVolume ? hit.Volume : null, stale }.OfType<string>());
         string icon = hit.IsFolder ? FileIcons.Folder : FileIcons.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
@@ -268,6 +269,77 @@ public static class StatusText
             return $"{name} is unreachable · using the list from {Age(state.Volume.LastScannedAt)}";
         }
         return null;
+    }
+
+    /// <summary>A volume's state in a few words, the same in the panel's volume menu and on the Volumes page in Settings.</summary>
+    public static string Describe(VolumeState state)
+    {
+        if (state.Volume.LiveOnly)
+        {
+            return "Live search only";
+        }
+        if (state.ScannedSoFar is int read)
+        {
+            return $"Scanning… {read:N0} files";
+        }
+        string? error = state.Volume.LastError switch
+        {
+            VolumeError.PathNotFound => "Folder not found",
+            VolumeError.DriveNotFound => "Drive or server not found",
+            VolumeError.PermissionDenied => "Access denied",
+            _ => null,
+        };
+        if (error is not null)
+        {
+            return error;
+        }
+        if (state.Volume.Status == VolumeStatus.Offline)
+        {
+            return state.Problem is null ? "Offline" : $"Offline · {state.Problem}";
+        }
+        if (state.Problem is not null)
+        {
+            return state.Problem;
+        }
+        return state.Index is null ? "Never read" : "Online";
+    }
+
+    /// <summary>The mark on results whose volume cannot be reached, so the list they come from may be out of date; null otherwise.</summary>
+    public static string? Stale(VolumeState state)
+    {
+        bool fromSavedList = state.Index is not null && !state.Volume.LiveOnly && state.ScannedSoFar is null;
+        return fromSavedList && state.Volume.Status == VolumeStatus.Offline ? $"offline · list from {Age(state.Volume.LastScannedAt)}" : null;
+    }
+
+    /// <summary>A volume's state, when it was read and when it is read next: its second line in the volume menu.</summary>
+    /// <param name="next">From <see cref="Indexer.NextScanFor"/>: UTC, <see cref="DateTime.MinValue"/> for now, null for only on F5.</param>
+    public static string MenuLine(VolumeState state, DateTime? next)
+    {
+        string described = Describe(state);
+        if (state.Volume.LiveOnly || state.ScannedSoFar is not null)
+        {
+            return described;
+        }
+        string read = state.Volume.LastScannedAt is null ? "" : $" · read {Age(state.Volume.LastScannedAt)}";
+        return $"{described}{read} · next {Until(next)}";
+    }
+
+    private static string Until(DateTime? utc)
+    {
+        if (utc is not DateTime when)
+        {
+            return "on F5";
+        }
+        TimeSpan ahead = when - DateTime.UtcNow;
+        if (ahead.TotalMinutes < 1)
+        {
+            return "now";
+        }
+        if (ahead.TotalHours < 1)
+        {
+            return $"in {(int)ahead.TotalMinutes} min";
+        }
+        return ahead.TotalDays < 1 ? $"in {(int)ahead.TotalHours} h" : $"on {when.ToLocalTime():d MMM}";
     }
 
     public static string Age(DateTime? utc)

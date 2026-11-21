@@ -80,10 +80,17 @@ public partial class SearchWindow
         }
     }
 
-    /// <summary>F5: reads every volume again and shows it for at least a moment, so a fast read is still seen.</summary>
-    private void Rescan()
+    /// <summary>F5: reads every volume again, or the one given, and shows it for at least a moment, so a fast read is still seen.</summary>
+    private void Rescan(long? volume = null)
     {
-        _app.Indexer.RescanAll();
+        if (volume is long id)
+        {
+            _app.Indexer.Rescan(id);
+        }
+        else
+        {
+            _app.Indexer.RescanAll();
+        }
         _rescanShownUntil = DateTime.UtcNow + MinScanShown;
         _rescanTimer.Stop();
         _rescanTimer.Start();
