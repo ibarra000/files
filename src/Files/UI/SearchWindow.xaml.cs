@@ -214,6 +214,9 @@ public partial class SearchWindow : Window
         CloseMenus();
         EndRename();
         _deleteAsked = null;
+        // The chance to undo, and having gone to the results, end with what was on screen.
+        _lastBatch = null;
+        _inResults = false;
         StopPreview();
         // A search typed just before hiding would otherwise finish, and fill the list and read a preview, while hidden.
         // Showing the panel again searches for what is in the box.
@@ -273,6 +276,8 @@ public partial class SearchWindow : Window
         Placeholder.Visibility = Input.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
         // Typing since a file operation: Ctrl+Z undoes the typing first, as in any text box.
         _undoFilesFirst = false;
+        // Typing puts the keyboard back in the box: Del, F2 and the rest edit the search until the results are chosen again.
+        _inResults = false;
         _typing.Stop();
         StopLiveSearch();
         // A paste, a recalled search or a saved one is complete already, so it searches at once.
@@ -465,11 +470,11 @@ public partial class SearchWindow : Window
             e.Handled = chord || e.Key == Key.Delete || OnActionKey(e.Key);
             return;
         }
-        e.Handled = OnFixedKey(modifiers, key) || (keys.Find(modifiers, key) is PanelCommand command && Run(command));
+        e.Handled = OnFixedKey(modifiers, key, e.IsRepeat) || (keys.Find(modifiers, key) is PanelCommand command && Run(command));
     }
 
     /// <summary>The keys Settings cannot change (see PanelKeys): moving, opening, clearing. Returns whether the key was used.</summary>
-    private bool OnFixedKey(ModifierKeys modifiers, Key key)
+    private bool OnFixedKey(ModifierKeys modifiers, Key key, bool isRepeat)
     {
         bool plain = modifiers == ModifierKeys.None;
         if (modifiers.HasFlag(ModifierKeys.Alt) && !(modifiers == ModifierKeys.Alt && key == Key.Down))
@@ -477,7 +482,7 @@ public partial class SearchWindow : Window
             // Alt chords other than Alt+Down are left to Windows and the menu bar keys.
             return false;
         }
-        if (OnFileKey(modifiers, key))
+        if (OnFileKey(modifiers, key, isRepeat))
         {
             return true;
         }
@@ -558,7 +563,7 @@ public partial class SearchWindow : Window
                 // The box text is selected only because the panel was shown: the keys copy the path, as the footer says.
                 CopySelected(path: true);
                 return true;
-            case PanelCommand.Rename when SelectedHit is not null:
+            case PanelCommand.Rename when SelectedHit is not null && _inResults:
                 StartRename();
                 return true;
             case PanelCommand.CopyName:
@@ -610,6 +615,8 @@ public partial class SearchWindow : Window
         {
             return;
         }
+        // Moving through the results gives the file keys (Del, F2, Ctrl+X, Ctrl+V) to the selected result.
+        _inResults = true;
         int step = by > 0 ? 1 : -1;
         int target = Math.Clamp(Results.SelectedIndex + by, 0, Results.Items.Count - 1);
         // Section headers cannot be selected: keep going past them, or turn back at the end of the list.

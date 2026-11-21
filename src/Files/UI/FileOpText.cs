@@ -54,8 +54,25 @@ public static class FileOpText
             FileOpKind.Move => $"Moved {items}",
             FileOpKind.Rename => $"Renamed to {one}",
             FileOpKind.Delete when batch.Permanent => $"Deleted {items}",
-            _ => $"Moved {items} to the Recycle Bin",
+            _ => Recycled(done),
         };
+    }
+
+    /// <summary>A delete to the Recycle Bin, saying so for anything the shell deleted for good instead (too big, or the bin turned off).</summary>
+    private static string Recycled(List<FileResult> done)
+    {
+        List<FileResult> kept = done.Where(result => result.InRecycleBin).ToList();
+        int gone = done.Count - kept.Count;
+        string Items(List<FileResult> results) => results.Count == 1 ? Path.GetFileName(results[0].Source) : $"{results.Count:N0} items";
+        if (gone == 0)
+        {
+            return $"Moved {Items(kept)} to the Recycle Bin";
+        }
+        if (kept.Count == 0)
+        {
+            return $"Deleted {Items(done)} for good: it did not go to the Recycle Bin, so it cannot be undone";
+        }
+        return $"Moved {Items(kept)} to the Recycle Bin · {gone:N0} deleted for good, which cannot be undone";
     }
 
     /// <summary>One file's problem as a sentence.</summary>
@@ -80,6 +97,7 @@ public static class FileOpText
         FileOutcome.Locked => "open in another program",
         FileOutcome.Denied => "not allowed",
         FileOutcome.NotFound => "not found",
+        FileOutcome.CopiedOnly => "copied, but the original is still there too",
         _ => "failed",
     };
 

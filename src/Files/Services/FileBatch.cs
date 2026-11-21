@@ -28,6 +28,9 @@ public enum FileOutcome
     /// <summary>Gone, or on a share that cannot be reached.</summary>
     NotFound,
     Failed,
+
+    /// <summary>Copied to another drive, but some of the original could not be deleted, so it is in both places.</summary>
+    CopiedOnly,
 }
 
 /// <summary>A file or folder as it was when it was copied or cut, so a paste can tell whether it changed since.</summary>
@@ -72,6 +75,12 @@ public sealed record FileResult(string Source, string? Target, FileOutcome Outco
 {
     /// <summary>The source as it was before the operation, for undo to check against.</summary>
     public FileSnapshot? Was { get; init; }
+
+    /// <summary>A deleted item that is in the Recycle Bin, so undo can bring it back; one the shell deleted for good is not.</summary>
+    public bool InRecycleBin { get; init; }
+
+    /// <summary>A copied folder's files as they were just after copying, so undo only removes a copy nobody has worked on.</summary>
+    internal IReadOnlyList<TreeEntry>? CopiedTree { get; init; }
 }
 
 /// <summary>How far an operation has got: <see cref="Done"/> of <see cref="Total"/> files and folders.</summary>
@@ -84,16 +93,25 @@ public sealed record FileBatch(FileOpKind Kind, IReadOnlyList<FileResult> Result
     /// <summary>The operation this one took back, or null.</summary>
     public FileOpKind? Undoes { get; init; }
 
+    /// <summary>When it started and finished; a Recycle Bin item deleted outside this time is never restored for it.</summary>
+    public DateTime Started { get; init; }
+
+    public DateTime Finished { get; init; }
+
     public IEnumerable<FileResult> Done => Results.Where(result => result.Outcome == FileOutcome.Done);
 
-    public bool CanUndo => !Permanent && Undoes is null && Done.Any();
+    /// <summary>What undo can take back: everything done, except deletes that did not land in the Recycle Bin.</summary>
+    public IEnumerable<FileResult> Undoable => Done.Where(result => Kind != FileOpKind.Delete || result.InRecycleBin);
+
+    public bool CanUndo => !Permanent && Undoes is null && Undoable.Any();
 
     /// <summary>The paths that are no longer where the saved lists have them, and the paths those lists do not have yet.</summary>
     public (IReadOnlyList<string> Removed, IReadOnlyList<NotedPath> Added) Changes()
     {
         List<string> removed = Kind == FileOpKind.Copy ? [] : Done.Select(result => result.Source).ToList();
-        List<NotedPath> added = Done
-            .Where(result => result.Target is not null)
+        // A copy whose original could not all be deleted is new where it went, and the original is still listed.
+        List<NotedPath> added = Results
+            .Where(result => result.Outcome is FileOutcome.Done or FileOutcome.CopiedOnly && result.Target is not null)
             .Select(result => new NotedPath(result.Target!, result.Was?.IsFolder == true))
             .ToList();
         return (removed, added);

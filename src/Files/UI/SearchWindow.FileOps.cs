@@ -18,16 +18,21 @@ public partial class SearchWindow
     private const double RenameIndent = 28;
 
     private FileBatch? _lastBatch;
+    private DateTime _lastBatchAt;
 
     // An operation ended since the box was last typed in, so Ctrl+Z takes it back before the box's own undo.
     private bool _undoFilesFirst;
+
+    // The user went to the results (arrow keys, Page Up or Down, or a click on a row) since last typing.
+    // Until then the file keys belong to the search box, so editing the search never touches a file.
+    private bool _inResults;
 
     // What Ctrl+C or Ctrl+X put on the clipboard, as it was then, so a paste can skip what changed since.
     private IReadOnlyList<FileSnapshot> _copied = [];
     private bool _fileOpRunning;
 
-    // A delete for good the footer asked about: the same key on the same file before this time confirms it.
-    private (string Path, DateTime Until)? _deleteAsked;
+    // A delete for good the footer asked about, which only the same key on the same file confirms.
+    private DeleteAsk? _deleteAsked;
     private ResultRow? _renaming;
 
     // The file a rename or move put somewhere else, which the next results select.
@@ -38,28 +43,27 @@ public partial class SearchWindow
     /// <summary>The user selected text in the box, which Ctrl+C and Ctrl+X act on as in any text box.</summary>
     private bool BoxHasSelection => Input.SelectionLength > 0 && !_selectedOnShow;
 
-    /// <summary>
-    /// Delete would change nothing in the box: its caret is at the end, or its text is selected only
-    /// because the panel was just shown.
-    /// </summary>
-    private bool BoxLeavesDelete => _selectedOnShow || (Input.SelectionLength == 0 && Input.CaretIndex == Input.Text.Length);
+    /// <summary>The last operation, while it can still be taken back: until the panel hides, and for two minutes at most.</summary>
+    private FileBatch? UndoableBatch =>
+        _lastBatch is { CanUndo: true } batch && FileKeys.CanStillUndo(_lastBatchAt, DateTime.UtcNow) ? batch : null;
 
     /// <summary>
-    /// Ctrl+Z, and on a result Ctrl+X, Ctrl+V, Delete and Shift+Delete, whenever the search box would not
-    /// use them itself. Returns whether the key was used.
+    /// Ctrl+Z, and Ctrl+X, Ctrl+V, Delete and Shift+Delete once the user has gone to the results. Returns
+    /// whether the key was used; otherwise the search box has it as usual.
     /// </summary>
-    private bool OnFileKey(ModifierKeys modifiers, Key key)
+    /// <param name="isRepeat">A key held down: Delete then does nothing, so holding it can never answer its own question.</param>
+    private bool OnFileKey(ModifierKeys modifiers, Key key, bool isRepeat)
     {
         if (modifiers == ModifierKeys.Control && key == Key.Z)
         {
-            bool undo = _lastBatch is { CanUndo: true } && (_undoFilesFirst || !Input.CanUndo);
+            bool undo = UndoableBatch is not null && (_undoFilesFirst || !Input.CanUndo);
             if (undo)
             {
                 UndoLast();
             }
             return undo;
         }
-        if (SelectedHit is null)
+        if (SelectedHit is null || !_inResults)
         {
             return false;
         }
@@ -71,11 +75,11 @@ public partial class SearchWindow
             case (ModifierKeys.Control, Key.V) when ClipboardHasFiles():
                 Paste();
                 return true;
-            case (ModifierKeys.None, Key.Delete) when BoxLeavesDelete:
-                DeleteSelected(permanently: false);
-                return true;
-            case (ModifierKeys.Shift, Key.Delete) when BoxLeavesDelete:
-                DeleteSelected(permanently: true);
+            case (ModifierKeys.None or ModifierKeys.Shift, Key.Delete):
+                if (!isRepeat)
+                {
+                    DeleteSelected(permanently: modifiers == ModifierKeys.Shift);
+                }
                 return true;
             default:
                 return false;
@@ -185,8 +189,9 @@ public partial class SearchWindow
     }
 
     /// <summary>
-    /// Sends the selected result to the Recycle Bin. A delete for good (Shift+Del, or a network path, which
-    /// has no Recycle Bin) is asked about first in the footer, and the same key again confirms it.
+    /// Sends the selected result to the Recycle Bin. A delete for good (Shift+Del, or a drive with no
+    /// Recycle Bin: a share, a removable or subst drive, or a folder linked to one) is asked about first in
+    /// the footer, and only the same key on the same file, pressed again a moment later, confirms it.
     /// </summary>
     private async void DeleteSelected(bool permanently, ResultRow? row = null)
     {
@@ -197,13 +202,19 @@ public partial class SearchWindow
             return;
         }
         string path = hit.Path;
-        bool network = FileOps.IsOnNetwork(path);
-        bool forGood = permanently || network;
-        bool asked = _deleteAsked is var (askedPath, until) && askedPath == path && DateTime.UtcNow < until;
-        if (forGood && !asked)
+        // Off the UI thread: following a link or asking about a drive can wait on the network.
+        bool hasBin = await Task.Run(() => RecycleBin.HasBin(path));
+        bool forGood = permanently || !hasBin;
+        DateTime now = DateTime.UtcNow;
+        DeleteAnswer answer = forGood ? FileKeys.Answer(_deleteAsked, path, permanently, now) : DeleteAnswer.Confirm;
+        if (answer == DeleteAnswer.Ignore)
         {
-            _deleteAsked = (path, DateTime.UtcNow + ToastDuration);
-            string where = network ? $" on {Path.GetPathRoot(path)}" : "";
+            return;
+        }
+        if (answer == DeleteAnswer.Ask)
+        {
+            _deleteAsked = new DeleteAsk(path, permanently, now);
+            string where = hasBin ? "" : $" on {Path.GetPathRoot(path)}, which has no Recycle Bin";
             string again = permanently ? "Shift+Del" : "Del";
             ShowToast($"Permanently delete {hit.Name}{where}? It cannot be undone · {again} again to delete");
             return;
@@ -214,7 +225,7 @@ public partial class SearchWindow
 
     private async void UndoLast()
     {
-        if (_lastBatch is not { CanUndo: true } batch)
+        if (UndoableBatch is not FileBatch batch)
         {
             ShowToast("Nothing to undo");
             return;
@@ -263,15 +274,21 @@ public partial class SearchWindow
     private void AfterFileOp(FileBatch batch)
     {
         ShowToast(FileOpText.Done(batch, RowActions.UndoKeys.Replace(' ', '+')));
-        if (!batch.Done.Any())
+        (IReadOnlyList<string> removed, IReadOnlyList<NotedPath> added) = batch.Changes();
+        if (removed.Count == 0 && added.Count == 0)
         {
             // Nothing changed: what was there to undo still is.
             return;
         }
-        (IReadOnlyList<string> removed, IReadOnlyList<NotedPath> added) = batch.Changes();
         _app.Indexer.Note(removed, added);
-        _lastBatch = batch.CanUndo ? batch : null;
-        _undoFilesFirst = batch.CanUndo;
+        if (batch.Done.Any())
+        {
+            // Hiding ends the chance to undo, also when it hid while this ran (a shell question takes the focus).
+            bool keep = batch.CanUndo && IsVisible;
+            _lastBatch = keep ? batch : null;
+            _lastBatchAt = DateTime.UtcNow;
+            _undoFilesFirst = keep;
+        }
         if (batch.Kind is FileOpKind.Rename or FileOpKind.Move && batch.Done.First().Target is string moved)
         {
             _selectNext = moved;

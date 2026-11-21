@@ -1,4 +1,5 @@
 using Files.Services;
+using Files.UI;
 
 namespace Files.Tests;
 
@@ -222,11 +223,80 @@ public sealed class FileOpsTests
         FileBatch copy = FileOps.Copy([Snap(source)], Folder(temp, "b"));
         string copied = copy.Results[0].Target!;
 
-        FileBatch undo = FileOps.Undo(copy, permanently: true);
+        FileBatch undo = FileOps.Undo(copy, null, FakeBin);
 
         Assert.Equal(FileOutcome.Done, Assert.Single(undo.Results).Outcome);
         Assert.False(File.Exists(copied));
         Assert.True(File.Exists(source));
+    }
+
+    [Fact]
+    public void Undoing_a_folder_copy_removes_it_while_it_holds_just_what_was_copied()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\2024\plan.pdf", "p");
+        FileBatch copy = FileOps.Copy([Snap(Path.Combine(temp.Path, "a", "2024"))], Folder(temp, "b"));
+
+        FileBatch undo = FileOps.Undo(copy, null, FakeBin);
+
+        Assert.Equal(FileOutcome.Done, Assert.Single(undo.Results).Outcome);
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "b", "2024")));
+    }
+
+    [Fact]
+    public void A_folder_copy_with_new_work_in_it_is_kept_by_undo()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\2024\plan.pdf", "p");
+        FileBatch copy = FileOps.Copy([Snap(Path.Combine(temp.Path, "a", "2024"))], Folder(temp, "b"));
+        temp.File(@"b\2024\notes.txt", "written in the copy since");
+
+        FileBatch undo = FileOps.Undo(copy, null, FakeBin);
+
+        Assert.Equal(FileOutcome.Changed, Assert.Single(undo.Results).Outcome);
+        Assert.True(File.Exists(Path.Combine(temp.Path, "b", "2024", "notes.txt")));
+    }
+
+    [Fact]
+    public void A_copy_on_a_drive_with_no_recycle_bin_is_never_deleted_by_undo()
+    {
+        var copy = new FileBatch(FileOpKind.Copy,
+            [new FileResult(@"\\server\share\report.pdf", @"\\server\share\report (1).pdf", FileOutcome.Done)]);
+
+        FileBatch undo = FileOps.Undo(copy, null, (_, _) => throw new InvalidOperationException("must not be called"));
+
+        FileResult result = Assert.Single(undo.Results);
+        Assert.Equal(FileOutcome.Failed, result.Outcome);
+        Assert.Contains("no Recycle Bin", result.Message);
+    }
+
+    [Fact]
+    public void A_failed_folder_copy_removes_only_what_it_made()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\2024\free.pdf", "f");
+        string locked = temp.File(@"a\2024\locked.pdf", "l");
+        string existing = temp.File(@"b\2024\mine.txt", "already here");
+        FileBatch batch;
+        using (new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            batch = FileOps.Copy([Snap(Path.Combine(temp.Path, "a", "2024"))], Path.Combine(temp.Path, "b"));
+        }
+
+        Assert.Equal(FileOutcome.Locked, Assert.Single(batch.Results).Outcome);
+        Assert.Equal("already here", File.ReadAllText(existing));
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "b", "2024 (1)")));
+    }
+
+    [Fact]
+    public void A_new_folder_is_made_beside_ones_already_there_never_in_them()
+    {
+        using var temp = new TempFolder();
+        Folder(temp, "2024");
+        Folder(temp, "2024 (1)");
+
+        Assert.Equal(Path.Combine(temp.Path, "2024 (2)"), FileTree.CreateFresh(temp.Path, "2024"));
+        Assert.Throws<IOException>(() => FileTree.CreateExactly(Path.Combine(temp.Path, "2024")));
     }
 
     [Fact]
@@ -238,7 +308,7 @@ public sealed class FileOpsTests
         string copied = copy.Results[0].Target!;
         File.WriteAllText(copied, "edited after copying");
 
-        FileBatch undo = FileOps.Undo(copy, permanently: true);
+        FileBatch undo = FileOps.Undo(copy, null, FakeBin);
 
         Assert.Equal(FileOutcome.Changed, Assert.Single(undo.Results).Outcome);
         Assert.True(File.Exists(copied));
@@ -271,6 +341,86 @@ public sealed class FileOpsTests
         Assert.Equal(FileOutcome.Exists, Assert.Single(undo.Results).Outcome);
         Assert.Equal("a new one", File.ReadAllText(source));
         Assert.True(File.Exists(Path.Combine(temp.Path, "b", "report.pdf")));
+    }
+
+    [Fact]
+    public void A_moved_file_changed_since_is_not_moved_back()
+    {
+        using var temp = new TempFolder();
+        string source = temp.File(@"a\report.pdf", "moved");
+        FileBatch move = FileOps.Move([Snap(source)], Folder(temp, "b"));
+        File.WriteAllText(Path.Combine(temp.Path, "b", "report.pdf"), "worked on since the move");
+
+        FileBatch undo = FileOps.Undo(move);
+
+        Assert.Equal(FileOutcome.Changed, Assert.Single(undo.Results).Outcome);
+        Assert.False(File.Exists(source));
+    }
+
+    [Fact]
+    public void A_folder_rename_that_only_changes_case_goes_through()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"plans\a.pdf");
+
+        FileBatch rename = FileOps.Rename(Path.Combine(temp.Path, "plans"), "Plans");
+
+        Assert.Equal(FileOutcome.Done, Assert.Single(rename.Results).Outcome);
+        Assert.Equal("Plans", Path.GetFileName(Directory.GetDirectories(temp.Path).Single()));
+        Assert.True(File.Exists(Path.Combine(temp.Path, "Plans", "a.pdf")));
+    }
+
+    [Fact]
+    public void A_move_to_another_drive_checks_the_copy_and_then_deletes_the_original()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\2024\plan.pdf", "p");
+        temp.File(@"a\2024\sub\notes.txt", "n");
+        string target = Path.Combine(Folder(temp, "b"), "2024");
+
+        FileResult result = FileMoves.MoveAcross(Path.Combine(temp.Path, "a", "2024"), target, isFolder: true);
+
+        Assert.Equal(FileOutcome.Done, result.Outcome);
+        Assert.Equal("n", File.ReadAllText(Path.Combine(target, "sub", "notes.txt")));
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "a", "2024")));
+    }
+
+    [Fact]
+    public void A_folder_holding_links_is_not_moved_to_another_drive()
+    {
+        using var temp = new TempFolder();
+        using var elsewhere = new TempFolder();
+        temp.File(@"a\2024\plan.pdf", "p");
+        WalkerTests.Junction(Path.Combine(temp.Path, "a", "2024", "link"), elsewhere.Path);
+
+        FileResult result = FileMoves.MoveAcross(Path.Combine(temp.Path, "a", "2024"), Path.Combine(Folder(temp, "b"), "2024"), isFolder: true);
+
+        Assert.Equal(FileOutcome.Failed, result.Outcome);
+        Assert.True(File.Exists(Path.Combine(temp.Path, "a", "2024", "plan.pdf")));
+        Assert.False(Directory.Exists(Path.Combine(temp.Path, "b", "2024")));
+    }
+
+    [Fact]
+    public void An_original_that_cannot_all_be_deleted_after_moving_says_where_the_copy_is()
+    {
+        using var temp = new TempFolder();
+        temp.File(@"a\2024\free.pdf", "f");
+        string held = temp.File(@"a\2024\held.pdf", "h");
+        string target = Path.Combine(Folder(temp, "b"), "2024");
+        FileResult result;
+        // Readable, so it copies, but not deletable while it is open.
+        using (new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            result = FileMoves.MoveAcross(Path.Combine(temp.Path, "a", "2024"), target, isFolder: true);
+        }
+
+        Assert.Equal(FileOutcome.CopiedOnly, result.Outcome);
+        Assert.Equal(target, result.Target);
+        Assert.Contains(target, result.Message);
+        Assert.True(File.Exists(Path.Combine(target, "held.pdf")));
+        var batch = new FileBatch(FileOpKind.Move, [result]);
+        Assert.Equal(target, Assert.Single(batch.Changes().Added).Path);
+        Assert.Empty(batch.Changes().Removed);
     }
 
     [Fact]
@@ -315,10 +465,52 @@ public sealed class FileOpsTests
     [Fact]
     public void A_network_path_is_never_sent_to_a_recycle_bin_it_does_not_have()
     {
-        FileBatch batch = FileOps.Delete([@"\\server\share\report.pdf"], permanently: false);
+        FileBatch batch = FileOps.Delete([@"\\server\share\report.pdf"], permanently: false, null,
+            (_, _) => throw new InvalidOperationException("must not be called"));
 
         FileResult result = Assert.Single(batch.Results);
         Assert.Equal(FileOutcome.Failed, result.Outcome);
+    }
+
+    [Fact]
+    public void Only_a_local_fixed_disk_has_a_recycle_bin()
+    {
+        using var temp = new TempFolder();
+
+        Assert.True(RecycleBin.HasBin(temp.File("report.pdf")));
+        Assert.False(RecycleBin.HasBin(@"\\server\share\report.pdf"));
+    }
+
+    [Fact]
+    public void A_folder_linked_from_elsewhere_is_judged_by_where_it_really_is()
+    {
+        using var temp = new TempFolder();
+        using var elsewhere = new TempFolder();
+        string inside = Path.Combine(temp.Path, "link", "report.pdf");
+        WalkerTests.Junction(Path.Combine(temp.Path, "link"), elsewhere.Path);
+        File.WriteAllText(inside, "");
+
+        // Both on the same fixed disk here; what counts is that the link is followed without a problem.
+        Assert.True(RecycleBin.HasBin(inside));
+    }
+
+    [Fact]
+    public void An_item_the_shell_deleted_for_good_is_reported_so_and_cannot_be_undone()
+    {
+        using var temp = new TempFolder();
+        string file = temp.File("big.iso", "too big for the bin");
+
+        FileBatch batch = FileOps.Delete([file], permanently: false, null, (path, _) =>
+        {
+            File.Delete(path);
+            return false;
+        });
+
+        FileResult result = Assert.Single(batch.Results);
+        Assert.Equal(FileOutcome.Done, result.Outcome);
+        Assert.False(result.InRecycleBin);
+        Assert.False(batch.CanUndo);
+        Assert.Contains("for good", FileOpText.Done(batch));
     }
 
     [Fact]
@@ -333,14 +525,31 @@ public sealed class FileOpsTests
         string file = temp.File($"recycled-{Guid.NewGuid():N}.txt", "keep me");
 
         FileBatch delete = FileOps.Delete([file], permanently: false);
-        Assert.Equal(FileOutcome.Done, Assert.Single(delete.Results).Outcome);
-        Assert.False(File.Exists(file));
-        Assert.True(delete.CanUndo);
+        try
+        {
+            Assert.Equal(FileOutcome.Done, Assert.Single(delete.Results).Outcome);
+            Assert.True(delete.Results[0].InRecycleBin);
+            Assert.False(File.Exists(file));
+            Assert.True(delete.CanUndo);
 
-        FileBatch undo = FileOps.Undo(delete);
+            // An item deleted outside the batch's time is never taken for it.
+            DateTime before = delete.Started.AddHours(-1);
+            Assert.NotNull(RecycleBin.Restore(file, before, before.AddMinutes(1), size: null));
+            Assert.False(File.Exists(file));
 
-        Assert.Equal(FileOutcome.Done, Assert.Single(undo.Results).Outcome);
-        Assert.Equal("keep me", File.ReadAllText(file));
+            FileBatch undo = FileOps.Undo(delete);
+
+            Assert.Equal(FileOutcome.Done, Assert.Single(undo.Results).Outcome);
+            Assert.Equal("keep me", File.ReadAllText(file));
+        }
+        finally
+        {
+            // The test's own file never stays in the Recycle Bin, whatever failed above.
+            if (!File.Exists(file))
+            {
+                RecycleBin.Restore(file, delete.Started.AddMinutes(-1), DateTime.UtcNow.AddMinutes(1), size: null);
+            }
+        }
     }
 
     [Fact]
@@ -350,6 +559,20 @@ public sealed class FileOpsTests
         Assert.False(FileOps.SameVolume(@"C:\a\report.pdf", @"D:\b"));
         Assert.False(FileOps.SameVolume(@"\\server\share\a.pdf", @"\\server\other\b"));
         Assert.True(FileOps.SameVolume(@"\\server\share\a.pdf", @"\\server\share\b"));
+    }
+
+    /// <summary>Stands in for the Recycle Bin, so tests never fill the real one: deletes, and says it landed.</summary>
+    private static bool FakeBin(string path, bool isFolder)
+    {
+        if (isFolder)
+        {
+            Directory.Delete(path, recursive: true);
+        }
+        else
+        {
+            File.Delete(path);
+        }
+        return true;
     }
 
     /// <summary>Records progress at once, on the calling thread, unlike Progress&lt;T&gt;.</summary>

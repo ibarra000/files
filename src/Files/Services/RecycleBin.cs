@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
@@ -7,41 +8,82 @@ namespace Files.Services;
 
 /// <summary>
 /// Sends files to the Recycle Bin and brings them back. Sending uses the shell's own delete (through
-/// Microsoft.VisualBasic), which keeps what Explorer's Restore needs. Restoring goes through the shell's
-/// Recycle Bin folder (Shell.Application), as .NET has no managed way to it.
+/// Microsoft.VisualBasic), which keeps what Explorer's Restore needs. Finding and restoring go through the
+/// shell's Recycle Bin folder (Shell.Application), as .NET has no managed way to it.
 /// </summary>
 public static class RecycleBin
 {
     // ShellSpecialFolderConstants.ssfBITBUCKET.
     private const int RecycleBinFolder = 10;
     private const string RestoreVerb = "undelete";
+    private const int MaxLinks = 16;
     private static readonly TimeSpan RestoreWait = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RestorePoll = TimeSpan.FromMilliseconds(100);
+
+    // The shell keeps the deletion time to the second, in local time; a little slack either side.
+    private static readonly TimeSpan Slack = TimeSpan.FromSeconds(2);
 
     /// <summary>Whether Windows' shell is there to restore from (it is not on a server core or in some containers).</summary>
     public static bool IsAvailable => Type.GetTypeFromProgID("Shell.Application") is not null;
 
     /// <summary>
-    /// Sends a local file or folder to the Recycle Bin. The shell shows its own message if one cannot go,
-    /// as Explorer would, and the error is passed on.
+    /// Whether <paramref name="path"/> is on a local fixed disk, which has a Recycle Bin. A share, a mapped or
+    /// removable drive, a drive made with subst, and a folder linked to any of those do not: Windows would
+    /// delete from them for good. Following links touches each folder above the path once.
     /// </summary>
-    public static void Send(string path, bool isFolder)
+    public static bool HasBin(string path)
     {
-        if (isFolder)
+        try
         {
-            FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+            string? real = RealPath(path);
+            if (real is null || real.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            return Path.GetPathRoot(real) is string root && new DriveInfo(root).DriveType == DriveType.Fixed;
         }
-        else
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+            // Unsure means no Recycle Bin: the panel then asks before deleting.
+            return false;
         }
     }
 
     /// <summary>
-    /// Restores the newest deletion of <paramref name="originalPath"/> from the Recycle Bin. Returns a
-    /// problem in words, or null. Nothing is restored over a file that took its place.
+    /// Sends a local file or folder to the Recycle Bin and says whether it is there now. The shell asks
+    /// before deleting anything for good (too big for the bin, the bin turned off), and asks the user's
+    /// usual question, if they have one; saying no throws <see cref="OperationCanceledException"/>.
     /// </summary>
-    public static string? Restore(string originalPath)
+    public static bool Send(string path, bool isFolder)
+    {
+        DateTime since = DateTime.UtcNow;
+        long? size = isFolder ? null : new FileInfo(path).Length;
+        if (isFolder)
+        {
+            FileSystem.DeleteDirectory(path, UIOption.AllDialogs, RecycleOption.SendToRecycleBin);
+        }
+        else
+        {
+            FileSystem.DeleteFile(path, UIOption.AllDialogs, RecycleOption.SendToRecycleBin);
+        }
+        try
+        {
+            return OnShellThread(() => Find(path, since, DateTime.UtcNow, size) is not null);
+        }
+        catch (Exception error) when (error is COMException or TargetInvocationException or InvalidCastException
+            or MissingMethodException or InvalidComObjectException)
+        {
+            // Not found means not restorable: it is reported as deleted for good.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Restores <paramref name="originalPath"/> from the Recycle Bin: the newest item deleted from that path
+    /// between <paramref name="fromUtc"/> and <paramref name="toUtc"/>, of <paramref name="size"/> if given.
+    /// Returns a problem in words, or null. Nothing is restored over a file that took its place.
+    /// </summary>
+    public static string? Restore(string originalPath, DateTime fromUtc, DateTime toUtc, long? size)
     {
         string name = Path.GetFileName(originalPath);
         if (File.Exists(originalPath) || Directory.Exists(originalPath))
@@ -50,7 +92,15 @@ public static class RecycleBin
         }
         try
         {
-            return OnShellThread(() => RestoreNewest(originalPath));
+            return OnShellThread(() =>
+            {
+                if (Find(originalPath, fromUtc, toUtc, size) is not object item)
+                {
+                    return $"{name} is not in the Recycle Bin any more";
+                }
+                Call(item, "InvokeVerb", RestoreVerb);
+                return WaitFor(originalPath) ? null : $"{name} could not be restored from the Recycle Bin";
+            });
         }
         catch (Exception error) when (error is COMException or TargetInvocationException or InvalidCastException
             or MissingMethodException or InvalidComObjectException)
@@ -59,38 +109,63 @@ public static class RecycleBin
         }
     }
 
-    private static string? RestoreNewest(string originalPath)
+    /// <summary>The newest Recycle Bin item deleted from this path in this time (and of this size), or null.</summary>
+    private static object? Find(string originalPath, DateTime fromUtc, DateTime toUtc, long? size)
     {
-        string name = Path.GetFileName(originalPath);
         if (Type.GetTypeFromProgID("Shell.Application") is not Type shellType || Activator.CreateInstance(shellType) is not object shell)
         {
-            return $"{name} could not be restored: Windows' shell is not available";
+            return null;
         }
-        object? newest = null;
-        DateTime newestAt = DateTime.MinValue;
         object? bin = Call(shell, "NameSpace", RecycleBinFolder);
         object? items = Call(bin, "Items");
         int count = (int)Get(items, "Count")!;
+        object? newest = null;
+        DateTime newestAt = DateTime.MinValue;
         for (int i = 0; i < count; i++)
         {
             object? item = Call(items, "Item", i);
-            if (item is null || !IsDeletionOf(bin, item, originalPath))
+            if (item is null || !IsDeletionOf(bin, item, originalPath) || DeletionRecord(item) is not var (at, keptSize))
             {
                 continue;
             }
-            DateTime at = Call(item, "ExtendedProperty", "System.Recycle.DateDeleted") as DateTime? ?? DateTime.MinValue;
-            if (newest is null || at > newestAt)
+            bool inTime = at >= fromUtc - Slack && at <= toUtc + Slack;
+            bool sameSize = size is null || keptSize == size;
+            if (inTime && sameSize && (newest is null || at > newestAt))
             {
                 newest = item;
                 newestAt = at;
             }
         }
-        if (newest is null)
+        return newest;
+    }
+
+    /// <summary>
+    /// When the item was deleted (UTC) and its size, as Windows wrote them in its "$I" record: the item is
+    /// kept as "$R…" and the record as "$I…" beside it, with the size at byte 8 and the time at byte 16.
+    /// Null if the record cannot be read, and the item is then never taken.
+    /// </summary>
+    private static (DateTime At, long Size)? DeletionRecord(object item)
+    {
+        const int RecordStart = 24;
+        if (Get(item, "Path") is not string kept || Path.GetFileName(kept) is not { Length: > 2 } name
+            || !name.StartsWith("$R", StringComparison.OrdinalIgnoreCase))
         {
-            return $"{name} is not in the Recycle Bin any more";
+            return null;
         }
-        Call(newest, "InvokeVerb", RestoreVerb);
-        return WaitFor(originalPath) ? null : $"{name} could not be restored from the Recycle Bin";
+        string record = Path.Combine(Path.GetDirectoryName(kept)!, "$I" + name[2..]);
+        try
+        {
+            using FileStream stream = File.OpenRead(record);
+            Span<byte> head = stackalloc byte[RecordStart];
+            stream.ReadExactly(head);
+            long size = BinaryPrimitives.ReadInt64LittleEndian(head[8..16]);
+            long deleted = BinaryPrimitives.ReadInt64LittleEndian(head[16..24]);
+            return (DateTime.FromFileTimeUtc(deleted), size);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -116,6 +191,69 @@ public static class RecycleBin
         }
         return string.Equals(shown, Path.GetFileNameWithoutExtension(name), StringComparison.OrdinalIgnoreCase)
             && string.Equals(Path.GetExtension(kept), Path.GetExtension(name), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Where <paramref name="path"/> really is: through subst drives, and through any linked folder above it
+    /// (the item itself may be a link: deleting a link removes only the link). Null if links go round too often.
+    /// </summary>
+    private static string? RealPath(string path)
+    {
+        string current = Path.GetFullPath(path);
+        for (int hops = 0; hops < MaxLinks; hops++)
+        {
+            string? next = SubstTarget(current) ?? ThroughLink(current);
+            if (next is null)
+            {
+                return current;
+            }
+            current = next;
+        }
+        return null;
+    }
+
+    /// <summary>The path on the folder a subst drive stands for, or null if the drive is not one.</summary>
+    private static string? SubstTarget(string path)
+    {
+        const string SubstPrefix = @"\??\";
+        if (path.Length < 2 || path[1] != ':')
+        {
+            return null;
+        }
+        var target = new char[1024];
+        if (QueryDosDeviceW(path[..2], target, target.Length) == 0)
+        {
+            return null;
+        }
+        string device = new string(target).Split('\0')[0];
+        if (!device.StartsWith(SubstPrefix, StringComparison.Ordinal))
+        {
+            return null;
+        }
+        string folder = device[SubstPrefix.Length..];
+        // A subst of a share shows as \??\UNC\server\share.
+        if (folder.StartsWith(@"UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            folder = @"\" + folder[3..];
+        }
+        return Path.Join(folder, path[2..]);
+    }
+
+    /// <summary>The path through the nearest linked folder above it, or null if there is none.</summary>
+    private static string? ThroughLink(string path)
+    {
+        for (string? folder = Path.GetDirectoryName(path); folder is not null; folder = Path.GetDirectoryName(folder))
+        {
+            var info = new DirectoryInfo(folder);
+            if (!info.Exists || !info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                continue;
+            }
+            FileSystemInfo target = info.ResolveLinkTarget(returnFinalTarget: true)
+                ?? throw new IOException($"{folder} is a link that cannot be followed");
+            return Path.Join(target.FullName, Path.GetRelativePath(folder, path));
+        }
+        return null;
     }
 
     /// <summary>The shell restores on its own time: waits a little for the file to be back.</summary>
@@ -167,4 +305,8 @@ public static class RecycleBin
         failed?.Throw();
         return result;
     }
+
+    // .NET has no way to tell a subst drive from the disk it stands for.
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint QueryDosDeviceW(string deviceName, char[] targetPath, int max);
 }

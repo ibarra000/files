@@ -456,7 +456,7 @@ public sealed class WalkerTests
         Walker.Walk(root, skipHidden: true, CancellationToken.None, progress: null, Walker.CharLimit(), followLinks: followLinks);
 
     /// <summary>A directory junction, which needs no admin rights (a symbolic link does).</summary>
-    private static void Junction(string link, string target)
+    internal static void Junction(string link, string target)
     {
         using Process mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
         {

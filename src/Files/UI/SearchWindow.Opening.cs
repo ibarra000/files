@@ -95,8 +95,16 @@ public partial class SearchWindow
     }
 
     /// <summary>A drag starts only from a row: a press on the scrollbar or empty space scrolls, as anywhere else.</summary>
-    private void OnResultMouseDown(object sender, MouseButtonEventArgs e) =>
-        _dragStart = ElementTree.AncestorOf<System.Windows.Controls.ListBoxItem>(e.OriginalSource) is not null ? e.GetPosition(Results) : null;
+    private void OnResultMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        bool onRow = ElementTree.AncestorOf<System.Windows.Controls.ListBoxItem>(e.OriginalSource) is not null;
+        _dragStart = onRow ? e.GetPosition(Results) : null;
+        if (onRow)
+        {
+            // Choosing a row with the mouse gives the file keys to it, as the arrow keys do.
+            _inResults = true;
+        }
+    }
 
     /// <summary>Dragging a result out drops the file itself into Explorer, mail or any other app.</summary>
     private void OnResultMouseMove(object sender, MouseEventArgs e)

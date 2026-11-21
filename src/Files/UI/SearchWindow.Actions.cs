@@ -25,7 +25,7 @@ public partial class SearchWindow
         {
             return;
         }
-        string? undo = _lastBatch is { CanUndo: true } batch ? FileOpText.UndoLabel(batch) : null;
+        string? undo = UndoableBatch is FileBatch batch ? FileOpText.UndoLabel(batch) : null;
         IReadOnlyList<RowAction> actions = RowActions.For(row, _app.Settings, _app.Favorites, Input.Text, ClipboardHasFiles(), undo);
         if (actions.Count == 0)
         {
@@ -143,6 +143,7 @@ public partial class SearchWindow
             return;
         }
         Results.SelectedItem = row;
+        _inResults = true;
         OpenActions();
         e.Handled = true;
     }
