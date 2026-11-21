@@ -6,7 +6,7 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 | State | Fields | Entered by | Left by | Rule |
 |---|---|---|---|---|
-| **Hidden** | `IsVisible` false | Esc on an empty box, a click elsewhere (`HideOnBlur`), Alt+F4, opening a file (`HideAfterOpening`), opening Settings | The hotkey, the tray, a second launch | Hiding stops a live search, the typing pause, the indexed search and preview reads, and closes both menus. Nothing fills the list or reads a file while hidden. Showing restores a minimized panel. |
+| **Hidden** | `IsVisible` false | Esc on an empty box, a click elsewhere (`HideOnBlur`), Alt+F4, opening a file (`HideAfterOpening`), opening Settings | The hotkey, the tray, a second launch | Hiding stops a live search, the typing pause, the indexed search, a content search and preview reads, and closes both menus. Nothing fills the list or reads a file while hidden. Showing restores a minimized panel. |
 | **Home** | box empty or spaces (`IsHome`), `_showAllFavorites` | Showing with an empty box, Esc on a search, deleting the text | Typing, a paste, recall | Favorites, then Recent. Chips are hidden, and Ctrl+1–5 do nothing. Del removes a Recent row, and the next row takes its place. |
 | **Recall** | `_recall.IsActive` | Up on the top row (what was typed is held as a draft) | Typing, Esc, opening, Down past the newest search | Up on the top row steps to older searches and Down to newer ones; Down past the newest brings back the draft and leaves Recall, so the next Down moves into the results. The draft is never added to history. |
 | **Typing pause** | `_typing` running | A keystroke | 150 ms, Enter | The chips, count and footer follow at once. |
@@ -32,6 +32,33 @@ The panel and Settings have no explicit state machine: their state is a handful 
 - A read cut short by a newer selection says nothing.
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
+
+## Content search (`UI/SearchWindow.Contents.cs`, `Services/KensakuLink.cs`)
+
+**The slot** (`_contentCancel`, `_contents`, `_contentsFor`, `_contentProblem`, `_epoch`):
+
+| State | Fields | Entered by | Left by | Rule |
+|---|---|---|---|---|
+| **Idle** | `_contentCancel` null | Content search off, the panel hidden, a search answered or cancelled | A search's names on screen | Nothing is asked of kensaku while the panel is hidden. |
+| **Asking** | `_contentCancel` | The names of a search are on screen | Its answer, a newer search, hiding | The search takes its token once and disposes its own source; stopping only cancels. Only the newest search (`_epoch`), for what is still in the box, on a visible panel, may fill the list. |
+| **Shown** | `_contents` for `_contentsFor` | An answer | The next answer | Rows are drawn under Contents only for the line they were found for. An answer for a new line redraws the list, even when its matches are the same as the last line's. A problem is said once, until it changes. |
+
+Turning content search on or off, or changing its port, data folder or CLI, searches again.
+
+**kensaku** (`KensakuLink`, held by the panel for the app's life):
+- A search whose settings changed while it waited records nothing.
+- Its key is `KensakuKey`: the CLI, the port and the data folder as set. A new key starts over: Unknown, nothing started, and the data folder looked up again (once per key, off the UI thread).
+- Before each search, `/health` is asked without the token. Any answer means up (kensaku refuses it with 401). A refused connection means not running; a reset or no answer in time is not, so nothing is started on a port that may be in use. So a missing token is only reported when kensaku is up, and a first run, before kensaku has made its token, still starts kensaku-cli.
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Unknown** | A new key | The first search | |
+| **Up** | Anything answers | Nothing answering | Searches go to kensaku with the token. |
+| **Absent** | Nothing answers, and no CLI is set or it was already started for this key | Anything answering, a new key | Says "kensaku is not running". |
+| **Starting** | kensaku-cli started | Its health answering (Up); the process gone, or 60 s without an answer (Failed) | kensaku-cli is started at most once per key. A search waits up to 5 s for it, one deadline for every check; after that, and while the process runs, it says "kensaku is starting". |
+| **Failed** | Starting failed, or kensaku-cli quit or stayed silent before answering | A start 60 s later, a new key | The start's problem is said. Only then may it be tried again. |
+
+On quit, a kensaku-cli the app started keeps running, as kensaku's own `serve` does; only its handle is let go.
 
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 

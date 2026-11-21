@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text.Json;
 
 namespace Files.Services;
@@ -12,6 +13,19 @@ public sealed record ContentMatch(string Path, double Score, string? Snippet, st
 public sealed record ContentResult(IReadOnlyList<ContentMatch> Matches, string? Problem)
 {
     public static ContentResult Unavailable(string problem) => new([], problem);
+}
+
+/// <summary>What answers on kensaku's port, asked without the token.</summary>
+public enum KensakuReach
+{
+    /// <summary>Something answered, a refusal of the missing token included.</summary>
+    Answers,
+
+    /// <summary>The connection was refused: nothing listens there.</summary>
+    NotRunning,
+
+    /// <summary>No answer in time, or the connection broke: something may be there.</summary>
+    TooSlow,
 }
 
 /// <summary>
@@ -32,10 +46,41 @@ public sealed class Kensaku(int port, string dataFolder)
 
     // One client for the app's life; each call sets its own time limit. No proxy and no redirects,
     // so the token is only ever sent to this PC, never to a proxy or wherever a squatter on the port points.
-    private static readonly HttpClient Http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
+    private static readonly HttpClient Http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectCallback = ConnectAsync })
     {
         Timeout = Timeout.InfiniteTimeSpan,
     };
+
+    // SIO_TCP_INITIAL_RTO with TCP_INITIAL_RTO_PARAMETERS { Rtt = unspecified, MaxSynRetransmissions = none }.
+    private const int InitialRto = unchecked((int)0x98000011);
+    private static readonly byte[] NoSynRetransmissions = [0xFF, 0xFF, 0xFE, 0x00];
+
+    /// <summary>
+    /// Connects without Windows' SYN retries, so a port nothing listens on is refused at once rather than after
+    /// about two seconds: that refusal is how the panel tells kensaku is not running.
+    /// </summary>
+    private static async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancel)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+        try
+        {
+            socket.IOControl(InitialRto, NoSynRetransmissions, null);
+        }
+        catch (SocketException)
+        {
+            // An older Windows: the refusal just takes longer.
+        }
+        try
+        {
+            await socket.ConnectAsync(context.DnsEndPoint, cancel);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch (Exception)
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
 
     private Uri Base => new($"http://127.0.0.1:{port}/");
 
@@ -105,6 +150,36 @@ public sealed class Kensaku(int port, string dataFolder)
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             return $"kensaku could not be opened: {error.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Whether anything answers on the port, asked without the token: kensaku refuses that with 401, which
+    /// still says it is up. So a missing token is only reported when kensaku is up, and on a first run
+    /// (no token yet) kensaku-cli can still be started.
+    /// </summary>
+    public async Task<KensakuReach> ProbeAsync(CancellationToken cancel)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        timeout.CancelAfter(HealthTimeout);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Base, "health"));
+            using HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            return KensakuReach.Answers;
+        }
+        catch (HttpRequestException error) when (error.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
+        {
+            return KensakuReach.NotRunning;
+        }
+        catch (HttpRequestException)
+        {
+            // Reset or dropped: something may be there, so nothing is started on its port.
+            return KensakuReach.TooSlow;
+        }
+        catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
+        {
+            return KensakuReach.TooSlow;
         }
     }
 
@@ -193,12 +268,12 @@ public sealed class Kensaku(int port, string dataFolder)
         }
     }
 
-    /// <summary>Starts <c>kensaku-cli serve</c> hidden, on this port and data folder. Returns a problem in words, or null.</summary>
-    public string? Start(string cliPath)
+    /// <summary>Starts <c>kensaku-cli serve</c> hidden, on this port and data folder: the process started, or a problem in words.</summary>
+    public (Process? Process, string? Problem) Start(string cliPath)
     {
         if (!Path.IsPathRooted(cliPath) || !File.Exists(cliPath))
         {
-            return "kensaku-cli was not found; set its full path in Settings → Search";
+            return (null, "kensaku-cli was not found; set its full path in Settings → Search");
         }
         try
         {
@@ -210,12 +285,12 @@ public sealed class Kensaku(int port, string dataFolder)
                 UseShellExecute = false,
             };
             start.Environment["KENSAKU_DATA_DIR"] = dataFolder;
-            using Process? process = Process.Start(start);
-            return process is null ? "kensaku-cli could not be started" : null;
+            Process? process = Process.Start(start);
+            return process is null ? (null, "kensaku-cli could not be started") : (process, null);
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            return $"kensaku-cli could not be started: {error.Message}";
+            return (null, $"kensaku-cli could not be started: {error.Message}");
         }
     }
 
@@ -254,11 +329,8 @@ public sealed class Kensaku(int port, string dataFolder)
     private static bool Unreachable(Exception error, CancellationToken cancel) =>
         !cancel.IsCancellationRequested && error is HttpRequestException or OperationCanceledException or IOException or JsonException;
 
-    private const string NotRunning = "kensaku is not running";
-    private const string TooSlow = "kensaku did not answer in time";
-
-    /// <summary>Whether a problem means nothing answered at all, so starting kensaku-cli may help.</summary>
-    public static bool IsAbsent(string? problem) => problem is NotRunning;
+    public const string NotRunning = "kensaku is not running";
+    public const string TooSlow = "kensaku did not answer in time";
 
     private static string Described(Exception error) => error switch
     {
@@ -271,19 +343,27 @@ public sealed class Kensaku(int port, string dataFolder)
     /// <summary>No token to send: kensaku has not run with this data folder, or the folder is wrong.</summary>
     private sealed class TokenMissingException(string path) : IOException(path);
 
-    /// <summary>Whether kensaku answers within a few seconds of being started, asking every quarter second.</summary>
+    /// <summary>
+    /// Whether kensaku answers within <paramref name="patience"/> of being started, asking every quarter second.
+    /// One deadline covers every check, so a check that hangs cannot stretch the wait.
+    /// </summary>
     public async Task<bool> WaitUntilUpAsync(TimeSpan patience, CancellationToken cancel)
     {
-        DateTime giveUp = DateTime.UtcNow + patience;
-        while (DateTime.UtcNow < giveUp)
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        deadline.CancelAfter(patience);
+        try
         {
-            if (await CheckAsync(cancel) is null)
+            while (await CheckAsync(deadline.Token) is not null)
             {
-                return true;
+                await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token);
             }
-            await Task.Delay(TimeSpan.FromMilliseconds(250), cancel);
+            return true;
         }
-        return false;
+        catch (Exception) when (deadline.IsCancellationRequested && !cancel.IsCancellationRequested)
+        {
+            // Whatever a check was doing when the deadline passed.
+            return false;
+        }
     }
 
     /// <summary>A snippet on one line, as the second line of a result shows it.</summary>

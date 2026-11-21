@@ -125,9 +125,9 @@ public sealed class KensakuTests
         string data = DataFolder(temp);
         // A port nothing listens on: a closed HttpListener's port is still answered by Windows' HTTP service.
         int closedPort = FakeServer.FreePort();
-        // Windows retries a refused loopback connection for a while, so a closed port may run out the time limit first.
+        // Refused at once: Windows' retries of a refused loopback connection are turned off.
         string? closed = (await new Kensaku(closedPort, data).SearchAsync("x", CancellationToken.None)).Problem;
-        Assert.Contains(closed, new[] { "kensaku is not running", "kensaku did not answer in time" });
+        Assert.Equal("kensaku is not running", closed);
 
         using var slow = new FakeServer(_ => (200, """{"results":[]}""", TimeSpan.FromSeconds(3)));
         var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -214,5 +214,93 @@ public sealed class KensakuTests
         string bad = temp.File("bad.json", """{ "KensakuPort": 70000, "KensakuCli": null }""");
         (Settings fixedUp, _) = Settings.Load(bad);
         Assert.Equal((8765, ""), (fixedUp.KensakuPort, fixedUp.KensakuCli));
+    }
+
+    [Fact]
+    public async Task Waiting_for_kensaku_to_come_up_keeps_to_one_deadline()
+    {
+        using var temp = new TempFolder();
+        using var slow = new FakeServer(_ => (200, Health, TimeSpan.FromSeconds(3)));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        bool up = await new Kensaku(slow.Port, DataFolder(temp)).WaitUntilUpAsync(TimeSpan.FromMilliseconds(500), CancellationToken.None);
+
+        Assert.False(up);
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(1.5), $"waited {clock.Elapsed}");
+    }
+
+    [Fact]
+    public async Task Nothing_on_the_port_and_no_token_yet_means_kensaku_cli_is_started()
+    {
+        using var temp = new TempFolder();
+        var link = new KensakuLink();
+        // A first run: kensaku has never made its token. The CLI is not there, so the start fails, but it is tried.
+        var key = new KensakuKey(Path.Combine(temp.Path, "kensaku-cli.exe"), FakeServer.FreePort(), DataFolder(temp, token: null));
+
+        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
+
+        Assert.Contains("kensaku-cli was not found", result.Problem);
+        Assert.Equal(KensakuState.Failed, link.State);
+    }
+
+    [Fact]
+    public async Task Kensaku_that_is_up_without_a_token_file_says_the_token_is_missing()
+    {
+        using var temp = new TempFolder();
+        using var server = new FakeServer(_ => (200, Health, TimeSpan.Zero));
+        var link = new KensakuLink();
+        var key = new KensakuKey(Path.Combine(temp.Path, "kensaku-cli.exe"), server.Port, DataFolder(temp, token: null));
+
+        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
+
+        Assert.Contains("http.token was not found", result.Problem);
+        Assert.Equal(KensakuState.Up, link.State);
+    }
+
+    [Fact]
+    public async Task Without_kensaku_cli_set_nothing_is_started()
+    {
+        using var temp = new TempFolder();
+        var link = new KensakuLink();
+        var key = new KensakuKey("", FakeServer.FreePort(), DataFolder(temp));
+
+        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
+
+        Assert.Equal("kensaku is not running", result.Problem);
+        Assert.Equal(KensakuState.Absent, link.State);
+    }
+
+    [Fact]
+    public async Task A_failed_start_is_tried_again_only_after_a_minute()
+    {
+        using var temp = new TempFolder();
+        DateTime now = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var link = new KensakuLink(() => now);
+        string cli = Path.Combine(temp.Path, "kensaku-cli.exe");
+        var key = new KensakuKey(cli, FakeServer.FreePort(), DataFolder(temp));
+        Assert.Contains("was not found", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
+        // From now on a start is tried and fails another way, which shows when it was tried.
+        File.WriteAllText(cli, "not a program");
+
+        now += TimeSpan.FromSeconds(30);
+        Assert.Contains("was not found", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
+
+        now += TimeSpan.FromSeconds(31);
+        Assert.Contains("could not be started", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
+    }
+
+    [Fact]
+    public async Task Other_settings_start_over()
+    {
+        using var temp = new TempFolder();
+        var link = new KensakuLink();
+        string cli = Path.Combine(temp.Path, "kensaku-cli.exe");
+        string data = DataFolder(temp);
+        await link.SearchAsync(new KensakuKey(cli, FakeServer.FreePort(), data), "x", CancellationToken.None);
+        File.WriteAllText(cli, "not a program");
+
+        ContentResult result = await link.SearchAsync(new KensakuKey(cli, FakeServer.FreePort(), data), "x", CancellationToken.None);
+
+        Assert.Contains("could not be started", result.Problem);
     }
 }

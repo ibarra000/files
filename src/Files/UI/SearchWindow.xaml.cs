@@ -119,7 +119,12 @@ public partial class SearchWindow : Window
     /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
     private string _searchSettings;
 
-    private static string SearchSettingsOf(Settings settings) => string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+    private static string SearchSettingsOf(Settings settings)
+    {
+        string hidden = string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+        // Content search turned on or off, or pointed at another kensaku, changes the list too.
+        return string.Join("\n", hidden, settings.ContentSearch, settings.KensakuPort, settings.KensakuData, settings.KensakuCli);
+    }
 
     /// <summary>
     /// Settings change for many reasons (Ctrl+P, saving the panel's place on hide, the update check, an edit in
@@ -207,6 +212,7 @@ public partial class SearchWindow : Window
         // Showing the panel again searches for what is in the box.
         _typing.Stop();
         _searchCancel?.Cancel();
+        StopContentSearch();
         // Saving the place raises a settings change while the panel is still visible; it must not rebuild the list,
         // restart a preview read or check favorites for a panel about to hide.
         _hiding = true;
