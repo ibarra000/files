@@ -147,4 +147,12 @@ public sealed class PanelKeysTests
         var clashing = new Settings { PanelKeys = new Dictionary<string, string> { ["Preview"] = "Ctrl+D" } };
         Assert.Equal(PanelKeys.Defaults.Bindings, clashing.Shortcuts.Bindings);
     }
+
+    [Fact]
+    public void Copy_is_saved_under_its_old_key_so_earlier_settings_still_load()
+    {
+        var settings = new Settings { PanelKeys = new Dictionary<string, string> { ["CopyPath"] = "Ctrl+K" } };
+        Assert.Equal(PanelCommand.CopyPath, settings.Shortcuts.Find(ModifierKeys.Control, Key.K));
+        Assert.Equal("Copy", PanelKeys.Name(PanelCommand.CopyPath));
+    }
 }

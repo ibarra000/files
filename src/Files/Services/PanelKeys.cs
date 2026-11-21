@@ -2,12 +2,16 @@ using System.Windows.Input;
 
 namespace Files.Services;
 
-/// <summary>What a key in the panel can do, apart from moving and typing, which keep their keys.</summary>
+/// <summary>
+/// What a key in the panel can do, apart from moving and typing, which keep their keys. A member's name
+/// is the key Settings saves its shortcut under, so a renamed member would drop saved shortcuts.
+/// </summary>
 public enum PanelCommand
 {
     Reveal,
     LiveSearch,
     Favorite,
+    // Shown as "Copy": Ctrl+C copies the file itself once file operations land.
     CopyPath,
     CopyName,
     Preview,
@@ -101,7 +105,7 @@ public sealed class PanelKeys
         PanelCommand.Reveal => "Show in folder",
         PanelCommand.LiveSearch => "Search live",
         PanelCommand.Favorite => "Pin to favorites",
-        PanelCommand.CopyPath => "Copy path",
+        PanelCommand.CopyPath => "Copy",
         PanelCommand.CopyName => "Copy name",
         PanelCommand.Preview => "Preview",
         PanelCommand.Rescan => "Rescan volumes",
