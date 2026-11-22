@@ -6,6 +6,7 @@
 - [.NET 10 SDK](https://dotnet.microsoft.com/download) (`winget install Microsoft.DotNet.SDK.10`)
 - Any editor; Visual Studio 2026 or VS Code with the C# Dev Kit work well
 - For installers only: the WiX 5 tool, `dotnet tool install --global wix --version 5.0.2` and `wix extension add --global WixToolset.UI.wixext/5.0.2`
+- For content search (the bundled kensaku, see [KENSAKU.md](docs/KENSAKU.md)): the submodule (`git submodule update --init third_party/kensaku`), Rust 1.98 or newer with the MSVC toolchain (`winget install Rustlang.Rustup`), bun (`winget install Oven-sh.Bun`) and the Windows SDK, then `pwsh tools/build_kensaku.ps1`. A build run from source finds the result in `artifacts\kensaku`; without it, content search says "kensaku is not built". CI does not build kensaku.
 
 ## Build and run
 
@@ -73,7 +74,7 @@ Maintainers only:
    pwsh tools/make_msi.ps1 -Release                          # GitHub release v<version>
    ```
 
-   `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag. The script signs `files.exe` and the MSI, and stops if either is not signed by the release certificate.
+   The script builds kensaku first (`tools/build_kensaku.ps1`); `-SkipKensaku` leaves content search out of the installer. `-Publish` copies the MSI to a shared folder and writes `latest.json` beside it, for installs that set an update folder. `-Release` attaches both to GitHub release `v<version>`; the `v` prefix is required, because the updater downloads from that tag. The script signs `files.exe` and the MSI, and stops if either is not signed by the release certificate.
 
 ### An installer with preset volumes
 
