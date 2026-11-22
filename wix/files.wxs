@@ -4,8 +4,8 @@
   Build it with `tools/make_msi.ps1`.
 
   Installs one self-contained executable into Program Files with the PaddleOCR
-  models beside it, one Start-menu shortcut and, optionally, a sign-in startup
-  entry. It does not modify `PATH`.
+  models and the bundled kensaku (kensaku.wxs) beside it, one Start-menu
+  shortcut and, optionally, a sign-in startup entry. It does not modify `PATH`.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -114,6 +114,10 @@
       <ComponentRef Id="StartMenuShortcut" />
       <?ifdef Volumes ?>
       <ComponentRef Id="BundledVolumes" />
+      <?endif ?>
+      <!-- Content search (Services/Kensaku); left out by `make_msi.ps1 -SkipKensaku`. -->
+      <?ifdef KensakuDir ?>
+      <ComponentGroupRef Id="Kensaku" />
       <?endif ?>
 
       <!-- Selected by default. The installer, the Settings window's General page
