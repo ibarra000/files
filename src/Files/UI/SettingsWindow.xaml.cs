@@ -41,6 +41,8 @@ public partial class SettingsWindow : Window
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
         app.Indexer.Changed += onIndexerChanged;
+        Action onKensakuChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, ShowKensakuStatus);
+        app.Kensaku.Changed += onKensakuChanged;
         // The title bar and body take the panel's colors, and follow a change of Colors at once;
         // the Install button follows an update found while the window is open.
         Action onSettingsChanged = () =>
@@ -66,8 +68,12 @@ public partial class SettingsWindow : Window
         }
         // Typing in a text field is saved even if the window is left or closed without moving focus.
         Deactivated += (_, _) => SaveTypedText();
-        // History may have changed in the panel while this window was behind it.
-        Activated += (_, _) => UpdateClearButtons();
+        // History may have changed in the panel while this window was behind it, and kensaku may have read more.
+        Activated += (_, _) =>
+        {
+            UpdateClearButtons();
+            ShowKensakuStatus();
+        };
         Closing += (_, e) =>
         {
             ViewerGrid.CommitEdit(DataGridEditingUnit.Row, exitEditingMode: true);
@@ -86,6 +92,7 @@ public partial class SettingsWindow : Window
         Closed += (_, _) =>
         {
             app.Indexer.Changed -= onIndexerChanged;
+            app.Kensaku.Changed -= onKensakuChanged;
             app.SettingsChanged -= onSettingsChanged;
             // A shortcut being recorded is taken now; a problem with it has no window left to be shown in.
             if (app.ResumeHotkeys() is string problem)
@@ -212,9 +219,7 @@ public partial class SettingsWindow : Window
         RemovalsBox.Text = string.Join(Environment.NewLine, settings.ScreenTextRemovals);
         ShowFoldersBox.IsChecked = settings.ShowFolders;
         ContentSearchBox.IsChecked = settings.ContentSearch;
-        KensakuCliBox.Text = settings.KensakuCli;
-        KensakuDataBox.Text = settings.KensakuData;
-        KensakuPortBox.Text = settings.KensakuPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        ContentOcrBox.IsChecked = settings.ContentOcr;
         foreach (Viewer viewer in settings.Viewers)
         {
             _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
@@ -306,9 +311,7 @@ public partial class SettingsWindow : Window
             ScreenTextRemovals = RemovalLines(),
             ShowFolders = ShowFoldersBox.IsChecked == true,
             ContentSearch = ContentSearchBox.IsChecked == true,
-            KensakuCli = KensakuCliBox.Text.Trim().Trim('"'),
-            KensakuData = KensakuDataBox.Text.Trim().Trim('"'),
-            KensakuPort = int.TryParse(KensakuPortBox.Text, out int port) && port is > 0 and < 65536 ? port : _app.Settings.KensakuPort,
+            ContentOcr = ContentOcrBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
@@ -391,6 +394,19 @@ public partial class SettingsWindow : Window
             .ToList();
 
     private void OnChanged(object sender, RoutedEventArgs e) => Save();
+
+    /// <summary>The content search status line: what kensaku reads while it is up, else what the host is doing.</summary>
+    private async void ShowKensakuStatus()
+    {
+        KensakuHost host = _app.Kensaku;
+        if (host.State != KensakuHostState.Up)
+        {
+            KensakuStatusText.Text = host.Status;
+            return;
+        }
+        // StatusAsync turns every failure into words, so nothing escapes this handler.
+        KensakuStatusText.Text = await new Kensaku(KensakuHost.Port, host.DataFolder).StatusAsync(CancellationToken.None);
+    }
 
     private void OnGridEdited(object? sender, EventArgs e)
     {

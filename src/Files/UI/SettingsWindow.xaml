@@ -396,11 +396,11 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                        <TextBlock Text="Search file contents with kensaku" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Search file contents" Style="{StaticResource RowLabel}" />
                                         <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                                   Text="Lists files whose text matches, from kensaku's index, below the name results. kensaku is a separate app; nothing it returns is kept." />
+                                                   Text="Lists files whose text matches below the name results. The bundled kensaku reads the volumes that are not live-only, in the background." />
                                     </StackPanel>
-                                    <CheckBox x:Name="ContentSearchBox" Grid.Column="1" AutomationProperties.Name="Search file contents with kensaku" Click="OnChanged" />
+                                    <CheckBox x:Name="ContentSearchBox" Grid.Column="1" AutomationProperties.Name="Search file contents" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
                                 <Grid Style="{StaticResource SettingRow}">
@@ -409,34 +409,14 @@
                                         <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                        <TextBlock Text="kensaku-cli" Style="{StaticResource RowLabel}" />
+                                        <TextBlock Text="Read text in images and scanned PDFs" Style="{StaticResource RowLabel}" />
                                         <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                                   Text="The full path of kensaku-cli.exe, started once when kensaku does not answer. Leave empty to use a kensaku-cli serve you start yourself." />
+                                                   Text="Off by default. Turning it on downloads kensaku's text-reading models once." />
                                     </StackPanel>
-                                    <TextBox x:Name="KensakuCliBox" Grid.Column="1" Width="300" AutomationProperties.Name="kensaku-cli path" LostFocus="OnChanged" />
+                                    <CheckBox x:Name="ContentOcrBox" Grid.Column="1" AutomationProperties.Name="Read text in images and scanned PDFs" Click="OnChanged" />
                                 </Grid>
                                 <Border Style="{StaticResource RowDivider}" />
-                                <Grid Style="{StaticResource SettingRow}">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                        <TextBlock Text="Data folder" Style="{StaticResource RowLabel}" />
-                                        <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                                   Text="Where kensaku keeps its index and http.token. Leave empty for its default (%APPDATA%\kensaku, or data beside a portable kensaku)." />
-                                    </StackPanel>
-                                    <TextBox x:Name="KensakuDataBox" Grid.Column="1" Width="300" AutomationProperties.Name="kensaku data folder" LostFocus="OnChanged" />
-                                </Grid>
-                                <Border Style="{StaticResource RowDivider}" />
-                                <Grid Style="{StaticResource SettingRow}">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Text="Port" VerticalAlignment="Center" Style="{StaticResource RowLabel}" />
-                                    <TextBox x:Name="KensakuPortBox" Grid.Column="1" Width="80" AutomationProperties.Name="kensaku port" LostFocus="OnChanged" />
-                                </Grid>
+                                <TextBlock x:Name="KensakuStatusText" Margin="0,8,0,0" TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
                             </StackPanel>
                         </Border>
                     </StackPanel>

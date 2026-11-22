@@ -15,8 +15,8 @@ public partial class SearchWindow
     /// <summary>Why the last content search gave nothing, said once until it changes.</summary>
     private string? _contentProblem;
 
-    /// <summary>Whether kensaku is up, and whether kensaku-cli may be started, for the settings in use.</summary>
-    private readonly KensakuLink _kensaku = new();
+    /// <summary>Whether the bundled kensaku is up, asked before each content search.</summary>
+    private readonly KensakuLink _kensaku;
 
     /// <summary>The content matches for what is in the box now, or none (also when content search was turned off, or Folders is chosen).</summary>
     private IReadOnlyList<ContentMatch>? ContentsShown =>
@@ -45,7 +45,7 @@ public partial class SearchWindow
         ContentResult result;
         try
         {
-            result = await _kensaku.SearchAsync(KensakuKey.Of(settings), line, token);
+            result = await _kensaku.SearchAsync(line, token);
         }
         catch (Exception) when (token.IsCancellationRequested)
         {
@@ -86,12 +86,5 @@ public partial class SearchWindow
         {
             ShowResults(shown);
         }
-    }
-
-    /// <summary>Brings kensaku forward with <paramref name="text"/> on the clipboard (Open in kensaku, Find in kensaku).</summary>
-    private void OpenInKensaku(string text)
-    {
-        Settings settings = _app.Settings;
-        ShowToast(Kensaku.OpenApp(Kensaku.AppPath(settings.KensakuCli, settings.KensakuDataFolder), text));
     }
 }

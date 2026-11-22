@@ -165,17 +165,6 @@ public sealed class KensakuTests
     }
 
     [Fact]
-    public void A_portable_kensaku_keeps_its_data_beside_it()
-    {
-        using var temp = new TempFolder();
-        string cli = temp.File("kensaku-cli.exe", "");
-        temp.File("portable", "");
-
-        Assert.Equal(Path.Combine(temp.Path, "data"), Kensaku.DefaultDataFolder(cli));
-        Assert.EndsWith(@"\kensaku", Kensaku.DefaultDataFolder(null));
-    }
-
-    [Fact]
     public void Content_matches_come_after_the_name_results_without_repeating_them()
     {
         Files.Core.VolumeIndex index = new Files.Core.VolumeIndex.Builder(@"C:\docs").Build();
@@ -194,29 +183,6 @@ public sealed class KensakuTests
     }
 
     [Fact]
-    public void The_action_menu_offers_kensaku_only_when_content_search_is_on()
-    {
-        var row = Files.UI.ResultRow.ForContent(new ContentMatch(@"C:\docs\report.pdf", 1, null, "Content"));
-
-        Assert.DoesNotContain(Files.UI.RowActions.For(row, new Settings(), [], "torque"), action => action.Kind == Files.UI.ActionKind.OpenInKensaku);
-        Assert.Contains(Files.UI.RowActions.For(row, new Settings { ContentSearch = true }, [], "torque"), action => action.Kind == Files.UI.ActionKind.OpenInKensaku);
-    }
-
-    [Fact]
-    public void The_content_search_settings_survive_a_save_and_a_bad_port_gets_the_default()
-    {
-        using var temp = new TempFolder();
-        string path = Path.Combine(temp.Path, "settings.json");
-        new Settings { ContentSearch = true, KensakuCli = @"C:\k\kensaku-cli.exe", KensakuData = @"C:\k\data", KensakuPort = 9000 }.Save(path);
-        (Settings loaded, _) = Settings.Load(path);
-        Assert.Equal((true, @"C:\k\kensaku-cli.exe", @"C:\k\data", 9000), (loaded.ContentSearch, loaded.KensakuCli, loaded.KensakuData, loaded.KensakuPort));
-
-        string bad = temp.File("bad.json", """{ "KensakuPort": 70000, "KensakuCli": null }""");
-        (Settings fixedUp, _) = Settings.Load(bad);
-        Assert.Equal((8765, ""), (fixedUp.KensakuPort, fixedUp.KensakuCli));
-    }
-
-    [Fact]
     public async Task Waiting_for_kensaku_to_come_up_keeps_to_one_deadline()
     {
         using var temp = new TempFolder();
@@ -230,77 +196,49 @@ public sealed class KensakuTests
     }
 
     [Fact]
-    public async Task Nothing_on_the_port_and_no_token_yet_means_kensaku_cli_is_started()
-    {
-        using var temp = new TempFolder();
-        var link = new KensakuLink();
-        // A first run: kensaku has never made its token. The CLI is not there, so the start fails, but it is tried.
-        var key = new KensakuKey(Path.Combine(temp.Path, "kensaku-cli.exe"), FakeServer.FreePort(), DataFolder(temp, token: null));
-
-        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
-
-        Assert.Contains("kensaku-cli was not found", result.Problem);
-        Assert.Equal(KensakuState.Failed, link.State);
-    }
-
-    [Fact]
-    public async Task Kensaku_that_is_up_without_a_token_file_says_the_token_is_missing()
+    public async Task A_missing_token_is_named()
     {
         using var temp = new TempFolder();
         using var server = new FakeServer(_ => (200, Health, TimeSpan.Zero));
-        var link = new KensakuLink();
-        var key = new KensakuKey(Path.Combine(temp.Path, "kensaku-cli.exe"), server.Port, DataFolder(temp, token: null));
 
-        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
+        string? problem = await new Kensaku(server.Port, DataFolder(temp, token: null)).CheckAsync(CancellationToken.None);
 
-        Assert.Contains("http.token was not found", result.Problem);
-        Assert.Equal(KensakuState.Up, link.State);
+        Assert.Contains("http.token was not found", problem);
+    }
+
+    [Theory]
+    [InlineData("""{"ok":true,"health":{"state":{"roots":["a","b","c"],"files":12400,"is_indexing":false}}}""", "Reading 3 volumes · 12,400 files")]
+    [InlineData("""{"ok":true,"health":{"state":{"roots":["a"],"files":5,"is_indexing":true}}}""", "Indexing 1 volume · 5 files so far")]
+    [InlineData("""{"ok":false,"health":{"error":"no index"}}""", "kensaku is running; its index is not open yet")]
+    public void The_status_line_says_what_kensaku_reads(string json, string status)
+    {
+        using var culture = new CultureScope("en-US");
+
+        Assert.Equal(status, Kensaku.Describe(json));
     }
 
     [Fact]
-    public async Task Without_kensaku_cli_set_nothing_is_started()
+    public void Content_search_and_reading_images_survive_a_save_and_the_old_kensaku_keys_are_ignored()
     {
         using var temp = new TempFolder();
-        var link = new KensakuLink();
-        var key = new KensakuKey("", FakeServer.FreePort(), DataFolder(temp));
+        string path = Path.Combine(temp.Path, "settings.json");
+        new Settings { ContentSearch = true, ContentOcr = true }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+        Assert.Equal((true, true), (loaded.ContentSearch, loaded.ContentOcr));
 
-        ContentResult result = await link.SearchAsync(key, "x", CancellationToken.None);
-
-        Assert.Equal("kensaku is not running", result.Problem);
-        Assert.Equal(KensakuState.Absent, link.State);
+        string old = temp.File("old.json", """{ "ContentSearch": true, "KensakuCli": "kensaku-cli.exe", "KensakuData": "data", "KensakuPort": 9000 }""");
+        (Settings migrated, string? problem) = Settings.Load(old);
+        Assert.Null(problem);
+        Assert.Equal((true, false), (migrated.ContentSearch, migrated.ContentOcr));
     }
 
-    [Fact]
-    public async Task A_failed_start_is_tried_again_only_after_a_minute()
+    /// <summary>Sets the current culture for a test, so numbers are written the same on every PC.</summary>
+    private sealed class CultureScope : IDisposable
     {
-        using var temp = new TempFolder();
-        DateTime now = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        var link = new KensakuLink(() => now);
-        string cli = Path.Combine(temp.Path, "kensaku-cli.exe");
-        var key = new KensakuKey(cli, FakeServer.FreePort(), DataFolder(temp));
-        Assert.Contains("was not found", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
-        // From now on a start is tried and fails another way, which shows when it was tried.
-        File.WriteAllText(cli, "not a program");
+        private readonly System.Globalization.CultureInfo _previous = System.Globalization.CultureInfo.CurrentCulture;
 
-        now += TimeSpan.FromSeconds(30);
-        Assert.Contains("was not found", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
+        public CultureScope(string name) => System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo(name);
 
-        now += TimeSpan.FromSeconds(31);
-        Assert.Contains("could not be started", (await link.SearchAsync(key, "x", CancellationToken.None)).Problem);
-    }
-
-    [Fact]
-    public async Task Other_settings_start_over()
-    {
-        using var temp = new TempFolder();
-        var link = new KensakuLink();
-        string cli = Path.Combine(temp.Path, "kensaku-cli.exe");
-        string data = DataFolder(temp);
-        await link.SearchAsync(new KensakuKey(cli, FakeServer.FreePort(), data), "x", CancellationToken.None);
-        File.WriteAllText(cli, "not a program");
-
-        ContentResult result = await link.SearchAsync(new KensakuKey(cli, FakeServer.FreePort(), data), "x", CancellationToken.None);
-
-        Assert.Contains("could not be started", result.Problem);
+        public void Dispose() => System.Globalization.CultureInfo.CurrentCulture = _previous;
     }
 }

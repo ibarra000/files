@@ -57,6 +57,7 @@ public partial class SearchWindow : Window
     {
         InitializeComponent();
         _app = app;
+        _kensaku = new KensakuLink(app.Kensaku);
         _typing = new DispatcherTimer { Interval = TypingDelay };
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
@@ -122,8 +123,8 @@ public partial class SearchWindow : Window
     private static string SearchSettingsOf(Settings settings)
     {
         string hidden = string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
-        // Content search turned on or off, or pointed at another kensaku, changes the list too.
-        return string.Join("\n", hidden, settings.ContentSearch, settings.KensakuPort, settings.KensakuData, settings.KensakuCli);
+        // Content search turned on or off changes the list too.
+        return string.Join("\n", hidden, settings.ContentSearch);
     }
 
     /// <summary>

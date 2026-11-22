@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
@@ -15,23 +14,10 @@ public sealed record ContentResult(IReadOnlyList<ContentMatch> Matches, string? 
     public static ContentResult Unavailable(string problem) => new([], problem);
 }
 
-/// <summary>What answers on kensaku's port, asked without the token.</summary>
-public enum KensakuReach
-{
-    /// <summary>Something answered, a refusal of the missing token included.</summary>
-    Answers,
-
-    /// <summary>The connection was refused: nothing listens there.</summary>
-    NotRunning,
-
-    /// <summary>No answer in time, or the connection broke: something may be there.</summary>
-    TooSlow,
-}
-
 /// <summary>
-/// Searches inside files through kensaku, a separate app that indexes file contents (issue #87):
-/// its local HTTP server, <c>kensaku-cli serve</c>, on 127.0.0.1 with the bearer token it keeps in
-/// <c>http.token</c> in its data folder. Name search never waits on it; every failure comes back as
+/// Searches inside files through the bundled kensaku, which indexes file contents (issues #87, #97):
+/// its local HTTP server, <c>kensaku-cli serve</c> started by <see cref="KensakuHost"/>, on 127.0.0.1 with
+/// the bearer token it keeps in <c>http.token</c> in its data folder. Name search never waits on it; every failure comes back as
 /// a problem in words, and nothing returned is stored.
 /// </summary>
 public sealed class Kensaku(int port, string dataFolder)
@@ -84,105 +70,6 @@ public sealed class Kensaku(int port, string dataFolder)
 
     private Uri Base => new($"http://127.0.0.1:{port}/");
 
-    /// <summary>
-    /// The data folder kensaku uses: <c>KENSAKU_DATA_DIR</c> when set, else <c>data</c> beside a portable
-    /// kensaku-cli (one with a <c>portable</c> marker), else <c>%APPDATA%\kensaku</c>, as kensaku decides.
-    /// </summary>
-    public static string DefaultDataFolder(string? cliPath)
-    {
-        string? fromEnvironment = Environment.GetEnvironmentVariable("KENSAKU_DATA_DIR");
-        if (!string.IsNullOrWhiteSpace(fromEnvironment))
-        {
-            return fromEnvironment;
-        }
-        string? cliFolder = string.IsNullOrWhiteSpace(cliPath) ? null : Path.GetDirectoryName(cliPath);
-        if (cliFolder is not null && (File.Exists(Path.Combine(cliFolder, "portable")) || File.Exists(Path.Combine(cliFolder, "kensaku.portable"))))
-        {
-            return Path.Combine(cliFolder, "data");
-        }
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "kensaku");
-    }
-
-    /// <summary>The kensaku app: beside the CLI, beside a portable data folder, or where its installer puts it; null when not found.</summary>
-    public static string? AppPath(string? cliPath, string dataFolder)
-    {
-        string?[] folders =
-        [
-            string.IsNullOrWhiteSpace(cliPath) ? null : Path.GetDirectoryName(cliPath),
-            PortableFolder(dataFolder),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "kensaku"),
-        ];
-        return folders.OfType<string>().Select(folder => Path.Combine(folder, "kensaku.exe")).FirstOrDefault(File.Exists);
-    }
-
-    /// <summary>The folder of a portable kensaku whose data folder this is (its <c>data</c>, beside the <c>portable</c> marker), or null.</summary>
-    private static string? PortableFolder(string dataFolder)
-    {
-        string? parent = Path.GetDirectoryName(dataFolder.TrimEnd('\\', '/'));
-        bool portable = parent is not null && Path.GetFileName(dataFolder.TrimEnd('\\', '/')).Equals("data", StringComparison.OrdinalIgnoreCase)
-            && (File.Exists(Path.Combine(parent, "portable")) || File.Exists(Path.Combine(parent, "kensaku.portable")));
-        return portable ? parent : null;
-    }
-
-    /// <summary>
-    /// Brings the kensaku app forward with <paramref name="text"/> on the clipboard to paste into it;
-    /// kensaku takes no search on its command line. Returns what to tell the user.
-    /// </summary>
-    public static string OpenApp(string? appPath, string text)
-    {
-        if (appPath is null)
-        {
-            return "kensaku.exe was not found beside kensaku-cli or its data folder";
-        }
-        try
-        {
-            System.Windows.Clipboard.SetText(text);
-        }
-        catch (System.Runtime.InteropServices.COMException)
-        {
-            // Still opened; the text just has to be typed.
-        }
-        try
-        {
-            Process.Start(new ProcessStartInfo(appPath) { ArgumentList = { "--toggle" }, UseShellExecute = false })?.Dispose();
-            return $"Opened kensaku · \"{text}\" is on the clipboard to paste";
-        }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
-        {
-            return $"kensaku could not be opened: {error.Message}";
-        }
-    }
-
-    /// <summary>
-    /// Whether anything answers on the port, asked without the token: kensaku refuses that with 401, which
-    /// still says it is up. So a missing token is only reported when kensaku is up, and on a first run
-    /// (no token yet) kensaku-cli can still be started.
-    /// </summary>
-    public async Task<KensakuReach> ProbeAsync(CancellationToken cancel)
-    {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        timeout.CancelAfter(HealthTimeout);
-        try
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Base, "health"));
-            using HttpResponseMessage response = await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
-            return KensakuReach.Answers;
-        }
-        catch (HttpRequestException error) when (error.InnerException is SocketException { SocketErrorCode: SocketError.ConnectionRefused })
-        {
-            return KensakuReach.NotRunning;
-        }
-        catch (HttpRequestException)
-        {
-            // Reset or dropped: something may be there, so nothing is started on its port.
-            return KensakuReach.TooSlow;
-        }
-        catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
-        {
-            return KensakuReach.TooSlow;
-        }
-    }
-
     /// <summary>Whether kensaku answers, as a problem in words or null when it does.</summary>
     public async Task<string?> CheckAsync(CancellationToken cancel)
     {
@@ -208,6 +95,49 @@ public sealed class Kensaku(int port, string dataFolder)
         catch (Exception error) when (Unreachable(error, cancel))
         {
             return Described(error);
+        }
+    }
+
+    /// <summary>What kensaku is reading, for the status line in Settings, or a problem in words.</summary>
+    public async Task<string> StatusAsync(CancellationToken cancel)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        timeout.CancelAfter(HealthTimeout);
+        try
+        {
+            using HttpResponseMessage response = await SendAsync("health", timeout.Token);
+            return Problem(response) ?? Describe(await response.Content.ReadAsStringAsync(timeout.Token));
+        }
+        catch (Exception error) when (Unreachable(error, cancel))
+        {
+            return Described(error);
+        }
+    }
+
+    /// <summary>
+    /// Reads <c>/health</c>'s <c>{ health: { state: { roots, files, is_indexing } } }</c> as
+    /// "Reading 3 volumes · 12,400 files".
+    /// </summary>
+    public static string Describe(string json)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (!document.RootElement.TryGetProperty("health", out JsonElement health)
+                || !health.TryGetProperty("state", out JsonElement state) || state.ValueKind != JsonValueKind.Object)
+            {
+                return "kensaku is running; its index is not open yet";
+            }
+            int roots = state.TryGetProperty("roots", out JsonElement r) && r.ValueKind == JsonValueKind.Array ? r.GetArrayLength() : 0;
+            long files = state.TryGetProperty("files", out JsonElement f) && f.ValueKind == JsonValueKind.Number ? f.GetInt64() : 0;
+            bool indexing = state.TryGetProperty("is_indexing", out JsonElement i) && i.ValueKind == JsonValueKind.True;
+            string volumes = roots == 1 ? "1 volume" : $"{roots:N0} volumes";
+            string read = files == 1 ? "1 file" : $"{files:N0} files";
+            return indexing ? $"Indexing {volumes} · {read} so far" : $"Reading {volumes} · {read}";
+        }
+        catch (JsonException)
+        {
+            return "kensaku's answer could not be read";
         }
     }
 
@@ -268,32 +198,6 @@ public sealed class Kensaku(int port, string dataFolder)
         }
     }
 
-    /// <summary>Starts <c>kensaku-cli serve</c> hidden, on this port and data folder: the process started, or a problem in words.</summary>
-    public (Process? Process, string? Problem) Start(string cliPath)
-    {
-        if (!Path.IsPathRooted(cliPath) || !File.Exists(cliPath))
-        {
-            return (null, "kensaku-cli was not found; set its full path in Settings → Search");
-        }
-        try
-        {
-            var start = new ProcessStartInfo(cliPath)
-            {
-                ArgumentList = { "serve", "--port", port.ToString(System.Globalization.CultureInfo.InvariantCulture) },
-                // A hidden console of its own: pipes to this app would break when it closes, and could stop kensaku.
-                CreateNoWindow = true,
-                UseShellExecute = false,
-            };
-            start.Environment["KENSAKU_DATA_DIR"] = dataFolder;
-            Process? process = Process.Start(start);
-            return process is null ? (null, "kensaku-cli could not be started") : (process, null);
-        }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
-        {
-            return (null, $"kensaku-cli could not be started: {error.Message}");
-        }
-    }
-
     private async Task<HttpResponseMessage> SendAsync(string path, CancellationToken cancel)
     {
         // Read each time (kensaku makes a new token when the file is deleted), and off the UI thread,
@@ -320,7 +224,7 @@ public sealed class Kensaku(int port, string dataFolder)
     private static string? Problem(HttpResponseMessage response) => response.StatusCode switch
     {
         HttpStatusCode.OK => null,
-        HttpStatusCode.Unauthorized => "kensaku refused the token; check its data folder in Settings → Search",
+        HttpStatusCode.Unauthorized => "kensaku refused the token",
         HttpStatusCode.ServiceUnavailable => "kensaku is busy",
         _ => $"kensaku answered {(int)response.StatusCode}",
     };
@@ -334,13 +238,13 @@ public sealed class Kensaku(int port, string dataFolder)
 
     private static string Described(Exception error) => error switch
     {
-        TokenMissingException missing => $"{missing.Message} was not found; is the data folder right (Settings → Search)?",
+        TokenMissingException missing => $"{missing.Message} was not found",
         OperationCanceledException => TooSlow,
         HttpRequestException => NotRunning,
         _ => $"kensaku could not be reached: {error.Message}",
     };
 
-    /// <summary>No token to send: kensaku has not run with this data folder, or the folder is wrong.</summary>
+    /// <summary>No token to send: <c>serve</c> has not run with this data folder yet.</summary>
     private sealed class TokenMissingException(string path) : IOException(path);
 
     /// <summary>

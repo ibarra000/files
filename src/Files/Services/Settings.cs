@@ -62,21 +62,11 @@ public sealed record Settings
     /// <summary>Shows each result's folder on a second line; off keeps one line per result, the folder on hover.</summary>
     public bool ShowFolders { get; init; } = true;
 
-    /// <summary>Also lists files whose contents match, from kensaku's index (Services/Kensaku.cs); off by default.</summary>
+    /// <summary>Also lists files whose contents match, from the bundled kensaku (Services/Kensaku); off by default.</summary>
     public bool ContentSearch { get; init; }
 
-    /// <summary>kensaku-cli.exe, started with <c>serve</c> when kensaku does not answer; empty to only use one already running.</summary>
-    public string KensakuCli { get; init; } = "";
-
-    /// <summary>kensaku's data folder, which holds its token; empty for where kensaku keeps it by default.</summary>
-    public string KensakuData { get; init; } = "";
-
-    /// <summary>The port <c>kensaku-cli serve</c> listens on.</summary>
-    public int KensakuPort { get; init; } = 8765;
-
-    /// <summary>The data folder in effect: the one set, or kensaku's default.</summary>
-    [JsonIgnore]
-    public string KensakuDataFolder => KensakuData.Trim().Length > 0 ? KensakuData.Trim() : Services.Kensaku.DefaultDataFolder(KensakuCli);
+    /// <summary>Lets kensaku read text in images and scanned PDFs; on, it downloads its OCR models once.</summary>
+    public bool ContentOcr { get; init; }
 
     /// <summary>The preview pane beside the results (Ctrl+P); the window is that much wider while it shows.</summary>
     public bool ShowPreview { get; init; }
@@ -137,9 +127,6 @@ public sealed record Settings
                 .Where(viewer => viewer?.Name is not null && viewer.Program is not null)
                 .ToList(),
             UpdateFolder = loaded.UpdateFolder ?? "",
-            KensakuCli = loaded.KensakuCli ?? "",
-            KensakuData = loaded.KensakuData ?? "",
-            KensakuPort = loaded.KensakuPort is > 0 and < 65536 ? loaded.KensakuPort : defaults.KensakuPort,
         };
     }
 
