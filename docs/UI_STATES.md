@@ -43,12 +43,12 @@ On search results only; the home list keeps Del for Recent and Ctrl+C for the pa
 
 | State | Entered by | Left by | Rule |
 |---|---|---|---|
-| **Box** | Typing, any caret or selection change in the box, the list falling back to its first row because the selected file is gone, hiding | Going to the results | The keys edit the search. They never touch a file. |
+| **Box** | Typing, any caret or selection change in the box, the list falling back to its first row because the selected file is gone, hiding | Going to the results | The keys edit the search. Del never touches a file: at the end of the text with nothing selected it does nothing in the box, so the footer says "Press ↓ to choose the file, then Del". Shift+Del with no text selected acts on the highlighted result, after asking, since the box has nothing to cut; this is how a lone result, highlighted without going to it, is deleted (`FileKeys.ActsOnFile`). |
 | **Results** | ↑ ↓ PgUp PgDn, a click or right-click on a row, a rename closing that began here | Any of the ways into Box, or F2 into Renaming | The keys act on the selected result. After a delete that worked the row beside it is selected, so the keys stay here. |
 | **Renaming** | F2 or the menu's Rename opening the rename box | The box closing | The rename box has every key. On closing, the keys go back to whoever had them before (`RenameSession.ReturnTo`). |
 
 **Delete ask** (`_deleteAsked`, `_deleteCount`): a delete for good (Shift+Del, or Del where there is no Recycle Bin) is asked about in the footer.
-- Each press is numbered and timed when pressed, before waiting to learn whether the drive has a Recycle Bin. A press whose drive answers after a newer press, after the keys went back to the box, or after hiding, is dropped.
+- Each press is numbered and timed when pressed, before waiting to learn whether the drive has a Recycle Bin. A press whose drive answers after a newer press, after the keys went back to the box or the box changed, or after hiding, is dropped.
 - The question is armed only once its toast shows. Any other toast drops it (`ShowToast`), and so does hiding.
 - Only the same key on the same file, pressed between 300 ms and 4 s after the question showed, confirms it. A press made before it showed, or a held key (auto-repeat), does nothing.
 

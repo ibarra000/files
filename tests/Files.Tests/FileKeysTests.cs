@@ -45,6 +45,43 @@ public sealed class FileKeysTests
     }
 
     [Fact]
+    public void Shift_Del_in_the_box_with_no_text_selected_acts_on_the_highlighted_result()
+    {
+        // A lone result is highlighted already, so the user never pressed the down arrow.
+        Assert.Equal(DeleteTarget.File, FileKeys.ActsOnFile(KeyOwner.Box, shift: true, boxHasSelection: false, caretAtEnd: true, hasHit: true));
+        Assert.Equal(DeleteTarget.File, FileKeys.ActsOnFile(KeyOwner.Box, shift: true, boxHasSelection: false, caretAtEnd: false, hasHit: true));
+    }
+
+    [Fact]
+    public void Shift_Del_with_text_selected_in_the_box_cuts_the_text()
+    {
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Box, shift: true, boxHasSelection: true, caretAtEnd: true, hasHit: true));
+    }
+
+    [Fact]
+    public void Del_in_the_box_never_acts_on_a_file()
+    {
+        Assert.Equal(DeleteTarget.Hint, FileKeys.ActsOnFile(KeyOwner.Box, shift: false, boxHasSelection: false, caretAtEnd: true, hasHit: true));
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Box, shift: false, boxHasSelection: false, caretAtEnd: false, hasHit: true));
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Box, shift: false, boxHasSelection: true, caretAtEnd: true, hasHit: true));
+    }
+
+    [Fact]
+    public void Del_and_Shift_Del_in_the_results_act_on_the_file()
+    {
+        Assert.Equal(DeleteTarget.File, FileKeys.ActsOnFile(KeyOwner.Results, shift: false, boxHasSelection: false, caretAtEnd: true, hasHit: true));
+        Assert.Equal(DeleteTarget.File, FileKeys.ActsOnFile(KeyOwner.Results, shift: true, boxHasSelection: true, caretAtEnd: false, hasHit: true));
+    }
+
+    [Fact]
+    public void With_no_result_highlighted_Del_edits_the_box()
+    {
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Box, shift: true, boxHasSelection: false, caretAtEnd: true, hasHit: false));
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Box, shift: false, boxHasSelection: false, caretAtEnd: true, hasHit: false));
+        Assert.Equal(DeleteTarget.Box, FileKeys.ActsOnFile(KeyOwner.Results, shift: false, boxHasSelection: false, caretAtEnd: true, hasHit: false));
+    }
+
+    [Fact]
     public void An_operation_can_be_undone_for_two_minutes()
     {
         Assert.True(FileKeys.CanStillUndo(Asked, Asked.AddMinutes(1)));

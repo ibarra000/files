@@ -26,6 +26,19 @@ public enum DeleteAnswer
     Ignore,
 }
 
+/// <summary>Where a press of Del or Shift+Del goes.</summary>
+public enum DeleteTarget
+{
+    /// <summary>The search box edits its text as usual.</summary>
+    Box,
+
+    /// <summary>The selected result is deleted, after asking when it is for good.</summary>
+    File,
+
+    /// <summary>Del at the end of the box, where it does nothing: the footer says how to delete the file.</summary>
+    Hint,
+}
+
 /// <summary>A delete for good the footer asked about: which file, which key (Shift+Del or Del), and when.</summary>
 public sealed record DeleteAsk(string Path, bool Permanently, DateTime AskedAt);
 
@@ -56,6 +69,23 @@ public static class FileKeys
             return DeleteAnswer.Ignore;
         }
         return since <= ConfirmWindow ? DeleteAnswer.Confirm : DeleteAnswer.Ask;
+    }
+
+    /// <summary>
+    /// Del acts on a file only from the results. Shift+Del also acts from the box when no text is selected
+    /// there, since it has nothing to cut: a lone result is highlighted without the user going to it.
+    /// </summary>
+    public static DeleteTarget ActsOnFile(KeyOwner owner, bool shift, bool boxHasSelection, bool caretAtEnd, bool hasHit)
+    {
+        if (!hasHit || owner == KeyOwner.Renaming)
+        {
+            return DeleteTarget.Box;
+        }
+        if (owner == KeyOwner.Results || (shift && !boxHasSelection))
+        {
+            return DeleteTarget.File;
+        }
+        return !shift && caretAtEnd && !boxHasSelection ? DeleteTarget.Hint : DeleteTarget.Box;
     }
 
     public static bool CanStillUndo(DateTime doneAt, DateTime now) => now - doneAt <= UndoFor;

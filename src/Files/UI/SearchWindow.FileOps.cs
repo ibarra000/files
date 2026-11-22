@@ -76,6 +76,10 @@ public partial class SearchWindow
             }
             return undo;
         }
+        if (key == Key.Delete && modifiers is ModifierKeys.None or ModifierKeys.Shift)
+        {
+            return OnDeleteKey(permanently: modifiers == ModifierKeys.Shift, isRepeat);
+        }
         if (SelectedHit is null || _keyOwner != KeyOwner.Results)
         {
             return false;
@@ -88,10 +92,28 @@ public partial class SearchWindow
             case (ModifierKeys.Control, Key.V) when ClipboardHasFiles():
                 Paste();
                 return true;
-            case (ModifierKeys.None or ModifierKeys.Shift, Key.Delete):
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>Del or Shift+Del: deletes the selected result, hints how to, or leaves the key to the box (FileKeys.ActsOnFile).</summary>
+    private bool OnDeleteKey(bool permanently, bool isRepeat)
+    {
+        // A selection made when the panel showed is deleted by Del like any other, so only a bare caret counts as at the end.
+        bool caretAtEnd = Input.SelectionLength == 0 && Input.CaretIndex == Input.Text.Length;
+        switch (FileKeys.ActsOnFile(_keyOwner, permanently, BoxHasSelection, caretAtEnd, hasHit: SelectedHit is not null))
+        {
+            case DeleteTarget.File:
                 if (!isRepeat)
                 {
-                    DeleteSelected(permanently: modifiers == ModifierKeys.Shift);
+                    DeleteSelected(permanently);
+                }
+                return true;
+            case DeleteTarget.Hint:
+                if (!isRepeat)
+                {
+                    ShowToast("Press ↓ to choose the file, then Del");
                 }
                 return true;
             default:
@@ -118,9 +140,9 @@ public partial class SearchWindow
         if (_keyOwner == KeyOwner.Results)
         {
             _keyOwner = KeyOwner.Box;
-            // A Del still waiting on its drive was meant for the results the user has now left.
-            _deleteCount++;
         }
+        // A Del still waiting on its drive was meant for the result the user has now left, or for a search they are changing.
+        _deleteCount++;
     }
 
     private static bool ClipboardHasFiles()
