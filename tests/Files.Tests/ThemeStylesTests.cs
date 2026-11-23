@@ -4,6 +4,9 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 
+// ThemeMode (the Fluent theme, which the app uses) is marked experimental, as in Files.csproj.
+#pragma warning disable WPF0001
+
 namespace Files.Tests;
 
 /// <summary>
@@ -114,6 +117,43 @@ public sealed class ThemeStylesTests
             // A Popup already places its child's margin outside the field, so moving it back by the room as well
             // put the list over the field (seen on screen).
             Assert.Equal(0, popup.HorizontalOffset);
+        });
+    }
+
+    [Theory]
+    [InlineData("Light")]
+    [InlineData("Dark")]
+    public void The_result_list_keeps_its_scroll_bar_beside_the_rows(string theme)
+    {
+        InTheme(theme, _ =>
+        {
+            // The Fluent theme (App.ThemeMode) lays a ScrollViewer's bar over its content, over the rows' right edge (#77).
+            ThemeMode before = Application.Current.ThemeMode;
+            Application.Current.ThemeMode = theme == "Dark" ? ThemeMode.Dark : ThemeMode.Light;
+            try
+            {
+                ResourceDictionary resources = Application.Current.Resources;
+                var list = new ListBox { Style = (Style)resources["PanelList"], ItemContainerStyle = (Style)resources["ResultItem"] };
+                for (int i = 0; i < 40; i++)
+                {
+                    list.Items.Add($"result {i}");
+                }
+                var window = new Window { Content = list, Width = 400, Height = 300 };
+                list.Measure(new Size(400, 300));
+                list.Arrange(new Rect(0, 0, 400, 300));
+                list.UpdateLayout();
+
+                ScrollBar bar = Descendants(list).OfType<ScrollBar>().Single(b => b.Orientation == Orientation.Vertical);
+                Assert.Equal(Visibility.Visible, bar.Visibility);
+                double barLeft = bar.TransformToAncestor(list).Transform(new Point(0, 0)).X;
+                ListBoxItem row = Descendants(list).OfType<ListBoxItem>().First();
+                double rowRight = row.TransformToAncestor(list).Transform(new Point(row.ActualWidth, 0)).X;
+                Assert.True(rowRight <= barLeft, $"row ends at {rowRight}, bar starts at {barLeft}");
+            }
+            finally
+            {
+                Application.Current.ThemeMode = before;
+            }
         });
     }
 
