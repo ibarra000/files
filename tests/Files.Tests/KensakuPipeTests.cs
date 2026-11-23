@@ -210,6 +210,75 @@ public sealed class KensakuPipeTests
     }
 
     [Fact]
+    public async Task A_shutdown_with_no_daemon_left_is_done()
+    {
+        using var temp = new TempFolder();
+        using var pipe = new KensakuPipe(DataFolder(temp));
+
+        await pipe.CallAsync("shutdown", null, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task A_change_is_not_sent_twice_when_the_connection_breaks_under_it()
+    {
+        using var temp = new TempFolder();
+        string data = DataFolder(temp);
+        int calls = 0;
+        using var daemon = new FakeDaemon(data, request => Task.FromResult(Interlocked.Increment(ref calls) == 2 ? null : Ok(request)));
+        using var pipe = new KensakuPipe(data);
+        await pipe.CallAsync("ping", null, CancellationToken.None);
+
+        var error = await Assert.ThrowsAsync<KensakuException>(() => pipe.CallAsync("patch_config", new JsonObject { ["patch"] = new JsonObject() }, CancellationToken.None));
+
+        // The daemon may have applied it before the connection broke.
+        Assert.Equal(KensakuError.DaemonUnavailable, error.Code);
+        Assert.Equal(2, daemon.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_search_is_not_held_up_by_a_slow_setup()
+    {
+        using var temp = new TempFolder();
+        string data = DataFolder(temp);
+        using var daemon = new FakeDaemon(data, async request =>
+        {
+            if (request["method"]!.GetValue<string>() == "setup")
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3));
+            }
+            return Ok(request, """{"results":[]}""");
+        });
+        using var pipe = new KensakuPipe(data);
+        Task setup = pipe.CallAsync("setup", null, CancellationToken.None);
+        await WaitUntil(() => daemon.Requests.Count == 1);
+
+        JsonElement result = await pipe.CallAsync("search", null, CancellationToken.None);
+
+        Assert.Equal(0, result.GetProperty("results").GetArrayLength());
+        Assert.False(setup.IsCompleted);
+    }
+
+    [Fact]
+    public void A_null_error_is_no_error_and_an_answer_to_another_request_is_refused()
+    {
+        JsonElement result = KensakuPipe.Result("""{"jsonrpc":"2.0","id":7,"error":null,"result":{"ok":true}}""", 7);
+        Assert.True(result.GetProperty("ok").GetBoolean());
+
+        var error = Assert.Throws<KensakuException>(() => KensakuPipe.Result("""{"jsonrpc":"2.0","id":6,"result":{}}""", 7));
+        Assert.Equal(KensakuError.Internal, error.Code);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition())
+        {
+            Assert.True(clock.Elapsed < TimeSpan.FromSeconds(5), "timed out");
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
     public async Task A_shutdown_the_daemon_does_not_answer_is_still_done()
     {
         using var temp = new TempFolder();

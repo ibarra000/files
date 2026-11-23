@@ -55,8 +55,8 @@ Turning content search on or off searches again. A search no file can match (a t
 | **Stopped** | Content search off; quit; on without kensaku (`Problem` says "run tools/fetch_kensaku.ps1") or without a volume that is not live-only ("No indexed volumes to read inside") | Content search on with kensaku and a volume | Nothing runs. |
 | **Starting** | A run starts, after a 2 s settle | Setup sent (Up); the daemon exiting or not answering a ping for 10 s (Restarting); a refusal (Failed) | A daemon left by an earlier run of the app is shut down first. Then `daemon run` starts, is pinged every 250 ms, and gets `setup` (a new data folder) or `patch_config`. |
 | **Up** | The daemon answers and has the volumes | The daemon exiting or a call failing (Restarting), off, quit | The panel searches only now. Changes go to the running daemon. |
-| **Restarting** | The daemon stopped or did not answer | The wait passing (Starting), off, quit | The daemon is shut down or ended. Waits 5 s, 30 s, then 2 min each time; a run that reached Up starts again at 5 s. |
-| **Failed** | The pipe refuses this app (`forbidden`), or kensaku.exe cannot be started | Content search off and on, quit | Says why. Starting again would not help, so nothing is retried. |
+| **Restarting** | The daemon stopped or did not answer; an earlier daemon still answering 2 s after `shutdown`; any other error in a run | The wait passing (Starting), off, quit | The daemon is shut down or ended. Waits 5 s, 30 s, then 2 min each time; a run that stayed Up for 60 s starts again at 5 s, so one that keeps crashing waits longer. |
+| **Failed** | The pipe refuses this app (`forbidden`, which covers a wrong protocol version), a ping answered with `invalid_params` or `method_not_found` (another protocol), or kensaku.exe cannot be started | Content search off and on, quit | Says why. Starting again would not help, so nothing is retried. |
 
 Stopping (off, quit) asks the daemon to `shutdown` over the pipe, waits up to 2 s, then ends what is left. Quit waits at most 3 s for this.
 

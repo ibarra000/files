@@ -15,6 +15,8 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+# Invoke-WebRequest's progress bar slows the download many times over.
+$ProgressPreference = 'SilentlyContinue'
 
 # The release, and the asset's hash from that release's SHA256SUMS. A changed upload fails the hash check.
 $Version = '2.0.0'
@@ -40,12 +42,19 @@ try {
 
     $unpacked = Join-Path $work 'unpacked'
     Expand-Archive -Path $zip -DestinationPath $unpacked
-    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    # The zip holds one folder named after the asset; the files are taken from there by name, nothing else.
+    $top = Join-Path $unpacked ([IO.Path]::GetFileNameWithoutExtension($Asset))
+    $staged = Join-Path $work 'kensaku'
+    New-Item -ItemType Directory -Force -Path $staged | Out-Null
     foreach ($name in $Files) {
-        $file = Get-ChildItem -Path $unpacked -Recurse -File -Filter $name | Select-Object -First 1
-        if (-not $file) { throw "$Asset has no $name" }
-        Copy-Item -Path $file.FullName -Destination (Join-Path $out $name) -Force
+        $file = Join-Path $top $name
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "$Asset has no $name in its top folder" }
+        Copy-Item -LiteralPath $file -Destination (Join-Path $staged $name)
     }
+    # Swapped in only once every file is there, so a failed fetch never leaves a half-updated artifacts\kensaku.
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $out) | Out-Null
+    if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+    Move-Item -LiteralPath $staged -Destination $out
     Write-Host "kensaku $Version is in $out"
 }
 finally {

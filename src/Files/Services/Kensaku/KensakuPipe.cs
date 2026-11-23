@@ -36,9 +36,10 @@ public interface IKensakuPipe
 }
 
 /// <summary>
-/// The pipe of the kensaku daemon for one data folder (issue #97): newline-delimited JSON-RPC 2.0, one request and one
-/// answer at a time on one connection, each request carrying the token from <c>daemon.token</c> and the protocol
-/// version. A connection that breaks is opened again once. The token is never logged or put in a message.
+/// The pipe of the kensaku daemon for one data folder (issue #97): newline-delimited JSON-RPC 2.0, each request
+/// carrying the token from <c>daemon.token</c> and the protocol version. Searches have a connection of their own, so a
+/// slow setup call never holds one up; on each connection calls go one at a time. A connection that breaks is opened
+/// again once, for calls that are safe to send twice. The token is never logged or put in a message.
 /// </summary>
 public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
 {
@@ -51,14 +52,33 @@ public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
     private static readonly TimeSpan SetupLimit = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DefaultLimit = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan DisposeWait = TimeSpan.FromSeconds(1);
 
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    // Calls that read only, so sending one again after a broken connection does no harm.
+    private static readonly HashSet<string> Repeatable = ["ping", "health", "get_status", "index_state", "search"];
+
     private readonly string _name = PipeName(dataFolder);
-
-    // The open connection, guarded by _gate; null until the first call and after one breaks.
-    private NamedPipeClientStream? _pipe;
-    private StreamReader? _reader;
+    private readonly Connection _searches = new();
+    private readonly Connection _control = new();
     private long _id;
+
+    /// <summary>One connection to the daemon, used by one call at a time; null pipe until the first call and after one breaks.</summary>
+    private sealed class Connection
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+
+        public NamedPipeClientStream? Pipe { get; set; }
+
+        public StreamReader? Reader { get; set; }
+
+        public void Drop()
+        {
+            Reader?.Dispose();
+            Pipe?.Dispose();
+            Reader = null;
+            Pipe = null;
+        }
+    }
 
     /// <summary>
     /// <c>kensaku-</c> and the first 12 hex digits of the SHA-256 of the lowercased data folder, as kensaku names it
@@ -82,57 +102,74 @@ public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
         // Read each time, off the UI thread: kensaku makes a new token when the file is deleted.
         string token = await Task.Run(ReadToken, cancel)
             ?? throw new KensakuException(KensakuError.DaemonUnavailable, "kensaku has not made its token yet");
+        long id = Interlocked.Increment(ref _id);
         var request = new JsonObject
         {
             ["jsonrpc"] = "2.0",
-            ["id"] = Interlocked.Increment(ref _id),
+            ["id"] = id,
             ["method"] = method,
             ["params"] = WithToken(parameters, token),
         };
-        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        limit.CancelAfter(LimitFor(method));
+        Connection connection = method == "search" ? _searches : _control;
+        // The time limit starts once it is this call's turn, so waiting behind another call does not use it up.
+        await connection.Gate.WaitAsync(cancel);
         try
         {
-            await _gate.WaitAsync(limit.Token);
-        }
-        catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
-        {
-            throw new TimeoutException($"kensaku did not answer {method} in time");
-        }
-        try
-        {
-            string reply = await ExchangeAsync(request.ToJsonString() + "\n", limit.Token);
-            return Result(reply);
+            using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+            limit.CancelAfter(LimitFor(method));
+            string reply = await ExchangeAsync(connection, request.ToJsonString() + "\n", Repeatable.Contains(method), limit.Token);
+            return Result(reply, id);
         }
         catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
         {
             // A late answer would be read as the next call's, so the connection goes.
-            Drop();
+            connection.Drop();
             throw new TimeoutException($"kensaku did not answer {method} in time");
         }
         catch (OperationCanceledException)
         {
-            Drop();
+            connection.Drop();
             throw;
         }
-        catch (IOException) when (method == "shutdown")
+        catch (Exception error) when (method == "shutdown" && Gone(error))
         {
-            // The daemon may exit before its answer is read: it is shutting down either way.
-            Drop();
+            // The daemon may exit before its answer is read, or be gone already: it is shut down either way.
+            connection.Drop();
             return default;
         }
         catch (IOException error)
         {
-            Drop();
+            connection.Drop();
             throw new KensakuException(KensakuError.DaemonUnavailable, $"kensaku is not running ({error.Message})");
+        }
+        catch (KensakuException error) when (error.Code == KensakuError.Internal)
+        {
+            // An answer that could not be read or was for another request: the connection may be out of step.
+            connection.Drop();
+            throw;
         }
         finally
         {
-            _gate.Release();
+            connection.Gate.Release();
         }
     }
 
-    public void Dispose() => Drop();
+    private static bool Gone(Exception error) =>
+        error is IOException || error is KensakuException { Code: KensakuError.DaemonUnavailable };
+
+    public void Dispose()
+    {
+        foreach (Connection connection in new[] { _searches, _control })
+        {
+            // A call in progress ends within its limit; one that does not is cut off.
+            bool held = connection.Gate.Wait(DisposeWait);
+            connection.Drop();
+            if (held)
+            {
+                connection.Gate.Release();
+            }
+        }
+    }
 
     private static JsonObject WithToken(JsonObject? parameters, string token)
     {
@@ -143,34 +180,38 @@ public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
         return copy;
     }
 
-    /// <summary>Writes one line and reads one; a connection that was open before and broke is opened again once.</summary>
-    private async Task<string> ExchangeAsync(string line, CancellationToken cancel)
+    /// <summary>
+    /// Writes one line and reads one. A connection that was open before and broke is opened again once when
+    /// <paramref name="repeatable"/>; otherwise the daemon may have acted on it, so it is not sent twice.
+    /// </summary>
+    private async Task<string> ExchangeAsync(Connection connection, string line, bool repeatable, CancellationToken cancel)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(line);
         while (true)
         {
-            bool fresh = _pipe is null;
+            bool fresh = connection.Pipe is null;
             if (fresh)
             {
-                await ConnectAsync(cancel);
+                await ConnectAsync(connection, cancel);
             }
             try
             {
-                await _pipe!.WriteAsync(bytes, cancel);
-                await _pipe.FlushAsync(cancel);
-                return await _reader!.ReadLineAsync(cancel) ?? throw new IOException("kensaku closed the pipe");
+                await connection.Pipe!.WriteAsync(bytes, cancel);
+                await connection.Pipe.FlushAsync(cancel);
+                return await connection.Reader!.ReadLineAsync(cancel) ?? throw new IOException("kensaku closed the pipe");
             }
-            catch (IOException) when (!fresh)
+            catch (IOException) when (!fresh && repeatable)
             {
                 // The daemon was restarted since the last call.
-                Drop();
+                connection.Drop();
             }
         }
     }
 
-    private async Task ConnectAsync(CancellationToken cancel)
+    private async Task ConnectAsync(Connection connection, CancellationToken cancel)
     {
-        var pipe = new NamedPipeClientStream(".", _name, PipeDirection.InOut, PipeOptions.Asynchronous);
+        // CurrentUserOnly: a pipe of this name made by another user is never sent the token.
+        var pipe = new NamedPipeClientStream(".", _name, PipeDirection.InOut, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         try
         {
             await pipe.ConnectAsync(ConnectTimeout, cancel);
@@ -190,20 +231,12 @@ public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
             await pipe.DisposeAsync();
             throw;
         }
-        _pipe = pipe;
-        _reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
+        connection.Pipe = pipe;
+        connection.Reader = new StreamReader(pipe, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
     }
 
-    private void Drop()
-    {
-        _reader?.Dispose();
-        _pipe?.Dispose();
-        _reader = null;
-        _pipe = null;
-    }
-
-    /// <summary>The <c>result</c> of an answer, or its <c>error</c> as a <see cref="KensakuException"/>.</summary>
-    internal static JsonElement Result(string reply)
+    /// <summary>The <c>result</c> of the answer to request <paramref name="id"/>, or its <c>error</c> as a <see cref="KensakuException"/>.</summary>
+    internal static JsonElement Result(string reply, long id)
     {
         JsonElement answer;
         try
@@ -215,11 +248,20 @@ public sealed class KensakuPipe(string dataFolder) : IKensakuPipe, IDisposable
         {
             throw new KensakuException(KensakuError.Internal, "kensaku's answer could not be read");
         }
-        if (answer.ValueKind == JsonValueKind.Object && answer.TryGetProperty("error", out JsonElement error))
+        if (answer.ValueKind != JsonValueKind.Object)
+        {
+            throw new KensakuException(KensakuError.Internal, "kensaku's answer could not be read");
+        }
+        if (answer.TryGetProperty("error", out JsonElement error) && error.ValueKind != JsonValueKind.Null)
         {
             throw Refused(error);
         }
-        if (answer.ValueKind != JsonValueKind.Object || !answer.TryGetProperty("result", out JsonElement result))
+        // An answer to another request means the connection is out of step; dropping it puts it right.
+        if (!answer.TryGetProperty("id", out JsonElement answered) || !answered.TryGetInt64(out long number) || number != id)
+        {
+            throw new KensakuException(KensakuError.Internal, "kensaku answered another request");
+        }
+        if (!answer.TryGetProperty("result", out JsonElement result))
         {
             throw new KensakuException(KensakuError.Internal, "kensaku's answer has no result");
         }

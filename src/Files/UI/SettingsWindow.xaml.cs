@@ -31,6 +31,9 @@ public partial class SettingsWindow : Window
     private VolumeRow? _editing;
     private bool _loading = true;
 
+    // Counts status requests, so only the newest answer is shown (UI thread only).
+    private int _kensakuStatusAsked;
+
     public SettingsWindow(App app)
     {
         InitializeComponent();
@@ -398,8 +401,22 @@ public partial class SettingsWindow : Window
     /// <summary>The content search status line: what kensaku reads while it is up, else what the host is doing.</summary>
     private async void ShowKensakuStatus()
     {
-        // StatusAsync turns every failure into words, so nothing escapes this handler.
-        KensakuStatusText.Text = await new Kensaku(_app.Kensaku).StatusAsync(CancellationToken.None);
+        // Only the newest request may write the line, so a slow older answer never replaces a newer one.
+        int asked = ++_kensakuStatusAsked;
+        string status;
+        try
+        {
+            status = await new Kensaku(_app.Kensaku).StatusAsync(CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            // An async void handler: anything escaping it would end the app.
+            status = $"kensaku's status could not be read: {error.Message}";
+        }
+        if (asked == _kensakuStatusAsked)
+        {
+            KensakuStatusText.Text = status;
+        }
     }
 
     private void OnGridEdited(object? sender, EventArgs e)

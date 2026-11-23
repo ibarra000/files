@@ -80,9 +80,17 @@ public sealed class KensakuHostTests
 
         public FakeProcess? Running => Started.LastOrDefault(process => !process.HasExited);
 
+        /// <summary>Thrown by the next start, then cleared.</summary>
+        public Exception? FailNextStart { get; set; }
+
         public IKensakuProcess Start(string program, IReadOnlyList<string> arguments, IReadOnlyDictionary<string, string> environment)
         {
             log.Add("start");
+            if (FailNextStart is Exception failure)
+            {
+                FailNextStart = null;
+                throw failure;
+            }
             var process = new FakeProcess(log, arguments, environment);
             lock (_started)
             {
@@ -108,6 +116,9 @@ public sealed class KensakuHostTests
 
         /// <summary>A daemon an earlier run of the app left, answering until it is shut down.</summary>
         public bool Leftover { get; set; }
+
+        /// <summary>A leftover that ignores shutdown.</summary>
+        public bool LeftoverStays { get; init; }
 
         public KensakuError? Refuse { get; init; }
 
@@ -152,7 +163,7 @@ public sealed class KensakuHostTests
 
         private string Shutdown()
         {
-            Leftover = false;
+            Leftover = LeftoverStays;
             runner.Running?.Exit();
             return "{}";
         }
@@ -329,6 +340,71 @@ public sealed class KensakuHostTests
         ContentResult result = await new Kensaku(host).SearchAsync(new KensakuQuery("x", new HashSet<string>()), CancellationToken.None);
 
         Assert.Equal(Kensaku.SettingUp, result.Problem);
+    }
+
+    [Fact]
+    public async Task An_error_nobody_foresaw_restarts_kensaku_instead_of_leaving_the_host_stuck()
+    {
+        var log = new Log();
+        var runner = new FakeRunner(log) { FailNextStart = new ArgumentException("an unexpected path") };
+        var host = Host(runner, new FakePipe(log, runner));
+        var problems = new System.Collections.Concurrent.ConcurrentQueue<string?>();
+        host.Changed += () => problems.Enqueue(host.Problem);
+
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Up);
+
+        Assert.Contains("kensaku failed: an unexpected path", problems);
+        // Quitting after such a run still ends at once rather than throwing.
+        host.Dispose();
+        Assert.Equal(KensakuHostState.Stopped, host.State);
+    }
+
+    [Fact]
+    public async Task A_daemon_that_crashes_soon_after_coming_up_waits_longer_each_time()
+    {
+        var log = new Log();
+        var runner = new FakeRunner(log);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner), backOff: [TimeSpan.Zero, TimeSpan.FromMinutes(1)]);
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Up);
+
+        runner.Started[0].Exit();
+        await WaitFor(() => runner.Started.Count == 2 && host.State == KensakuHostState.Up);
+        runner.Started[1].Exit();
+        await WaitFor(() => host.State == KensakuHostState.Restarting);
+
+        // Up for well under a minute both times, so the second crash waits the longer back-off.
+        await Task.Delay(100);
+        Assert.Equal(2, runner.Started.Count);
+    }
+
+    [Fact]
+    public async Task A_leftover_daemon_that_does_not_stop_is_not_taken_for_a_new_one()
+    {
+        var log = new Log();
+        var runner = new FakeRunner(log);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { Leftover = true, LeftoverStays = true }, backOff: [TimeSpan.FromMinutes(1)]);
+
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Restarting);
+
+        Assert.Empty(runner.Started);
+        Assert.Equal("an earlier kensaku did not stop", host.Problem);
+    }
+
+    [Fact]
+    public async Task A_daemon_that_does_not_take_this_apps_ping_fails_without_starting_again()
+    {
+        var log = new Log();
+        var runner = new FakeRunner(log);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { Refuse = KensakuError.InvalidParams });
+
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Failed);
+
+        Assert.Empty(runner.Started);
+        Assert.StartsWith("this kensaku does not speak the protocol files uses", host.Problem);
     }
 
     [Fact]

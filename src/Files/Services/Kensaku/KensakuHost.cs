@@ -34,6 +34,9 @@ public sealed class KensakuHost : IDisposable
 
     public static readonly TimeSpan PingPatience = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long a daemon must run before a crash counts as a fresh start rather than one more failure.</summary>
+    public static readonly TimeSpan StableUptime = TimeSpan.FromSeconds(60);
     public static readonly IReadOnlyList<TimeSpan> DefaultBackOff = [TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)];
 
     // Volumes load one by one at start-up, each changing what is wanted; only the last one is sent.
@@ -154,7 +157,7 @@ public sealed class KensakuHost : IDisposable
             _changed = new SemaphoreSlim(0);
             _run = Task.Run(async () =>
             {
-                await previous;
+                await Settled(previous);
                 await RunAsync(stop.Token);
             });
         }
@@ -170,7 +173,21 @@ public sealed class KensakuHost : IDisposable
             run = StopLocked();
             Set(KensakuHostState.Stopped, null);
         }
-        run.Wait(ShutdownGrace + TimeSpan.FromSeconds(1));
+        // On quit: a run that went wrong must not keep the app from closing.
+        Settled(run).Wait(ShutdownGrace + TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary><paramref name="run"/>, finished however it ended: RunAsync handles its own failures, this is the last guard.</summary>
+    private static async Task Settled(Task run)
+    {
+        try
+        {
+            await run;
+        }
+        catch (Exception)
+        {
+            // Nothing is left to stop; the next run starts afresh.
+        }
     }
 
     private Task StopLocked()
@@ -222,34 +239,52 @@ public sealed class KensakuHost : IDisposable
             await Task.Delay(_settle, cancel);
             while (true)
             {
-                (bool wasUp, bool failed, string problem) = await RunOnceAsync(cancel);
+                (bool stable, bool failed, string problem) = await RunGuardedAsync(cancel);
                 cancel.ThrowIfCancellationRequested();
                 if (failed)
                 {
                     SetFor(cancel, KensakuHostState.Failed, problem);
                     return;
                 }
-                // A kensaku that came up and later stopped starts over from the shortest wait.
-                failures = wasUp ? 1 : failures + 1;
+                // A kensaku that ran a good while starts over from the shortest wait; one that keeps crashing waits longer each time.
+                failures = stable ? 1 : failures + 1;
                 SetFor(cancel, KensakuHostState.Restarting, problem);
                 await Task.Delay(_backOff[Math.Min(failures, _backOff.Count) - 1], cancel);
             }
         }
-        catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+        catch (Exception) when (cancel.IsCancellationRequested)
         {
             // Stopped: the daemon was shut down on the way out.
         }
     }
 
+    /// <summary>One run; an error nobody foresaw is a restart, never a run that dies with the state left at Up.</summary>
+    private async Task<(bool Stable, bool Failed, string Problem)> RunGuardedAsync(CancellationToken cancel)
+    {
+        try
+        {
+            return await RunOnceAsync(cancel);
+        }
+        catch (Exception error) when (!cancel.IsCancellationRequested)
+        {
+            return (false, false, $"kensaku failed: {error.Message}");
+        }
+    }
+
     /// <summary>Starts the daemon, sets it up, sends changes while it runs, and returns once it stops or fails.</summary>
-    private async Task<(bool WasUp, bool Failed, string Problem)> RunOnceAsync(CancellationToken cancel)
+    private async Task<(bool Stable, bool Failed, string Problem)> RunOnceAsync(CancellationToken cancel)
     {
         IKensakuProcess? daemon = null;
-        bool up = false;
+        System.Diagnostics.Stopwatch? up = null;
+        bool Stable() => up?.Elapsed >= StableUptime;
         try
         {
             SetFor(cancel, KensakuHostState.Starting);
-            await ShutDownLeftoverAsync(cancel);
+            if (!await ShutDownLeftoverAsync(cancel))
+            {
+                // Starting another now would find the old one answering and take it for the new.
+                return (false, false, "an earlier kensaku did not stop");
+            }
             string ort = Path.Combine(Path.GetDirectoryName(_program!)!, "onnxruntime.dll");
             daemon = _runner.Start(_program!, ["daemon", "run", "--data-dir", DataFolder], new Dictionary<string, string> { ["ORT_DYLIB_PATH"] = ort });
             if (!await WaitForPingAsync(daemon, cancel))
@@ -258,22 +293,26 @@ public sealed class KensakuHost : IDisposable
             }
             KensakuWanted? applied = await SendAsync(null, cancel);
             SetFor(cancel, KensakuHostState.Up);
-            up = true;
+            up = System.Diagnostics.Stopwatch.StartNew();
             while (await ChangedOrExitedAsync(daemon, cancel))
             {
                 await Task.Delay(_settle, cancel);
                 applied = await SendAsync(applied, cancel);
             }
-            return (true, false, "kensaku stopped");
+            return (Stable(), false, "kensaku stopped");
         }
         catch (KensakuException error) when (error.Code == KensakuError.Forbidden)
         {
-            return (up, true, $"kensaku refused this app: {error.Message}");
+            return (false, true, $"kensaku refused this app: {error.Message}");
+        }
+        catch (IncompatibleException error)
+        {
+            return (false, true, error.Message);
         }
         catch (Exception error) when (error is KensakuException or TimeoutException)
         {
             // Stopping ends the run in RunAsync; otherwise the daemon starts again.
-            return (up, false, error.Message);
+            return (Stable(), false, error.Message);
         }
         catch (Exception error) when (error is Win32Exception or InvalidOperationException)
         {
@@ -285,22 +324,33 @@ public sealed class KensakuHost : IDisposable
         }
     }
 
-    /// <summary>Asks a daemon left by an earlier run of the app (one that crashed, say) to shut down, so a new one can take the data folder.</summary>
-    private async Task ShutDownLeftoverAsync(CancellationToken cancel)
+    /// <summary>
+    /// Asks a daemon left by an earlier run of the app (one that crashed, say) to shut down, so a new one can take the
+    /// data folder. False when it still answers after <see cref="ShutdownGrace"/>.
+    /// </summary>
+    private async Task<bool> ShutDownLeftoverAsync(CancellationToken cancel)
     {
         if (!await AnswersAsync(cancel))
         {
-            return;
+            return true;
         }
         await Pipe.CallAsync("shutdown", null, cancel);
         DateTime deadline = DateTime.UtcNow + ShutdownGrace;
-        while (DateTime.UtcNow < deadline && await AnswersAsync(cancel))
+        while (await AnswersAsync(cancel))
         {
+            if (DateTime.UtcNow >= deadline)
+            {
+                return false;
+            }
             await Task.Delay(PingInterval, cancel);
         }
+        return true;
     }
 
-    /// <summary>Whether a daemon answers a ping; a refusal is thrown, since another start would be refused too.</summary>
+    /// <summary>
+    /// Whether a daemon answers a ping. A refused token is thrown, and so is a daemon that does not take the ping as
+    /// this app sends it (another protocol), since starting again would meet the same.
+    /// </summary>
     private async Task<bool> AnswersAsync(CancellationToken cancel)
     {
         try
@@ -308,11 +358,18 @@ public sealed class KensakuHost : IDisposable
             await Pipe.CallAsync("ping", null, cancel);
             return true;
         }
+        catch (KensakuException error) when (error.Code is KensakuError.InvalidParams or KensakuError.MethodNotFound)
+        {
+            throw new IncompatibleException($"this kensaku does not speak the protocol files uses: {error.Message}");
+        }
         catch (Exception error) when (error is TimeoutException || error is KensakuException { Code: not KensakuError.Forbidden })
         {
             return false;
         }
     }
+
+    /// <summary>A daemon of a version this app cannot talk to.</summary>
+    private sealed class IncompatibleException(string message) : Exception(message);
 
     /// <summary>Pings the daemon until it answers, it exits, or <see cref="PingPatience"/> passes.</summary>
     private async Task<bool> WaitForPingAsync(IKensakuProcess daemon, CancellationToken cancel)
