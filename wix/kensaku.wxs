@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The bundled kensaku (docs/KENSAKU.md): kensaku.exe, which runs as the daemon
+  that indexes file contents, the ONNX Runtime it loads, and its licence, in
+  Program Files\files\kensaku. Fetched by tools/fetch_kensaku.ps1;
+  tools/make_msi.ps1 adds this fragment unless it is given -SkipKensaku.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Directory Id="KensakuFolder" Name="kensaku" />
+    </DirectoryRef>
+
+    <!-- One file per component, so WiX can give each a stable generated GUID. -->
+    <ComponentGroup Id="Kensaku" Directory="KensakuFolder">
+      <Component Id="KensakuExe" Bitness="always64">
+        <File Id="kensakuExe" Source="$(var.KensakuDir)\kensaku.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="KensakuOnnxRuntime" Bitness="always64">
+        <File Id="kensakuOnnxRuntime" Source="$(var.KensakuDir)\onnxruntime.dll" KeyPath="yes" />
+      </Component>
+      <Component Id="KensakuLicense" Bitness="always64">
+        <File Id="kensakuLicense" Source="$(var.KensakuDir)\LICENSE" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+  </Fragment>
+</Wix>

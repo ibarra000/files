@@ -139,11 +139,18 @@ public partial class SearchWindow
         }
     }
 
-    /// <summary>How many results the chip lets through: files counted in full, folders as found (at most <see cref="Searcher.MaxFolders"/>).</summary>
-    private int Shown(SearchResult result) => _filter switch
+    /// <summary>
+    /// How many results the chip lets through: files counted in full, folders as found (at most <see cref="Searcher.MaxFolders"/>),
+    /// and the files listed under Contents.
+    /// </summary>
+    private int Shown(SearchResult result)
     {
-        SearchFilter.Folders => result.Folders.Count,
-        SearchFilter.All => result.Matched + result.Folders.Count,
-        _ => result.Matched,
-    };
+        int names = _filter switch
+        {
+            SearchFilter.Folders => result.Folders.Count,
+            SearchFilter.All => result.Matched + result.Folders.Count,
+            _ => result.Matched,
+        };
+        return names + Results.Items.OfType<ResultRow>().Count(row => row.Kind == RowKind.Content);
+    }
 }

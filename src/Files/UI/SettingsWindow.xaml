@@ -386,6 +386,39 @@
                                 <CheckBox x:Name="ShowFoldersBox" Grid.Column="1" AutomationProperties.Name="Show folder on a second line" Click="OnChanged" />
                             </Grid>
                         </Border>
+
+                        <TextBlock Text="CONTENT SEARCH" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Text="Search file contents" Style="{StaticResource RowLabel}" />
+                                        <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
+                                                   Text="Lists files whose text matches below the name results. The bundled kensaku reads the volumes that are not live-only, in the background." />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ContentSearchBox" Grid.Column="1" AutomationProperties.Name="Search file contents" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                        <TextBlock Text="Read text in images and scanned PDFs" Style="{StaticResource RowLabel}" />
+                                        <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
+                                                   Text="Off by default. Turning it on downloads kensaku's text-reading models once." />
+                                    </StackPanel>
+                                    <CheckBox x:Name="ContentOcrBox" Grid.Column="1" AutomationProperties.Name="Read text in images and scanned PDFs" Click="OnChanged" />
+                                </Grid>
+                                <Border Style="{StaticResource RowDivider}" />
+                                <TextBlock x:Name="KensakuStatusText" Margin="0,8,0,0" TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
 
                     <!-- Opening -->

@@ -58,6 +58,11 @@ public partial class SearchWindow
         {
             _app.RecordOpened(item.Target, "");
         }
+        else if (row.Content is ContentMatch match)
+        {
+            // kensaku's ranking follows what is opened, as Files' own open counts do.
+            _kensaku.RecordOpen(match.Path);
+        }
         _recall.Reset(_app.History);
         if (_app.Settings.HideAfterOpening)
         {

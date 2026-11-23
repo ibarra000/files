@@ -1,4 +1,5 @@
 using Files.Core;
+using Files.Services;
 
 namespace Files.UI;
 
@@ -12,7 +13,16 @@ public static class SearchRows
     public const int FoldersShown = 5;
 
     /// <param name="filter">Files leaves folders out; Folders lists every folder found and no files.</param>
-    public static List<ResultRow> Build(SearchResult result, bool showVolume, SearchFilter filter = SearchFilter.All)
+    /// <param name="contents">Files kensaku found by what is inside them, listed last; one already listed by name is not repeated.</param>
+    public static List<ResultRow> Build(SearchResult result, bool showVolume, SearchFilter filter = SearchFilter.All,
+        IReadOnlyList<ContentMatch>? contents = null)
+    {
+        List<ResultRow> rows = NameRows(result, showVolume, filter);
+        AddContents(rows, result, contents);
+        return rows;
+    }
+
+    private static List<ResultRow> NameRows(SearchResult result, bool showVolume, SearchFilter filter)
     {
         var rows = new List<ResultRow>();
         IReadOnlyList<Hit> allFiles = filter == SearchFilter.Folders ? [] : result.Hits;
@@ -31,6 +41,21 @@ public static class SearchRows
         AddGroup(rows, "Folders", folders, showVolume);
         AddGroup(rows, "Files", files, showVolume);
         return rows;
+    }
+
+    private static void AddContents(List<ResultRow> rows, SearchResult result, IReadOnlyList<ContentMatch>? contents)
+    {
+        if (contents is not { Count: > 0 })
+        {
+            return;
+        }
+        var listed = result.Hits.Concat(result.Folders).Select(hit => hit.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        List<ResultRow> found = contents.Where(match => !listed.Contains(match.Path)).Select(ResultRow.ForContent).ToList();
+        if (found.Count > 0)
+        {
+            rows.Add(ResultRow.ForHeader("Contents"));
+            rows.AddRange(found);
+        }
     }
 
     private static void AddGroup(List<ResultRow> rows, string title, IEnumerable<Hit> hits, bool showVolume)

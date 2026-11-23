@@ -31,6 +31,9 @@ public partial class SettingsWindow : Window
     private VolumeRow? _editing;
     private bool _loading = true;
 
+    // Counts status requests, so only the newest answer is shown (UI thread only).
+    private int _kensakuStatusAsked;
+
     public SettingsWindow(App app)
     {
         InitializeComponent();
@@ -41,6 +44,8 @@ public partial class SettingsWindow : Window
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
         app.Indexer.Changed += onIndexerChanged;
+        Action onKensakuChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, ShowKensakuStatus);
+        app.Kensaku.Changed += onKensakuChanged;
         // The title bar and body take the panel's colors, and follow a change of Colors at once;
         // the Install button follows an update found while the window is open.
         Action onSettingsChanged = () =>
@@ -66,8 +71,12 @@ public partial class SettingsWindow : Window
         }
         // Typing in a text field is saved even if the window is left or closed without moving focus.
         Deactivated += (_, _) => SaveTypedText();
-        // History may have changed in the panel while this window was behind it.
-        Activated += (_, _) => UpdateClearButtons();
+        // History may have changed in the panel while this window was behind it, and kensaku may have read more.
+        Activated += (_, _) =>
+        {
+            UpdateClearButtons();
+            ShowKensakuStatus();
+        };
         Closing += (_, e) =>
         {
             ViewerGrid.CommitEdit(DataGridEditingUnit.Row, exitEditingMode: true);
@@ -86,6 +95,7 @@ public partial class SettingsWindow : Window
         Closed += (_, _) =>
         {
             app.Indexer.Changed -= onIndexerChanged;
+            app.Kensaku.Changed -= onKensakuChanged;
             app.SettingsChanged -= onSettingsChanged;
             // A shortcut being recorded is taken now; a problem with it has no window left to be shown in.
             if (app.ResumeHotkeys() is string problem)
@@ -211,6 +221,8 @@ public partial class SettingsWindow : Window
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
         RemovalsBox.Text = string.Join(Environment.NewLine, settings.ScreenTextRemovals);
         ShowFoldersBox.IsChecked = settings.ShowFolders;
+        ContentSearchBox.IsChecked = settings.ContentSearch;
+        ContentOcrBox.IsChecked = settings.ContentOcr;
         foreach (Viewer viewer in settings.Viewers)
         {
             _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
@@ -301,6 +313,8 @@ public partial class SettingsWindow : Window
             HiddenExtensions = SplitList(HiddenBox.Text),
             ScreenTextRemovals = RemovalLines(),
             ShowFolders = ShowFoldersBox.IsChecked == true,
+            ContentSearch = ContentSearchBox.IsChecked == true,
+            ContentOcr = ContentOcrBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
@@ -383,6 +397,27 @@ public partial class SettingsWindow : Window
             .ToList();
 
     private void OnChanged(object sender, RoutedEventArgs e) => Save();
+
+    /// <summary>The content search status line: what kensaku reads while it is up, else what the host is doing.</summary>
+    private async void ShowKensakuStatus()
+    {
+        // Only the newest request may write the line, so a slow older answer never replaces a newer one.
+        int asked = ++_kensakuStatusAsked;
+        string status;
+        try
+        {
+            status = await new Kensaku(_app.Kensaku).StatusAsync(CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            // An async void handler: anything escaping it would end the app.
+            status = $"kensaku's status could not be read: {error.Message}";
+        }
+        if (asked == _kensakuStatusAsked)
+        {
+            KensakuStatusText.Text = status;
+        }
+    }
 
     private void OnGridEdited(object? sender, EventArgs e)
     {

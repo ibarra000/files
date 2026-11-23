@@ -62,6 +62,12 @@ public sealed record Settings
     /// <summary>Shows each result's folder on a second line; off keeps one line per result, the folder on hover.</summary>
     public bool ShowFolders { get; init; } = true;
 
+    /// <summary>Also lists files whose contents match, from the bundled kensaku (Services/Kensaku); off by default.</summary>
+    public bool ContentSearch { get; init; }
+
+    /// <summary>Lets kensaku read text in images and scanned PDFs; on, it downloads its OCR models once.</summary>
+    public bool ContentOcr { get; init; }
+
     /// <summary>The preview pane beside the results (Ctrl+P); the window is that much wider while it shows.</summary>
     public bool ShowPreview { get; init; }
 

@@ -3,8 +3,9 @@
     Builds the installer.
 
 .DESCRIPTION
-    Publishes the self-contained files.exe, reads the version from
-    src/Files/Files.csproj and passes both to WiX 5. files.exe and the MSI are
+    Publishes the self-contained files.exe, fetches the bundled kensaku with
+    tools/fetch_kensaku.ps1 (see docs/KENSAKU.md), reads the version from
+    src/Files/Files.csproj and passes them to WiX 5. files.exe and the MSI are
     both signed with the release certificate, which must be in the current
     user's certificate store; the updater refuses installers signed with any
     other certificate. Requires signtool (Windows SDK), the WiX dotnet tool and
@@ -32,8 +33,11 @@
 #>
 [CmdletBinding()]
 param(
-    # Skip `dotnet publish`, for when artifacts\publish is already current.
+    # Skip `dotnet publish` and the kensaku fetch, for when artifacts is already current.
     [switch]$NoBuild,
+
+    # Leave kensaku (content search) out of the installer, and skip fetching it.
+    [switch]$SkipKensaku,
 
     # A volumes.json to build into the installer: volumes added once for each user on each PC.
     [string]$Volumes,
@@ -145,10 +149,20 @@ try {
     if (Stage-Volumes -Source $Volumes -Folder $publishDir) {
         $defines += @('-define', 'Volumes=1')
     }
+    $sources = @(Join-Path $root 'wix\files.wxs')
+    if (-not $SkipKensaku) {
+        if (-not $NoBuild) {
+            & (Join-Path $PSScriptRoot 'fetch_kensaku.ps1')
+        }
+        $kensakuDir = Join-Path $artifacts 'kensaku'
+        if (-not (Test-Path (Join-Path $kensakuDir 'kensaku.exe'))) { throw 'kensaku is not fetched; run tools/fetch_kensaku.ps1' }
+        $defines += @('-define', "KensakuDir=$kensakuDir")
+        $sources += Join-Path $root 'wix\kensaku.wxs'
+    }
 
     $name = "files-$version-x64.msi"
     $out = Join-Path $artifacts $name
-    & $wix build -arch x64 @defines -ext WixToolset.UI.wixext -out $out (Join-Path $root 'wix\files.wxs')
+    & $wix build -arch x64 @defines -ext WixToolset.UI.wixext -out $out @sources
     if ($LASTEXITCODE -ne 0) { throw "wix build failed ($LASTEXITCODE)" }
     Sign-File $out
     Write-Host "wrote $out"

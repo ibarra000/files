@@ -11,6 +11,9 @@ public enum RowKind
     Favorite,
     Opened,
     SeeAll,
+
+    /// <summary>A file kensaku found by what is inside it.</summary>
+    Content,
 }
 
 /// <summary>
@@ -29,6 +32,9 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     /// <summary>A Segoe Fluent Icons glyph, or empty.</summary>
     public string Icon { get; init; } = "";
 
+    /// <summary>What a content row stands for.</summary>
+    public ContentMatch? Content { get; init; }
+
     /// <summary>A favorite file or folder that is no longer at its path.</summary>
     public bool Missing { get; init; }
 
@@ -45,6 +51,10 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
             if (Hit is not null)
             {
                 return Hit.Path;
+            }
+            if (Content is not null)
+            {
+                return Content.Path;
             }
             return Item is { Kind: not FavoriteKind.Search } item ? item.Target : null;
         }
@@ -66,6 +76,13 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     }
 
     public static ResultRow ForHeader(string title) => new(RowKind.Header, title, "", "", "", "");
+
+    /// <summary>A file found inside: its name, and the text around the match (or its folder when there is none) below.</summary>
+    public static ResultRow ForContent(ContentMatch match)
+    {
+        string detail = match.Snippet is { Length: > 0 } snippet ? $"…{snippet}…" : FolderOf(match.Path);
+        return new ResultRow(RowKind.Content, NameOf(match.Path), "", "", detail, "") { Content = match, Icon = FileIcons.Glyph(match.Path) };
+    }
 
     public static ResultRow ForFavorite(Favorite favorite, bool missing)
     {

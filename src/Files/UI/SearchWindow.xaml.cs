@@ -57,6 +57,7 @@ public partial class SearchWindow : Window
     {
         InitializeComponent();
         _app = app;
+        _kensaku = new Kensaku(app.Kensaku);
         _typing = new DispatcherTimer { Interval = TypingDelay };
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
@@ -119,7 +120,12 @@ public partial class SearchWindow : Window
     /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
     private string _searchSettings;
 
-    private static string SearchSettingsOf(Settings settings) => string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+    private static string SearchSettingsOf(Settings settings)
+    {
+        string hidden = string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+        // Content search turned on or off changes the list too.
+        return string.Join("\n", hidden, settings.ContentSearch);
+    }
 
     /// <summary>
     /// Settings change for many reasons (Ctrl+P, saving the panel's place on hide, the update check, an edit in
@@ -207,6 +213,7 @@ public partial class SearchWindow : Window
         // Showing the panel again searches for what is in the box.
         _typing.Stop();
         _searchCancel?.Cancel();
+        StopContentSearch();
         // Saving the place raises a settings change while the panel is still visible; it must not rebuild the list,
         // restart a preview read or check favorites for a panel about to hide.
         _hiding = true;
@@ -307,6 +314,7 @@ public partial class SearchWindow : Window
         Query query = SearchFilters.Narrow(Query.Parse(line), _filter);
         int epoch = ++_epoch;
         _searchCancel?.Cancel();
+        StopContentSearch();
         _queryProblem = query.Problem;
         if (!query.IsValid)
         {
@@ -318,7 +326,10 @@ public partial class SearchWindow : Window
 
         var cancel = new CancellationTokenSource();
         _searchCancel = cancel;
-        var volumes = ScopedVolumes()
+        IReadOnlyList<VolumeState> scoped = ScopedVolumes();
+        // Content results keep to the same search, in the chosen volume when there is one.
+        KensakuQuery? contentQuery = KensakuQuery.For(query, _scope is null ? null : scoped[0].Volume.Root);
+        var volumes = scoped
             .Where(state => state.Index is not null)
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
@@ -346,12 +357,14 @@ public partial class SearchWindow : Window
         _searchedIndexes = volumes.Select(v => v.Index).ToHashSet();
         _searchTook = clock.Elapsed;
         ShowResults(result);
+        // The names are on screen first; what kensaku finds inside files follows when it answers.
+        _ = SearchContentsAsync(line, contentQuery, epoch);
     }
 
     private void ShowResults(SearchResult result)
     {
         // Keep the same file selected when the rows move.
-        string? selectedPath = (Results.SelectedItem as ResultRow)?.Hit?.Path;
+        string? selectedPath = (Results.SelectedItem as ResultRow)?.Path;
         // Results for the same search (a live search's progress, a volume read again) keep the list where it was scrolled;
         // another chip or volume is another list, which starts at the top.
         string shownFor = $"{Input.Text}\n{_filter}\n{_scope}";
@@ -360,11 +373,11 @@ public partial class SearchWindow : Window
         _shownFor = shownFor;
         _result = result;
         bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter, _live is null ? ContentsShown : null);
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
         // A recalled search starts at the top row, where Up and Down keep stepping through past searches.
-        int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Hit is not null && row.Hit.Path == selectedPath);
+        int keep = _recall.IsActive && !sameSearch ? -1 : rows.FindIndex(row => row.Path is not null && row.Path == selectedPath);
         // The first row is a section label, so the first result is the next one that can be selected.
         Results.SelectedIndex = keep >= 0 ? keep : NextSelectable(0, 1) ?? -1;
         if (scrolled > 0)

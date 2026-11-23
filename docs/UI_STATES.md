@@ -6,7 +6,7 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 | State | Fields | Entered by | Left by | Rule |
 |---|---|---|---|---|
-| **Hidden** | `IsVisible` false | Esc on an empty box, a click elsewhere (`HideOnBlur`), Alt+F4, opening a file (`HideAfterOpening`), opening Settings | The hotkey, the tray, a second launch | Hiding stops a live search, the typing pause, the indexed search and preview reads, and closes both menus. Nothing fills the list or reads a file while hidden. Showing restores a minimized panel. |
+| **Hidden** | `IsVisible` false | Esc on an empty box, a click elsewhere (`HideOnBlur`), Alt+F4, opening a file (`HideAfterOpening`), opening Settings | The hotkey, the tray, a second launch | Hiding stops a live search, the typing pause, the indexed search, a content search and preview reads, and closes both menus. Nothing fills the list or reads a file while hidden. Showing restores a minimized panel. |
 | **Home** | box empty or spaces (`IsHome`), `_showAllFavorites` | Showing with an empty box, Esc on a search, deleting the text | Typing, a paste, recall | Favorites, then Recent. Chips are hidden, and Ctrl+1–5 do nothing. Del removes a Recent row, and the next row takes its place. |
 | **Recall** | `_recall.IsActive` | Up on the top row (what was typed is held as a draft) | Typing, Esc, opening, Down past the newest search | Up on the top row steps to older searches and Down to newer ones; Down past the newest brings back the draft and leaves Recall, so the next Down moves into the results. The draft is never added to history. |
 | **Typing pause** | `_typing` running | A keystroke | 150 ms, Enter | The chips, count and footer follow at once. |
@@ -32,6 +32,41 @@ The panel and Settings have no explicit state machine: their state is a handful 
 - A read cut short by a newer selection says nothing.
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
+
+## Content search (`UI/SearchWindow.Contents.cs`, `Services/Kensaku/`)
+
+**The slot** (`_contentCancel`, `_contents`, `_contentsFor`, `_contentProblem`, `_epoch`):
+
+| State | Fields | Entered by | Left by | Rule |
+|---|---|---|---|---|
+| **Idle** | `_contentCancel` null | Content search off, the panel hidden, a search answered or cancelled | A search's names on screen | Nothing is asked of kensaku while the panel is hidden. |
+| **Asking** | `_contentCancel` | The names of a search are on screen | Its answer, a newer search, hiding | The search takes its token once and disposes its own source; stopping only cancels. Only the newest search (`_epoch`), for what is still in the box, on a visible panel, may fill the list. |
+| **Shown** | `_contents` for `_contentsFor` | An answer | The next answer | Rows are drawn under Contents only for the line they were found for. An answer for a new line redraws the list, even when its matches are the same as the last line's. A problem is said once, until it changes. |
+
+Turning content search on or off searches again. A search no file can match (a type filter none of the typed extensions fits) shows no contents without asking kensaku.
+
+**The host** (`KensakuHost`, held by the app; fields `_wanted`, `_stop`, `_run`, `_changed`, `State`, `Problem`):
+- What it runs for is `KensakuWanted`: the roots of the volumes that are not live-only, and the OCR setting. The app calls `Apply` on every volume or settings change.
+- While a run is going, a different `KensakuWanted` only wakes it (`_changed`). It waits 2 s for more changes, then sends the daemon what changed (`KensakuSetup.Calls`). The daemon is not restarted.
+- Content search off, no indexed volume or no kensaku stops the run. State changes made by a stopped run are dropped, so an old run never overwrites a new one.
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Stopped** | Content search off; quit; on without kensaku (`Problem` says "run tools/fetch_kensaku.ps1") or without a volume that is not live-only ("No indexed volumes to read inside") | Content search on with kensaku and a volume | Nothing runs. |
+| **Starting** | A run starts, after a 2 s settle | Setup sent (Up); the daemon exiting or not answering a ping for 10 s (Restarting); a refusal (Failed) | A daemon left by an earlier run of the app is shut down first. Then `daemon run` starts, is pinged every 250 ms, and gets `setup` (a new data folder) or `patch_config`. |
+| **Up** | The daemon answers and has the volumes | The daemon exiting or a call failing (Restarting), off, quit | The panel searches only now. Changes go to the running daemon. |
+| **Restarting** | The daemon stopped or did not answer; an earlier daemon still answering 2 s after `shutdown`; any other error in a run | The wait passing (Starting), off, quit | The daemon is shut down or ended. Waits 5 s, 30 s, then 2 min each time; a run that stayed Up for 60 s starts again at 5 s, so one that keeps crashing waits longer. |
+| **Failed** | The pipe refuses this app (`forbidden`, which covers a wrong protocol version), a ping answered with `invalid_params` or `method_not_found` (another protocol), or kensaku.exe cannot be started | Content search off and on, quit | Says why. Starting again would not help, so nothing is retried. |
+
+Stopping (off, quit) asks the daemon to `shutdown` over the pipe, waits up to 2 s, then ends what is left. Quit waits at most 3 s for this.
+
+**The panel** asks the host's state before each search (`Kensaku.SearchAsync`) and calls `search` only while it is Up:
+
+| Host | The panel says |
+|---|---|
+| Starting, Restarting | "kensaku is starting" |
+| Stopped, Failed | The host's problem, or "kensaku is not running" |
+| Up, but the search failed | "kensaku did not answer in time" (800 ms), "kensaku is still setting up" (`not_setup`, `no_index`), "kensaku is not running" (the pipe broke; the host sees the daemon exit and restarts it), or kensaku's own message |
 
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 

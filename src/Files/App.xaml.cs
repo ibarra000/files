@@ -42,6 +42,9 @@ public partial class App : Application
     public Indexer Indexer { get; private set; } = null!;
     public Updater Updater { get; private set; } = null!;
 
+    /// <summary>The bundled kensaku, run while content search is on.</summary>
+    public KensakuHost Kensaku { get; private set; } = null!;
+
     /// <summary>Searches that led to an opened file, newest first.</summary>
     public IReadOnlyList<string> History { get; private set; } = [];
 
@@ -145,6 +148,10 @@ public partial class App : Application
 
         Indexer = new Indexer(catalog, AppPaths.Shards, () => Settings);
         Updater = new Updater(() => Settings, AppPaths.Updates);
+        Kensaku = KensakuHost.ForApp(Path.Combine(AppPaths.Local, "kensaku"));
+        // A volume added, removed, or switched between live and indexed changes what kensaku reads.
+        Indexer.Changed += UpdateKensaku;
+        UpdateKensaku();
         ApplyTheme();
 
         WarmTextReader();
@@ -324,6 +331,7 @@ public partial class App : Application
         {
             ApplyTheme();
         }
+        UpdateKensaku();
         SettingsChanged?.Invoke();
         return problem;
     }
@@ -436,10 +444,20 @@ public partial class App : Application
         _ocrHotkey?.Dispose();
         _paddleReader.Dispose();
         _tray?.Dispose();
+        Indexer.Changed -= UpdateKensaku;
         Indexer.Dispose();
+        Kensaku.Dispose();
         _summon?.Dispose();
         _singleInstance?.Dispose();
         Shutdown();
+    }
+
+    /// <summary>Runs kensaku for the volumes read in the background while content search is on; the host sends only what changed.</summary>
+    private void UpdateKensaku()
+    {
+        Settings settings = Settings;
+        KensakuWanted wanted = KensakuSetup.Wanted(Indexer.Volumes.Select(state => state.Volume), settings.ContentOcr);
+        Kensaku.Apply(settings.ContentSearch, wanted);
     }
 
     /// <summary>Loads PaddleOCR's models in the background once it is chosen, so the first Ctrl+Alt+Space is not slowed by it.</summary>
