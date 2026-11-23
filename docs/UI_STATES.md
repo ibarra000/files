@@ -90,6 +90,25 @@ Both read the same `Query` and rank with the same `RankKey`. They differ in wher
 
 Rule: a name that indexed search would leave out is never kept by live search.
 
+Ties in rank are cut by the file's place in the index. A live snapshot builds its index in path order (`Walker.Merge` sorts folders and files), so the rows near the 300th place stay put between refreshes. They change only when a file that sorts earlier is found.
+
+## Open counts (`Core/OpenCounts.cs`, `App.OpenCounts`)
+
+`App.OpenCounts` maps a path, ignoring case, to `OpenCount(Count, LastUtc)`. It is saved to `opened-counts.txt` after each change. With **Rank opened files higher** on, a search ranks opened files first among matches of the same kind.
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Not counted** | The path was never opened, was removed, or fell off | Opening it from the panel with the setting on | It ranks by its match alone. |
+| **Counted** | Opening from the panel (`Record`: count + 1, time now) | Del on its Recent row, Clear recent, or falling off | It ranks above matches of the same kind with fewer opens, then above those opened less recently. |
+| **Fell off** | More than 500 counted | Opening it again | The file that ranks lowest goes first: fewest opens, then opened longest ago. Eviction and ranking use the same order (`OpenCounts.Compare`). Once 500 files have two or more opens, a file opened once falls off at once. |
+
+**Load:**
+- A damaged line is skipped.
+- Lines that differ only in case are one file: their counts add up, and the later time is kept.
+- A time in the future is read as now, so a clock set back cannot keep a file on top for good.
+
+Turning the setting off stops counting and ranking, but keeps the counts. Changing it runs the search again.
+
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 
 | State | Fields | Rule |

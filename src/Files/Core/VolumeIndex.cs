@@ -30,6 +30,70 @@ public sealed class VolumeIndex
         Folders = folders;
         FolderFirstFile = folderFirstFile;
         _lowerRoot = Names.Fold(root.TrimEnd('\\'));
+        _folderIds = new(() =>
+        {
+            var ids = new Dictionary<string, int>(Folders.Count, StringComparer.OrdinalIgnoreCase);
+            for (int folder = 0; folder < Folders.Count; folder++)
+            {
+                ids.TryAdd(Folders[folder], folder);
+            }
+            return ids;
+        });
+    }
+
+    // Folders by relative path, built the first time a file is looked up by its path.
+    private readonly Lazy<Dictionary<string, int>> _folderIds;
+
+    /// <summary>The file at <paramref name="path"/> in this index, ignoring case, or -1.</summary>
+    internal int Find(string path)
+    {
+        string relative = Path.GetRelativePath(Root, path);
+        if (relative == ".." || relative.StartsWith(@"..\", StringComparison.Ordinal) || Path.IsPathRooted(relative)
+            || !_folderIds.Value.TryGetValue(Path.GetDirectoryName(relative) ?? "", out int folder))
+        {
+            return -1;
+        }
+        string name = Path.GetFileName(relative);
+        foreach (int file in FilesIn(folder))
+        {
+            if (Files.OrigSpan(file).Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return file;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>The hit for the file at <paramref name="path"/> when it is in this index, matches and passes the filters; else null.</summary>
+    public Hit? HitFor(string volume, Query query, IReadOnlySet<string> hiddenExtensions, string path)
+    {
+        // The name is tested first, so most opened files cost no lookup at all.
+        string fileName = Path.GetFileName(path);
+        if (query.Rank(Names.Fold(fileName), fileName, out _, out _) < 0)
+        {
+            return null;
+        }
+        int file;
+        try
+        {
+            file = Find(path);
+        }
+        catch (ArgumentException)
+        {
+            // A path the counts file should not have held; it simply gets no boost.
+            return null;
+        }
+        if (file < 0)
+        {
+            return null;
+        }
+        ReadOnlySpan<char> name = Files.LowerSpan(file);
+        int at = query.Rank(name, Files.OrigSpan(file), out _, out MatchClass kind);
+        if (at < 0 || !new Filter(this, query, hiddenExtensions).Admits(file, name))
+        {
+            return null;
+        }
+        return ToHit(volume, query, RankKey.Make(false, kind, at, name.Length, file));
     }
 
     // For path: terms, which may name part of the root (a share or drive).
@@ -113,11 +177,11 @@ public sealed class VolumeIndex
                 cancel.ThrowIfCancellationRequested();
             }
             ReadOnlySpan<char> relative = Folders.LowerSpan(folder);
-            int at = OwnNameMatch(query, relative);
+            int at = RankOwnName(query, folder, out _, out MatchClass kind);
             if (at >= 0 && AdmitsFolder(query, relative))
             {
                 int ownLength = relative.Length - (relative.LastIndexOf('\\') + 1);
-                top.Add(RankKey.Make(false, at, ownLength, folder));
+                top.Add(RankKey.Make(false, kind, at, ownLength, folder));
             }
         }
         foreach (ulong key in top.Sorted())
@@ -153,8 +217,16 @@ public sealed class VolumeIndex
         int slash = relative.LastIndexOf('\\');
         string name = relative[(slash + 1)..];
         string parent = Path.Join(Root, slash < 0 ? "" : relative[..slash]);
-        int start = OwnNameMatch(query, Folders.LowerSpan(folder), out int length);
+        int start = RankOwnName(query, folder, out int length, out _);
         return new Hit(volume, this, folder, name, parent, start, length, key) { IsFolder = true };
+    }
+
+    /// <summary>How a folder's own name (the last part of its path) matches, ranked like a file's name.</summary>
+    private int RankOwnName(Query query, int folder, out int length, out MatchClass kind)
+    {
+        ReadOnlySpan<char> lower = Folders.LowerSpan(folder);
+        int start = lower.LastIndexOf('\\') + 1;
+        return query.Rank(lower[start..], Folders.OrigSpan(folder)[start..], out length, out kind);
     }
 
     private int SweepFiles(Query query, Filter filter, TopK top, CancellationToken cancel)
@@ -183,6 +255,10 @@ public sealed class VolumeIndex
     // The hot loop, kept free of allocations: most searches are one phrase.
     private int SweepChunk(Alternative alternative, Filter filter, TopK top, int lo, int hi)
     {
+        if (alternative.Needle.Length == 1)
+        {
+            return SweepChunkOneLetter(alternative, filter, top, lo, hi);
+        }
         ReadOnlySpan<char> arena = Files.Lower;
         int end = Files.Offsets[hi];
         int position = Files.Offsets[lo];
@@ -195,17 +271,46 @@ public sealed class VolumeIndex
                 break;
             }
             int file = Files.EntryAt(position + found);
-            ReadOnlySpan<char> name = Files.LowerSpan(file);
-            int at = alternative.MatchAt(name, position + found - Files.Offsets[file]);
-            if (at >= 0 && filter.Admits(file, name))
+            if (Rank(alternative, filter, top, file, position + found - Files.Offsets[file]))
             {
                 matched++;
-                top.Add(RankKey.Make(false, at, name.Length, file));
             }
             // Each name gives at most its leftmost hit.
             position = Files.Offsets[file + 1];
         }
         return matched;
+    }
+
+    /// <summary>
+    /// One letter is in nearly every name, so the names are walked in order: that skips the
+    /// search for which name each hit falls in.
+    /// </summary>
+    private int SweepChunkOneLetter(Alternative alternative, Filter filter, TopK top, int lo, int hi)
+    {
+        char letter = alternative.Needle[0];
+        int matched = 0;
+        for (int file = lo; file < hi; file++)
+        {
+            int firstHit = Files.LowerSpan(file).IndexOf(letter);
+            if (firstHit >= 0 && Rank(alternative, filter, top, file, firstHit))
+            {
+                matched++;
+            }
+        }
+        return matched;
+    }
+
+    /// <summary>Ranks a file whose name holds the needle at <paramref name="firstHit"/>; false when it does not match or is filtered out.</summary>
+    private bool Rank(Alternative alternative, Filter filter, TopK top, int file, int firstHit)
+    {
+        ReadOnlySpan<char> name = Files.LowerSpan(file);
+        int at = alternative.MatchAt(name, Files.OrigSpan(file), firstHit, out MatchClass kind);
+        if (at < 0 || !filter.Admits(file, name))
+        {
+            return false;
+        }
+        top.Add(RankKey.Make(false, kind, at, name.Length, file));
+        return true;
     }
 
     /// <summary>A search with several alternatives: each name is ranked once, by the alternative that matches earliest.</summary>
@@ -222,11 +327,11 @@ public sealed class VolumeIndex
                     continue;
                 }
                 ReadOnlySpan<char> name = Files.LowerSpan(file);
-                int at = query.Match(name);
+                int at = query.Rank(name, Files.OrigSpan(file), out _, out MatchClass kind);
                 if (at >= 0 && filter.Admits(file, name))
                 {
                     matched++;
-                    top.Add(RankKey.Make(false, at, name.Length, file));
+                    top.Add(RankKey.Make(false, kind, at, name.Length, file));
                 }
             }
         }
@@ -278,7 +383,7 @@ public sealed class VolumeIndex
                 matched++;
                 if (added++ < MaxFilesPerFolder)
                 {
-                    top.Add(RankKey.Make(true, at, name.Length, file));
+                    top.Add(RankKey.Make(true, MatchClass.Anywhere, at, name.Length, file));
                 }
             }
         }
@@ -315,7 +420,7 @@ public sealed class VolumeIndex
         int length = 0;
         if (!RankKey.IsInherited(key))
         {
-            start = query.Match(Files.LowerSpan(file), out length);
+            start = query.Rank(Files.LowerSpan(file), Files.OrigSpan(file), out length, out _);
         }
         return new Hit(volume, this, file, Files[file], FolderPath(FolderOf(file)), start, length, key);
     }

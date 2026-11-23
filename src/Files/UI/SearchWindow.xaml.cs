@@ -128,7 +128,8 @@ public partial class SearchWindow : Window
     /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
     private string _searchSettings;
 
-    private static string SearchSettingsOf(Settings settings) => string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal));
+    private static string SearchSettingsOf(Settings settings) =>
+        $"{settings.RankOpenedHigher};{string.Join(",", settings.HiddenExtensionSet.Order(StringComparer.Ordinal))}";
 
     /// <summary>
     /// Settings change for many reasons (Ctrl+P, saving the panel's place on hide, the update check, an edit in
@@ -333,11 +334,12 @@ public partial class SearchWindow : Window
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
         IReadOnlySet<string> hidden = _app.Settings.HiddenExtensionSet;
+        IReadOnlyDictionary<string, OpenCount>? opened = _app.Settings.RankOpenedHigher ? _app.OpenCounts : null;
         SearchResult result;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token), cancel.Token);
+            result = await Task.Run(() => Searcher.Search(volumes, query, hidden, cancel.Token, opened), cancel.Token);
         }
         catch (OperationCanceledException)
         {

@@ -35,6 +35,9 @@ public sealed class Names
 
     internal ReadOnlySpan<char> LowerSpan(int i) => Lower.AsSpan(Offsets[i], Length(i));
 
+    /// <summary>Name <paramref name="i"/> as spelled, without allocating.</summary>
+    internal ReadOnlySpan<char> OrigSpan(int i) => Orig.AsSpan(Offsets[i], Length(i));
+
     /// <summary>Lowercases one string exactly as the arenas are lowercased.</summary>
     public static string Fold(string text) => text.ToLowerInvariant();
 

@@ -215,6 +215,7 @@ public partial class SettingsWindow : Window
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
         RemovalsBox.Text = string.Join(Environment.NewLine, settings.ScreenTextRemovals);
         ShowFoldersBox.IsChecked = settings.ShowFolders;
+        RankOpenedBox.IsChecked = settings.RankOpenedHigher;
         foreach (Viewer viewer in settings.Viewers)
         {
             _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
@@ -305,6 +306,7 @@ public partial class SettingsWindow : Window
             HiddenExtensions = SplitList(HiddenBox.Text),
             ScreenTextRemovals = RemovalLines(),
             ShowFolders = ShowFoldersBox.IsChecked == true,
+            RankOpenedHigher = RankOpenedBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
