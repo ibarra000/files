@@ -3,8 +3,8 @@
     Builds the installer.
 
 .DESCRIPTION
-    Publishes the self-contained files.exe, builds the bundled kensaku with
-    tools/build_kensaku.ps1 (see docs/KENSAKU.md), reads the version from
+    Publishes the self-contained files.exe, fetches the bundled kensaku with
+    tools/fetch_kensaku.ps1 (see docs/KENSAKU.md), reads the version from
     src/Files/Files.csproj and passes them to WiX 5. files.exe and the MSI are
     both signed with the release certificate, which must be in the current
     user's certificate store; the updater refuses installers signed with any
@@ -33,10 +33,10 @@
 #>
 [CmdletBinding()]
 param(
-    # Skip `dotnet publish` and the kensaku build, for when artifacts is already current.
+    # Skip `dotnet publish` and the kensaku fetch, for when artifacts is already current.
     [switch]$NoBuild,
 
-    # Leave kensaku (content search) out of the installer, and skip building it.
+    # Leave kensaku (content search) out of the installer, and skip fetching it.
     [switch]$SkipKensaku,
 
     # A volumes.json to build into the installer: volumes added once for each user on each PC.
@@ -152,10 +152,10 @@ try {
     $sources = @(Join-Path $root 'wix\files.wxs')
     if (-not $SkipKensaku) {
         if (-not $NoBuild) {
-            & (Join-Path $PSScriptRoot 'build_kensaku.ps1')
+            & (Join-Path $PSScriptRoot 'fetch_kensaku.ps1')
         }
         $kensakuDir = Join-Path $artifacts 'kensaku'
-        if (-not (Test-Path (Join-Path $kensakuDir 'kensaku-daemon.exe'))) { throw 'kensaku is not built; run tools/build_kensaku.ps1' }
+        if (-not (Test-Path (Join-Path $kensakuDir 'kensaku.exe'))) { throw 'kensaku is not fetched; run tools/fetch_kensaku.ps1' }
         $defines += @('-define', "KensakuDir=$kensakuDir")
         $sources += Join-Path $root 'wix\kensaku.wxs'
     }

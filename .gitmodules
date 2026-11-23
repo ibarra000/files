@@ -1,3 +1,0 @@
-[submodule "third_party/kensaku"]
-	path = third_party/kensaku
-	url = https://github.com/yjid/kensaku

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  The bundled kensaku (docs/KENSAKU.md): the daemon that indexes file contents,
-  the CLI whose `serve` answers searches, the ONNX Runtime they load, and their
-  licences, in Program Files\files\kensaku. Built by tools/build_kensaku.ps1;
+  The bundled kensaku (docs/KENSAKU.md): kensaku.exe, which runs as the daemon
+  that indexes file contents, the ONNX Runtime it loads, and its licence, in
+  Program Files\files\kensaku. Fetched by tools/fetch_kensaku.ps1;
   tools/make_msi.ps1 adds this fragment unless it is given -SkipKensaku.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
@@ -13,23 +13,14 @@
 
     <!-- One file per component, so WiX can give each a stable generated GUID. -->
     <ComponentGroup Id="Kensaku" Directory="KensakuFolder">
-      <Component Id="KensakuDaemon" Bitness="always64">
-        <File Id="kensakuDaemon" Source="$(var.KensakuDir)\kensaku-daemon.exe" KeyPath="yes" />
-      </Component>
-      <Component Id="KensakuCli" Bitness="always64">
-        <File Id="kensakuCli" Source="$(var.KensakuDir)\kensaku-cli.exe" KeyPath="yes" />
+      <Component Id="KensakuExe" Bitness="always64">
+        <File Id="kensakuExe" Source="$(var.KensakuDir)\kensaku.exe" KeyPath="yes" />
       </Component>
       <Component Id="KensakuOnnxRuntime" Bitness="always64">
         <File Id="kensakuOnnxRuntime" Source="$(var.KensakuDir)\onnxruntime.dll" KeyPath="yes" />
       </Component>
       <Component Id="KensakuLicense" Bitness="always64">
-        <File Id="kensakuLicense" Source="$(var.KensakuDir)\LICENSE-kensaku.txt" KeyPath="yes" />
-      </Component>
-      <Component Id="OnnxRuntimeLicense" Bitness="always64">
-        <File Id="onnxRuntimeLicense" Source="$(var.KensakuDir)\LICENSE-onnxruntime.txt" KeyPath="yes" />
-      </Component>
-      <Component Id="OnnxRuntimeNotices" Bitness="always64">
-        <File Id="onnxRuntimeNotices" Source="$(var.KensakuDir)\ThirdPartyNotices-onnxruntime.txt" KeyPath="yes" />
+        <File Id="kensakuLicense" Source="$(var.KensakuDir)\LICENSE" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>
