@@ -62,6 +62,15 @@ public sealed class StatusTextTests
     }
 
     [Fact]
+    public void The_hints_and_the_first_run_note_show_the_keys_set_in_settings()
+    {
+        PanelKeys keys = new Settings { PanelKeys = new Dictionary<string, string> { ["Preview"] = "F6", ["LiveSearch"] = "Ctrl+L" } }.Shortcuts;
+        Assert.Contains(new KeyHint("F6", "Preview"), StatusText.Hints(noHits: false, liveRunning: false, keys: keys));
+        Assert.Equal(new KeyHint("Ctrl L", "Search live"), StatusText.Hints(noHits: true, liveRunning: false, keys: keys)[0]);
+        Assert.Equal("No volumes yet · press F9 to add a folder", StatusText.For([], null, settingsKeys: "F9"));
+    }
+
+    [Fact]
     public void The_header_counts_the_results_and_says_how_long_the_search_took()
     {
         Assert.Equal("1 result · 9 ms", StatusText.Count(1, TimeSpan.FromMilliseconds(9.4)));
