@@ -33,6 +33,28 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
 
+## Volume phases (`Services/Indexer.cs`)
+
+`Indexer.PhaseOf(state)` names each volume's phase once. `StatusText.Describe`, `Stale` and `MenuLine` and `Indexer.NextScan` all read it. Fields: `VolumeState.ScannedSoFar`, `Queued` and `Index`, `Volume.Status` and `LiveOnly`, and `_retryAt`.
+
+| Phase | Fields | Entered by | Left by | `NextScan` |
+|---|---|---|---|---|
+| **LiveOnly** | `LiveOnly` | Adding or editing it as live-only | Editing it | Never (null) |
+| **Queued** | `Queued` | `Scan`: due, F5, or added | Its read starts, or is stopped | Now |
+| **Reading** | `ScannedSoFar` set | The read starts | It ends: Online or Offline | Now |
+| **NeverRead** | `Index` null | Added, moved, or its saved list could not be loaded | A read that succeeds | Now, or at its retry |
+| **Online** | `Status` Online | A read that succeeds | The next read | `RescanHours` after the last read; when 0, only at the retry of a read that stopped |
+| **Offline** | `Status` Offline | A read that fails | A read that succeeds | At its retry, 5 min on, even when `RescanHours` is 0; now if offline when the app last closed |
+| **Interrupted** | `Status` Scanning | Start-up, when the app closed during a read | Its read | Now |
+
+Rules:
+- Only the catalog says Scanning during a read. In memory the volume keeps what its last read found, so Scanning in memory means the app closed mid-read. It is not marked offline.
+- An Offline volume keeps its stale mark while it is Queued or Reading, so the mark does not blink at each retry.
+- The stale mark names the list's date, not its age, so it does not change until a read succeeds.
+- A read that fails in any phase waits for its retry (`_retryAt`), cleared by a read that succeeds.
+
+**Stale marks** (`SearchWindow._shownStale`): keyed by volume id, and a result finds its volume by the list it came from, since two volumes may share a name. None after a live search. A change in the marks redraws the rows on screen.
+
 ## Search line (`Core/Query.cs`)
 
 `Query.Parse` turns the box into `Alternatives`, `Extensions`, `ExcludedExtensions`, `Excluded`, `PathTerms` and `Problem`. It never throws. Each token is a word, an operator, or a problem. A quoted token is always a word.

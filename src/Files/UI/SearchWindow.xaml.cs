@@ -358,6 +358,40 @@ public partial class SearchWindow : Window
         ShowResults(result);
     }
 
+    /// <summary>By volume id, the marks on the rows on screen, so a volume going offline or coming back redraws them.</summary>
+    private Dictionary<long, string>? _shownStale;
+
+    private bool StaleMarksChanged(IReadOnlyList<VolumeState> volumes)
+    {
+        Dictionary<long, string>? now = StaleMarks(volumes);
+        return now?.Count != _shownStale?.Count || (now is not null && now.Any(mark => _shownStale!.GetValueOrDefault(mark.Key) != mark.Value));
+    }
+
+    /// <summary>By volume id, the mark for results from each volume that cannot be reached; none after a live search, which read them just now.</summary>
+    private Dictionary<long, string>? StaleMarks(IReadOnlyList<VolumeState> volumes)
+    {
+        if (_live is not null)
+        {
+            return null;
+        }
+        var marks = new Dictionary<long, string>();
+        foreach (VolumeState state in volumes)
+        {
+            if (StatusText.Stale(state) is string mark)
+            {
+                marks.Add(state.Volume.Id, mark);
+            }
+        }
+        return marks;
+    }
+
+    /// <summary>The mark for a result, found by the list it came from, since two volumes may share a name.</summary>
+    private static string? StaleMark(Hit hit, IReadOnlyList<VolumeState> volumes, Dictionary<long, string>? marks)
+    {
+        VolumeState? from = volumes.FirstOrDefault(state => ReferenceEquals(state.Index, hit.Index));
+        return from is null ? null : marks?.GetValueOrDefault(from.Volume.Id);
+    }
+
     private void ShowResults(SearchResult result)
     {
         // Keep the same file selected when the rows move.
@@ -369,8 +403,11 @@ public partial class SearchWindow : Window
         double scrolled = sameSearch && ListScroller() is ScrollViewer before ? before.VerticalOffset : 0;
         _shownFor = shownFor;
         _result = result;
-        bool showVolume = _app.Indexer.Volumes.Count > 1;
-        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter);
+        IReadOnlyList<VolumeState> volumes = _app.Indexer.Volumes;
+        bool showVolume = volumes.Count > 1;
+        Dictionary<long, string>? marks = StaleMarks(volumes);
+        _shownStale = marks;
+        List<ResultRow> rows = SearchRows.Build(result, showVolume, _filter, hit => StaleMark(hit, volumes, marks));
         Results.ItemsSource = rows;
         KeepActionsFor(rows);
         // A recalled search starts at the top row, where Up and Down keep stepping through past searches.
@@ -427,11 +464,20 @@ public partial class SearchWindow : Window
                 _previewedPath = null;
                 _ = SearchAsync();
             }
+            else if (IsVisible && !IsHome && _result is SearchResult shown && StaleMarksChanged(_app.Indexer.Volumes))
+            {
+                ShowResults(shown);
+            }
         });
     }
 
     private void OnKey(object sender, KeyEventArgs e)
     {
+        if (_scopeMenu?.IsOpen == true)
+        {
+            // The volume menu handles its own keys, F5 among them.
+            return;
+        }
         ModifierKeys modifiers = Keyboard.Modifiers;
         // Alt chords arrive as Key.System.
         Key key = e.Key == Key.System ? e.SystemKey : e.Key;

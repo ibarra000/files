@@ -168,4 +168,61 @@ public sealed class StatusTextTests
         // Grouped the way this PC writes numbers.
         Assert.Equal($"Search {1_234_567:N0} files", StatusText.Placeholder(1_234_567));
     }
+
+    private static VolumeState Read(VolumeStatus status, VolumeError? error = null, string? problem = null, DateTime? lastRead = null) =>
+        new(new Volume(1, Guid.NewGuid(), @"\\server\share", "share", "drawings", status, error, lastRead ?? DateTime.UtcNow),
+            SearchTests.Index(@"\\server\share"), null, problem);
+
+    [Fact]
+    public void Each_volume_state_has_one_wording_for_the_panel_and_settings()
+    {
+        VolumeState live = State("archive", null);
+        Assert.Equal("Live search only", StatusText.Describe(live with { Volume = live.Volume with { LiveOnly = true } }));
+        Assert.Equal($"Scanning… {1_200:N0} files", StatusText.Describe(State("drawings", 1_200)));
+        Assert.Equal("Never read", StatusText.Describe(State("drawings", null)));
+        Assert.Equal("Access denied", StatusText.Describe(Read(VolumeStatus.Offline, VolumeError.PermissionDenied, "denied")));
+        Assert.Equal("Drive or server not found", StatusText.Describe(Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone")));
+        Assert.Equal("Folder not found", StatusText.Describe(Read(VolumeStatus.Offline, VolumeError.PathNotFound, "gone")));
+        Assert.Equal("Offline · the share is busy", StatusText.Describe(Read(VolumeStatus.Offline, problem: "the share is busy")));
+        Assert.Equal("Online", StatusText.Describe(Read(VolumeStatus.Online)));
+    }
+
+    [Fact]
+    public void Results_from_an_unreachable_volume_say_when_their_list_was_read()
+    {
+        var listed = new DateTime(2026, 11, 21, 9, 0, 0, DateTimeKind.Utc);
+        VolumeState offline = Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone", listed);
+        Assert.Equal($"offline · list from {listed.ToLocalTime():d MMM HH:mm}", StatusText.Stale(offline));
+        Assert.Null(StatusText.Stale(Read(VolumeStatus.Online)));
+    }
+
+    [Fact]
+    public void An_unreachable_volume_keeps_its_mark_while_it_is_tried_again()
+    {
+        VolumeState offline = Read(VolumeStatus.Offline, VolumeError.DriveNotFound, "gone", DateTime.UtcNow.AddHours(-3));
+        string? mark = StatusText.Stale(offline);
+        Assert.NotNull(mark);
+        Assert.Equal(mark, StatusText.Stale(offline with { Queued = true }));
+        Assert.Equal(mark, StatusText.Stale(offline with { ScannedSoFar = 40 }));
+    }
+
+    [Fact]
+    public void A_read_cut_off_when_the_app_closed_is_not_marked_offline()
+    {
+        VolumeState interrupted = Read(VolumeStatus.Scanning);
+        Assert.Null(StatusText.Stale(interrupted));
+        Assert.Equal("Interrupted", StatusText.Describe(interrupted));
+        Assert.Equal("Waiting to be read", StatusText.Describe(interrupted with { Queued = true }));
+    }
+
+    [Fact]
+    public void The_volume_menu_says_when_a_volume_was_read_and_when_it_is_read_next()
+    {
+        VolumeState online = Read(VolumeStatus.Online, lastRead: DateTime.UtcNow.AddMinutes(-5).AddSeconds(-10));
+        Assert.Equal("Online · read 5 min ago · next in 55 min", StatusText.MenuLine(online, DateTime.UtcNow.AddMinutes(55).AddSeconds(10)));
+        Assert.Equal("Online · read 5 min ago · next on F5", StatusText.MenuLine(online, null));
+        Assert.Equal("Online · read 5 min ago · next in 2 h", StatusText.MenuLine(online, DateTime.UtcNow.AddHours(2).AddMinutes(1)));
+        Assert.Equal("Never read · next now", StatusText.MenuLine(State("drawings", null), DateTime.MinValue));
+        Assert.Equal($"Scanning… {40:N0} files", StatusText.MenuLine(State("drawings", 40), DateTime.MinValue));
+    }
 }
