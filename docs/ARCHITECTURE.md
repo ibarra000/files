@@ -1,6 +1,6 @@
 # Architecture
 
-`files` answers one question very fast: *which files in these volumes have this in their name?* Listing a large network folder takes seconds to minutes, so the app never lists on demand. Each volume is read in the background, saved to a local SQLite shard, and held in memory, where a search is a parallel, vectorized scan that takes about a millisecond per million names.
+`files` answers one question very fast: *which files in these volumes have this in their name?* Listing a large network folder takes seconds to minutes, so the app never lists on demand. Each volume is read in the background, saved to a local SQLite shard, and held in memory, where a search is a parallel, vectorized scan that takes about a millisecond per million names, more when many names match and must be ranked ([BENCHMARK.md](BENCHMARK.md)).
 
 It is one WPF executable (`src/Files`, .NET 10, self-contained) with a test project (`tests/Files.Tests`).
 
