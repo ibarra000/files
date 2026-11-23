@@ -14,7 +14,7 @@ Instant file-name search across folders and network shares on Windows.
 - **Filters.** While you type, chips narrow the results to All, Files, Folders, Code or Documents (<kbd>Ctrl</kbd>+<kbd>1</kbd> to <kbd>Ctrl</kbd>+<kbd>5</kbd>). With more than one volume, the menu in the header searches just one of them.
 - **Preview.** <kbd>Ctrl</kbd>+<kbd>P</kbd> opens a pane beside the results with the selected file's size, date and type, and its first lines, a small copy of an image, a PDF's first page (with its page count), a picture of a drawing (the preview saved inside a DWG or a Creo part, assembly or drawing, which needs no Creo; a DXF's geometry and text, a plot file's pen strokes, a STEP model shaded with its visible edges, an assembly's parts each where it goes and each part in its own colour; for SOLIDWORKS, Inventor and other CAD files, the thumbnail their CAD program shows in Explorer, when it is installed), or a folder's first entries, with Open, Show in folder and Copy path buttons. Only the selected file is read, off to the side, so a slow share never holds up typing.
 - **Actions.** <kbd>Tab</kbd> or right-click opens every action for the selected result with its shortcut; type to filter them and press <kbd>Enter</kbd> to run one.
-- **Search syntax.** `term*` starts with, `*term` ends with (before the extension), and `ext:pdf,dwg` filters by type.
+- **Search syntax.** Plain words are one phrase, matched anywhere in the name. Operators narrow or widen it; see [Search syntax](#search-syntax).
 - **Opening.** <kbd>Enter</kbd> opens with the Windows default or a program you add in Settings. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. <kbd>Tab</kbd> or right-click a result for every option. Drag a result into another app to hand it the file.
 - **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. The action menu (<kbd>Tab</kbd>) can also pin a result's folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
 - **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder, under Recent (<kbd>Del</kbd> takes one off).
@@ -23,6 +23,22 @@ Instant file-name search across folders and network shares on Windows.
 - **Placing the panel.** Drag it anywhere by its edge padding (also out of maximized or snapped; double-click there maximizes or restores), resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
 - **Preset volumes.** An installer built with `make_msi.ps1 -Volumes` adds a list of volumes once for each user on each PC it is installed on; see [CONTRIBUTING.md](CONTRIBUTING.md#an-installer-with-preset-volumes).
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
+
+## Search syntax
+
+| Type | Finds |
+|---|---|
+| `annual report` | names holding "annual report" (spaces between words count as one) |
+| `"annual  report"` | the text in quotes exactly, spaces and all; operators inside quotes are plain text |
+| `invoice\|quote` | names holding either |
+| `plan !draft` | names holding "plan" but not "draft" |
+| `ext:pdf;dwg` or `ext:pdf,dwg` | only those types |
+| `ext:!exe` | every type but that one |
+| `path:"client/2026"` | files whose folder path holds that text (`/` or `\`) |
+| `plan*` / `*0704` | names starting with "plan" / ending with "0704" before the extension |
+| `AB-?-07*.pdf` | a wildcard pattern the whole name fits: `?` is one character, `*` any run |
+
+Operators combine: `inv|quote !draft ext:pdf path:2026`. They apply to the whole line, so write them apart from the `|` words: `inv|quote !draft`, not `inv|!draft`. `!readme` on its own searches for a name starting with "!"; next to anything else, `!` leaves names out. An operator that is not a valid one (`ext:` with nothing after it, an empty `path:`, a lone `!`) is shown as an invalid search, and the footer says what it needs. Live search (<kbd>Shift</kbd>+<kbd>Enter</kbd>) understands the same syntax.
 
 ## Keys
 

@@ -33,6 +33,41 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
 
+## Search line (`Core/Query.cs`)
+
+`Query.Parse` turns the box into `Alternatives`, `Extensions`, `ExcludedExtensions`, `Excluded`, `PathTerms` and `Problem`. It never throws. Each token is a word, an operator, or a problem. A quoted token is always a word.
+
+| State | Fields | Entered by | Rule |
+|---|---|---|---|
+| **Valid** | `Problem` null, one or more `Alternatives` | A line with something to search for | It is searched. Operators narrow it; words between `\|` are its alternatives. |
+| **Problem** | `Problem` set | A malformed operator, or nothing to search for | Enter does nothing; the panel is in **Invalid search** and the footer shows the message. The first problem on the line is the one shown. |
+| **Lone `!term`** | one unquoted token that starts with `!` | `!readme` and nothing else | It is a word: it finds names holding `!readme`. With any other token, `!term` excludes. |
+
+| Problem | Line |
+|---|---|
+| `ext: needs a type, like ext:pdf` | `ext:` with no type, or a type that is too long or holds a character no extension has (`ext:p<f`, `ext:!`) |
+| `path: needs a folder name, like path:2026` | `path:` with nothing after it but slashes |
+| `! needs a word after it, like !draft` | a `!` on its own |
+| `nothing to search for` | only stars, quotes, filters or exclusions (`ext:pdf !draft`) |
+| `contains a character that cannot be searched` | a NUL in the line |
+
+Typing an operator in steps (`ext:` before `pdf`) passes through **Problem** for a moment. That is the same as any other invalid search.
+
+## Indexed vs live search (`Core/VolumeIndex.cs`, `Core/LiveSearch.cs`)
+
+Both read the same `Query` and rank with the same `RankKey`. They differ in where the names come from and in what they count.
+
+| | Indexed | Live |
+|---|---|---|
+| **Names** | The saved list in memory | Read from the share now. Each snapshot builds a small index of what was kept and searches it the indexed way. |
+| **Filter** | `NameFilter` (hidden types, `ext:`, `!term`) and `path:` on every match | The same filter in `Keep`, before a name is kept. A hidden or filtered name never takes room or adds to the count. |
+| **Room** | `MaxResults` (300) shown, every match counted | `MaxKept` (100,000) kept. Past it, matches are only counted, and `IsCapped` is set. |
+| **Files in a matching folder** | Every one counted, up to 64 listed per folder | Up to 64 kept per folder, so the count can be lower than indexed |
+| **Matching folders** | Every folder whose own name matches | Up to 1,000 per volume, noted as the walk passes them |
+| **A typed folder path** | Not special | Read first, only for a plain line (`IsPlain`: one phrase, no operators) |
+
+Rule: a name that indexed search would leave out is never kept by live search.
+
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 
 | State | Fields | Rule |
