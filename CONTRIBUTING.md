@@ -27,6 +27,13 @@ dotnet test Files.slnx --collect:"XPlat Code Coverage"
 
 Tests cover `Core`, `Data` and `Services` against temporary folders and databases. `SearchTests.A_million_names_search_in_milliseconds` prints the search time; run it in Release (`-c Release`) for a meaningful number. `tools/IndexBench` times the fixed query set in [docs/BENCHMARK.md](docs/BENCHMARK.md) at 1M and 5M names; run it again and replace the table there when a release changes the index, the query parser or the ranking. UI changes are checked by running the app: take a look in light and dark, and with a volume that is unreachable.
 
+**A share that goes offline** (run it when changing volume status or the stale mark):
+
+1. Add a `\\server\share` volume (or a mapped drive) and a second, local volume, and let both be read.
+2. Disconnect the share (unplug, VPN off, or `net use X: /delete`) and press <kbd>F5</kbd>.
+3. Search for a file on the share: it still appears, marked "offline · list from …" with the time of the last read. The volume menu (<kbd>Alt</kbd>+<kbd>↓</kbd>) shows the share as offline, with when it was read and when it is read next.
+4. Reconnect, highlight the share in the volume menu and press <kbd>F5</kbd> (or wait for the scheduled read): the mark is gone from the next search.
+
 ## Workflow
 
 1. **Branch from `master`** with a short kebab-case name that says what the work is: `settings-window`, `result-columns`.

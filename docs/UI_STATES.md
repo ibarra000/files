@@ -33,6 +33,28 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 **Footer** (`_toast`, `_rescanShownUntil`): a message shows for 4 s. "Scanning…" shows for at least a second after F5. The key caps follow the states above.
 
+## Volume phases (`Services/Indexer.cs`)
+
+`Indexer.PhaseOf(state)` names each volume's phase once. `StatusText.Describe`, `Stale` and `MenuLine` and `Indexer.NextScan` all read it. Fields: `VolumeState.ScannedSoFar`, `Queued` and `Index`, `Volume.Status` and `LiveOnly`, and `_retryAt`.
+
+| Phase | Fields | Entered by | Left by | `NextScan` |
+|---|---|---|---|---|
+| **LiveOnly** | `LiveOnly` | Adding or editing it as live-only | Editing it | Never (null) |
+| **Queued** | `Queued` | `Scan`: due, F5, or added | Its read starts, or is stopped | Now |
+| **Reading** | `ScannedSoFar` set | The read starts | It ends: Online or Offline | Now |
+| **NeverRead** | `Index` null | Added, moved, or its saved list could not be loaded | A read that succeeds | Now, or at its retry |
+| **Online** | `Status` Online | A read that succeeds | The next read | `RescanHours` after the last read; when 0, only at the retry of a read that stopped |
+| **Offline** | `Status` Offline | A read that fails | A read that succeeds | At its retry, 5 min on, even when `RescanHours` is 0; now if offline when the app last closed |
+| **Interrupted** | `Status` Scanning | Start-up, when the app closed during a read | Its read | Now |
+
+Rules:
+- Only the catalog says Scanning during a read. In memory the volume keeps what its last read found, so Scanning in memory means the app closed mid-read. It is not marked offline.
+- An Offline volume keeps its stale mark while it is Queued or Reading, so the mark does not blink at each retry.
+- The stale mark names the list's date, not its age, so it does not change until a read succeeds.
+- A read that fails in any phase waits for its retry (`_retryAt`), cleared by a read that succeeds.
+
+**Stale marks** (`SearchWindow._shownStale`): keyed by volume id, and a result finds its volume by the list it came from, since two volumes may share a name. None after a live search. A change in the marks redraws the rows on screen.
+
 ## Search line (`Core/Query.cs`)
 
 `Query.Parse` turns the box into `Alternatives`, `Extensions`, `ExcludedExtensions`, `Excluded`, `PathTerms` and `Problem`. It never throws. Each token is a word, an operator, or a problem. A quoted token is always a word.
@@ -67,6 +89,25 @@ Both read the same `Query` and rank with the same `RankKey`. They differ in wher
 | **A typed folder path** | Not special | Read first, only for a plain line (`IsPlain`: one phrase, no operators) |
 
 Rule: a name that indexed search would leave out is never kept by live search.
+
+Ties in rank are cut by the file's place in the index. A live snapshot builds its index in path order (`Walker.Merge` sorts folders and files), so the rows near the 300th place stay put between refreshes. They change only when a file that sorts earlier is found.
+
+## Open counts (`Core/OpenCounts.cs`, `App.OpenCounts`)
+
+`App.OpenCounts` maps a path, ignoring case, to `OpenCount(Count, LastUtc)`. It is saved to `opened-counts.txt` after each change. With **Rank opened files higher** on, a search ranks opened files first among matches of the same kind.
+
+| State | Entered by | Left by | Rule |
+|---|---|---|---|
+| **Not counted** | The path was never opened, was removed, or fell off | Opening it from the panel with the setting on | It ranks by its match alone. |
+| **Counted** | Opening from the panel (`Record`: count + 1, time now) | Del on its Recent row, Clear recent, or falling off | It ranks above matches of the same kind with fewer opens, then above those opened less recently. |
+| **Fell off** | More than 500 counted | Opening it again | The file that ranks lowest goes first: fewest opens, then opened longest ago. Eviction and ranking use the same order (`OpenCounts.Compare`). Once 500 files have two or more opens, a file opened once falls off at once. |
+
+**Load:**
+- A damaged line is skipped.
+- Lines that differ only in case are one file: their counts add up, and the later time is kept.
+- A time in the future is read as now, so a clock set back cannot keep a file on top for good.
+
+Turning the setting off stops counting and ranking, but keeps the counts. Changing it runs the search again.
 
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 

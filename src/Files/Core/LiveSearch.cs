@@ -50,6 +50,7 @@ public sealed class LiveSearch
     private const int SavedFolderHits = 50;
 
     private readonly IReadOnlyList<LiveVolume> _volumes;
+    private readonly IReadOnlyDictionary<string, OpenCount>? _opened;
     private readonly Query _query;
     private readonly IReadOnlySet<string> _hiddenExtensions;
     private readonly NameFilter _names;
@@ -76,8 +77,11 @@ public sealed class LiveSearch
     private int _kept;
     private int _notKept;
 
-    public LiveSearch(IReadOnlyList<LiveVolume> volumes, Query query, IReadOnlySet<string> hiddenExtensions, bool skipHidden, int maxKept = MaxKept)
+    /// <param name="opened">Files opened from the panel, ranked higher as in an indexed search.</param>
+    public LiveSearch(IReadOnlyList<LiveVolume> volumes, Query query, IReadOnlySet<string> hiddenExtensions, bool skipHidden, int maxKept = MaxKept,
+        IReadOnlyDictionary<string, OpenCount>? opened = null)
     {
+        _opened = opened;
         _volumes = volumes;
         _query = query;
         _hiddenExtensions = hiddenExtensions;
@@ -210,7 +214,7 @@ public sealed class LiveSearch
             }
             indexes.Add((_volumes[volume].Name, builder.Build()));
         }
-        SearchResult searched = Searcher.Search(indexes, _query, _hiddenExtensions, cancel);
+        SearchResult searched = Searcher.Search(indexes, _query, _hiddenExtensions, cancel, _opened);
         SearchResult result = searched with { Matched = searched.Matched + notKept };
         lock (_gate)
         {

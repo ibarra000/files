@@ -216,6 +216,7 @@ public partial class SettingsWindow : Window
         HiddenBox.Text = string.Join(", ", settings.HiddenExtensions);
         RemovalsBox.Text = string.Join(Environment.NewLine, settings.ScreenTextRemovals);
         ShowFoldersBox.IsChecked = settings.ShowFolders;
+        RankOpenedBox.IsChecked = settings.RankOpenedHigher;
         foreach (Viewer viewer in settings.Viewers)
         {
             _viewers.Add(new ViewerRow { Name = viewer.Name, Program = viewer.Program });
@@ -307,6 +308,7 @@ public partial class SettingsWindow : Window
             HiddenExtensions = SplitList(HiddenBox.Text),
             ScreenTextRemovals = RemovalLines(),
             ShowFolders = ShowFoldersBox.IsChecked == true,
+            RankOpenedHigher = RankOpenedBox.IsChecked == true,
             Viewers = ValidViewers(problems),
             EnterOpens = (string?)(EnterBox.SelectedItem as ComboBoxItem)?.Tag ?? Settings.DefaultOpen,
             CheckForUpdates = CheckUpdatesBox.IsChecked == true,
@@ -775,35 +777,7 @@ public partial class SettingsWindow : Window
         {
             string files = state.Index?.FileCount.ToString("N0") ?? "–";
             string read = state.Volume.LiveOnly ? "–" : StatusText.Age(state.Volume.LastScannedAt);
-            return new VolumeRow(state.Volume.Id, state.Volume.Name, state.Volume.Root, files, read, Describe(state), state.Volume.LiveOnly);
-        }
-
-        private static string Describe(VolumeState state)
-        {
-            if (state.Volume.LiveOnly)
-            {
-                return "Live search only";
-            }
-            if (state.ScannedSoFar is int read)
-            {
-                return $"Scanning… {read:N0} files";
-            }
-            string? error = state.Volume.LastError switch
-            {
-                VolumeError.PathNotFound => "Folder not found",
-                VolumeError.DriveNotFound => "Drive or server not found",
-                VolumeError.PermissionDenied => "Access denied",
-                _ => null,
-            };
-            if (error is not null)
-            {
-                return error;
-            }
-            if (state.Problem is not null)
-            {
-                return state.Problem;
-            }
-            return state.Index is null ? "Waiting to be read" : "OK";
+            return new VolumeRow(state.Volume.Id, state.Volume.Name, state.Volume.Root, files, read, StatusText.Describe(state), state.Volume.LiveOnly);
         }
     }
 }

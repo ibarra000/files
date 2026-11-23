@@ -34,7 +34,8 @@ public partial class SearchWindow
         // A volume's saved list, when it has one, points the walk at the folders where matches were last time.
         var volumes = ScopedVolumes().Select(state => new LiveVolume(state.Volume.Name, state.Volume.Root, state.Index)).ToList();
         _searchTook = null;
-        var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles);
+        var live = new LiveSearch(volumes, query, _app.Settings.HiddenExtensionSet, _app.Settings.HideSystemFiles,
+            opened: _app.Settings.RankOpenedHigher ? _app.OpenCounts : null);
         var cancel = new CancellationTokenSource();
         _live = live;
         _liveCancel = cancel;
