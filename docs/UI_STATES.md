@@ -43,33 +43,30 @@ The panel and Settings have no explicit state machine: their state is a handful 
 | **Asking** | `_contentCancel` | The names of a search are on screen | Its answer, a newer search, hiding | The search takes its token once and disposes its own source; stopping only cancels. Only the newest search (`_epoch`), for what is still in the box, on a visible panel, may fill the list. |
 | **Shown** | `_contents` for `_contentsFor` | An answer | The next answer | Rows are drawn under Contents only for the line they were found for. An answer for a new line redraws the list, even when its matches are the same as the last line's. A problem is said once, until it changes. |
 
-Turning content search on or off searches again.
+Turning content search on or off searches again. A search no file can match (a type filter none of the typed extensions fits) shows no contents without asking kensaku.
 
-**The host** (`KensakuHost`, held by the app; fields `_key`, `_stop`, `_run`, `State`, `Problem`):
-- Its key is `KensakuKey`: the bundle folder, the port (8766) and the hash of `config.json`'s text. `Apply` with the key it runs changes nothing, so the app calls it on every volume change.
-- Another key stops the run in progress, then starts a new one. A run writes `config.json` only when its text differs from what the app wrote last (`config.files-hash`), since kensaku rewrites the file as it indexes.
-- State changes made by a stopped run are dropped, so an old run never overwrites a new one.
+**The host** (`KensakuHost`, held by the app; fields `_wanted`, `_stop`, `_run`, `_changed`, `State`, `Problem`):
+- What it runs for is `KensakuWanted`: the roots of the volumes that are not live-only, and the OCR setting. The app calls `Apply` on every volume or settings change.
+- While a run is going, a different `KensakuWanted` only wakes it (`_changed`). It waits 2 s for more changes, then sends the daemon what changed (`KensakuSetup.Calls`). The daemon is not restarted.
+- Content search off, no indexed volume or no kensaku stops the run. State changes made by a stopped run are dropped, so an old run never overwrites a new one.
 
 | State | Entered by | Left by | Rule |
 |---|---|---|---|
-| **Stopped** | Content search off; on but kensaku not built (`Problem` says "run tools/build_kensaku.ps1"); quit | Content search on with a built kensaku | Nothing runs. |
-| **StartingDaemon** | A run starts: leftovers of an earlier run of the app are ended, and nobody else answers on the pipe | The daemon answering a ping (StartingServe); it exits or stays silent for 10 s (Restarting) | Pinged every 250 ms with `daemon.token`. |
-| **StartingServe** | The daemon answers | `/health` answering (Up); 30 s without (Restarting) | `serve` is never started before the daemon answers: it decides once whether to use it. |
-| **Up** | `/health` answers | Either process exiting (Restarting), another key, Stopped | The panel searches only now. |
-| **Restarting** | A process exited or never answered | The wait passing (StartingDaemon), another key, Stopped | Both processes are ended. Waits 5 s, 30 s, then 2 min each time; a run that reached Up starts again at 5 s. |
-| **Blocked** | The pipe answers but refuses this data folder's token: another kensaku's daemon | Another key, content search off and on | Says "Another kensaku is running"; nothing is started. |
+| **Stopped** | Content search off; quit; on without kensaku (`Problem` says "run tools/fetch_kensaku.ps1") or without a volume that is not live-only ("No indexed volumes to read inside") | Content search on with kensaku and a volume | Nothing runs. |
+| **Starting** | A run starts, after a 2 s settle | Setup sent (Up); the daemon exiting or not answering a ping for 10 s (Restarting); a refusal (Failed) | A daemon left by an earlier run of the app is shut down first. Then `daemon run` starts, is pinged every 250 ms, and gets `setup` (a new data folder) or `patch_config`. |
+| **Up** | The daemon answers and has the volumes | The daemon exiting or a call failing (Restarting), off, quit | The panel searches only now. Changes go to the running daemon. |
+| **Restarting** | The daemon stopped or did not answer | The wait passing (Starting), off, quit | The daemon is shut down or ended. Waits 5 s, 30 s, then 2 min each time; a run that reached Up starts again at 5 s. |
+| **Failed** | The pipe refuses this app (`forbidden`), or kensaku.exe cannot be started | Content search off and on, quit | Says why. Starting again would not help, so nothing is retried. |
 
-Stopping (another key, off, quit) asks the daemon to `shutdown` over the pipe, waits up to 2 s, then ends `serve` and whatever is left. Quit waits at most 3 s for this.
+Stopping (off, quit) asks the daemon to `shutdown` over the pipe, waits up to 2 s, then ends what is left. Quit waits at most 3 s for this.
 
-**The panel's link** (`KensakuLink`, held by the panel for the app's life): asks the host's state before each search and searches only when it is Up. A new host key starts it over at Unknown. A search whose key changed while it waited records nothing.
+**The panel** asks the host's state before each search (`Kensaku.SearchAsync`) and calls `search` only while it is Up:
 
-| State | Entered by | Rule |
-|---|---|---|
-| **Unknown** | A new key | |
-| **Up** | A search answered | |
-| **Starting** | The host starting or restarting | Says "kensaku is starting". |
-| **Failed** | A search failed, or the host is Blocked | Says the problem. |
-| **Absent** | The host stopped | Says the host's problem, or "kensaku is not running". |
+| Host | The panel says |
+|---|---|
+| Starting, Restarting | "kensaku is starting" |
+| Stopped, Failed | The host's problem, or "kensaku is not running" |
+| Up, but the search failed | "kensaku did not answer in time" (800 ms), "kensaku is still setting up" (`not_setup`, `no_index`), "kensaku is not running" (the pipe broke; the host sees the daemon exit and restarts it), or kensaku's own message |
 
 ## Settings (`UI/SettingsWindow.xaml.cs`)
 
