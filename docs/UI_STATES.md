@@ -40,7 +40,7 @@ The panel and Settings have no explicit state machine: their state is a handful 
 | **Loading** | `_loading` | Filling the controls never saves. |
 | **Volume form: Add / Edit** | `_editing` | Edit… or a double-click on a row fills the form. Saving clears it, and so does removing that volume. Cancel goes back to Add. |
 | **Saving a volume** | `_saving` | Save and Cancel are off until it finishes. Only the form that was saved is cleared. |
-| **Recording a shortcut** | `App._hotkeysSuspended` | All three shortcuts are let go while a shortcut box has focus. Leaving it takes them back, or the old ones if a new one cannot be had. No two can be the same keys. Alt+F4, Alt+Tab, Ctrl+Esc and Win+L are refused. A problem found on close is shown by the tray icon. |
+| **Recording a shortcut** | `App._hotkeysSuspended` | Both shortcuts are let go while a shortcut box has focus. Leaving it takes them back, or the old ones if a new one cannot be had. The two can never be the same keys. Alt+F4, Alt+Tab, Ctrl+Esc and Win+L are refused. A problem found on close is shown by the tray icon. |
 | **Patterns refused** | `_refusedRemovals` | The patterns that worked stay in use. Leaving the box does not try the refused ones again. Closing says once that they were not saved. |
 | **Program row not valid** | `_viewerProblem`, `_closeWarned` | It is not saved. The first close stops so it can be fixed. |
 | **Update: checking / offered / installing** | `App._checking`, `App.UpdateOffer`, `App._installing` | One check at a time. A new update folder drops the old offer. Install is on only with an offer. |
@@ -49,36 +49,4 @@ The panel and Settings have no explicit state machine: their state is a handful 
 
 - **Theme.** `Settings.Theme` and `_appliedDark`. With System, a Windows switch is followed at once. The panel colors (`UI/PanelTheme.*.xaml`) are swapped app-wide, so every window, popup and the tray menu follow.
 - **Quitting.** `IsQuitting` is one-way. Once set, nothing registers a shortcut, and Alt+F4 on the panel no longer only hides it.
-
-## Screen text (`App.xaml.cs`, `UI/AreaWindow.cs`, `UI/ScreenTextWindow.xaml.cs`)
-
-**The read gate** (`App._screenRead`, a `ScreenReadState`; `App._areaPick`). Both reads go through `ReadScreenAsync`.
-
-| State | Entered by | Left by | Rule |
-|---|---|---|---|
-| **Idle** | Start, the end of any read | A screen-text shortcut | The window title is taken at the press. When the panel is in front, it is taken once the panel hides. |
-| **Picking** | The area shortcut | A drag (Reading), Esc, a right-click, a click without a drag, the area shortcut again (Idle) | The other screen-text shortcut is ignored. |
-| **Reading** | The text-under-the-mouse shortcut, or the end of a drag | The text is read, or reading fails (Idle) | Every screen-text shortcut is ignored, so a slow app is read once. A failure becomes a note. Nothing is shown once quitting. |
-
-**The area layer** (`AreaWindow`: `_from`, `_closing`, `_picked`):
-
-| State | Fields | Entered by | Left by | Rule |
-|---|---|---|---|---|
-| **Shown** | `_from` null | Opening, a lost mouse capture | A left button down (Dragging), Esc, a right-click, `Cancel` | The layer never takes focus, so Esc is polled every 30 ms, not received; it is not swallowed, and the window behind sees it too. A keyboard hook is not worth it here. |
-| **Dragging** | `_from` set, mouse captured | A left button down | The button up (Done), the capture lost (Shown), Esc, a right-click | The box shows the drag. Losing the capture forgets the drag and hides the box. |
-| **Done** | `_picked` holds the area | The button up | (closed) | The area is in physical pixels. A click without a drag gives null. |
-| **Cancelled** | `_picked` holds null | Esc, a right-click, `Cancel`, quitting | (closed) | It closes once (`_closing`), however many come together. |
-
-A change of screens (DPI or display settings) covers every screen again. The display handler is static, so closing removes it.
-
-**History** (`App.ScreenTexts`, saved as `screen-text.json`):
-- Kept only while `Settings.RememberSearches` is on. Paused, a read is still searched or copied, and the history window says it is paused. It follows Settings as it changes.
-- The newest read comes first. The same text read again moves up. At most 50 are kept.
-- Clear empties it and saves the empty list.
-
-**After reading** (`Settings.AfterReading`): Search opens the panel with the first line. Copy puts the text on the clipboard and never opens the panel; what it says, even "nothing read", goes to the tray. Text of several lines is always copied.
-
-**The three shortcuts** (`_hotkey`, `_ocrHotkey`, `_areaHotkey`, with `HotkeyProblem`, `OcrHotkeyProblem`, `AreaHotkeyProblem`):
-- Each is registered, suspended while a shortcut box records, or failed with its problem kept. A failed one is tried again whenever settings are applied.
-- No two are the same keys (`Settings.WithShortcutsApart`). Of two that clash, the one just changed gives way, and only that one.
-- Quitting disposes all three.
+- **Reading the screen.** `_readingScreen` is set from the press until the text is read, so a second press is ignored. `Settings.AfterReading` then decides: Search opens the panel searching for it; Copy puts it on the clipboard, leaves the panel closed and has the tray say what was copied, or why nothing was. Nothing is shown once quitting.

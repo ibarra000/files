@@ -33,6 +33,15 @@ public sealed class ScreenTextTests
     }
 
     [Fact]
+    public void The_copy_note_says_what_was_copied_or_why_nothing_was()
+    {
+        Assert.Equal("Copied: AB-C-0704", ScreenText.CopiedNote(new ScreenRead("AB-C-0704", null)));
+        Assert.Equal("Copied: AB · note", ScreenText.CopiedNote(new ScreenRead("AB", "note")));
+        Assert.Equal("No text under the mouse", ScreenText.CopiedNote(new ScreenRead(null, "No text under the mouse")));
+        Assert.Equal("Nothing was read", ScreenText.CopiedNote(new ScreenRead(null, null)));
+    }
+
+    [Fact]
     public void A_blank_word_gives_nothing()
     {
         Assert.Null(ScreenText.TokenAround("some line", "  "));
@@ -41,7 +50,7 @@ public sealed class ScreenTextTests
     [Fact]
     public void The_word_under_the_pointer_wins_over_nearer_edges_of_others()
     {
-        var words = new List<ReadWord>
+        var words = new List<(string, Rect)>
         {
             ("left", new Rect(0, 0, 50, 20)),
             ("AB-C-0704", new Rect(60, 0, 90, 20)),
@@ -53,41 +62,12 @@ public sealed class ScreenTextTests
     [Fact]
     public void Off_any_word_the_closest_one_is_taken()
     {
-        var words = new List<ReadWord>
+        var words = new List<(string, Rect)>
         {
             ("far", new Rect(0, 0, 40, 20)),
             ("near", new Rect(200, 100, 40, 20)),
         };
         Assert.Equal("near", ScreenText.Nearest(words, new Point(190, 105)));
         Assert.Null(ScreenText.Nearest([], new Point(0, 0)));
-    }
-
-    [Fact]
-    public void Words_are_put_back_into_lines_top_to_bottom_and_left_to_right()
-    {
-        var words = new List<ReadWord>
-        {
-            new("world", new Rect(70, 2, 50, 20), 0.9f),
-            new("second", new Rect(0, 40, 60, 20), 0.5f),
-            new("hello", new Rect(0, 0, 60, 22), 0.7f),
-            new("line", new Rect(70, 41, 40, 18), 0.3f),
-        };
-
-        IReadOnlyList<Core.ScreenTextLine> lines = ScreenText.Lines(words);
-
-        Assert.Equal(["hello world", "second line"], lines.Select(line => line.Text));
-        Assert.Equal(0.7f, lines[0].Confidence);
-        Assert.Equal(0.3f, lines[1].Confidence);
-        Assert.Null(ScreenText.Lines([("plain", new Rect(0, 0, 10, 10))])[0].Confidence);
-    }
-
-    [Fact]
-    public void An_area_is_the_box_between_the_two_corners_dragged_kept_on_the_screen()
-    {
-        var screen = new System.Drawing.Rectangle(-1920, 0, 3840, 1080);
-
-        Assert.Equal(new System.Drawing.Rectangle(100, 200, 300, 50), ScreenText.Area(new(400, 250), new(100, 200), screen));
-        Assert.Equal(new System.Drawing.Rectangle(-1920, 1000, 20, 80), ScreenText.Area(new(-2000, 1000), new(-1900, 1200), screen));
-        Assert.Null(ScreenText.Area(new(10, 10), new(12, 40), screen));
     }
 }

@@ -75,6 +75,17 @@ public static class ScreenText
         return new ScreenRead(text, note.Length > 0 ? note : null);
     }
 
+    /// <summary>What the tray says when the read is only copied: what was copied, or why nothing was read.</summary>
+    public static string CopiedNote(ScreenRead read)
+    {
+        if (read.Text is null)
+        {
+            return read.Problem ?? "Nothing was read";
+        }
+        string copied = $"Copied: {read.Text}";
+        return read.Problem is null ? copied : $"{copied} · {read.Problem}";
+    }
+
     /// <summary>Said when the engine chosen in Settings could not load, so the user knows why reading is weaker.</summary>
     public const string FellBackNote = "PaddleOCR could not load, so Windows text recognition read this";
 
@@ -83,7 +94,7 @@ public static class ScreenText
     /// cannot load, reads with <paramref name="fallback"/> instead. Returns the words, the scale they
     /// were read at, and whether the fallback read them. Any other error is not hidden.
     /// </summary>
-    public static async Task<(IReadOnlyList<ReadWord> Words, int Scale, bool FellBack)> ReadWithFallbackAsync(
+    public static async Task<(IReadOnlyList<(string Text, Rect Box)> Words, int Scale, bool FellBack)> ReadWithFallbackAsync(
         ITextReader reader, ITextReader fallback, Func<int, Task<byte[]>> grab, CancellationToken cancel)
     {
         try
@@ -128,11 +139,11 @@ public static class ScreenText
     }
 
     /// <summary>The word whose box holds <paramref name="point"/>, else the closest one, or null when there are none.</summary>
-    public static string? Nearest(IReadOnlyList<ReadWord> words, Point point)
+    public static string? Nearest(IReadOnlyList<(string Text, Rect Box)> words, Point point)
     {
         string? best = null;
         double bestDistance = double.MaxValue;
-        foreach ((string text, Rect box, _) in words)
+        foreach (var (text, box) in words)
         {
             double dx = Math.Max(0, Math.Max(box.Left - point.X, point.X - box.Right));
             double dy = Math.Max(0, Math.Max(box.Top - point.Y, point.Y - box.Bottom));
@@ -144,81 +155,6 @@ public static class ScreenText
             }
         }
         return best is null ? null : Clean(best);
-    }
-
-    /// <summary>The smallest area worth reading; a click without a drag selects nothing.</summary>
-    private const int MinAreaSide = 8;
-
-    /// <summary>The longest side of an area's image as read, which keeps a whole-screen drag within the engines' limits and memory.</summary>
-    private const int MaxReadSide = 4096;
-
-    /// <summary>
-    /// Reads all the text in <paramref name="area"/> (physical screen pixels) as lines, top to bottom.
-    /// No lines and a problem when nothing could be read.
-    /// </summary>
-    public static async Task<(IReadOnlyList<Core.ScreenTextLine> Lines, string? Problem)> InAreaAsync(
-        System.Drawing.Rectangle area, ITextReader reader, ITextReader fallback)
-    {
-        try
-        {
-            // A large area is enlarged less, or shrunk, to stay within what the engines read (Windows OCR stops near 10,000 px).
-            double Fit(int scale) => Math.Min(scale, (double)MaxReadSide / Math.Max(area.Width, area.Height));
-            var (words, _, fellBack) = await ReadWithFallbackAsync(reader, fallback, s => Task.Run(() => Grab(area, Fit(s))), CancellationToken.None);
-            IReadOnlyList<Core.ScreenTextLine> lines = Lines(words);
-            string? note = fellBack ? FellBackNote : null;
-            return lines.Count > 0 ? (lines, note) : (lines, note ?? "No text in that area");
-        }
-        catch (TextRecognitionUnavailableException error)
-        {
-            return ([], error.Message);
-        }
-    }
-
-    /// <summary>The box between two corners dragged on the screen, kept on <paramref name="screen"/>; null when it is too small to read.</summary>
-    public static System.Drawing.Rectangle? Area(System.Drawing.Point from, System.Drawing.Point to, System.Drawing.Rectangle screen)
-    {
-        int left = Math.Max(Math.Min(from.X, to.X), screen.Left);
-        int top = Math.Max(Math.Min(from.Y, to.Y), screen.Top);
-        int right = Math.Min(Math.Max(from.X, to.X), screen.Right);
-        int bottom = Math.Min(Math.Max(from.Y, to.Y), screen.Bottom);
-        return right - left < MinAreaSide || bottom - top < MinAreaSide
-            ? null
-            : System.Drawing.Rectangle.FromLTRB(left, top, right, bottom);
-    }
-
-    /// <summary>
-    /// Words put back into lines: a word whose middle falls within a line's height joins it. Lines run
-    /// top to bottom, words left to right; a line is as sure as its least sure word.
-    /// </summary>
-    public static IReadOnlyList<Core.ScreenTextLine> Lines(IReadOnlyList<ReadWord> words)
-    {
-        var lines = new List<List<ReadWord>>();
-        foreach (ReadWord word in words.OrderBy(word => word.Box.Top))
-        {
-            double middle = word.Box.Top + word.Box.Height / 2;
-            List<ReadWord>? line = lines.FirstOrDefault(line => middle >= line[0].Box.Top && middle <= line[0].Box.Bottom);
-            if (line is null)
-            {
-                lines.Add([word]);
-            }
-            else
-            {
-                line.Add(word);
-            }
-        }
-        return lines
-            .Select(line => new Core.ScreenTextLine(
-                string.Join(' ', line.OrderBy(word => word.Box.Left).Select(word => word.Text)),
-                line.Min(word => word.Confidence)))
-            .ToList();
-    }
-
-    /// <summary>The title of the window in front, which a screen read is noted against in the history.</summary>
-    public static string ForegroundTitle()
-    {
-        nint window = GetForegroundWindow();
-        var title = new System.Text.StringBuilder(256);
-        return window != 0 && GetWindowText(window, title, title.Capacity) > 0 ? title.ToString() : "";
     }
 
     /// <summary>Strips surrounding punctuation; null when nothing is left.</summary>
@@ -277,14 +213,14 @@ public static class ScreenText
     }
 
     /// <summary>The screen in <paramref name="area"/>, enlarged <paramref name="scale"/> times with bicubic scaling, as PNG.</summary>
-    private static byte[] Grab(System.Drawing.Rectangle area, double scale)
+    private static byte[] Grab(System.Drawing.Rectangle area, int scale)
     {
         using var screen = new System.Drawing.Bitmap(area.Width, area.Height);
         using (var graphics = System.Drawing.Graphics.FromImage(screen))
         {
             graphics.CopyFromScreen(area.Location, System.Drawing.Point.Empty, area.Size);
         }
-        using var image = new System.Drawing.Bitmap(Math.Max(1, (int)(area.Width * scale)), Math.Max(1, (int)(area.Height * scale)));
+        using var image = new System.Drawing.Bitmap(area.Width * scale, area.Height * scale);
         using (var graphics = System.Drawing.Graphics.FromImage(image))
         {
             graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
@@ -305,17 +241,4 @@ public static class ScreenText
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out Point32 point);
-
-    /// <summary>The pointer in physical screen pixels, the same space <see cref="InAreaAsync"/> captures in.</summary>
-    public static System.Drawing.Point CursorPosition()
-    {
-        GetCursorPos(out Point32 cursor);
-        return new System.Drawing.Point(cursor.X, cursor.Y);
-    }
-
-    [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int GetWindowText(nint window, System.Text.StringBuilder text, int length);
 }

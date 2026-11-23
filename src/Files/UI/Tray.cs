@@ -13,7 +13,6 @@ public sealed class Tray : IDisposable
     {
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Show files", null, (_, _) => app.ShowPanel());
-        menu.Items.Add("Screen text", null, (_, _) => app.ShowScreenTexts());
         menu.Items.Add("Settings", null, (_, _) => app.ShowSettings());
         _install = new Forms.ToolStripMenuItem("Install update", null, async (_, _) => Notify(await app.InstallUpdateAsync()));
         menu.Items.Add(_install);

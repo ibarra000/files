@@ -39,9 +39,9 @@ public sealed class TextReaderTests
         using var reader = new PaddleTextReader(ModelFolder);
         byte[] png = Render(reader.Scale, dark ? Color.White : Color.Black, dark ? Color.FromArgb(30, 30, 32) : Color.White);
 
-        IReadOnlyList<ReadWord> words = await reader.ReadWordsAsync(png, CancellationToken.None);
+        IReadOnlyList<(string Text, Rect Box)> words = await reader.ReadWordsAsync(png, CancellationToken.None);
 
-        (string text, Rect box, _) = Assert.Single(words, word => ScreenText.Clean(word.Text) == Code);
+        (string text, Rect box) = Assert.Single(words, word => ScreenText.Clean(word.Text) == Code);
         Point middle = new(box.X + box.Width / 2, box.Y + box.Height / 2);
         Assert.Equal(Code, ScreenText.Nearest(words, middle));
         Assert.NotEmpty(text);
@@ -62,8 +62,8 @@ public sealed class TextReaderTests
         byte[] png = Render(reader.Scale, Color.Black, Color.White);
 
         Task warm = reader.WarmAsync();
-        Task<IReadOnlyList<ReadWord>> first = reader.ReadWordsAsync(png, CancellationToken.None);
-        Task<IReadOnlyList<ReadWord>> second = reader.ReadWordsAsync(png, CancellationToken.None);
+        Task<IReadOnlyList<(string Text, Rect Box)>> first = reader.ReadWordsAsync(png, CancellationToken.None);
+        Task<IReadOnlyList<(string Text, Rect Box)>> second = reader.ReadWordsAsync(png, CancellationToken.None);
         await warm;
 
         Assert.Contains(await first, word => ScreenText.Clean(word.Text) == Code);
@@ -75,7 +75,7 @@ public sealed class TextReaderTests
     {
         var reader = new PaddleTextReader(ModelFolder);
         byte[] png = Render(reader.Scale, Color.Black, Color.White);
-        Task<IReadOnlyList<ReadWord>> reading = reader.ReadWordsAsync(png, CancellationToken.None);
+        Task<IReadOnlyList<(string Text, Rect Box)>> reading = reader.ReadWordsAsync(png, CancellationToken.None);
         // Closed only once the read is loading the models: a close before the read starts rightly refuses it.
         await reader.LoadStarted.WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -104,7 +104,7 @@ public sealed class TextReaderTests
         var windows = new StubReader(3, words: [("plan.pdf", new Rect(0, 0, 10, 10))]);
         var scalesGrabbed = new List<int>();
 
-        (IReadOnlyList<ReadWord> words, int scale, bool fellBack) = await ScreenText.ReadWithFallbackAsync(broken, windows, s =>
+        (IReadOnlyList<(string Text, Rect Box)> words, int scale, bool fellBack) = await ScreenText.ReadWithFallbackAsync(broken, windows, s =>
         {
             scalesGrabbed.Add(s);
             return Task.FromResult(Array.Empty<byte>());
@@ -126,11 +126,11 @@ public sealed class TextReaderTests
             ScreenText.ReadWithFallbackAsync(broken, windows, _ => Task.FromResult(Array.Empty<byte>()), CancellationToken.None));
     }
 
-    private sealed class StubReader(int scale, Exception? error = null, IReadOnlyList<ReadWord>? words = null) : ITextReader
+    private sealed class StubReader(int scale, Exception? error = null, IReadOnlyList<(string Text, Rect Box)>? words = null) : ITextReader
     {
         public int Scale => scale;
 
-        public Task<IReadOnlyList<ReadWord>> ReadWordsAsync(byte[] png, CancellationToken cancel) =>
-            error is null ? Task.FromResult(words ?? []) : Task.FromException<IReadOnlyList<ReadWord>>(error);
+        public Task<IReadOnlyList<(string Text, Rect Box)>> ReadWordsAsync(byte[] png, CancellationToken cancel) =>
+            error is null ? Task.FromResult(words ?? []) : Task.FromException<IReadOnlyList<(string Text, Rect Box)>>(error);
     }
 }

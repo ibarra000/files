@@ -21,13 +21,13 @@ public enum OcrChoice
     Paddle,
 }
 
-/// <summary>What happens to text read from the screen.</summary>
+/// <summary>What happens to the text read under the mouse.</summary>
 public enum ScreenTextAction
 {
     /// <summary>The panel searches for it.</summary>
     Search,
 
-    /// <summary>It goes on the clipboard, and nothing is searched.</summary>
+    /// <summary>It goes on the clipboard; the panel does not open.</summary>
     Copy,
 }
 
@@ -55,17 +55,11 @@ public sealed record Settings
     /// <summary>Searches for the word or code under the mouse.</summary>
     public string OcrHotkey { get; init; } = "Ctrl+Alt+Space";
 
-    /// <summary>Lets the user drag out an area of the screen and searches the text in it.</summary>
-    public string AreaHotkey { get; init; } = "Ctrl+Alt+Shift+Space";
-
-    /// <summary>The language Windows text recognition reads (a tag such as "en-US"), or empty for the user's languages.</summary>
-    public string OcrLanguage { get; init; } = "";
-
-    /// <summary>Whether text read from the screen is searched for or only copied.</summary>
-    public ScreenTextAction AfterReading { get; init; } = ScreenTextAction.Search;
-
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
+
+    /// <summary>Whether the text under the mouse is searched for or only copied.</summary>
+    public ScreenTextAction AfterReading { get; init; } = ScreenTextAction.Search;
 
     /// <summary>Regular expressions removed from the text under the mouse before it is searched (Core/TextCleanup.cs).</summary>
     public IReadOnlyList<string> ScreenTextRemovals { get; init; } = [];
@@ -133,8 +127,6 @@ public sealed record Settings
         {
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
             OcrHotkey = loaded.OcrHotkey ?? defaults.OcrHotkey,
-            AreaHotkey = loaded.AreaHotkey ?? defaults.AreaHotkey,
-            OcrLanguage = loaded.OcrLanguage ?? "",
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
             ScreenTextRemovals = (loaded.ScreenTextRemovals ?? []).Where(pattern => pattern is not null).ToList(),
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,
@@ -143,42 +135,6 @@ public sealed record Settings
                 .ToList(),
             UpdateFolder = loaded.UpdateFolder ?? "",
         };
-    }
-
-    /// <summary>
-    /// No two shortcuts can be the same keys: the second could not be registered, and would be blamed
-    /// on another program. Of two that clash, the one just changed gives way, and only that one.
-    /// </summary>
-    public (Settings Kept, string? Problem) WithShortcutsApart(Settings previous)
-    {
-        Settings kept = this;
-        string? problem = null;
-        if (Services.Hotkey.SameKeys(kept.Hotkey, kept.OcrHotkey))
-        {
-            bool ocrChanged = !Services.Hotkey.SameKeys(kept.OcrHotkey, previous.OcrHotkey);
-            problem = $"{kept.OcrHotkey} is already the other shortcut";
-            kept = ocrChanged ? kept with { OcrHotkey = previous.OcrHotkey } : kept with { Hotkey = previous.Hotkey };
-        }
-        bool clashesWithHotkey = Services.Hotkey.SameKeys(kept.AreaHotkey, kept.Hotkey);
-        bool clashesWithOcr = Services.Hotkey.SameKeys(kept.AreaHotkey, kept.OcrHotkey);
-        if (!clashesWithHotkey && !clashesWithOcr)
-        {
-            return (kept, problem);
-        }
-        problem ??= $"{kept.AreaHotkey} is already another shortcut";
-        if (!Services.Hotkey.SameKeys(kept.AreaHotkey, previous.AreaHotkey))
-        {
-            return (kept with { AreaHotkey = previous.AreaHotkey }, problem);
-        }
-        if (clashesWithHotkey)
-        {
-            kept = kept with { Hotkey = previous.Hotkey };
-        }
-        if (clashesWithOcr)
-        {
-            kept = kept with { OcrHotkey = previous.OcrHotkey };
-        }
-        return (kept, problem);
     }
 
     public void Save(string path) => AtomicFile.WriteAllText(path, JsonSerializer.Serialize(this, Json));

@@ -21,17 +21,14 @@ public partial class App : Application
     private EventWaitHandle? _summon;
     private Hotkey? _hotkey;
     private Hotkey? _ocrHotkey;
-    private Hotkey? _areaHotkey;
-    private ScreenTextWindow? _screenTextWindow;
-    private ScreenReadState _screenRead;
-    private AreaWindow? _areaPick;
+    private bool _readingScreen;
     private Tray? _tray;
     private SearchWindow? _panel;
     private SettingsWindow? _settingsWindow;
     private ResourceDictionary? _themeColors;
 
     // The engines for the text under the mouse; PaddleOCR loads its models only when chosen.
-    private readonly WindowsTextReader _windowsReader;
+    private readonly WindowsTextReader _windowsReader = new();
     private readonly PaddleTextReader _paddleReader = new(PaddleTextReader.DefaultModelFolder);
 
     // The removal patterns, compiled once each time they change. Settings saves only patterns that compile.
@@ -41,18 +38,7 @@ public partial class App : Application
     // Saves run one at a time, and each writes the newest list, so a quick second change is never lost.
     private readonly object _saveGate = new();
 
-    public App()
-    {
-        _windowsReader = new WindowsTextReader(() => Settings.OcrLanguage);
-    }
-
     public Settings Settings { get; private set; } = new();
-
-    /// <summary>The last reads of the screen, newest first.</summary>
-    public IReadOnlyList<Core.ScreenTextEntry> ScreenTexts { get; private set; } = [];
-
-    /// <summary>Raised after a read of the screen is kept or the reads are cleared.</summary>
-    public event Action? ScreenTextsChanged;
     public Indexer Indexer { get; private set; } = null!;
     public Updater Updater { get; private set; } = null!;
 
@@ -73,9 +59,6 @@ public partial class App : Application
     /// <summary>Why the text-under-the-mouse shortcut does not work, or null.</summary>
     public string? OcrHotkeyProblem { get; private set; }
 
-    /// <summary>Why the search-text-in-an-area shortcut does not work, or null.</summary>
-    public string? AreaHotkeyProblem { get; private set; }
-
     // Both shortcuts are let go while one is being recorded in Settings (see SuspendHotkeys).
     private bool _hotkeysSuspended;
     private bool _installing;
@@ -91,13 +74,12 @@ public partial class App : Application
         _hotkeysSuspended = true;
         _hotkey?.Suspend();
         _ocrHotkey?.Suspend();
-        _areaHotkey?.Suspend();
     }
 
     /// <summary>Takes the shortcuts back once recording ends. A combination that cannot be had gives way to the one held before.</summary>
     public string? ResumeHotkeys()
     {
-        if (!_hotkeysSuspended || _hotkey is null || _ocrHotkey is null || _areaHotkey is null || IsQuitting)
+        if (!_hotkeysSuspended || _hotkey is null || _ocrHotkey is null || IsQuitting)
         {
             // While quitting the shortcuts are already let go for good.
             return null;
@@ -105,15 +87,13 @@ public partial class App : Application
         _hotkeysSuspended = false;
         var (hotkey, hotkeyProblem) = _hotkey.Resume(Settings.Hotkey);
         var (ocrHotkey, ocrProblem) = _ocrHotkey.Resume(Settings.OcrHotkey);
-        var (areaHotkey, areaProblem) = _areaHotkey.Resume(Settings.AreaHotkey);
         HotkeyProblem = hotkeyProblem;
         OcrHotkeyProblem = ocrProblem;
-        AreaHotkeyProblem = areaProblem;
-        if (hotkey != Settings.Hotkey || ocrHotkey != Settings.OcrHotkey || areaHotkey != Settings.AreaHotkey)
+        if (hotkey != Settings.Hotkey || ocrHotkey != Settings.OcrHotkey)
         {
-            ApplySettings(Settings with { Hotkey = hotkey, OcrHotkey = ocrHotkey, AreaHotkey = areaHotkey });
+            ApplySettings(Settings with { Hotkey = hotkey, OcrHotkey = ocrHotkey });
         }
-        return hotkeyProblem ?? ocrProblem ?? areaProblem;
+        return hotkeyProblem ?? ocrProblem;
     }
 
     /// <summary>Raised on the UI thread after settings or the update offer change.</summary>
@@ -149,7 +129,6 @@ public partial class App : Application
         (Core.TextCleanup? cleanup, IReadOnlyList<string> patternProblems) = Core.TextCleanup.Compile(Settings.ScreenTextRemovals);
         _textCleanup = cleanup ?? Core.TextCleanup.None;
         History = LoadOrEmpty(() => Core.History.Load(AppPaths.History));
-        ScreenTexts = LoadOrEmpty(() => Core.ScreenTextHistory.Load(AppPaths.ScreenTexts));
         Opened = LoadOrEmpty(() => Core.History.Load(AppPaths.Opened));
         Favorites = LoadOrEmpty(() => Core.Favorites.Load(AppPaths.Favorites));
         Catalog catalog;
@@ -175,11 +154,8 @@ public partial class App : Application
         _hotkey.Pressed += TogglePanel;
         HotkeyProblem = _hotkey.Register(Settings.Hotkey);
         _ocrHotkey = new Hotkey();
-        _ocrHotkey.Pressed += () => _ = ReadScreenAsync(ScreenReadState.Reading, ReadUnderCursorAsync);
+        _ocrHotkey.Pressed += () => _ = SearchUnderCursorAsync();
         OcrHotkeyProblem = _ocrHotkey.Register(Settings.OcrHotkey);
-        _areaHotkey = new Hotkey();
-        _areaHotkey.Pressed += OnAreaHotkey;
-        AreaHotkeyProblem = _areaHotkey.Register(Settings.AreaHotkey);
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         Indexer.Start();
         // Before the volume list is checked below, so an installer's volumes never open Settings at first start.
@@ -200,10 +176,6 @@ public partial class App : Application
         if (OcrHotkeyProblem is not null)
         {
             startProblems.Add($"Text-under-the-mouse shortcut: {OcrHotkeyProblem}");
-        }
-        if (AreaHotkeyProblem is not null)
-        {
-            startProblems.Add($"Search-text-in-an-area shortcut: {AreaHotkeyProblem}");
         }
         startProblems.AddRange(bundleProblems);
         startProblems.AddRange(patternProblems);
@@ -231,183 +203,66 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Where a read of the screen is (docs/UI_STATES.md). One runs at a time, so a second press never queues up behind a slow app.</summary>
-    private enum ScreenReadState
+    /// <summary>Reads the word or code under the mouse and searches for it, or only copies it when Settings says so.</summary>
+    private async Task SearchUnderCursorAsync()
     {
-        Idle,
-        Picking,
-        Reading,
-    }
-
-    /// <summary>What a read of the screen found: the text to search for, the text to copy, and a note.</summary>
-    private sealed record ScreenTextFound(string? Search, string? Copy, string? Problem);
-
-    private void OnAreaHotkey()
-    {
-        if (_screenRead == ScreenReadState.Picking)
+        if (_readingScreen)
         {
-            // Pressed again while the layer is up: the pick is cancelled, as Esc does.
-            _areaPick?.Cancel();
+            // A slow app is still being read; a second press would only queue up behind it.
             return;
         }
-        _ = ReadScreenAsync(ScreenReadState.Picking, ReadAreaAsync);
-    }
-
-    /// <summary>
-    /// What both reads of the screen share: one at a time, the panel stepping aside so it is not what is
-    /// read, a note for every failure (nothing awaits this task), and nothing shown once quitting.
-    /// <paramref name="read"/> gets the title of the window read and returns null when there is nothing to show.
-    /// </summary>
-    private async Task ReadScreenAsync(ScreenReadState first, Func<string, Task<ScreenTextFound?>> read)
-    {
-        if (_screenRead != ScreenReadState.Idle)
-        {
-            return;
-        }
-        _screenRead = first;
-        // Taken at the press, before hiding the panel lets some other window come to the front.
-        // With the panel itself in front, the window behind it comes back once it hides.
-        bool panelInFront = _panel is { IsActive: true };
-        string source = panelInFront ? "" : ScreenText.ForegroundTitle();
-        ScreenTextFound? found;
+        _readingScreen = true;
+        ScreenRead read;
         try
         {
             if (_panel is { IsVisible: true })
             {
+                // The panel itself must not be what is read.
                 _panel.HidePanel();
                 await Task.Delay(PanelHideDelay);
             }
-            if (panelInFront)
-            {
-                source = ScreenText.ForegroundTitle();
-            }
-            found = await read(source);
+            ITextReader reader = Settings.OcrEngine == OcrChoice.Paddle ? _paddleReader : _windowsReader;
+            read = ScreenText.WithRemovals(await ScreenText.UnderCursorAsync(reader, _windowsReader), _textCleanup);
         }
         catch (Exception error)
         {
+            // Nothing awaits this task, so every failure ends in the panel saying what happened.
             System.Diagnostics.Trace.WriteLine(error.ToString());
-            found = new ScreenTextFound(null, null, $"The screen could not be read: {error.Message}");
+            read = new ScreenRead(null, $"The screen could not be read: {error.Message}");
         }
         finally
         {
-            _screenRead = ScreenReadState.Idle;
-            _areaPick = null;
+            _readingScreen = false;
         }
-        if (found is not null && !IsQuitting)
+        if (IsQuitting)
         {
-            ShowScreenText(found);
+            // A read cut short by quitting has nothing to show.
+            return;
         }
+        if (Settings.AfterReading == ScreenTextAction.Copy)
+        {
+            CopyScreenText(read);
+            return;
+        }
+        _panel?.ShowWithSearch(read.Text, read.Problem);
     }
 
-    /// <summary>Reads the word or code under the mouse.</summary>
-    private async Task<ScreenTextFound?> ReadUnderCursorAsync(string source)
+    /// <summary>Puts what was read on the clipboard. The panel stays closed, so the tray says what happened.</summary>
+    private void CopyScreenText(ScreenRead read)
     {
-        ScreenRead read = ScreenText.WithRemovals(await ScreenText.UnderCursorAsync(ChosenReader, _windowsReader), _textCleanup);
+        string note = ScreenText.CopiedNote(read);
         if (read.Text is not null)
-        {
-            KeepScreenText(source, [new Core.ScreenTextLine(read.Text, null)]);
-        }
-        return new ScreenTextFound(read.Text, read.Text, read.Problem);
-    }
-
-    private ITextReader ChosenReader => Settings.OcrEngine == OcrChoice.Paddle ? _paddleReader : _windowsReader;
-
-    /// <summary>Lets the user drag out an area of the screen and reads the text in it; its first line is searched.</summary>
-    private async Task<ScreenTextFound?> ReadAreaAsync(string source)
-    {
-        _areaPick = AreaWindow.Open();
-        System.Drawing.Rectangle? picked = await _areaPick.Picked;
-        _areaPick = null;
-        if (picked is not System.Drawing.Rectangle area)
-        {
-            // Cancelled, or a click without a drag: nothing is read.
-            return null;
-        }
-        _screenRead = ScreenReadState.Reading;
-        // The dimmed layer is gone from the screen before it is captured.
-        await Task.Delay(PanelHideDelay);
-        (IReadOnlyList<Core.ScreenTextLine> lines, string? problem) = await ScreenText.InAreaAsync(area, ChosenReader, _windowsReader);
-        // The removal patterns apply to each line, as to text read under the mouse, so history, clipboard and search agree.
-        IReadOnlyList<Core.ScreenTextLine> cleaned = lines
-            .Select(line => line with { Text = ScreenText.WithRemovals(new ScreenRead(line.Text, null), _textCleanup).Text ?? "" })
-            .Where(line => line.Text.Length > 0)
-            .ToList();
-        if (cleaned.Count == 0)
-        {
-            return new ScreenTextFound(null, null, lines.Count > 0 ? ScreenText.NothingLeftNote : problem);
-        }
-        KeepScreenText(source, cleaned);
-        string all = string.Join(Environment.NewLine, cleaned.Select(line => line.Text));
-        return new ScreenTextFound(cleaned[0].Text, all, problem);
-    }
-
-    /// <summary>
-    /// Searches for what was read, or only copies it when Settings says so. Text of several lines is
-    /// always copied too, since only its first line is searched.
-    /// </summary>
-    private void ShowScreenText(ScreenTextFound found)
-    {
-        bool copyOnly = Settings.AfterReading == ScreenTextAction.Copy;
-        string? problem = found.Problem;
-        if (found.Copy is string copy && (copyOnly || copy.Contains('\n')))
         {
             try
             {
-                System.Windows.Clipboard.SetText(copy);
-                problem = string.Join(" · ", new[] { "Copied what was read", problem }.OfType<string>());
+                System.Windows.Clipboard.SetText(read.Text);
             }
             catch (System.Runtime.InteropServices.COMException)
             {
-                problem = "What was read could not be copied: the clipboard is in use by another app";
+                note = "What was read could not be copied: the clipboard is in use by another app";
             }
         }
-        if (copyOnly)
-        {
-            // Only copying, the panel never opens; even a read that found nothing is said by the tray.
-            if (problem is not null)
-            {
-                _tray?.Notify(problem);
-            }
-            return;
-        }
-        _panel?.ShowWithSearch(found.Search, problem);
-    }
-
-    /// <summary>Keeps a read of the screen in the history, unless history is paused.</summary>
-    private void KeepScreenText(string source, IReadOnlyList<Core.ScreenTextLine> lines)
-    {
-        if (!Settings.RememberSearches)
-        {
-            return;
-        }
-        ScreenTexts = Core.ScreenTextHistory.Record(ScreenTexts, new Core.ScreenTextEntry(DateTime.UtcNow, source, lines));
-        // The list is read when the save runs, so whichever save runs last writes the newest one.
-        SaveInBackground(() => Core.ScreenTextHistory.Save(AppPaths.ScreenTexts, ScreenTexts));
-        ScreenTextsChanged?.Invoke();
-    }
-
-    /// <summary>Forgets every read of the screen.</summary>
-    public void ClearScreenTexts()
-    {
-        ScreenTexts = [];
-        SaveInBackground(() => Core.ScreenTextHistory.Save(AppPaths.ScreenTexts, ScreenTexts));
-        ScreenTextsChanged?.Invoke();
-    }
-
-    /// <summary>Shows the panel searching for <paramref name="text"/>.</summary>
-    public void SearchFor(string text) => _panel?.ShowWithSearch(text, null);
-
-    /// <summary>Opens the list of the last reads of the screen.</summary>
-    public void ShowScreenTexts()
-    {
-        _panel?.HidePanel();
-        if (_screenTextWindow is null)
-        {
-            _screenTextWindow = new ScreenTextWindow(this);
-            _screenTextWindow.Closed += (_, _) => _screenTextWindow = null;
-            _screenTextWindow.Show();
-        }
-        _screenTextWindow.Activate();
+        _tray?.Notify(note);
     }
 
     public void ShowSettings(SettingsWindow.Page page = SettingsWindow.Page.General)
@@ -426,7 +281,14 @@ public partial class App : Application
     public string? ApplySettings(Settings settings)
     {
         Settings previous = Settings;
-        (settings, string? problem) = settings.WithShortcutsApart(previous);
+        string? problem = null;
+        // The two shortcuts can never be the same keys: the second could not be registered, and would be blamed on another program.
+        if (Hotkey.SameKeys(settings.Hotkey, settings.OcrHotkey))
+        {
+            bool ocrChanged = !Hotkey.SameKeys(settings.OcrHotkey, previous.OcrHotkey);
+            settings = ocrChanged ? settings with { OcrHotkey = previous.OcrHotkey } : settings with { Hotkey = previous.Hotkey };
+            problem = $"{(ocrChanged ? settings.Hotkey : settings.OcrHotkey)} is already the other shortcut";
+        }
         // A new update folder may offer something else: the offer from the old one is not installed from the new one.
         if (settings.UpdateFolder != previous.UpdateFolder && UpdateOffer is not null)
         {
@@ -452,15 +314,6 @@ public partial class App : Application
                 settings = settings with { OcrHotkey = working };
             }
             problem ??= OcrHotkeyProblem;
-        }
-        if (_areaHotkey is not null && canRegister && (settings.AreaHotkey != previous.AreaHotkey || AreaHotkeyProblem is not null))
-        {
-            AreaHotkeyProblem = _areaHotkey.Register(settings.AreaHotkey);
-            if (AreaHotkeyProblem is not null && _areaHotkey.Active is string working)
-            {
-                settings = settings with { AreaHotkey = working };
-            }
-            problem ??= AreaHotkeyProblem;
         }
         if (!settings.ScreenTextRemovals.SequenceEqual(previous.ScreenTextRemovals))
         {
@@ -604,7 +457,6 @@ public partial class App : Application
         _panel?.HidePanel();
         _hotkey?.Dispose();
         _ocrHotkey?.Dispose();
-        _areaHotkey?.Dispose();
         _paddleReader.Dispose();
         _tray?.Dispose();
         Indexer.Dispose();

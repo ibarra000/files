@@ -99,6 +99,29 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Screen_text_is_searched_by_default_and_copy_is_kept()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        Assert.Equal(ScreenTextAction.Search, new Settings().AfterReading);
+
+        new Settings { AfterReading = ScreenTextAction.Copy }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+
+        Assert.Equal(ScreenTextAction.Copy, loaded.AfterReading);
+    }
+
+    [Fact]
+    public void Settings_from_the_dropped_area_and_language_choices_still_load()
+    {
+        using var temp = new TempFolder();
+        string path = temp.File("settings.json", """{ "AreaHotkey": "Ctrl+Alt+Shift+Space", "OcrLanguage": "de-DE", "AfterReading": "Copy" }""");
+        (Settings loaded, string? problem) = Settings.Load(path);
+        Assert.Null(problem);
+        Assert.Equal(ScreenTextAction.Copy, loaded.AfterReading);
+    }
+
+    [Fact]
     public void The_preview_pane_starts_closed_and_its_choice_is_kept()
     {
         using var temp = new TempFolder();
@@ -118,20 +141,6 @@ public sealed class ServiceTests
         string path = temp.File("settings.json", """{ "Hotkey": "Alt+Space", "OcrHotkey": null }""");
         (Settings loaded, _) = Settings.Load(path);
         Assert.Equal(new Settings().OcrHotkey, loaded.OcrHotkey);
-    }
-
-    [Fact]
-    public void The_screen_text_settings_survive_a_save_and_nulls_get_their_defaults()
-    {
-        using var temp = new TempFolder();
-        string path = Path.Combine(temp.Path, "settings.json");
-        new Settings { AreaHotkey = "Ctrl+Alt+A", OcrLanguage = "de-DE", AfterReading = ScreenTextAction.Copy }.Save(path);
-        (Settings loaded, _) = Settings.Load(path);
-        Assert.Equal(("Ctrl+Alt+A", "de-DE", ScreenTextAction.Copy), (loaded.AreaHotkey, loaded.OcrLanguage, loaded.AfterReading));
-
-        string nulls = temp.File("nulls.json", """{ "AreaHotkey": null, "OcrLanguage": null }""");
-        (Settings defaults, _) = Settings.Load(nulls);
-        Assert.Equal((new Settings().AreaHotkey, ""), (defaults.AreaHotkey, defaults.OcrLanguage));
     }
 
     [Fact]
@@ -215,44 +224,6 @@ public sealed class ServiceTests
         Assert.True(Hotkey.SameKeys("Ctrl+Shift+Space", "shift+control+space"));
         Assert.False(Hotkey.SameKeys("Ctrl+Shift+Space", "Ctrl+Alt+Space"));
         Assert.False(Hotkey.SameKeys(Hotkey.Off, Hotkey.Off));
-    }
-
-    [Fact]
-    public void Only_the_shortcut_that_clashes_with_the_area_shortcut_is_put_back()
-    {
-        var previous = new Settings { Hotkey = "Ctrl+Shift+Space", OcrHotkey = "Ctrl+Alt+Space", AreaHotkey = "Ctrl+Alt+Shift+Space" };
-        Settings changed = previous with { Hotkey = "ctrl+alt+shift+space", OcrHotkey = "Ctrl+Alt+O" };
-
-        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
-
-        Assert.Equal(previous.Hotkey, kept.Hotkey);
-        Assert.Equal("Ctrl+Alt+O", kept.OcrHotkey);
-        Assert.Equal(previous.AreaHotkey, kept.AreaHotkey);
-        Assert.NotNull(problem);
-    }
-
-    [Fact]
-    public void An_area_shortcut_changed_to_another_shortcut_gives_way()
-    {
-        var previous = new Settings { Hotkey = "Ctrl+Shift+Space", OcrHotkey = "Ctrl+Alt+Space", AreaHotkey = "Ctrl+Alt+Shift+Space" };
-        Settings changed = previous with { AreaHotkey = "Ctrl+Alt+Space" };
-
-        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
-
-        Assert.Equal(previous, kept);
-        Assert.NotNull(problem);
-    }
-
-    [Fact]
-    public void Shortcuts_that_differ_are_kept_as_they_are()
-    {
-        var previous = new Settings();
-        Settings changed = previous with { AreaHotkey = "Ctrl+Alt+A" };
-
-        (Settings kept, string? problem) = changed.WithShortcutsApart(previous);
-
-        Assert.Equal(changed, kept);
-        Assert.Null(problem);
     }
 
     [Fact]
