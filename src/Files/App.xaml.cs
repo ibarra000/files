@@ -207,7 +207,7 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Reads the word or code under the mouse and searches for it.</summary>
+    /// <summary>Reads the word or code under the mouse and searches for it, or only copies it when Settings says so.</summary>
     private async Task SearchUnderCursorAsync()
     {
         if (_readingScreen)
@@ -243,7 +243,30 @@ public partial class App : Application
             // A read cut short by quitting has nothing to show.
             return;
         }
+        if (Settings.AfterReading == ScreenTextAction.Copy)
+        {
+            CopyScreenText(read);
+            return;
+        }
         _panel?.ShowWithSearch(read.Text, read.Problem);
+    }
+
+    /// <summary>Puts what was read on the clipboard. The panel stays closed, so the tray says what happened.</summary>
+    private void CopyScreenText(ScreenRead read)
+    {
+        string note = ScreenText.CopiedNote(read);
+        if (read.Text is not null)
+        {
+            try
+            {
+                System.Windows.Clipboard.SetText(read.Text);
+            }
+            catch (System.Runtime.InteropServices.COMException)
+            {
+                note = "What was read could not be copied: the clipboard is in use by another app";
+            }
+        }
+        _tray?.Notify(note);
     }
 
     public void ShowSettings(SettingsWindow.Page page = SettingsWindow.Page.General)

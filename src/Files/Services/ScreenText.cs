@@ -75,6 +75,17 @@ public static class ScreenText
         return new ScreenRead(text, note.Length > 0 ? note : null);
     }
 
+    /// <summary>What the tray says when the read is only copied: what was copied, or why nothing was read.</summary>
+    public static string CopiedNote(ScreenRead read)
+    {
+        if (read.Text is null)
+        {
+            return read.Problem ?? "Nothing was read";
+        }
+        string copied = $"Copied: {read.Text}";
+        return read.Problem is null ? copied : $"{copied} · {read.Problem}";
+    }
+
     /// <summary>Said when the engine chosen in Settings could not load, so the user knows why reading is weaker.</summary>
     public const string FellBackNote = "PaddleOCR could not load, so Windows text recognition read this";
 

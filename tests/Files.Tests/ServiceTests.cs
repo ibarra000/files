@@ -99,6 +99,29 @@ public sealed class ServiceTests
     }
 
     [Fact]
+    public void Screen_text_is_searched_by_default_and_copy_is_kept()
+    {
+        using var temp = new TempFolder();
+        string path = Path.Combine(temp.Path, "settings.json");
+        Assert.Equal(ScreenTextAction.Search, new Settings().AfterReading);
+
+        new Settings { AfterReading = ScreenTextAction.Copy }.Save(path);
+        (Settings loaded, _) = Settings.Load(path);
+
+        Assert.Equal(ScreenTextAction.Copy, loaded.AfterReading);
+    }
+
+    [Fact]
+    public void Settings_from_the_dropped_area_and_language_choices_still_load()
+    {
+        using var temp = new TempFolder();
+        string path = temp.File("settings.json", """{ "AreaHotkey": "Ctrl+Alt+Shift+Space", "OcrLanguage": "de-DE", "AfterReading": "Copy" }""");
+        (Settings loaded, string? problem) = Settings.Load(path);
+        Assert.Null(problem);
+        Assert.Equal(ScreenTextAction.Copy, loaded.AfterReading);
+    }
+
+    [Fact]
     public void The_preview_pane_starts_closed_and_its_choice_is_kept()
     {
         using var temp = new TempFolder();

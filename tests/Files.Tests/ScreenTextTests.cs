@@ -33,6 +33,15 @@ public sealed class ScreenTextTests
     }
 
     [Fact]
+    public void The_copy_note_says_what_was_copied_or_why_nothing_was()
+    {
+        Assert.Equal("Copied: AB-C-0704", ScreenText.CopiedNote(new ScreenRead("AB-C-0704", null)));
+        Assert.Equal("Copied: AB · note", ScreenText.CopiedNote(new ScreenRead("AB", "note")));
+        Assert.Equal("No text under the mouse", ScreenText.CopiedNote(new ScreenRead(null, "No text under the mouse")));
+        Assert.Equal("Nothing was read", ScreenText.CopiedNote(new ScreenRead(null, null)));
+    }
+
+    [Fact]
     public void A_blank_word_gives_nothing()
     {
         Assert.Null(ScreenText.TokenAround("some line", "  "));

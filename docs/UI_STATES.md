@@ -125,3 +125,4 @@ Turning the setting off stops counting and ranking, but keeps the counts. Changi
 
 - **Theme.** `Settings.Theme` and `_appliedDark`. With System, a Windows switch is followed at once. The panel colors (`UI/PanelTheme.*.xaml`) are swapped app-wide, so every window, popup and the tray menu follow.
 - **Quitting.** `IsQuitting` is one-way. Once set, nothing registers a shortcut, and Alt+F4 on the panel no longer only hides it.
+- **Reading the screen.** `_readingScreen` is set from the press until the text is read, so a second press is ignored. `Settings.AfterReading` then decides: Search opens the panel searching for it; Copy puts it on the clipboard, leaves the panel closed and has the tray say what was copied, or why nothing was. Nothing is shown once quitting.

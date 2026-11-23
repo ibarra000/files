@@ -159,6 +159,23 @@
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="When screen text is read" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Copying leaves the panel closed; the tray says what was copied."
+                                               TextWrapping="Wrap" Style="{StaticResource RowDescription}" />
+                                </StackPanel>
+                                <ComboBox x:Name="AfterReadingBox" Grid.Column="1" Width="220" AutomationProperties.Name="When screen text is read"
+                                          SelectionChanged="OnChanged">
+                                    <ComboBoxItem Content="Search for it" />
+                                    <ComboBoxItem Content="Copy it" />
+                                </ComboBox>
+                            </Grid>
+                            <Border Style="{StaticResource RowDivider}" />
+                            <Grid Style="{StaticResource SettingRow}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />

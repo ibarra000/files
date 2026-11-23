@@ -21,6 +21,16 @@ public enum OcrChoice
     Paddle,
 }
 
+/// <summary>What happens to the text read under the mouse.</summary>
+public enum ScreenTextAction
+{
+    /// <summary>The panel searches for it.</summary>
+    Search,
+
+    /// <summary>It goes on the clipboard; the panel does not open.</summary>
+    Copy,
+}
+
 /// <summary>A program to open files with.</summary>
 public sealed record Viewer(string Name, string Program);
 
@@ -79,6 +89,9 @@ public sealed record Settings
 
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
+
+    /// <summary>Whether the text under the mouse is searched for or only copied.</summary>
+    public ScreenTextAction AfterReading { get; init; } = ScreenTextAction.Search;
 
     /// <summary>
     /// The text corrections (Core/TextCleanup.cs), applied to the text under the mouse before it is searched:
