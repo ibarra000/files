@@ -57,7 +57,7 @@ public partial class SearchWindow : Window
     {
         InitializeComponent();
         _app = app;
-        _kensaku = new KensakuLink(app.Kensaku);
+        _kensaku = new Kensaku(app.Kensaku);
         _typing = new DispatcherTimer { Interval = TypingDelay };
         _typing.Tick += async (_, _) => await SearchAsync();
         _toastTimer = new DispatcherTimer { Interval = ToastDuration };
@@ -326,7 +326,10 @@ public partial class SearchWindow : Window
 
         var cancel = new CancellationTokenSource();
         _searchCancel = cancel;
-        var volumes = ScopedVolumes()
+        IReadOnlyList<VolumeState> scoped = ScopedVolumes();
+        // Content results keep to the same search, in the chosen volume when there is one.
+        KensakuQuery? contentQuery = KensakuQuery.For(query, _scope is null ? null : scoped[0].Volume.Root);
+        var volumes = scoped
             .Where(state => state.Index is not null)
             .Select(state => (state.Volume.Name, Index: state.Index!))
             .ToList();
@@ -355,7 +358,7 @@ public partial class SearchWindow : Window
         _searchTook = clock.Elapsed;
         ShowResults(result);
         // The names are on screen first; what kensaku finds inside files follows when it answers.
-        _ = SearchContentsAsync(line, epoch);
+        _ = SearchContentsAsync(line, contentQuery, epoch);
     }
 
     private void ShowResults(SearchResult result)

@@ -15,8 +15,8 @@ public partial class SearchWindow
     /// <summary>Why the last content search gave nothing, said once until it changes.</summary>
     private string? _contentProblem;
 
-    /// <summary>Whether the bundled kensaku is up, asked before each content search.</summary>
-    private readonly KensakuLink _kensaku;
+    /// <summary>The bundled kensaku, asked only while its host has it up.</summary>
+    private readonly Kensaku _kensaku;
 
     /// <summary>The content matches for what is in the box now, or none (also when content search was turned off, or Folders is chosen).</summary>
     private IReadOnlyList<ContentMatch>? ContentsShown =>
@@ -29,13 +29,21 @@ public partial class SearchWindow
         _contentCancel = null;
     }
 
-    /// <summary>Asks kensaku for <paramref name="line"/> after the name results are on screen; a newer search cancels it.</summary>
-    private async Task SearchContentsAsync(string line, int epoch)
+    /// <summary>
+    /// Asks kensaku for <paramref name="query"/>, the search in <paramref name="line"/>, after the name results are on
+    /// screen; a newer search cancels it. A null query matches no file, so there are no contents.
+    /// </summary>
+    private async Task SearchContentsAsync(string line, KensakuQuery? query, int epoch)
     {
         StopContentSearch();
         Settings settings = _app.Settings;
         if (!settings.ContentSearch || !IsVisible)
         {
+            return;
+        }
+        if (query is null)
+        {
+            ShowContents(line, new ContentResult([], null));
             return;
         }
         var cancel = new CancellationTokenSource();
@@ -45,7 +53,7 @@ public partial class SearchWindow
         ContentResult result;
         try
         {
-            result = await _kensaku.SearchAsync(line, token);
+            result = await _kensaku.SearchAsync(query, token);
         }
         catch (Exception) when (token.IsCancellationRequested)
         {

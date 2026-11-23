@@ -1,177 +1,161 @@
 using System.ComponentModel;
-using Files.Core;
+using System.Text.Json;
 
 namespace Files.Services;
 
 /// <summary>What the bundled kensaku is doing.</summary>
 public enum KensakuHostState
 {
-    /// <summary>Content search is off, or kensaku is not built.</summary>
+    /// <summary>Content search is off, kensaku is not fetched, or there is no volume to read.</summary>
     Stopped,
 
-    /// <summary>kensaku-daemon was started and has not answered on its pipe yet.</summary>
-    StartingDaemon,
+    /// <summary>The daemon was started and has not answered or been set up yet.</summary>
+    Starting,
 
-    /// <summary>The daemon answers; <c>kensaku-cli serve</c> was started and has not answered <c>/health</c> yet.</summary>
-    StartingServe,
-
-    /// <summary>Both run and <c>serve</c> answers.</summary>
+    /// <summary>The daemon answers and has the volumes and OCR setting.</summary>
     Up,
 
-    /// <summary>One of them stopped or never answered; both start again after a back-off.</summary>
+    /// <summary>The daemon stopped or never answered; it starts again after a back-off.</summary>
     Restarting,
 
-    /// <summary>Another kensaku's daemon holds the pipe, so nothing is started.</summary>
-    Blocked,
+    /// <summary>kensaku cannot run here, or refuses this app; starting it again would not help.</summary>
+    Failed,
 }
 
-/// <summary>The bundle, port and config the host runs kensaku for; another key is another kensaku to the panel.</summary>
-public sealed record KensakuKey(string Bundle, int Port, string Config);
-
 /// <summary>
-/// Runs the bundled kensaku (issue #97): kensaku-daemon indexes the volumes' roots, and <c>kensaku-cli serve</c> answers
-/// searches on <see cref="Port"/>. <c>serve</c> decides once, on its first request, whether to use the daemon, so it is
-/// only started once the daemon answers on its pipe; and when either stops, both start again, after 5 s, 30 s, then
-/// every 2 minutes. On quit the daemon is asked to shut down, then whatever is left is ended.
+/// Runs the bundled kensaku (issue #97): <c>kensaku daemon run</c> for this app's own data folder, set up with the
+/// roots of the indexed volumes. A change of volumes or OCR is sent to the running daemon; when the daemon stops it
+/// starts again after 5 s, 30 s, then every 2 minutes. When content search is turned off, and on quit, the daemon is
+/// asked to shut down and whatever is left after 2 s is ended.
 /// </summary>
 public sealed class KensakuHost : IDisposable
 {
-    /// <summary>One above kensaku's own 8765, so a <c>serve</c> the user runs is left alone.</summary>
-    public const int Port = 8766;
-
-    public const string NotBuilt = "kensaku is not built · run tools/build_kensaku.ps1";
-    public const string AnotherKensaku = "Another kensaku is running";
+    public const string NotFetched = "kensaku is not fetched · run tools/fetch_kensaku.ps1";
 
     public static readonly TimeSpan PingPatience = TimeSpan.FromSeconds(10);
     public static readonly TimeSpan ShutdownGrace = TimeSpan.FromSeconds(2);
     public static readonly IReadOnlyList<TimeSpan> DefaultBackOff = [TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)];
 
-    // Volumes load one by one at start-up, each changing the config; only the last one is run.
+    // Volumes load one by one at start-up, each changing what is wanted; only the last one is sent.
     private static readonly TimeSpan DefaultSettle = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan PingInterval = TimeSpan.FromMilliseconds(250);
-    private static readonly TimeSpan ServePatience = TimeSpan.FromSeconds(30);
 
-    private readonly string? _bundle;
+    private readonly string? _program;
     private readonly IProcessRunner _runner;
-    private readonly IKensakuPipe _pipe;
-    private readonly Func<CancellationToken, Task<bool>> _serveAnswers;
     private readonly IReadOnlyList<TimeSpan> _backOff;
     private readonly TimeSpan _settle;
     private readonly object _gate = new();
 
-    // What runs now, guarded by _gate: its key (null when stopped), and how to stop it.
-    private KensakuKey? _key;
+    // Guarded by _gate: what is wanted, the run in progress (null _stop when stopped), and its wake-up for a change.
+    private KensakuWanted? _wanted;
     private CancellationTokenSource? _stop;
     private Task _run = Task.CompletedTask;
+    private SemaphoreSlim _changed = new(0);
     private bool _disposed;
 
-    /// <param name="bundle">The folder holding kensaku-daemon.exe and kensaku-cli.exe, or null when it is not built.</param>
-    /// <param name="serveAnswers">Waits until <c>serve</c> answers <c>/health</c>; false when it never did.</param>
-    /// <param name="settle">How long a new config waits before it is run, so a burst of changes starts kensaku once.</param>
-    public KensakuHost(string? bundle, string dataFolder, IProcessRunner runner, IKensakuPipe pipe,
-        Func<CancellationToken, Task<bool>> serveAnswers, IReadOnlyList<TimeSpan>? backOff = null, TimeSpan? settle = null)
+    /// <param name="program">kensaku.exe, or null when it is not fetched.</param>
+    /// <param name="settle">How long a change waits before it is sent, so a burst of changes is sent once.</param>
+    public KensakuHost(string? program, string dataFolder, IProcessRunner runner, IKensakuPipe pipe,
+        IReadOnlyList<TimeSpan>? backOff = null, TimeSpan? settle = null)
     {
-        _bundle = bundle;
+        _program = program;
         DataFolder = dataFolder;
         _runner = runner;
-        _pipe = pipe;
-        _serveAnswers = serveAnswers;
+        Pipe = pipe;
         _backOff = backOff ?? DefaultBackOff;
         _settle = settle ?? DefaultSettle;
     }
 
-    /// <summary>The host the app uses: the bundle found beside it, its own data folder, real processes and the real pipe.</summary>
-    public static KensakuHost ForApp(string dataFolder)
-    {
-        var kensaku = new Kensaku(Port, dataFolder);
-        return new KensakuHost(FindBundle(AppContext.BaseDirectory), dataFolder, new ProcessRunner(), new KensakuPipe(dataFolder),
-            cancel => kensaku.WaitUntilUpAsync(ServePatience, cancel));
-    }
+    /// <summary>The host the app uses: kensaku.exe found beside it, its own data folder, real processes and the real pipe.</summary>
+    public static KensakuHost ForApp(string dataFolder) =>
+        new(FindProgram(AppContext.BaseDirectory), dataFolder, new ProcessRunner(), new KensakuPipe(dataFolder));
 
     /// <summary>kensaku's data folder, which only this app's kensaku uses.</summary>
     public string DataFolder { get; }
 
+    /// <summary>The daemon's methods, for searches; ask only while <see cref="State"/> is Up.</summary>
+    public IKensakuPipe Pipe { get; }
+
     public KensakuHostState State { get; private set; }
 
-    /// <summary>Why kensaku is stopped, blocked or restarting, in words; null when nothing is wrong.</summary>
+    /// <summary>Why kensaku is stopped, restarting or failed, in words; null when nothing is wrong.</summary>
     public string? Problem { get; private set; }
 
-    /// <summary>The state in words, for the status line in Settings; while up, kensaku's own health says more.</summary>
+    /// <summary>The state in words, for the status line in Settings; while up, kensaku's own status says more.</summary>
     public string Status => State switch
     {
-        KensakuHostState.StartingDaemon or KensakuHostState.StartingServe => "Starting kensaku…",
+        KensakuHostState.Starting => "Starting kensaku…",
         KensakuHostState.Up => "Running",
         KensakuHostState.Restarting => $"Restarting · {Problem}",
         _ => Problem ?? "Off",
     };
 
-    /// <summary>What it runs for, or null when stopped.</summary>
-    public KensakuKey? Key
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _key;
-            }
-        }
-    }
-
     /// <summary>Raised on a worker thread when <see cref="State"/> changes.</summary>
     public event Action? Changed;
 
     /// <summary>
-    /// The installed bundle (<c>kensaku</c> beside files.exe), or for a build run from source the nearest
-    /// <c>artifacts\kensaku</c> above it; null when neither holds kensaku.
+    /// The installed kensaku (<c>kensaku\kensaku.exe</c> beside files.exe), or for a build run from source the nearest
+    /// <c>artifacts\kensaku\kensaku.exe</c> above it; null when neither exists.
     /// </summary>
-    public static string? FindBundle(string appFolder)
+    public static string? FindProgram(string appFolder)
     {
-        string beside = Path.Combine(appFolder, "kensaku");
-        if (IsBundle(beside))
+        string beside = Path.Combine(appFolder, "kensaku", "kensaku.exe");
+        if (File.Exists(beside))
         {
             return beside;
         }
         for (DirectoryInfo? folder = new(appFolder); folder is not null; folder = folder.Parent)
         {
-            string built = Path.Combine(folder.FullName, "artifacts", "kensaku");
-            if (IsBundle(built))
+            string fetched = Path.Combine(folder.FullName, "artifacts", "kensaku", "kensaku.exe");
+            if (File.Exists(fetched))
             {
-                return built;
+                return fetched;
             }
         }
         return null;
     }
 
-    private static bool IsBundle(string folder) =>
-        File.Exists(Path.Combine(folder, "kensaku-daemon.exe")) && File.Exists(Path.Combine(folder, "kensaku-cli.exe"));
-
     /// <summary>
-    /// Runs kensaku with <paramref name="config"/> when <paramref name="enabled"/>, else stops it. The same config again
-    /// changes nothing; another one restarts it. Called from any thread, as often as volumes change.
+    /// Runs kensaku for <paramref name="wanted"/> when <paramref name="enabled"/>, else stops it. A running daemon is
+    /// sent what changed; it is not restarted. Called from any thread, as often as volumes change.
     /// </summary>
-    public void Apply(bool enabled, string config)
+    public void Apply(bool enabled, KensakuWanted wanted)
     {
         lock (_gate)
         {
-            KensakuKey? key = enabled && _bundle is not null ? new KensakuKey(_bundle, Port, KensakuConfig.Hash(config)) : null;
-            if (_disposed || key is not null && key == _key)
-            {
-                // Quit, or running, starting or blocked for this config already.
-                return;
-            }
-            Task previous = StopLocked();
-            _key = key;
-            Set(KensakuHostState.Stopped, enabled && _bundle is null ? NotBuilt : null);
-            if (key is null)
+            if (_disposed)
             {
                 return;
             }
+            string? problem = !enabled ? null
+                : _program is null ? NotFetched
+                : wanted.WatchedDirs.Count == 0 ? KensakuSetup.NoVolumes
+                : null;
+            if (!enabled || problem is not null)
+            {
+                _wanted = null;
+                StopLocked();
+                Set(KensakuHostState.Stopped, problem);
+                return;
+            }
+            bool changed = wanted != _wanted;
+            _wanted = wanted;
+            if (_stop is not null)
+            {
+                if (changed)
+                {
+                    _changed.Release();
+                }
+                return;
+            }
+            Task previous = _run;
             var stop = new CancellationTokenSource();
             _stop = stop;
+            _changed = new SemaphoreSlim(0);
             _run = Task.Run(async () =>
             {
                 await previous;
-                await RunAsync(config, stop.Token);
+                await RunAsync(stop.Token);
             });
         }
     }
@@ -183,7 +167,6 @@ public sealed class KensakuHost : IDisposable
         lock (_gate)
         {
             _disposed = true;
-            _key = null;
             run = StopLocked();
             Set(KensakuHostState.Stopped, null);
         }
@@ -220,19 +203,30 @@ public sealed class KensakuHost : IDisposable
         }
     }
 
-    private async Task RunAsync(string config, CancellationToken cancel)
+    private KensakuWanted? Wanted
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _wanted;
+            }
+        }
+    }
+
+    private async Task RunAsync(CancellationToken cancel)
     {
         int failures = 0;
         try
         {
             await Task.Delay(_settle, cancel);
-            WriteConfig(config);
-            while (!cancel.IsCancellationRequested)
+            while (true)
             {
-                (bool blocked, bool wasUp, string problem) = await RunOnceAsync(cancel);
-                if (blocked)
+                (bool wasUp, bool failed, string problem) = await RunOnceAsync(cancel);
+                cancel.ThrowIfCancellationRequested();
+                if (failed)
                 {
-                    SetFor(cancel, KensakuHostState.Blocked, AnotherKensaku);
+                    SetFor(cancel, KensakuHostState.Failed, problem);
                     return;
                 }
                 // A kensaku that came up and later stopped starts over from the shortest wait.
@@ -243,105 +237,161 @@ public sealed class KensakuHost : IDisposable
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         {
-            // Stopped: the processes were ended on the way out.
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            SetFor(cancel, KensakuHostState.Stopped, $"kensaku's config could not be written: {error.Message}");
+            // Stopped: the daemon was shut down on the way out.
         }
     }
 
-    /// <summary>Writes config.json, unless what this app wrote last is the same: kensaku rewrites the file as it indexes.</summary>
-    private void WriteConfig(string config)
-    {
-        string written = Path.Combine(DataFolder, "config.files-hash");
-        string hash = KensakuConfig.Hash(config);
-        if (File.Exists(written) && File.ReadAllText(written).Trim() == hash)
-        {
-            return;
-        }
-        AtomicFile.WriteAllText(Path.Combine(DataFolder, "config.json"), config);
-        AtomicFile.WriteAllText(written, hash);
-    }
-
-    /// <summary>Starts the daemon, then <c>serve</c>, and returns once either stops, or one never answers.</summary>
-    private async Task<(bool Blocked, bool WasUp, string Problem)> RunOnceAsync(CancellationToken cancel)
+    /// <summary>Starts the daemon, sets it up, sends changes while it runs, and returns once it stops or fails.</summary>
+    private async Task<(bool WasUp, bool Failed, string Problem)> RunOnceAsync(CancellationToken cancel)
     {
         IKensakuProcess? daemon = null;
-        IKensakuProcess? serve = null;
+        bool up = false;
         try
         {
-            _runner.EndLeftovers(_bundle!);
-            if (await _pipe.PingAsync(cancel) == PipeAnswer.Other)
+            SetFor(cancel, KensakuHostState.Starting);
+            await ShutDownLeftoverAsync(cancel);
+            string ort = Path.Combine(Path.GetDirectoryName(_program!)!, "onnxruntime.dll");
+            daemon = _runner.Start(_program!, ["daemon", "run", "--data-dir", DataFolder], new Dictionary<string, string> { ["ORT_DYLIB_PATH"] = ort });
+            if (!await WaitForPingAsync(daemon, cancel))
             {
-                return (true, false, AnotherKensaku);
+                return (false, false, "kensaku did not answer");
             }
-            SetFor(cancel, KensakuHostState.StartingDaemon);
-            daemon = _runner.Start(Path.Combine(_bundle!, "kensaku-daemon.exe"), [], DataFolder);
-            PipeAnswer answer = await WaitForPipeAsync(daemon, cancel);
-            if (answer != PipeAnswer.Ours)
-            {
-                return (answer == PipeAnswer.Other, false, "kensaku-daemon did not answer");
-            }
-            SetFor(cancel, KensakuHostState.StartingServe);
-            serve = _runner.Start(Path.Combine(_bundle!, "kensaku-cli.exe"), ["serve", "--port", Port.ToString(System.Globalization.CultureInfo.InvariantCulture)], DataFolder);
-            // A serve that quits at once (its port taken, say) fails now rather than after the whole wait.
-            Task<bool> answers = _serveAnswers(cancel);
-            if (await Task.WhenAny(answers, serve.WaitForExitAsync(cancel)) != answers || !await answers || serve.HasExited)
-            {
-                cancel.ThrowIfCancellationRequested();
-                return (false, false, "kensaku-cli serve did not answer");
-            }
+            KensakuWanted? applied = await SendAsync(null, cancel);
             SetFor(cancel, KensakuHostState.Up);
-            await Task.WhenAny(daemon.WaitForExitAsync(cancel), serve.WaitForExitAsync(cancel));
-            cancel.ThrowIfCancellationRequested();
-            return (false, true, daemon.HasExited ? "kensaku-daemon stopped" : "kensaku-cli serve stopped");
+            up = true;
+            while (await ChangedOrExitedAsync(daemon, cancel))
+            {
+                await Task.Delay(_settle, cancel);
+                applied = await SendAsync(applied, cancel);
+            }
+            return (true, false, "kensaku stopped");
         }
-        catch (Exception error) when (error is Win32Exception or InvalidOperationException or IOException)
+        catch (KensakuException error) when (error.Code == KensakuError.Forbidden)
         {
-            return (false, false, $"kensaku could not be started: {error.Message}");
+            return (up, true, $"kensaku refused this app: {error.Message}");
+        }
+        catch (Exception error) when (error is KensakuException or TimeoutException)
+        {
+            // Stopping ends the run in RunAsync; otherwise the daemon starts again.
+            return (up, false, error.Message);
+        }
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
+        {
+            return (false, true, $"kensaku could not be started: {error.Message}");
         }
         finally
         {
-            await EndAsync(daemon, serve);
+            await EndAsync(daemon);
         }
     }
 
-    /// <summary>Pings the daemon until it answers, it exits, or <see cref="PingPatience"/> passes.</summary>
-    private async Task<PipeAnswer> WaitForPipeAsync(IKensakuProcess daemon, CancellationToken cancel)
+    /// <summary>Asks a daemon left by an earlier run of the app (one that crashed, say) to shut down, so a new one can take the data folder.</summary>
+    private async Task ShutDownLeftoverAsync(CancellationToken cancel)
     {
-        DateTime deadline = DateTime.UtcNow + PingPatience;
-        while (true)
+        if (!await AnswersAsync(cancel))
         {
-            PipeAnswer answer = await _pipe.PingAsync(cancel);
-            if (answer != PipeAnswer.Nobody || daemon.HasExited || DateTime.UtcNow >= deadline)
-            {
-                return answer;
-            }
+            return;
+        }
+        await Pipe.CallAsync("shutdown", null, cancel);
+        DateTime deadline = DateTime.UtcNow + ShutdownGrace;
+        while (DateTime.UtcNow < deadline && await AnswersAsync(cancel))
+        {
             await Task.Delay(PingInterval, cancel);
         }
     }
 
-    /// <summary>Asks the daemon to shut down, gives it <see cref="ShutdownGrace"/>, then ends both. <c>serve</c> has no shutdown of its own.</summary>
-    private async Task EndAsync(IKensakuProcess? daemon, IKensakuProcess? serve)
+    /// <summary>Whether a daemon answers a ping; a refusal is thrown, since another start would be refused too.</summary>
+    private async Task<bool> AnswersAsync(CancellationToken cancel)
     {
-        if (daemon is { HasExited: false })
+        try
+        {
+            await Pipe.CallAsync("ping", null, cancel);
+            return true;
+        }
+        catch (Exception error) when (error is TimeoutException || error is KensakuException { Code: not KensakuError.Forbidden })
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Pings the daemon until it answers, it exits, or <see cref="PingPatience"/> passes.</summary>
+    private async Task<bool> WaitForPingAsync(IKensakuProcess daemon, CancellationToken cancel)
+    {
+        DateTime deadline = DateTime.UtcNow + PingPatience;
+        while (!await AnswersAsync(cancel))
+        {
+            if (daemon.HasExited || DateTime.UtcNow >= deadline)
+            {
+                return false;
+            }
+            await Task.Delay(PingInterval, cancel);
+        }
+        return true;
+    }
+
+    /// <summary>Sends what changed since <paramref name="applied"/> and returns what the daemon now has.</summary>
+    private async Task<KensakuWanted?> SendAsync(KensakuWanted? applied, CancellationToken cancel)
+    {
+        if (Wanted is not KensakuWanted wanted)
+        {
+            return applied;
+        }
+        JsonElement health = await Pipe.CallAsync("health", null, cancel);
+        bool setupComplete = health.ValueKind == JsonValueKind.Object
+            && health.TryGetProperty("setup_complete", out JsonElement complete) && complete.ValueKind == JsonValueKind.True;
+        foreach (KensakuCall call in KensakuSetup.Calls(setupComplete, applied, wanted))
+        {
+            try
+            {
+                await Pipe.CallAsync(call.Method, call.Parameters, cancel);
+            }
+            catch (KensakuException error) when (call.Method == "pack_download" && error.Code is KensakuError.Busy or KensakuError.Internal)
+            {
+                // A download already running; kensaku reports a failed one in its own status.
+            }
+        }
+        return wanted;
+    }
+
+    /// <summary>Waits for a change to send (true) or the daemon to exit (false).</summary>
+    private async Task<bool> ChangedOrExitedAsync(IKensakuProcess daemon, CancellationToken cancel)
+    {
+        SemaphoreSlim changed;
+        lock (_gate)
+        {
+            changed = _changed;
+        }
+        // Its own token, so a wait left over when the daemon exits does not take the next change.
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        Task exited = daemon.WaitForExitAsync(waiting.Token);
+        Task<bool> wake = changed.WaitAsync(Timeout.Infinite, waiting.Token);
+        Task first = await Task.WhenAny(exited, wake);
+        waiting.Cancel();
+        cancel.ThrowIfCancellationRequested();
+        return first == wake && !daemon.HasExited;
+    }
+
+    /// <summary>Asks the daemon to shut down, gives it <see cref="ShutdownGrace"/>, then ends it.</summary>
+    private async Task EndAsync(IKensakuProcess? daemon)
+    {
+        if (daemon is null)
+        {
+            return;
+        }
+        if (!daemon.HasExited)
         {
             using var grace = new CancellationTokenSource(ShutdownGrace);
             try
             {
-                await _pipe.ShutdownAsync(grace.Token);
+                await Pipe.CallAsync("shutdown", null, grace.Token);
                 await daemon.WaitForExitAsync(grace.Token);
             }
-            catch (OperationCanceledException)
+            catch (Exception error) when (error is OperationCanceledException or KensakuException or TimeoutException)
             {
                 // Not gone in time: ended below.
             }
         }
-        foreach (IKensakuProcess? process in new[] { serve, daemon })
-        {
-            process?.Kill();
-            process?.Dispose();
-        }
+        daemon.Kill();
+        daemon.Dispose();
     }
 }

@@ -149,7 +149,7 @@ public partial class App : Application
         Indexer = new Indexer(catalog, AppPaths.Shards, () => Settings);
         Updater = new Updater(() => Settings, AppPaths.Updates);
         Kensaku = KensakuHost.ForApp(Path.Combine(AppPaths.Local, "kensaku"));
-        // A volume added, removed, or switched between live and indexed changes kensaku's config.
+        // A volume added, removed, or switched between live and indexed changes what kensaku reads.
         Indexer.Changed += UpdateKensaku;
         UpdateKensaku();
         ApplyTheme();
@@ -452,12 +452,12 @@ public partial class App : Application
         Shutdown();
     }
 
-    /// <summary>Runs kensaku for the volumes read in the background while content search is on; the host ignores a config it already runs.</summary>
+    /// <summary>Runs kensaku for the volumes read in the background while content search is on; the host sends only what changed.</summary>
     private void UpdateKensaku()
     {
         Settings settings = Settings;
-        string config = KensakuConfig.Text(Indexer.Volumes.Select(state => state.Volume), settings.ContentOcr);
-        Kensaku.Apply(settings.ContentSearch, config);
+        KensakuWanted wanted = KensakuSetup.Wanted(Indexer.Volumes.Select(state => state.Volume), settings.ContentOcr);
+        Kensaku.Apply(settings.ContentSearch, wanted);
     }
 
     /// <summary>Loads PaddleOCR's models in the background once it is chosen, so the first Ctrl+Alt+Space is not slowed by it.</summary>

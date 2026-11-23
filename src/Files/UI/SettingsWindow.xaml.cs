@@ -398,14 +398,8 @@ public partial class SettingsWindow : Window
     /// <summary>The content search status line: what kensaku reads while it is up, else what the host is doing.</summary>
     private async void ShowKensakuStatus()
     {
-        KensakuHost host = _app.Kensaku;
-        if (host.State != KensakuHostState.Up)
-        {
-            KensakuStatusText.Text = host.Status;
-            return;
-        }
         // StatusAsync turns every failure into words, so nothing escapes this handler.
-        KensakuStatusText.Text = await new Kensaku(KensakuHost.Port, host.DataFolder).StatusAsync(CancellationToken.None);
+        KensakuStatusText.Text = await new Kensaku(_app.Kensaku).StatusAsync(CancellationToken.None);
     }
 
     private void OnGridEdited(object? sender, EventArgs e)

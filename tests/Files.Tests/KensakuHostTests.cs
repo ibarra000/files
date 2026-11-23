@@ -1,12 +1,15 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Files.Services;
 
 namespace Files.Tests;
 
 public sealed class KensakuHostTests
 {
-    private const string Config = """{ "watched_dirs": [] }""";
+    private const string Program = @"C:\app\kensaku\kensaku.exe";
+    private static readonly KensakuWanted Docs = new([@"C:\docs"], Ocr: false);
 
-    /// <summary>Everything the fakes saw, in order: "start kensaku-daemon", "ping → Ours", "shutdown", "kill kensaku-cli".</summary>
+    /// <summary>Everything the fakes saw, in order: "start", "ping → none", "setup ["C:\\docs"]", "shutdown", "kill".</summary>
     private sealed class Log
     {
         private readonly List<string> _lines = [];
@@ -31,11 +34,13 @@ public sealed class KensakuHostTests
         }
     }
 
-    private sealed class FakeProcess(string name, Log log) : IKensakuProcess
+    private sealed class FakeProcess(Log log, IReadOnlyList<string> arguments, IReadOnlyDictionary<string, string> environment) : IKensakuProcess
     {
         private readonly TaskCompletionSource _exited = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public string Name => name;
+        public IReadOnlyList<string> Arguments => arguments;
+
+        public IReadOnlyDictionary<string, string> Environment => environment;
 
         public bool HasExited => _exited.Task.IsCompleted;
 
@@ -47,7 +52,7 @@ public sealed class KensakuHostTests
         {
             if (!HasExited)
             {
-                log.Add($"kill {name}");
+                log.Add("kill");
             }
             Exit();
         }
@@ -57,7 +62,8 @@ public sealed class KensakuHostTests
         }
     }
 
-    private sealed class FakeRunner(Log log) : IProcessRunner
+    /// <param name="exitAtOnce">Daemons started after the first this many exit at once, as one that cannot take the data folder.</param>
+    private sealed class FakeRunner(Log log, int exitAtOnceAfter = int.MaxValue) : IProcessRunner
     {
         private readonly List<FakeProcess> _started = [];
 
@@ -72,53 +78,88 @@ public sealed class KensakuHostTests
             }
         }
 
-        public IKensakuProcess Start(string program, IReadOnlyList<string> arguments, string dataFolder)
+        public FakeProcess? Running => Started.LastOrDefault(process => !process.HasExited);
+
+        public IKensakuProcess Start(string program, IReadOnlyList<string> arguments, IReadOnlyDictionary<string, string> environment)
         {
-            string name = Path.GetFileNameWithoutExtension(program);
-            log.Add($"start {name}");
-            var process = new FakeProcess(name, log);
+            log.Add("start");
+            var process = new FakeProcess(log, arguments, environment);
             lock (_started)
             {
                 _started.Add(process);
+                if (_started.Count > exitAtOnceAfter)
+                {
+                    process.Exit();
+                }
             }
             return process;
         }
-
-        public void EndLeftovers(string bundle)
-        {
-        }
     }
 
-    /// <summary>A daemon's pipe that answers once the newest daemon has been pinged <paramref name="pingsBeforeAnswer"/> times.</summary>
-    private sealed class FakePipe(Log log, FakeRunner runner, int pingsBeforeAnswer = 0, PipeAnswer answer = PipeAnswer.Ours) : IKensakuPipe
+    /// <summary>
+    /// The running fake daemon's methods: it answers pings after <c>pingsBeforeAnswer</c> of them, remembers whether it
+    /// was set up, and exits on shutdown. <c>answer</c> gives any other method's result.
+    /// </summary>
+    private sealed class FakePipe(Log log, FakeRunner runner) : IKensakuPipe
     {
-        private int _pings;
-        private FakeProcess? _pinged;
+        public int PingsBeforeAnswer { get; init; }
 
-        public Task<PipeAnswer> PingAsync(CancellationToken cancel)
+        public bool SetupComplete { get; set; }
+
+        /// <summary>A daemon an earlier run of the app left, answering until it is shut down.</summary>
+        public bool Leftover { get; set; }
+
+        public KensakuError? Refuse { get; init; }
+
+        public Func<string, JsonObject?, string>? Answer { get; init; }
+
+        private int _pings;
+
+        public Task<JsonElement> CallAsync(string method, JsonObject? parameters, CancellationToken cancel)
         {
-            FakeProcess? daemon = runner.Started.LastOrDefault(process => process.Name == "kensaku-daemon" && !process.HasExited);
-            PipeAnswer reply = answer == PipeAnswer.Other ? PipeAnswer.Other : PipeAnswer.Nobody;
-            if (daemon is not null)
+            if (Refuse is KensakuError refused)
             {
-                _pings = daemon == _pinged ? _pings + 1 : 1;
-                _pinged = daemon;
-                reply = _pings > pingsBeforeAnswer ? answer : PipeAnswer.Nobody;
+                throw new KensakuException(refused, "bad token");
             }
-            log.Add($"ping → {reply}");
-            return Task.FromResult(reply);
+            if (!Leftover && runner.Running is null)
+            {
+                Note(method, " → none");
+                throw new KensakuException(KensakuError.DaemonUnavailable, "kensaku is not running");
+            }
+            if (method == "ping" && !Leftover && ++_pings <= PingsBeforeAnswer)
+            {
+                Note(method, " → none");
+                throw new KensakuException(KensakuError.DaemonUnavailable, "kensaku is not running");
+            }
+            Note(method, method is "setup" or "patch_config" or "pack_download" ? " " + parameters!.ToJsonString() : "");
+            string result = method switch
+            {
+                "health" => $$"""{"setup_complete":{{(SetupComplete ? "true" : "false")}}}""",
+                "shutdown" => Shutdown(),
+                "setup" => Setup(),
+                _ => Answer?.Invoke(method, parameters) ?? "{}",
+            };
+            return Task.FromResult(JsonDocument.Parse(result).RootElement.Clone());
         }
 
-        public Task ShutdownAsync(CancellationToken cancel)
+        private void Note(string method, string detail) => log.Add(method + detail);
+
+        private string Setup()
         {
-            log.Add("shutdown");
-            runner.Started.LastOrDefault(process => process.Name == "kensaku-daemon")?.Exit();
-            return Task.CompletedTask;
+            SetupComplete = true;
+            return "{}";
+        }
+
+        private string Shutdown()
+        {
+            Leftover = false;
+            runner.Running?.Exit();
+            return "{}";
         }
     }
 
-    private static KensakuHost Host(TempFolder temp, FakeRunner runner, IKensakuPipe pipe, string? bundle = "bundle") =>
-        new(bundle, temp.Path, runner, pipe, _ => Task.FromResult(true), backOff: [TimeSpan.Zero], settle: TimeSpan.Zero);
+    private static KensakuHost Host(FakeRunner runner, IKensakuPipe pipe, string? program = Program, IReadOnlyList<TimeSpan>? backOff = null) =>
+        new(program, @"C:\data\kensaku", runner, pipe, backOff ?? [TimeSpan.Zero], settle: TimeSpan.Zero);
 
     private static async Task WaitFor(Func<bool> condition)
     {
@@ -131,160 +172,176 @@ public sealed class KensakuHostTests
     }
 
     [Fact]
-    public async Task Serve_starts_only_after_the_daemon_answers_its_pipe()
+    public async Task A_new_daemon_is_started_for_the_data_folder_pinged_until_it_answers_then_set_up()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner, pingsBeforeAnswer: 2));
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { PingsBeforeAnswer = 2 });
 
-        host.Apply(true, Config);
+        host.Apply(true, Docs);
         await WaitFor(() => host.State == KensakuHostState.Up);
 
         Assert.Equal(
-            ["ping → Nobody", "start kensaku-daemon", "ping → Nobody", "ping → Nobody", "ping → Ours", "start kensaku-cli"],
+            [
+                "ping → none", "start", "ping → none", "ping → none", "ping", "health",
+                """setup {"watched_dirs":["C:\\docs"]}""",
+                """patch_config {"patch":{"ocr_enabled":false}}""",
+            ],
             log.Lines);
-        Assert.Equal(Config, File.ReadAllText(Path.Combine(temp.Path, "config.json")));
+        FakeProcess daemon = runner.Started.Single();
+        Assert.Equal(["daemon", "run", "--data-dir", @"C:\data\kensaku"], daemon.Arguments);
+        Assert.Equal(@"C:\app\kensaku\onnxruntime.dll", daemon.Environment["ORT_DYLIB_PATH"]);
     }
 
     [Fact]
-    public async Task A_daemon_that_stops_restarts_both()
+    public async Task A_daemon_set_up_before_is_sent_the_volumes_and_a_change_goes_to_the_running_daemon()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner));
-        host.Apply(true, Config);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { SetupComplete = true });
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Up);
+        Assert.Contains("""patch_config {"patch":{"watched_dirs":["C:\\docs"],"ocr_enabled":false}}""", log.Lines);
+
+        host.Apply(true, Docs);
+        host.Apply(true, new KensakuWanted([@"C:\docs", @"\\server\share"], Ocr: false));
+        await WaitFor(() => log.Lines.Count(line => line.StartsWith("patch_config", StringComparison.Ordinal)) == 2);
+
+        Assert.Equal("""patch_config {"patch":{"watched_dirs":["C:\\docs","\\\\server\\share"]}}""", log.Lines[^1]);
+        Assert.Single(runner.Started);
+    }
+
+    [Fact]
+    public async Task A_daemon_that_stops_starts_again_and_a_restart_that_fails_waits_longer()
+    {
+        var log = new Log();
+        // The second daemon exits at once, as one that could not start.
+        var runner = new FakeRunner(log, exitAtOnceAfter: 1);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner), backOff: [TimeSpan.Zero, TimeSpan.FromMinutes(1)]);
+        host.Apply(true, Docs);
         await WaitFor(() => host.State == KensakuHostState.Up);
 
         runner.Started[0].Exit();
-        await WaitFor(() => runner.Started.Count == 4 && host.State == KensakuHostState.Up);
+        await WaitFor(() => runner.Started.Count == 2 && host.State == KensakuHostState.Restarting);
 
-        Assert.Equal(["kensaku-daemon", "kensaku-cli", "kensaku-daemon", "kensaku-cli"], runner.Started.Select(process => process.Name));
-        // serve asked the old daemon once and would never ask the new one, so it went too.
-        Assert.Contains("kill kensaku-cli", log.Lines);
-        Assert.True(runner.Started[1].HasExited);
+        // Up once, so the first restart came after the shortest wait; the failed one waits a minute.
+        await Task.Delay(100);
+        Assert.Equal(2, runner.Started.Count);
+        Assert.Equal("Restarting · kensaku did not answer", host.Status);
     }
 
     [Fact]
-    public async Task Another_kensaku_on_the_pipe_blocks_the_start()
+    public async Task Turning_content_search_off_shuts_the_daemon_down()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner, answer: PipeAnswer.Other));
-
-        host.Apply(true, Config);
-        await WaitFor(() => host.State == KensakuHostState.Blocked);
-
-        Assert.Empty(runner.Started);
-        Assert.Equal(KensakuHost.AnotherKensaku, host.Problem);
-    }
-
-    [Fact]
-    public async Task Turning_content_search_off_shuts_the_daemon_down_and_ends_serve()
-    {
-        using var temp = new TempFolder();
-        var log = new Log();
-        var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner));
-        host.Apply(true, Config);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner));
+        host.Apply(true, Docs);
         await WaitFor(() => host.State == KensakuHostState.Up);
 
-        host.Apply(false, Config);
+        host.Apply(false, Docs);
         await WaitFor(() => runner.Started.All(process => process.HasExited));
 
         Assert.Equal(KensakuHostState.Stopped, host.State);
-        Assert.Equal(["shutdown", "kill kensaku-cli"], log.Lines.SkipWhile(line => line != "shutdown"));
+        Assert.Equal("shutdown", log.Lines[^1]);
     }
 
     [Fact]
-    public async Task The_same_config_changes_nothing_and_another_restarts_kensaku()
+    public async Task A_daemon_left_by_an_earlier_run_is_shut_down_before_a_new_one_starts()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner));
-        host.Apply(true, Config);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { Leftover = true });
+
+        host.Apply(true, Docs);
         await WaitFor(() => host.State == KensakuHostState.Up);
 
-        host.Apply(true, Config);
-        Assert.Equal(2, runner.Started.Count);
-
-        string other = """{ "watched_dirs": ["C:\\docs"] }""";
-        host.Apply(true, other);
-        await WaitFor(() => runner.Started.Count == 4 && host.State == KensakuHostState.Up);
-        Assert.Equal(other, File.ReadAllText(Path.Combine(temp.Path, "config.json")));
+        Assert.Equal(["ping", "shutdown", "ping → none", "start"], log.Lines.Take(4));
     }
 
     [Fact]
-    public async Task A_serve_that_quits_at_once_is_a_failed_start_without_the_whole_wait()
+    public async Task A_daemon_that_refuses_the_token_fails_without_starting_again()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        // /health never answers, as when another program holds the port and serve quit.
-        using var host = new KensakuHost("bundle", temp.Path, runner, new FakePipe(log, runner),
-            cancel => Task.Delay(Timeout.Infinite, cancel).ContinueWith(_ => false, TaskScheduler.Default),
-            backOff: [TimeSpan.FromMinutes(1)], settle: TimeSpan.Zero);
-        host.Apply(true, Config);
-        await WaitFor(() => host.State == KensakuHostState.StartingServe);
+        using KensakuHost host = Host(runner, new FakePipe(log, runner) { Refuse = KensakuError.Forbidden });
 
-        runner.Started[1].Exit();
-        await WaitFor(() => host.State == KensakuHostState.Restarting);
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Failed);
 
-        Assert.Equal("kensaku-cli serve did not answer", host.Problem);
-        Assert.True(runner.Started[0].HasExited);
+        Assert.Empty(runner.Started);
+        Assert.Equal("kensaku refused this app: bad token", host.Problem);
     }
 
     [Fact]
-    public void Without_a_built_kensaku_content_search_says_how_to_build_it()
+    public void Without_kensaku_or_an_indexed_volume_nothing_starts_and_the_status_says_why()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        using KensakuHost host = Host(temp, runner, new FakePipe(log, runner), bundle: null);
+        using KensakuHost unfetched = Host(runner, new FakePipe(log, runner), program: null);
+        unfetched.Apply(true, Docs);
+        Assert.Equal((KensakuHostState.Stopped, KensakuHost.NotFetched), (unfetched.State, unfetched.Problem));
 
-        host.Apply(true, Config);
-
-        Assert.Equal((KensakuHostState.Stopped, KensakuHost.NotBuilt), (host.State, host.Problem));
+        using KensakuHost empty = Host(runner, new FakePipe(log, runner));
+        empty.Apply(true, new KensakuWanted([], Ocr: false));
+        Assert.Equal("No indexed volumes to read inside", empty.Status);
         Assert.Empty(runner.Started);
     }
 
     [Fact]
-    public async Task The_panel_says_kensaku_is_starting_or_blocked_rather_than_search()
+    public async Task The_panel_says_kensaku_is_starting_and_searches_once_it_is_up()
     {
-        using var temp = new TempFolder();
         var log = new Log();
         var runner = new FakeRunner(log);
-        // The daemon never answers, so the host stays starting it.
-        using KensakuHost starting = Host(temp, runner, new FakePipe(log, runner, pingsBeforeAnswer: int.MaxValue));
-        starting.Apply(true, Config);
-        await WaitFor(() => starting.State == KensakuHostState.StartingDaemon);
-        var link = new KensakuLink(starting);
+        string answer = """{"results":[{"path":"C:\\docs\\report.pdf","score":2,"snippet":"torque","match_type":"Content","is_dir":false}],"total":1}""";
+        using KensakuHost host = Host(runner, new FakePipe(log, runner)
+        {
+            PingsBeforeAnswer = int.MaxValue,
+            Answer = (method, _) => method == "search" ? answer : "{}",
+        });
+        var query = new KensakuQuery("torque", new HashSet<string>());
+        Assert.Equal(Kensaku.NotRunning, (await new Kensaku(host).SearchAsync(query, CancellationToken.None)).Problem);
 
-        Assert.Equal(KensakuLink.StillStarting, (await link.SearchAsync("x", CancellationToken.None)).Problem);
-        Assert.Equal(KensakuState.Starting, link.State);
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Starting && runner.Started.Count == 1);
+        Assert.Equal(Kensaku.StillStarting, (await new Kensaku(host).SearchAsync(query, CancellationToken.None)).Problem);
 
-        using KensakuHost blocked = Host(temp, runner, new FakePipe(log, runner, answer: PipeAnswer.Other));
-        blocked.Apply(true, Config);
-        await WaitFor(() => blocked.State == KensakuHostState.Blocked);
-        Assert.Equal(KensakuHost.AnotherKensaku, (await new KensakuLink(blocked).SearchAsync("x", CancellationToken.None)).Problem);
+        using KensakuHost up = Host(runner, new FakePipe(log, runner) { Answer = (method, _) => method == "search" ? answer : "{}" });
+        up.Apply(true, Docs);
+        await WaitFor(() => up.State == KensakuHostState.Up);
+        ContentResult result = await new Kensaku(up).SearchAsync(query, CancellationToken.None);
+        Assert.Equal([@"C:\docs\report.pdf"], result.Matches.Select(match => match.Path));
     }
 
     [Fact]
-    public void The_bundle_is_found_beside_the_app_then_in_artifacts_above_it()
+    public async Task A_search_kensaku_cannot_answer_yet_says_it_is_setting_up()
+    {
+        var log = new Log();
+        var runner = new FakeRunner(log);
+        var pipe = new FakePipe(log, runner)
+        {
+            Answer = (method, _) => method == "search" ? throw new KensakuException(KensakuError.NotSetup, "setup is not complete") : "{}",
+        };
+        using KensakuHost host = Host(runner, pipe);
+        host.Apply(true, Docs);
+        await WaitFor(() => host.State == KensakuHostState.Up);
+
+        ContentResult result = await new Kensaku(host).SearchAsync(new KensakuQuery("x", new HashSet<string>()), CancellationToken.None);
+
+        Assert.Equal(Kensaku.SettingUp, result.Problem);
+    }
+
+    [Fact]
+    public void Kensaku_is_found_beside_the_app_then_in_artifacts_above_it()
     {
         using var temp = new TempFolder();
         string app = Directory.CreateDirectory(Path.Combine(temp.Path, "src", "bin")).FullName;
-        Assert.Null(KensakuHost.FindBundle(app));
+        Assert.Null(KensakuHost.FindProgram(app));
 
-        temp.File(@"artifacts\kensaku\kensaku-daemon.exe");
-        temp.File(@"artifacts\kensaku\kensaku-cli.exe");
-        Assert.Equal(Path.Combine(temp.Path, "artifacts", "kensaku"), KensakuHost.FindBundle(app));
+        temp.File(@"artifacts\kensaku\kensaku.exe");
+        Assert.Equal(Path.Combine(temp.Path, "artifacts", "kensaku", "kensaku.exe"), KensakuHost.FindProgram(app));
 
-        temp.File(@"src\bin\kensaku\kensaku-daemon.exe");
-        temp.File(@"src\bin\kensaku\kensaku-cli.exe");
-        Assert.Equal(Path.Combine(app, "kensaku"), KensakuHost.FindBundle(app));
+        temp.File(@"src\bin\kensaku\kensaku.exe");
+        Assert.Equal(Path.Combine(app, "kensaku", "kensaku.exe"), KensakuHost.FindProgram(app));
     }
 }
