@@ -27,10 +27,11 @@ public static class RowActions
     public static IReadOnlyList<RowAction> For(ResultRow row, Settings settings, IReadOnlyList<Favorite> favorites, string search)
     {
         var actions = new List<RowAction>();
+        PanelKeys keys = settings.Shortcuts;
         if (row.Item is { Kind: FavoriteKind.Search })
         {
             actions.Add(new RowAction("Run this search", "↵", ActionKind.RunSearch));
-            actions.Add(new RowAction("Remove from favorites", "Ctrl D", ActionKind.Favorite, SeparatorBefore: true));
+            actions.Add(new RowAction("Remove from favorites", keys.Label(PanelCommand.Favorite), ActionKind.Favorite, SeparatorBefore: true));
             return actions;
         }
         if (row.Path is null)
@@ -44,10 +45,10 @@ public static class RowActions
         {
             actions.AddRange(settings.Viewers.Select(viewer => new RowAction($"Open with {viewer.Name}", "", ActionKind.OpenWith, Viewer: viewer)));
         }
-        actions.Add(new RowAction("Show in folder", "Ctrl ↵", ActionKind.Reveal, SeparatorBefore: true));
-        actions.Add(new RowAction("Copy path", "Ctrl C", ActionKind.CopyPath));
-        actions.Add(new RowAction("Copy name", "Ctrl Shift C", ActionKind.CopyName));
-        AddFavorites(actions, row, favorites, search);
+        actions.Add(new RowAction("Show in folder", keys.Label(PanelCommand.Reveal), ActionKind.Reveal, SeparatorBefore: true));
+        actions.Add(new RowAction("Copy path", keys.Label(PanelCommand.CopyPath), ActionKind.CopyPath));
+        actions.Add(new RowAction("Copy name", keys.Label(PanelCommand.CopyName), ActionKind.CopyName));
+        AddFavorites(actions, row, favorites, search, keys);
         if (row.Kind == RowKind.Opened)
         {
             actions.Add(new RowAction("Remove from recent", "Del", ActionKind.RemoveRecent, SeparatorBefore: true, Danger: true));
@@ -78,12 +79,12 @@ public static class RowActions
         return kept;
     }
 
-    private static void AddFavorites(List<RowAction> actions, ResultRow row, IReadOnlyList<Favorite> favorites, string search)
+    private static void AddFavorites(List<RowAction> actions, ResultRow row, IReadOnlyList<Favorite> favorites, string search, PanelKeys keys)
     {
         if (FavoriteOf(row) is Favorite favorite)
         {
             string label = Favorites.Contains(favorites, favorite) ? "Remove from favorites" : "Pin to favorites";
-            actions.Add(new RowAction(label, "Ctrl D", ActionKind.Favorite, SeparatorBefore: true));
+            actions.Add(new RowAction(label, keys.Label(PanelCommand.Favorite), ActionKind.Favorite, SeparatorBefore: true));
         }
         if (row.Hit is not { IsFolder: false } hit)
         {

@@ -52,6 +52,62 @@ public sealed class TextCleanupTests
     }
 
     [Fact]
+    public void A_line_with_an_arrow_replaces_its_matches()
+    {
+        // OCR reads a zero between digits as the letter O.
+        Assert.Equal("PN 1024 Owner", Compile(@"(?<=\d)O(?=\d) => 0").Apply("PN 1O24 Owner").Text);
+    }
+
+    [Fact]
+    public void A_replacement_can_use_the_groups_it_matched()
+    {
+        Assert.Equal("AB-1234", Compile(@"([A-Z]{2})\s*(\d+) => $1-$2").Apply("AB 1234").Text);
+        Assert.Equal("AB-1234", Compile(@"(?<code>[A-Z]{2})\s*(\d+) => ${code}-$1").Apply("AB 1234").Text);
+    }
+
+    [Fact]
+    public void A_dollar_that_names_no_group_is_kept_as_written()
+    {
+        Assert.Equal("100 $ $$ $& $_", Compile("USD => $ $$ $& $_").Apply("100 USD").Text);
+    }
+
+    [Fact]
+    public void An_arrow_with_nothing_after_it_removes()
+    {
+        Assert.Equal("1234", Compile("REV =>").Apply("1234 REV").Text);
+    }
+
+    [Fact]
+    public void An_arrow_without_spaces_is_part_of_the_pattern()
+    {
+        Assert.Equal("a b", Compile("x=>y").Apply("a x=>y b").Text);
+    }
+
+    [Fact]
+    public void An_invalid_pattern_before_an_arrow_is_named_by_its_line()
+    {
+        (TextCleanup? cleanup, IReadOnlyList<string> problems) = TextCleanup.Compile(["ok", "(unclosed => x"]);
+        Assert.Null(cleanup);
+        Assert.StartsWith("Pattern 2 \"(unclosed\" is not valid:", Assert.Single(problems));
+    }
+
+    [Fact]
+    public void Removals_and_replacements_apply_in_their_order()
+    {
+        TextCleanup cleanup = Compile(@"^DWG\s*", "O => 0", @"\s*Rev\s*[A-Z]$");
+        Assert.Equal("1004-56", cleanup.Apply("DWG 1OO4-56 Rev B").Text);
+    }
+
+    [Fact]
+    public void A_replacement_that_takes_too_long_keeps_the_text_and_says_so()
+    {
+        TextCleanup cleanup = Compile(@"^(a+)+b => c");
+        CleanedText cleaned = cleanup.Apply(new string('a', 40) + "!");
+        Assert.Equal(new string('a', 40) + "!", cleaned.Text);
+        Assert.Contains("took too long", cleaned.Note);
+    }
+
+    [Fact]
     public void Text_under_the_mouse_is_cleaned_and_one_left_empty_says_why()
     {
         TextCleanup cleanup = Compile(@"_page\d+", @"^DRAFT$");

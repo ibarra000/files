@@ -78,6 +78,30 @@ public sealed class SearchTests(ITestOutputHelper output)
         Assert.Equal(["plan.pdf"], Names(Search(index, "plan*")));
     }
 
+    [Theory]
+    [InlineData("plan !draft", new[] { "plan.pdf", "plan.dwg" })]
+    [InlineData("plan|quote", new[] { "plan.pdf", "plan.dwg", "quote.xlsx", "plan draft.pdf" })]
+    [InlineData("plan ext:!dwg", new[] { "plan.pdf", "plan draft.pdf" })]
+    [InlineData("plan path:2026", new[] { "plan.dwg" })]
+    [InlineData("pl?n.*", new[] { "plan.pdf", "plan.dwg" })]
+    [InlineData("\"plan draft\"", new[] { "plan draft.pdf" })]
+    public void Operators_narrow_or_widen_what_a_search_finds(string line, string[] expected)
+    {
+        VolumeIndex index = Index(@"C:\v",
+            ("2025", ["plan.pdf", "quote.xlsx", "plan draft.pdf"]),
+            (@"jobs\2026", ["plan.dwg"]));
+        Assert.Equal(expected.Order(), Names(Search(index, line)).Order());
+    }
+
+    [Fact]
+    public void A_name_found_by_either_alternative_is_listed_once()
+    {
+        VolumeIndex index = Index(@"C:\v", ("", ["plan quote.pdf"]));
+        SearchResult result = Search(index, "plan|quote");
+        Assert.Single(result.Hits);
+        Assert.Equal(1, result.Matched);
+    }
+
     [Fact]
     public void A_match_never_spans_two_names()
     {

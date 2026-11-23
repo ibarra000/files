@@ -114,6 +114,15 @@ public partial class SearchWindow : Window
         };
         _searchSettings = SearchSettingsOf(app.Settings);
         app.SettingsChanged += OnSettingsChanged;
+        ApplyShortcutTips();
+    }
+
+    /// <summary>The tooltips that name a shortcut follow Settings → General.</summary>
+    private void ApplyShortcutTips()
+    {
+        PanelKeys keys = _app.Settings.Shortcuts;
+        SettingsButton.ToolTip = $"Settings ({keys.Label(PanelCommand.Settings, "+")})";
+        PreviewCopyButton.ToolTip = $"Copy path ({keys.Label(PanelCommand.CopyPath, "+")})";
     }
 
     /// <summary>The settings a search depends on; only a change to these runs the search again.</summary>
@@ -131,6 +140,7 @@ public partial class SearchWindow : Window
         Backdrop.Apply(this, _app.IsDark);
         ApplyRowLayout();
         ApplyPreview(_app.Settings.ShowPreview);
+        ApplyShortcutTips();
         string searchSettings = SearchSettingsOf(_app.Settings);
         bool searchChanged = searchSettings != _searchSettings;
         _searchSettings = searchSettings;
@@ -468,118 +478,143 @@ public partial class SearchWindow : Window
             // The volume menu handles its own keys, F5 among them.
             return;
         }
-        bool ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
-        bool shift = Keyboard.Modifiers.HasFlag(ModifierKeys.Shift);
+        ModifierKeys modifiers = Keyboard.Modifiers;
+        // Alt chords arrive as Key.System.
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        PanelKeys keys = _app.Settings.Shortcuts;
         if (ActionMenu.IsOpen)
         {
             // A shortcut the menu lists beside one of its actions runs that action for the menu's row.
             // Other shortcuts, such as Ctrl+V, would change the search under the open menu, so they do nothing here.
-            if (MenuGesture(e.Key, ctrl, shift) is string gesture && _actions.FirstOrDefault(action => action.Gesture == gesture) is RowAction listed)
+            if (MenuGesture(keys, modifiers, key) is string gesture && _actions.FirstOrDefault(action => action.Gesture == gesture) is RowAction listed)
             {
                 RunAction(listed);
                 e.Handled = true;
                 return;
             }
-            bool chord = ctrl || Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+            bool chord = modifiers.HasFlag(ModifierKeys.Control) || modifiers.HasFlag(ModifierKeys.Alt);
             e.Handled = chord || e.Key == Key.Delete || OnActionKey(e.Key);
             return;
         }
-        e.Handled = true;
-        switch (e.Key)
+        e.Handled = OnFixedKey(modifiers, key) || (keys.Find(modifiers, key) is PanelCommand command && Run(command));
+    }
+
+    /// <summary>The keys Settings cannot change (see PanelKeys): moving, opening, clearing. Returns whether the key was used.</summary>
+    private bool OnFixedKey(ModifierKeys modifiers, Key key)
+    {
+        bool plain = modifiers == ModifierKeys.None;
+        if (modifiers.HasFlag(ModifierKeys.Alt) && !(modifiers == ModifierKeys.Alt && key == Key.Down))
         {
-            case Key.Tab when !ctrl:
+            // Alt chords other than Alt+Down are left to Windows and the menu bar keys.
+            return false;
+        }
+        switch (key)
+        {
+            case Key.Tab when !modifiers.HasFlag(ModifierKeys.Control):
                 OpenActions();
-                break;
+                return true;
             case Key.Delete when IsHome && SelectedRow is { Kind: RowKind.Opened } recent:
                 RemoveRecent(recent);
-                break;
-            case Key.System when e.SystemKey == Key.Down && Keyboard.Modifiers == ModifierKeys.Alt:
+                return true;
+            case Key.Down when modifiers == ModifierKeys.Alt:
                 // Alt+Down opens the volume menu, as it opens a dropdown.
                 OpenScopeMenu();
-                break;
+                return true;
             case Key.Down when CanRecallNewer():
                 ShowRecalled(_recall.Newer());
-                break;
+                return true;
             case Key.Down:
                 Move(1);
-                break;
+                return true;
             case Key.Up when CanRecall():
                 ShowRecalled(_recall.Older(Input.Text));
-                break;
+                return true;
             case Key.Up:
                 Move(-1);
-                break;
+                return true;
             case Key.PageDown:
                 Move(PageRows);
-                break;
+                return true;
             case Key.PageUp:
                 Move(-PageRows);
-                break;
-            case Key.Enter when ctrl:
-            case Key.O when ctrl:
+                return true;
+            case Key.O when modifiers == ModifierKeys.Control:
+                // A second key for Show in folder, as in Explorer's Open.
                 Reveal();
-                break;
-            case Key.Enter when shift:
-                _ = StartLiveSearchAsync();
-                break;
-            case Key.Enter:
+                return true;
+            case Key.Enter when plain:
                 Accept();
-                break;
-            case Key.D when ctrl:
-                ToggleFavorite(FavoriteFor(SelectedRow));
-                break;
-            case Key.C when ctrl && shift:
-                CopySelected(path: false);
-                break;
-            case Key.C when ctrl && (Input.SelectionLength == 0 || _selectedOnShow):
-                // The box text is selected only because the panel was shown: Ctrl+C copies the path, as the footer says.
-                CopySelected(path: true);
-                break;
+                return true;
             case Key.Escape when _liveCancel is not null:
                 _liveCancel.Cancel();
-                break;
+                return true;
             case Key.Escape when _showAllFavorites && IsHome:
                 _showAllFavorites = false;
                 ShowHome();
-                break;
+                return true;
             case Key.Escape when Input.Text.Length > 0:
                 Input.Clear();
-                break;
+                return true;
             case Key.Escape:
                 HidePanel();
-                break;
-            case Key.F5:
-                Rescan();
-                break;
-            case Key.OemComma when ctrl:
-                _app.ShowSettings();
-                break;
-            case Key.Q when ctrl:
-                _app.Quit();
-                break;
-            case Key.P when ctrl:
-                TogglePreview();
-                break;
-            case >= Key.D1 and <= Key.D5 when ctrl && !IsHome:
-                // Only while the chips show: on the home list a hidden chip would narrow the next search unseen.
-                SetFilter((SearchFilter)(e.Key - Key.D1));
-                break;
+                return true;
             default:
-                e.Handled = false;
-                break;
+                return false;
+        }
+    }
+
+    /// <summary>Runs a command from its shortcut (Settings → General). Returns whether the key was used.</summary>
+    private bool Run(PanelCommand command)
+    {
+        switch (command)
+        {
+            case PanelCommand.Reveal:
+                Reveal();
+                return true;
+            case PanelCommand.LiveSearch:
+                _ = StartLiveSearchAsync();
+                return true;
+            case PanelCommand.Favorite:
+                ToggleFavorite(FavoriteFor(SelectedRow));
+                return true;
+            case PanelCommand.CopyPath when Input.SelectionLength == 0 || _selectedOnShow:
+                // The box text is selected only because the panel was shown: the keys copy the path, as the footer says.
+                CopySelected(path: true);
+                return true;
+            case PanelCommand.CopyName:
+                CopySelected(path: false);
+                return true;
+            case PanelCommand.Preview:
+                TogglePreview();
+                return true;
+            case PanelCommand.Rescan:
+                Rescan();
+                return true;
+            case PanelCommand.Settings:
+                _app.ShowSettings();
+                return true;
+            case PanelCommand.Quit:
+                _app.Quit();
+                return true;
+            case >= PanelCommand.Filter1 and <= PanelCommand.Filter5 when !IsHome:
+                // Only while the chips show: on the home list a hidden chip would narrow the next search unseen.
+                SetFilter((SearchFilter)(command - PanelCommand.Filter1));
+                return true;
+            default:
+                // Ctrl+C with text selected in the box copies that text, as a text box does.
+                return false;
         }
     }
 
     /// <summary>A key as the action menu writes it beside an action (RowAction.Gesture), or null for any other.</summary>
-    private static string? MenuGesture(Key key, bool ctrl, bool shift) => (key, ctrl, shift) switch
+    private static string? MenuGesture(PanelKeys keys, ModifierKeys modifiers, Key key)
     {
-        (Key.Delete, false, false) => "Del",
-        (Key.D, true, false) => "Ctrl D",
-        (Key.Enter, true, false) => "Ctrl ↵",
-        (Key.C, true, false) => "Ctrl C",
-        (Key.C, true, true) => "Ctrl Shift C",
-        _ => null,
-    };
+        if (key == Key.Delete && modifiers == ModifierKeys.None)
+        {
+            return "Del";
+        }
+        return keys.Find(modifiers, key) is PanelCommand command ? keys.Label(command) : null;
+    }
 
     private void Move(int by)
     {

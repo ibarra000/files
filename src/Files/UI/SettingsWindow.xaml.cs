@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -37,6 +38,7 @@ public partial class SettingsWindow : Window
         _app = app;
         ViewerGrid.ItemsSource = _viewers;
         VolumeGrid.ItemsSource = _volumeRows;
+        FillPanelKeys();
         Load(app.Settings);
         RefreshVolumes();
         Action onIndexerChanged = () => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshVolumes);
@@ -110,6 +112,7 @@ public partial class SettingsWindow : Window
     {
         HotkeyBox.Text = _app.Settings.Hotkey;
         OcrHotkeyBox.Text = _app.Settings.OcrHotkey;
+        ShowPanelKeys();
     }
 
     /// <summary>Saves the two typed fields when they differ from what is saved; they otherwise save only when focus leaves them.</summary>
@@ -197,6 +200,7 @@ public partial class SettingsWindow : Window
         _loading = true;
         HotkeyBox.Text = settings.Hotkey;
         OcrHotkeyBox.Text = settings.OcrHotkey;
+        ShowPanelKeys();
         OcrEngineBox.SelectedIndex = (int)settings.OcrEngine;
         StartWithWindowsBox.IsChecked = StartWithWindows.IsEnabled;
         HideOnBlurBox.IsChecked = settings.HideOnBlur;
@@ -274,7 +278,7 @@ public partial class SettingsWindow : Window
     {
         if (_refusedRemovals.Count > 0)
         {
-            _app.Notify("The removal patterns that are not valid were not saved; the ones before stay in use.");
+            _app.Notify("The text corrections that are not valid were not saved; the ones before stay in use.");
             _refusedRemovals = [];
         }
     }
@@ -419,6 +423,93 @@ public partial class SettingsWindow : Window
         }
         box.Text = Hotkey.Format(Keyboard.Modifiers, key);
         Save();
+        if (_app.Settings.Shortcuts.Find(Keyboard.Modifiers, key) is PanelCommand taken)
+        {
+            // Windows gives a system-wide shortcut its keys first, so the panel no longer sees them.
+            string note = $"{box.Text} is also the panel's {PanelKeys.Name(taken)} shortcut, which it now replaces in the panel.";
+            Message.Text = Message.Text.Length == 0 ? note : $"{Message.Text}\n{note}";
+        }
+    }
+
+    /// <summary>The panel shortcut boxes, by the command each sets.</summary>
+    private readonly Dictionary<PanelCommand, TextBox> _panelKeyBoxes = [];
+
+    /// <summary>Adds a row for each panel command: its name and a box that records keys.</summary>
+    private void FillPanelKeys()
+    {
+        foreach (PanelCommand command in Enum.GetValues<PanelCommand>())
+        {
+            var row = new Grid { Style = (Style)FindResource("SettingRow") };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var label = new TextBlock { Text = PanelKeys.Name(command), VerticalAlignment = VerticalAlignment.Center, Style = (Style)FindResource("RowLabel") };
+            var box = new TextBox { Width = 220, IsReadOnly = true, IsReadOnlyCaretVisible = false, Tag = command };
+            AutomationProperties.SetName(box, PanelKeys.Name(command));
+            box.PreviewKeyDown += OnPanelKey;
+            Grid.SetColumn(box, 1);
+            row.Children.Add(label);
+            row.Children.Add(box);
+            PanelKeysList.Children.Add(new Border { Style = (Style)FindResource("RowDivider") });
+            PanelKeysList.Children.Add(row);
+            _panelKeyBoxes[command] = box;
+        }
+    }
+
+    /// <summary>The boxes show the shortcuts in effect, which may be the old ones after a problem.</summary>
+    private void ShowPanelKeys()
+    {
+        PanelKeys keys = _app.Settings.Shortcuts;
+        foreach ((PanelCommand command, TextBox box) in _panelKeyBoxes)
+        {
+            box.Text = keys.Label(command, "+");
+        }
+    }
+
+    private void OnPanelKey(object sender, KeyEventArgs e)
+    {
+        var box = (TextBox)sender;
+        var command = (PanelCommand)box.Tag;
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (key == Key.Tab && Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift)
+        {
+            // Tab and Shift+Tab move on, so the boxes can be left with the keyboard.
+            return;
+        }
+        e.Handled = true;
+        bool modifierOnly = key is Key.LeftCtrl or Key.RightCtrl or Key.LeftAlt or Key.RightAlt
+            or Key.LeftShift or Key.RightShift or Key.LWin or Key.RWin;
+        if (modifierOnly)
+        {
+            return;
+        }
+        string? keys = key == Key.Back && Keyboard.Modifiers == ModifierKeys.None ? null : Hotkey.Format(Keyboard.Modifiers, key);
+        SavePanelKey(command, keys);
+    }
+
+    /// <summary>Sets one command's keys, or its default for null; only the ones that differ from the defaults are saved.</summary>
+    private void SavePanelKey(PanelCommand command, string? keys)
+    {
+        var changed = new Dictionary<string, string>(_app.Settings.PanelKeys);
+        changed.Remove(command.ToString());
+        if (keys is not null && PanelKeys.Parse(keys) != PanelKeys.Parse(PanelKeys.Defaults.Bindings[command]))
+        {
+            changed[command.ToString()] = keys;
+        }
+        ApplyPanelKeys(changed);
+    }
+
+    private void OnRestorePanelKeys(object sender, RoutedEventArgs e) => ApplyPanelKeys(new Dictionary<string, string>());
+
+    private void ApplyPanelKeys(Dictionary<string, string> changed)
+    {
+        (PanelKeys? keys, IReadOnlyList<string> problems) = PanelKeys.From(changed, _app.Settings.Hotkey, _app.Settings.OcrHotkey);
+        if (keys is null)
+        {
+            Message.Text = problems[0];
+            return;
+        }
+        Message.Text = _app.ApplySettings(_app.Settings with { PanelKeys = changed }) ?? "";
+        ShowPanelKeys();
     }
 
     private void OnStartWithWindows(object sender, RoutedEventArgs e)

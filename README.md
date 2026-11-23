@@ -7,14 +7,14 @@ Instant file-name search across folders and network shares on Windows.
 ## Features
 
 - **Volumes.** Add any folder, drive or `\\server\share` in Settings. Each one is read in the background and read again on a schedule (every hour by default) or when you press <kbd>F5</kbd>. **Edit…** (or a double-click) renames a volume, points it at another folder (it is then read again from scratch) or makes it **live search only**: never read in the background or saved, only searched by <kbd>Shift</kbd>+<kbd>Enter</kbd>, for volumes too large to keep in memory.
-- **Fast matching.** Every name is held in memory and searched in parallel: about a millisecond per million names. Results from every volume are merged into one ranked list. Files inside a folder whose name matches are listed too, below direct matches.
+- **Fast matching.** Every name is held in memory and searched in parallel: about a millisecond per million names when few names match, and tens of milliseconds when most of a million do (measured in [docs/BENCHMARK.md](docs/BENCHMARK.md)). Results from every volume are merged into one ranked list. Files inside a folder whose name matches are listed too, below direct matches.
 - **Live search.** <kbd>Shift</kbd>+<kbd>Enter</kbd> reads every volume now instead of using its saved list, so files added since the last read are found too. Results appear as folders are read; <kbd>Esc</kbd> stops it. When a normal search finds nothing, the footer offers <kbd>Shift</kbd>+<kbd>Enter</kbd> for a live search (<kbd>Enter</kbd> starts one too).
-- **Search what you are looking at.** Point at a file name or drawing number anywhere on screen (an email, a PDF, a scanned sheet) and press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>: the panel opens searching for it. The text comes from the app when it shares it, else from text recognition: the engine built into Windows, or PaddleOCR (Settings → General → Text recognition), which reads letters more reliably and also runs entirely on your PC, and a code such as `AB-C-0704_Page1.pdf` is kept whole. Removal patterns (Settings → General → Text recognition, one regular expression per line, such as `_Page\d+`) take parts out of the text before it is searched, however it was read; a box below them shows what a sample would become. The shortcut can be changed or turned off in Settings.
+- **Search what you are looking at.** Point at a file name or drawing number anywhere on screen (an email, a PDF, a scanned sheet) and press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Space</kbd>: the panel opens searching for it. The text comes from the app when it shares it, else from text recognition: the engine built into Windows, or PaddleOCR (Settings → General → Text recognition), which reads letters more reliably and also runs entirely on your PC, and a code such as `AB-C-0704_Page1.pdf` is kept whole. Text corrections (Settings → General → Text recognition, one regular expression per line) change the text before it is searched, however it was read: a line such as `_Page\d+` takes its matches out, and a line such as `(?<=\d)O(?=\d) => 0` replaces them, here a zero read as the letter O (`$1` or `${name}` in a replacement puts back a group; any other `$` is kept as written). A line saved before replacements came that holds ` => ` (space, arrow, space) now reads as a replacement: to keep removing what it matched, write the space before the arrow as `[ ]`, as in `a[ ]=> b`. A box below them shows what a sample would become. The shortcut can be changed or turned off in Settings.
 - **Easy to scan.** Results come grouped as the best match, then matching folders (found by their own name), then files. Each has an icon for its kind (PDF, drawing, sheet, image, archive, video, audio, code or document) and its folder in monospace below; the volume is named only when you have more than one. Settings → Search → Results can put the folder on the same line, for one line per file. The header counts the results and says how long the search took; the footer says how many files are indexed and when they were last read, with a turning icon while volumes are read.
 - **Filters.** While you type, chips narrow the results to All, Files, Folders, Code or Documents (<kbd>Ctrl</kbd>+<kbd>1</kbd> to <kbd>Ctrl</kbd>+<kbd>5</kbd>). With more than one volume, the menu in the header searches just one of them, and says under each volume whether it is online, offline or being read, when it was read and when it is read next; <kbd>F5</kbd> there reads just the highlighted volume. Results from a volume that cannot be reached are marked "offline · list from …" with the age of the list they come from.
 - **Preview.** <kbd>Ctrl</kbd>+<kbd>P</kbd> opens a pane beside the results with the selected file's size, date and type, and its first lines, a small copy of an image, a PDF's first page (with its page count), a picture of a drawing (the preview saved inside a DWG or a Creo part, assembly or drawing, which needs no Creo; a DXF's geometry and text, a plot file's pen strokes, a STEP model shaded with its visible edges, an assembly's parts each where it goes and each part in its own colour; for SOLIDWORKS, Inventor and other CAD files, the thumbnail their CAD program shows in Explorer, when it is installed), or a folder's first entries, with Open, Show in folder and Copy path buttons. Only the selected file is read, off to the side, so a slow share never holds up typing.
 - **Actions.** <kbd>Tab</kbd> or right-click opens every action for the selected result with its shortcut; type to filter them and press <kbd>Enter</kbd> to run one.
-- **Search syntax.** `term*` starts with, `*term` ends with (before the extension), and `ext:pdf,dwg` filters by type.
+- **Search syntax.** Plain words are one phrase, matched anywhere in the name. Operators narrow or widen it; see [Search syntax](#search-syntax).
 - **Opening.** <kbd>Enter</kbd> opens with the Windows default or a program you add in Settings. <kbd>Ctrl</kbd>+<kbd>O</kbd> shows the file in its folder. <kbd>Tab</kbd> or right-click a result for every option. Drag a result into another app to hand it the file.
 - **Favorites.** <kbd>Ctrl</kbd>+<kbd>D</kbd> adds the selected file to favorites, or removes it; with no file selected it saves the search you typed. The action menu (<kbd>Tab</kbd>) can also pin a result's folder or save the search. A saved search fills the box and runs. A favorite that is no longer at its path is shown greyed out as "Not found".
 - **Home list.** With the box empty, the panel shows your favorites (five, with "See all" for the rest) and then the files you recently opened or showed in their folder, under Recent (<kbd>Del</kbd> takes one off).
@@ -23,6 +23,22 @@ Instant file-name search across folders and network shares on Windows.
 - **Placing the panel.** Drag it anywhere by its edge padding (also out of maximized or snapped; double-click there maximizes or restores), resize it from its edges, or snap it like any window: <kbd>Win</kbd>+<kbd>←</kbd>/<kbd>→</kbd>, drag to a screen edge, or <kbd>Win</kbd>+<kbd>Z</kbd> for the Windows 11 snap layouts. Its size and place are remembered.
 - **Preset volumes.** An installer built with `make_msi.ps1 -Volumes` adds a list of volumes once for each user on each PC it is installed on; see [CONTRIBUTING.md](CONTRIBUTING.md#an-installer-with-preset-volumes).
 - **Signed updates** from GitHub releases or a shared folder. An update is installed only if it is signed with the files release certificate.
+
+## Search syntax
+
+| Type | Finds |
+|---|---|
+| `annual report` | names holding "annual report" (spaces between words count as one) |
+| `"annual  report"` | the text in quotes exactly, spaces and all; operators inside quotes are plain text |
+| `invoice\|quote` | names holding either |
+| `plan !draft` | names holding "plan" but not "draft" |
+| `ext:pdf;dwg` or `ext:pdf,dwg` | only those types |
+| `ext:!exe` | every type but that one |
+| `path:"client/2026"` | files whose folder path holds that text (`/` or `\`) |
+| `plan*` / `*0704` | names starting with "plan" / ending with "0704" before the extension |
+| `AB-?-07*.pdf` | a wildcard pattern the whole name fits: `?` is one character, `*` any run |
+
+Operators combine: `inv|quote !draft ext:pdf path:2026`. They apply to the whole line, so write them apart from the `|` words: `inv|quote !draft`, not `inv|!draft`. `!readme` on its own searches for a name starting with "!"; next to anything else, `!` leaves names out. An operator that is not a valid one (`ext:` with nothing after it, an empty `path:`, a lone `!`) is shown as an invalid search, and the footer says what it needs. Live search (<kbd>Shift</kbd>+<kbd>Enter</kbd>) understands the same syntax.
 
 ## Keys
 
@@ -43,7 +59,18 @@ Instant file-name search across folders and network shares on Windows.
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings (or the gear at the bottom right) |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 
+These are the defaults. Settings → General → Panel shortcuts changes the keys for showing in folder, live search, favorites, copying, the preview, rescanning, Settings, Quit and the filters; the menu, footer and tooltips follow. Moving, Enter, Esc, Tab, Delete, <kbd>Ctrl</kbd>+<kbd>O</kbd> and text editing keys keep their keys.
+
 ## Install
+
+Once the packages are published (see [#84](https://github.com/ibarra000/files/issues/84)):
+
+```powershell
+winget install ibarra000.files
+choco install files-search
+```
+
+Or by hand:
 
 1. Download `files-<version>-x64.msi` from the [releases](https://github.com/ibarra000/files/releases) and run it. It installs per machine and asks for elevation. "Start with Windows" is on by default.
 2. Start **files** from the Start menu. The first time, Settings opens on **Volumes**: add the folders you want to search.

@@ -30,7 +30,7 @@
                         <TextBlock x:Name="ActionTitle" DockPanel.Dock="Top" FontSize="11" Margin="10,6,10,8"
                                    TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextDim}" />
                         <Border DockPanel.Dock="Top" Height="1" Margin="0,0,0,4" Background="{DynamicResource Divider}" />
-                        <ListBox x:Name="ActionList" MaxHeight="360" BorderThickness="0" Background="Transparent" Focusable="False"
+                        <ListBox x:Name="ActionList" Style="{StaticResource PanelList}" MaxHeight="360" BorderThickness="0" Background="Transparent" Focusable="False"
                                  ItemContainerStyle="{StaticResource ActionItem}" ItemTemplate="{StaticResource ActionLine}"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled" PreviewMouseLeftButtonUp="OnActionClicked" />
                     </DockPanel>
@@ -149,7 +149,7 @@
                         </Grid.ColumnDefinitions>
                         <Button Content="Open" Style="{StaticResource AccentButton}" Click="OnPreviewOpen" />
                         <Button Grid.Column="2" Content="Show in folder" Style="{StaticResource ControlButton}" Click="OnPreviewReveal" />
-                        <Button Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
+                        <Button x:Name="PreviewCopyButton" Grid.Column="4" Style="{StaticResource ControlButton}" ToolTip="Copy path (Ctrl+C)"
                                 AutomationProperties.Name="Copy path" Click="OnPreviewCopy">
                             <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13" />
                         </Button>
@@ -158,7 +158,7 @@
                     <Grid Margin="0,14,0,0">
                         <Rectangle x:Name="PreviewFrame" RadiusX="8" RadiusY="8" StrokeThickness="1"
                                    Stroke="{DynamicResource Divider}" Fill="{DynamicResource PanelBackground}" />
-                        <ScrollViewer x:Name="PreviewText" Margin="1" Padding="0,10" VerticalScrollBarVisibility="Auto"
+                        <ScrollViewer x:Name="PreviewText" Style="{StaticResource BesideScroller}" Margin="1" Padding="0,10" VerticalScrollBarVisibility="Auto"
                                       HorizontalScrollBarVisibility="Hidden" Visibility="Collapsed">
                             <Grid>
                                 <Grid.ColumnDefinitions>
@@ -183,7 +183,7 @@
                 </DockPanel>
             </Border>
 
-            <ListBox x:Name="Results" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
+            <ListBox x:Name="Results" Style="{StaticResource PanelList}" Margin="12,6,12,6" BorderThickness="0" Background="Transparent"
                      SelectionChanged="OnResultSelectionChanged"
                      ItemContainerStyle="{StaticResource ResultItem}" ItemTemplate="{StaticResource TwoLineRow}"
                      VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
