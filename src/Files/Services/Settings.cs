@@ -45,6 +45,38 @@ public sealed record Settings
     /// <summary>Searches for the word or code under the mouse.</summary>
     public string OcrHotkey { get; init; } = "Ctrl+Alt+Space";
 
+    /// <summary>
+    /// The panel's shortcuts the user changed, by command name (Services/PanelKeys.cs), such as
+    /// "Preview": "F6"; a command not listed keeps its default.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> PanelKeys { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// The panel's shortcuts in effect: <see cref="PanelKeys"/> over the defaults, or the defaults if they cannot
+    /// all be had. A system-wide shortcut on the same keys is not checked here: it only keeps that key from the
+    /// panel, and changing it must not drop the others. Settings warns of it when a panel key is recorded.
+    /// </summary>
+    [JsonIgnore]
+    public PanelKeys Shortcuts
+    {
+        get
+        {
+            // Read on every key press in the panel: built once for each saved list (records copy the reference on "with").
+            ShortcutsCache cache = _shortcuts;
+            if (!ReferenceEquals(cache.Source, PanelKeys))
+            {
+                PanelKeys keys = Services.PanelKeys.From(PanelKeys, Services.Hotkey.Off, Services.Hotkey.Off).Keys ?? Services.PanelKeys.Defaults;
+                cache = new ShortcutsCache(PanelKeys, keys);
+                _shortcuts = cache;
+            }
+            return cache.Keys;
+        }
+    }
+
+    private sealed record ShortcutsCache(IReadOnlyDictionary<string, string>? Source, PanelKeys Keys);
+
+    private static ShortcutsCache _shortcuts = new(null, Services.PanelKeys.Defaults);
+
     /// <summary>The engine for the text under the mouse; Windows OCR is the fallback if it cannot run.</summary>
     public OcrChoice OcrEngine { get; init; } = OcrChoice.Windows;
 
@@ -117,6 +149,9 @@ public sealed record Settings
         {
             Hotkey = loaded.Hotkey ?? defaults.Hotkey,
             OcrHotkey = loaded.OcrHotkey ?? defaults.OcrHotkey,
+            PanelKeys = (loaded.PanelKeys ?? new Dictionary<string, string>())
+                .Where(binding => binding.Value is not null)
+                .ToDictionary(binding => binding.Key, binding => binding.Value),
             HiddenExtensions = loaded.HiddenExtensions ?? defaults.HiddenExtensions,
             ScreenTextRemovals = (loaded.ScreenTextRemovals ?? []).Where(pattern => pattern is not null).ToList(),
             EnterOpens = loaded.EnterOpens ?? defaults.EnterOpens,

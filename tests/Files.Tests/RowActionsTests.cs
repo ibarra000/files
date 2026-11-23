@@ -25,6 +25,16 @@ public sealed class RowActionsTests
     }
 
     [Fact]
+    public void The_menu_shows_the_keys_set_in_settings()
+    {
+        Settings rebound = WithProgram with { PanelKeys = new Dictionary<string, string> { ["Reveal"] = "Ctrl+E", ["Favorite"] = "F8" } };
+        IReadOnlyList<RowAction> actions = RowActions.For(FileRow(), rebound, [], search: "");
+        Assert.Equal("Ctrl E", actions.Single(a => a.Kind == ActionKind.Reveal).Gesture);
+        Assert.Equal("F8", actions.Single(a => a.Kind == ActionKind.Favorite).Gesture);
+        Assert.Equal("Ctrl C", actions.Single(a => a.Kind == ActionKind.CopyPath).Gesture);
+    }
+
+    [Fact]
     public void A_pinned_file_offers_to_unpin_it()
     {
         IReadOnlyList<RowAction> actions = RowActions.For(FileRow(), WithProgram, [new Favorite(FavoriteKind.File, @"C:\v\2024\plan.pdf")], search: "");

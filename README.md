@@ -43,6 +43,8 @@ Instant file-name search across folders and network shares on Windows.
 | <kbd>Ctrl</kbd>+<kbd>,</kbd> | Settings (or the gear at the bottom right) |
 | <kbd>Ctrl</kbd>+<kbd>Q</kbd> | Quit |
 
+These are the defaults. Settings → General → Panel shortcuts changes the keys for showing in folder, live search, favorites, copying, the preview, rescanning, Settings, Quit and the filters; the menu, footer and tooltips follow. Moving, Enter, Esc, Tab, Delete, <kbd>Ctrl</kbd>+<kbd>O</kbd> and text editing keys keep their keys.
+
 ## Install
 
 Once the packages are published (see [#84](https://github.com/ibarra000/files/issues/84)):
