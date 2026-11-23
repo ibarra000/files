@@ -54,11 +54,11 @@ public static class ScreenText
         return text is null ? new ScreenRead(null, note ?? "No text under the mouse") : new ScreenRead(text, note);
     }
 
-    /// <summary>Said when the removal patterns took away everything that was read.</summary>
-    public const string NothingLeftNote = "Nothing was left after the removal patterns (Settings → General)";
+    /// <summary>Said when the text corrections took away everything that was read.</summary>
+    public const string NothingLeftNote = "Nothing was left after the text corrections (Settings → General)";
 
     /// <summary>
-    /// Applies the removal patterns to what was read, however it was read (from the app or by
+    /// Applies the text corrections to what was read, however it was read (from the app or by
     /// text recognition), then trims surrounding punctuation again. Text the patterns leave empty
     /// is not searched; the panel says why.
     /// </summary>

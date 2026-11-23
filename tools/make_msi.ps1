@@ -28,7 +28,9 @@
     pwsh tools/make_msi.ps1 -Release
 
     Builds the installer and latest.json into artifacts\dist and, if the
-    GitHub CLI is installed, publishes them as release v<version>.
+    GitHub CLI is installed, publishes them as release v<version>. Also writes
+    the winget and Chocolatey packages for it into artifacts\dist\packages
+    (tools/make_manifests.ps1) and prints how to submit them.
 #>
 [CmdletBinding()]
 param(
@@ -179,6 +181,7 @@ try {
             Write-Host '(not a draft, not a pre-release) and attach both of these:'
             $assets | ForEach-Object { Write-Host "  $_" }
         }
+        & (Join-Path $PSScriptRoot 'make_manifests.ps1') -Msi (Join-Path $dist $name) -Out (Join-Path $dist 'packages')
     }
 }
 finally {

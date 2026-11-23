@@ -117,6 +117,23 @@
                             </StackPanel>
                         </Border>
 
+                        <TextBlock Text="PANEL SHORTCUTS" Style="{StaticResource SectionLabel}" />
+                        <Border Style="{StaticResource Card}">
+                            <StackPanel>
+                                <Grid Style="{StaticResource SettingRow}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="Click a box and press keys. Backspace restores one; arrows, Enter, Esc, Tab and text editing keep their keys."
+                                               TextWrapping="Wrap" Margin="0,0,16,0" VerticalAlignment="Center" Style="{StaticResource RowDescription}" />
+                                    <Button Grid.Column="1" Content="Restore defaults" Style="{StaticResource ControlButton}" Click="OnRestorePanelKeys" />
+                                </Grid>
+                                <!-- One row per command (Services/PanelKeys.cs), added in SettingsWindow.FillPanelKeys. -->
+                                <StackPanel x:Name="PanelKeysList" />
+                            </StackPanel>
+                        </Border>
+
                         <TextBlock Text="TEXT RECOGNITION" Style="{StaticResource SectionLabel}" />
                         <Border Style="{StaticResource Card}">
                             <StackPanel>
@@ -147,13 +164,13 @@
                                     <RowDefinition Height="Auto" />
                                 </Grid.RowDefinitions>
                                 <StackPanel Margin="0,0,16,0">
-                                    <TextBlock Text="Removal patterns" Style="{StaticResource RowLabel}" />
+                                    <TextBlock Text="Text corrections" Style="{StaticResource RowLabel}" />
                                     <TextBlock TextWrapping="Wrap" Style="{StaticResource RowDescription}"
-                                               Text="Regular expressions, one per line, case-insensitive. Matching text is removed before searching. Example: _Page\d+" />
+                                               Text="Regular expressions, one per line, case-insensitive, applied before searching. A line removes its matches: _Page\d+. A line with =&gt; replaces them: (?&lt;=\d)O(?=\d) =&gt; 0" />
                                 </StackPanel>
                                 <TextBox x:Name="RemovalsBox" Grid.Column="1" Width="300" MinHeight="64" MaxHeight="160" AcceptsReturn="True" TextWrapping="NoWrap"
                                          VerticalScrollBarVisibility="Auto" VerticalContentAlignment="Top" FontFamily="Consolas"
-                                         AutomationProperties.Name="Removal patterns"
+                                         AutomationProperties.Name="Text corrections"
                                          LostFocus="OnChanged" TextChanged="OnTryRemovals" />
                                 <StackPanel Grid.Row="1" Margin="0,10,16,0" VerticalAlignment="Center">
                                     <TextBlock Text="Test" Style="{StaticResource RowLabel}" />
@@ -161,7 +178,7 @@
                                                Text="Enter sample text to preview the search." />
                                 </StackPanel>
                                 <TextBox x:Name="RemovalsTry" Grid.Row="1" Grid.Column="1" Width="300" Margin="0,10,0,0"
-                                         AutomationProperties.Name="Test removal patterns" TextChanged="OnTryRemovals" />
+                                         AutomationProperties.Name="Test text corrections" TextChanged="OnTryRemovals" />
                             </Grid>
                             </StackPanel>
                         </Border>

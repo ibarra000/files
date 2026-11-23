@@ -51,9 +51,10 @@ public sealed record ResultRow(RowKind Kind, string Before, string Match, string
     }
 
     /// <param name="showVolume">Name the volume, which only tells results apart when there are several.</param>
-    public static ResultRow ForHit(Hit hit, bool showVolume)
+    /// <param name="stale">From <see cref="StatusText.Stale"/>: the volume cannot be reached, and how old its list is.</param>
+    public static ResultRow ForHit(Hit hit, bool showVolume, string? stale = null)
     {
-        string badge = showVolume ? hit.Volume : "";
+        string badge = string.Join(" · ", new[] { showVolume ? hit.Volume : null, stale }.OfType<string>());
         string icon = hit.IsFolder ? FileIcons.Folder : FileIcons.Glyph(hit.Name);
         if (hit.MatchStart < 0)
         {
@@ -107,11 +108,12 @@ public sealed record KeyHint(string Keys, string Label);
 public static class StatusText
 {
     /// <param name="rescanRequested">F5 was just pressed: say "Scanning…" even before a volume reports, so a fast read still shows.</param>
-    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem, bool rescanRequested = false)
+    /// <param name="settingsKeys">The keys that open Settings, as a sentence writes them.</param>
+    public static string For(IReadOnlyList<VolumeState> volumes, string? queryProblem, bool rescanRequested = false, string settingsKeys = "Ctrl+,")
     {
         if (volumes.Count == 0)
         {
-            return "No volumes yet · press Ctrl+, to add a folder";
+            return $"No volumes yet · press {settingsKeys} to add a folder";
         }
         var parts = new List<string>();
         if (queryProblem is not null)
@@ -157,9 +159,12 @@ public static class StatusText
     /// <param name="liveFinished">A live search ended: it read everything, or it was stopped (<paramref name="liveStopped"/>).</param>
     /// <param name="liveStopped">Esc stopped it before it read everything, so searching live again can still find more.</param>
     /// <param name="volumeMenu">The volume menu shows (more than one volume), so Alt+Down opens it.</param>
+    /// <param name="keys">The panel's shortcuts, as Settings has them; the defaults if null.</param>
     public static IReadOnlyList<KeyHint> Hints(bool noHits, bool liveRunning, bool invalid = false, bool liveFinished = false,
-        bool liveStopped = false, bool volumeMenu = false)
+        bool liveStopped = false, bool volumeMenu = false, PanelKeys? keys = null)
     {
+        keys ??= PanelKeys.Defaults;
+        var searchLive = new KeyHint(keys.Label(PanelCommand.LiveSearch), "Search live");
         if (invalid)
         {
             return [new KeyHint("Esc", "Clear")];
@@ -171,10 +176,17 @@ public static class StatusText
         }
         if (noHits && liveFinished)
         {
-            return liveStopped ? [new KeyHint("Shift ↵", "Search live"), new KeyHint("Esc", "Clear")] : [new KeyHint("Esc", "Clear")];
+            return liveStopped ? [searchLive, new KeyHint("Esc", "Clear")] : [new KeyHint("Esc", "Clear")];
         }
-        KeyHint first = noHits ? new KeyHint("Shift ↵", "Search live") : new KeyHint("↵", "Open");
-        List<KeyHint> hints = [first, new KeyHint("↑↓", "Move"), new KeyHint("Ctrl ↵", "Folder"), new KeyHint("Ctrl C", "Copy path"), new KeyHint("Ctrl P", "Preview")];
+        KeyHint first = noHits ? searchLive : new KeyHint("↵", "Open");
+        List<KeyHint> hints =
+        [
+            first,
+            new KeyHint("↑↓", "Move"),
+            new KeyHint(keys.Label(PanelCommand.Reveal), "Folder"),
+            new KeyHint(keys.Label(PanelCommand.CopyPath), "Copy path"),
+            new KeyHint(keys.Label(PanelCommand.Preview), "Preview"),
+        ];
         if (volumeMenu)
         {
             hints.Add(new KeyHint("Alt ↓", "Volumes"));
@@ -268,6 +280,89 @@ public static class StatusText
             return $"{name} is unreachable · using the list from {Age(state.Volume.LastScannedAt)}";
         }
         return null;
+    }
+
+    /// <summary>A volume's state in a few words, the same in the panel's volume menu and on the Volumes page in Settings.</summary>
+    public static string Describe(VolumeState state)
+    {
+        switch (Indexer.PhaseOf(state))
+        {
+            case VolumePhase.LiveOnly:
+                return "Live search only";
+            case VolumePhase.Queued:
+                return "Waiting to be read";
+            case VolumePhase.Reading:
+                return $"Scanning… {state.ScannedSoFar:N0} files";
+            case VolumePhase.Interrupted:
+                return "Interrupted";
+        }
+        string? error = state.Volume.LastError switch
+        {
+            VolumeError.PathNotFound => "Folder not found",
+            VolumeError.DriveNotFound => "Drive or server not found",
+            VolumeError.PermissionDenied => "Access denied",
+            _ => null,
+        };
+        if (error is not null)
+        {
+            return error;
+        }
+        if (state.Volume.Status == VolumeStatus.Offline)
+        {
+            return state.Problem is null ? "Offline" : $"Offline · {state.Problem}";
+        }
+        if (state.Problem is not null)
+        {
+            return state.Problem;
+        }
+        return state.Index is null ? "Never read" : "Online";
+    }
+
+    /// <summary>
+    /// The mark on results whose volume cannot be reached, so the list they come from may be out of date; null otherwise.
+    /// It stays while the volume is tried again, and names a date, so it does not change until a read succeeds.
+    /// </summary>
+    public static string? Stale(VolumeState state)
+    {
+        bool offline = state.Index is not null && state.Volume.Status == VolumeStatus.Offline;
+        bool fromSavedList = Indexer.PhaseOf(state) is VolumePhase.Offline or VolumePhase.Queued or VolumePhase.Reading;
+        if (!offline || !fromSavedList)
+        {
+            return null;
+        }
+        string listed = state.Volume.LastScannedAt is DateTime when ? $"{when.ToLocalTime():d MMM HH:mm}" : "never";
+        return $"offline · list from {listed}";
+    }
+
+    /// <summary>A volume's state, when it was read and when it is read next: its second line in the volume menu.</summary>
+    /// <param name="next">From <see cref="Indexer.NextScanFor"/>: UTC, <see cref="DateTime.MinValue"/> for now, null for only on F5.</param>
+    public static string MenuLine(VolumeState state, DateTime? next)
+    {
+        string described = Describe(state);
+        if (Indexer.PhaseOf(state) is VolumePhase.LiveOnly or VolumePhase.Queued or VolumePhase.Reading)
+        {
+            return described;
+        }
+        string read = state.Volume.LastScannedAt is null ? "" : $" · read {Age(state.Volume.LastScannedAt)}";
+        return $"{described}{read} · next {Until(next)}";
+    }
+
+    private static string Until(DateTime? utc)
+    {
+        if (utc is not DateTime when)
+        {
+            return "on F5";
+        }
+        TimeSpan ahead = when - DateTime.UtcNow;
+        if (ahead.TotalMinutes < 1)
+        {
+            return "now";
+        }
+        if (ahead.TotalHours < 1)
+        {
+            return $"in {(int)ahead.TotalMinutes} min";
+        }
+        return ahead.TotalDays < 1 ? $"in {(int)ahead.TotalHours} h" : $"on {when.ToLocalTime():d MMM}";
     }
 
     public static string Age(DateTime? utc)

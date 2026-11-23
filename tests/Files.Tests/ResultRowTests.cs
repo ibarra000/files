@@ -22,6 +22,14 @@ public sealed class ResultRowTests
     }
 
     [Fact]
+    public void A_result_from_an_unreachable_volume_is_marked_stale()
+    {
+        Hit hit = HitIn(@"\\server\share\2024", "AB-C-0704.pdf");
+        Assert.Equal("offline · list from 21 Nov 09:00", ResultRow.ForHit(hit, showVolume: false, "offline · list from 21 Nov 09:00").Badge);
+        Assert.Equal("drawings · offline · list from 21 Nov 09:00", ResultRow.ForHit(hit, showVolume: true, "offline · list from 21 Nov 09:00").Badge);
+    }
+
+    [Fact]
     public void A_result_shows_its_type_its_folder_and_its_full_path_on_hover()
     {
         ResultRow row = ResultRow.ForHit(HitIn(@"\\server\share\2024", "AB-C-0704.pdf"), showVolume: false);

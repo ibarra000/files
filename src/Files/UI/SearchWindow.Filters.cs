@@ -1,6 +1,8 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Automation;
+using System.Windows.Input;
 using Files.Core;
 using Files.Services;
 
@@ -77,8 +79,25 @@ public partial class SearchWindow
         AddScopeItem(menu, "All volumes", null);
         foreach (VolumeState state in _app.Indexer.Volumes)
         {
-            AddScopeItem(menu, state.Volume.Name, state.Volume.Name);
+            MenuItem item = AddScopeItem(menu, ScopeHeader(state), state.Volume.Name);
+            item.Tag = state.Volume.Id;
+            AutomationProperties.SetName(item, state.Volume.Name);
+            if (!state.Volume.LiveOnly)
+            {
+                item.ToolTip = "F5 reads it again";
+            }
         }
+        // F5 on a volume reads just that one; on "All volumes", all of them.
+        menu.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.F5 || Keyboard.Modifiers != ModifierKeys.None)
+            {
+                return;
+            }
+            e.Handled = true;
+            Rescan((Keyboard.FocusedElement as MenuItem)?.Tag as long?);
+            menu.IsOpen = false;
+        };
         // Kept here, not as the button's context menu, so a right-click can never reopen an old one.
         _scopeMenu = menu;
         menu.Opened += (_, _) => (menu.Items.OfType<MenuItem>().FirstOrDefault(item => item.IsChecked) ?? menu.Items.OfType<MenuItem>().First()).Focus();
@@ -92,7 +111,19 @@ public partial class SearchWindow
         menu.IsOpen = true;
     }
 
-    private void AddScopeItem(ContextMenu menu, string header, string? scope)
+    /// <summary>A volume's name, and under it its state and when it is read (<see cref="StatusText.MenuLine"/>).</summary>
+    private StackPanel ScopeHeader(VolumeState state)
+    {
+        var line = new TextBlock { Text = StatusText.MenuLine(state, _app.Indexer.NextScanFor(state)), FontSize = 11.5 };
+        bool unwell = StatusText.Stale(state) is not null || state.Volume.LastError is not null || state.Problem is not null;
+        line.SetResourceReference(TextBlock.ForegroundProperty, unwell ? "Warn" : "TextDim");
+        var header = new StackPanel();
+        header.Children.Add(new TextBlock { Text = state.Volume.Name });
+        header.Children.Add(line);
+        return header;
+    }
+
+    private MenuItem AddScopeItem(ContextMenu menu, object header, string? scope)
     {
         var item = new MenuItem { Header = header, IsCheckable = true, IsChecked = _scope == scope, Style = (Style)FindResource("PanelMenuItem") };
         item.Click += (_, _) =>
@@ -101,6 +132,7 @@ public partial class SearchWindow
             RunAgain(queryChanged: true);
         };
         menu.Items.Add(item);
+        return item;
     }
 
     /// <summary>Repeats the search on screen with the new chip or volume, live if it was live.</summary>

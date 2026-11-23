@@ -25,13 +25,14 @@ public partial class SearchWindow
         Placeholder.Text = StatusText.Placeholder(files);
         UpdateHeader(volumes);
         bool liveRunning = _liveCancel is not null;
+        PanelKeys keys = _app.Settings.Shortcuts;
         ShowHints(ActionMenu.IsOpen
             ? StatusText.MenuHints
             : StatusText.Hints(HasNoHits, liveRunning, invalid: _queryProblem is not null, liveFinished: _live is not null && !liveRunning,
-                liveStopped: _liveStopped, volumeMenu: ScopeButton.Visibility == Visibility.Visible));
+                liveStopped: _liveStopped, volumeMenu: ScopeButton.Visibility == Visibility.Visible, keys: keys));
 
         bool rescanRequested = DateTime.UtcNow < _rescanShownUntil;
-        string attention = StatusText.For(volumes, _queryProblem, rescanRequested);
+        string attention = StatusText.For(volumes, _queryProblem, rescanRequested, keys.Label(PanelCommand.Settings, "+"));
         StatusDot.SetResourceReference(Shape.FillProperty, attention.Length == 0 ? "Ok" : "Warn");
         // The glyph turns only beside the words "Scanning…", not beside a message or a live search.
         bool scanning = false;
@@ -80,10 +81,17 @@ public partial class SearchWindow
         }
     }
 
-    /// <summary>F5: reads every volume again and shows it for at least a moment, so a fast read is still seen.</summary>
-    private void Rescan()
+    /// <summary>F5: reads every volume again, or the one given, and shows it for at least a moment, so a fast read is still seen.</summary>
+    private void Rescan(long? volume = null)
     {
-        _app.Indexer.RescanAll();
+        if (volume is long id)
+        {
+            _app.Indexer.Rescan(id);
+        }
+        else
+        {
+            _app.Indexer.RescanAll();
+        }
         _rescanShownUntil = DateTime.UtcNow + MinScanShown;
         _rescanTimer.Stop();
         _rescanTimer.Start();
